@@ -540,7 +540,7 @@ fn handle_regen(
 
     world.generator = crate::terrain::TerrainGenerator::new(settings.seed);
     world.chunks.clear();
-    for (_, entity) in streamer.entities.drain() {
+    for (_, (entity, _handle)) in streamer.entities.drain() {
         commands.entity(entity).despawn_recursive();
     }
     info!("World regenerated with seed {}", settings.seed);

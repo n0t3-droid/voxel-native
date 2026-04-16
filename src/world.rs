@@ -42,6 +42,7 @@ impl Plugin for WorldPlugin {
 fn reinit_world_for_active(
     mut world: ResMut<VoxelWorld>,
     mut streamer: ResMut<ChunkStreamer>,
+    mut meshes: ResMut<Assets<Mesh>>,
     settings: Res<WorldSettings>,
     pending: Res<crate::menu::PendingWorldLoad>,
     mut commands: Commands,
@@ -53,8 +54,10 @@ fn reinit_world_for_active(
     world.chunks.clear();
     streamer.pending_terrain.clear();
     streamer.pending_meshes.clear();
-    for (_, entity) in streamer.entities.drain() {
+    streamer.dirty_queue.clear();
+    for (_, (entity, handle)) in streamer.entities.drain() {
         commands.entity(entity).despawn_recursive();
+        let _ = meshes.remove(&handle);
     }
 }
 
@@ -115,7 +118,11 @@ impl VoxelWorld {
 /// task handles so we can poll them each frame without blocking.
 #[derive(Resource, Default)]
 pub struct ChunkStreamer {
-    pub entities: AHashMap<ChunkPos, Entity>,
+    /// Spawned mesh entity + its mesh asset handle per chunk. Keeping the
+    /// handle lets us explicitly free the GPU buffer via `meshes.remove()`
+    /// when a chunk re-meshes or unloads, instead of waiting for Bevy's
+    /// asset-GC sweep (which caused long-session memory drift).
+    pub entities: AHashMap<ChunkPos, (Entity, Handle<Mesh>)>,
     pub material: Option<Handle<StandardMaterial>>,
     pub water_material: Option<Handle<StandardMaterial>>,
     /// In-flight terrain-generation tasks (one per chunk position).
@@ -123,6 +130,9 @@ pub struct ChunkStreamer {
     /// In-flight meshing tasks (one per chunk position). `None` mesh =
     /// chunk is empty / uniform-solid and needs no geometry.
     pub pending_meshes: AHashMap<ChunkPos, Task<(ChunkPos, Option<Mesh>)>>,
+    /// Dirty-chunk queue so the mesh scheduler doesn't walk the entire
+    /// chunk hashmap every frame. Populated by whoever flips `c.dirty`.
+    pub dirty_queue: Vec<ChunkPos>,
 }
 
 fn init_world(
@@ -219,16 +229,37 @@ fn stream_chunks(
 
     // 2. Poll finished terrain tasks and fold them back into the world.
     let mut done: Vec<ChunkPos> = Vec::new();
+    let mut newly_loaded: Vec<ChunkPos> = Vec::new();
     for (pos, task) in streamer.pending_terrain.iter_mut() {
         if let Some((cp, voxels)) = future::block_on(future::poll_once(task)) {
             let mut chunk = Chunk::new(cp);
             chunk.install_voxels(voxels);
             world.chunks.insert(cp, chunk);
             done.push(*pos);
+            newly_loaded.push(cp);
         }
     }
     for p in done {
         streamer.pending_terrain.remove(&p);
+    }
+    // Enqueue every newly-loaded chunk + its 6 neighbours so seams get
+    // remeshed cleanly without a whole-world scan.
+    for cp in newly_loaded {
+        streamer.dirty_queue.push(cp);
+        for (dx, dy, dz) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let n = ChunkPos::new(cp.x + dx, cp.y + dy, cp.z + dz);
+            if let Some(c) = world.chunks.get_mut(&n) {
+                c.dirty = true;
+                streamer.dirty_queue.push(n);
+            }
+        }
     }
 
     // 3. Queue new terrain jobs for nearby chunks, camera-priority first,
@@ -309,9 +340,10 @@ fn mesh_dirty_chunks(
         streamer.pending_meshes.remove(&p);
     }
     for (pos, mesh_opt) in finished {
-        // Despawn previous mesh entity (if any).
-        if let Some(prev) = streamer.entities.remove(&pos) {
+        // Despawn previous mesh entity AND free its GPU buffer explicitly.
+        if let Some((prev, old_handle)) = streamer.entities.remove(&pos) {
             commands.entity(prev).despawn_recursive();
+            let _ = meshes.remove(&old_handle);
         }
         if let Some(mesh) = mesh_opt {
             let handle = meshes.add(mesh);
@@ -319,13 +351,13 @@ fn mesh_dirty_chunks(
             let transform = Transform::from_xyz(ox as f32, oy as f32, oz as f32);
             let entity = commands
                 .spawn(PbrBundle {
-                    mesh: handle,
+                    mesh: handle.clone(),
                     material: material.clone(),
                     transform,
                     ..default()
                 })
                 .id();
-            streamer.entities.insert(pos, entity);
+            streamer.entities.insert(pos, (entity, handle));
         }
     }
 
@@ -352,12 +384,17 @@ fn mesh_dirty_chunks(
         })
         .unwrap_or((0, 0));
 
-    let mut candidates: Vec<(i32, ChunkPos)> = Vec::new();
-    for (p, c) in world.chunks.iter() {
-        if !c.dirty || streamer.pending_meshes.contains_key(p) {
+    // Drain the dirty queue into a candidate list. Retain anything we
+    // can't schedule this frame (no slots / missing neighbours) so it's
+    // picked up next frame without rescanning the whole world.
+    let mut candidates: Vec<(i32, ChunkPos)> = Vec::with_capacity(streamer.dirty_queue.len());
+    let queue = std::mem::take(&mut streamer.dirty_queue);
+    for p in queue {
+        let Some(c) = world.chunks.get(&p) else { continue };
+        if !c.dirty || streamer.pending_meshes.contains_key(&p) {
             continue;
         }
-        candidates.push((priority_score(p.x - pcx, p.z - pcz, forward), *p));
+        candidates.push((priority_score(p.x - pcx, p.z - pcz, forward), p));
     }
     candidates.sort_unstable_by_key(|(s, _)| *s);
 
@@ -366,7 +403,9 @@ fn mesh_dirty_chunks(
 
     for (_s, pos) in candidates {
         if slots == 0 {
-            break;
+            // Put back into the dirty queue for next frame.
+            streamer.dirty_queue.push(pos);
+            continue;
         }
         // Horizontal seam avoidance: require 4 XZ neighbours loaded.
         let neighbours_xz = [
@@ -376,20 +415,35 @@ fn mesh_dirty_chunks(
             ChunkPos::new(pos.x, pos.y, pos.z - 1),
         ];
         if !neighbours_xz.iter().all(|n| world.chunks.contains_key(n)) {
+            // Neighbours haven't streamed in yet; try again next frame.
+            streamer.dirty_queue.push(pos);
             continue;
         }
 
-        // Fast-path: empty chunk surrounded by other empty chunks -> no
-        // mesh needed at all. Same for fully opaque-solid uniform chunks
-        // (their faces are all hidden by neighbours).
+        // All six neighbours (XZ + Y above/below) for the uniform fast
+        // path. Critical: a solid stone chunk with AIR above must NOT be
+        // skipped or its top face vanishes and we see holes into the
+        // chunk below. Only skip when the chunk is trivially uniform in
+        // every direction.
+        let neighbours_all = [
+            ChunkPos::new(pos.x + 1, pos.y, pos.z),
+            ChunkPos::new(pos.x - 1, pos.y, pos.z),
+            ChunkPos::new(pos.x, pos.y, pos.z + 1),
+            ChunkPos::new(pos.x, pos.y, pos.z - 1),
+            ChunkPos::new(pos.x, pos.y + 1, pos.z),
+            ChunkPos::new(pos.x, pos.y - 1, pos.z),
+        ];
         let fast_skip = {
             let center = world.chunks.get(&pos).unwrap();
             if center.is_empty {
-                neighbours_xz
+                neighbours_all
                     .iter()
                     .all(|n| world.chunks.get(n).map(|c| c.is_empty).unwrap_or(false))
             } else if center.is_uniform_solid {
-                neighbours_xz
+                // Also require neighbours to be uniform-solid. This is
+                // conservative (we could compare voxel types too) but
+                // avoids the exposed-face holes seen previously.
+                neighbours_all
                     .iter()
                     .all(|n| world.chunks.get(n).map(|c| c.is_uniform_solid).unwrap_or(false))
             } else {
@@ -397,8 +451,9 @@ fn mesh_dirty_chunks(
             }
         };
         if fast_skip {
-            if let Some(prev) = streamer.entities.remove(&pos) {
+            if let Some((prev, old_handle)) = streamer.entities.remove(&pos) {
                 commands.entity(prev).despawn_recursive();
+                let _ = meshes.remove(&old_handle);
             }
             if let Some(c) = world.chunks.get_mut(&pos) {
                 c.dirty = false;
@@ -425,14 +480,16 @@ fn mesh_dirty_chunks(
     }
 
     // 3. Clean up orphaned mesh entities whose chunk has streamed out.
+    //    Free the GPU buffer too so long sessions don't accumulate.
     let mut orphaned = Vec::new();
-    for (pos, entity) in streamer.entities.iter() {
+    for (pos, (entity, handle)) in streamer.entities.iter() {
         if !world.chunks.contains_key(pos) {
-            orphaned.push((*pos, *entity));
+            orphaned.push((*pos, *entity, handle.clone()));
         }
     }
-    for (pos, entity) in orphaned {
+    for (pos, entity, handle) in orphaned {
         commands.entity(entity).despawn_recursive();
+        let _ = meshes.remove(&handle);
         streamer.entities.remove(&pos);
     }
 }

@@ -425,7 +425,7 @@ fn draw_pause_main(
                     save_current_world(settings, active, player_q);
                     // Wipe chunk entities so the next world starts clean.
                     world.chunks.clear();
-                    for (_, entity) in streamer.entities.drain() {
+                    for (_, (entity, _handle)) in streamer.entities.drain() {
                         commands.entity(entity).despawn_recursive();
                     }
                     next.set(GameState::MainMenu);
