@@ -51,6 +51,7 @@ fn update_sun(
     mut clear_color: ResMut<ClearColor>,
     mut ambient: ResMut<AmbientLight>,
     mut sun: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
+    mut fog: Query<&mut FogSettings>,
 ) {
     let Ok((mut transform, mut light)) = sun.get_single_mut() else {
         return;
@@ -76,7 +77,7 @@ fn update_sun(
     let sunset_color = Color::srgb(1.0, 0.55, 0.35).to_linear();
 
     let base = if day > 0.0 { day_color } else { night_color };
-    let amb_lin = base.mix(&sunset_color, sunset * 0.5);
+    let amb_lin = base.mix(&sunset_color, sunset * 0.25);
     ambient.color = Color::LinearRgba(amb_lin);
     // Much brighter ambient floor so night is still visible (was 100.0).
     ambient.brightness = 350.0 + day * 450.0;
@@ -85,6 +86,26 @@ fn update_sun(
     let sky_day = Color::srgb(0.53, 0.80, 0.98).to_linear();
     let sky_night = Color::srgb(0.02, 0.04, 0.10).to_linear();
     let sky = sky_night.mix(&sky_day, day);
-    let sky = sky.mix(&sunset_color, sunset * 0.35);
+    let sky = sky.mix(&sunset_color, sunset * 0.20);
     clear_color.0 = Color::LinearRgba(sky);
+
+    // Drive fog colour from the same sky interpolation so the horizon
+    // haze always matches the actual sky. This is THE trick that hides
+    // the chunk-streaming edge for free. Uses a slightly brighter tint
+    // near the horizon for atmospheric scattering feel.
+    if let Ok(mut fog_settings) = fog.get_single_mut() {
+        let horizon = sky
+            .mix(&Color::srgb(1.0, 1.0, 1.0).to_linear(), 0.15)
+            .mix(&sunset_color, sunset * 0.25);
+        fog_settings.color = Color::LinearRgba(sky);
+        if let FogFalloff::ExponentialSquared { density } = &mut fog_settings.falloff {
+            // Fog gets denser at night (poor visibility) and sunrise/set.
+            let base_density = 0.0016;
+            *density = base_density * (1.0 + sunset * 0.6 + (1.0 - day) * 0.3);
+        }
+        // Directional light scattering — makes god-ray / atmospheric
+        // tints at sunset and during the night.
+        fog_settings.directional_light_color = Color::LinearRgba(horizon);
+        fog_settings.directional_light_exponent = 30.0;
+    }
 }

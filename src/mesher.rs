@@ -33,13 +33,24 @@ pub fn build_mesh<F: Fn(i32, i32, i32) -> Voxel>(pos: ChunkPos, sample: F) -> Me
 
     // Mask entries — `None` means no face at this cell. The bool encodes
     // whether the face points along the positive axis direction.
+    // `ao` holds per-corner ambient-occlusion values (0=darkest, 3=full
+    // light). Two cells only merge if ALL four AO corners match, which
+    // preserves ambient shading at creases while still letting wide flat
+    // surfaces collapse to a single quad.
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct MaskCell {
         voxel: Voxel,
         positive: bool,
+        ao: [u8; 4],
     }
 
     let mut mask: Vec<Option<MaskCell>> = vec![None; CHUNK_SIZE * CHUNK_SIZE];
+
+    // AO occluder test: "does this voxel block light from a corner?"
+    let is_occluder = |wx: i32, wy: i32, wz: i32| -> bool {
+        let v = sample(wx, wy, wz);
+        v != AIR && voxel_is_opaque(v)
+    };
 
     // For each axis d in {0=X, 1=Y, 2=Z}: u = (d+1)%3, v = (d+2)%3.
     for axis in 0..3 {
@@ -78,22 +89,68 @@ pub fn build_mesh<F: Fn(i32, i32, i32) -> Voxel>(pos: ChunkPos, sample: F) -> Me
                     let cell = if back_v == front_v {
                         None
                     } else if back_v == AIR {
-                        Some(MaskCell { voxel: front_v, positive: false })
+                        Some((front_v, false))
                     } else if front_v == AIR {
-                        Some(MaskCell { voxel: back_v, positive: true })
+                        Some((back_v, true))
                     } else {
                         let back_opaque = voxel_is_opaque(back_v);
                         let front_opaque = voxel_is_opaque(front_v);
                         if back_opaque && !front_opaque {
-                            Some(MaskCell { voxel: back_v, positive: true })
+                            Some((back_v, true))
                         } else if front_opaque && !back_opaque {
-                            Some(MaskCell { voxel: front_v, positive: false })
+                            Some((front_v, false))
                         } else {
                             None
                         }
                     };
 
-                    mask[(vi as usize) * CHUNK_SIZE + ui as usize] = cell;
+                    let mask_cell = cell.map(|(voxel, positive)| {
+                        // `ao_side` = axis-coord of the AIR side of this
+                        // face. Light / shading neighbours live in the air
+                        // half-space, not inside the solid block.
+                        let ao_side = if positive { d } else { d - 1 };
+
+                        // For each of the 4 quad corners (du, dv) ∈ {0,1}²,
+                        // sample the 3 voxels diagonally adjacent on the
+                        // air side. Classic Minecraft AO formula:
+                        //     if both sides solid  -> 0
+                        //     else                 -> 3 - (s1 + s2 + corner)
+                        let mut ao = [3u8; 4];
+                        for (ci, (du, dv)) in
+                            [(0, 0), (1, 0), (1, 1), (0, 1)].iter().enumerate()
+                        {
+                            let du_off = (*du as i32) * 2 - 1;
+                            let dv_off = (*dv as i32) * 2 - 1;
+
+                            // Build world coords for side1, side2, corner.
+                            let mut s1 = [0i32; 3];
+                            let mut s2 = [0i32; 3];
+                            let mut co = [0i32; 3];
+                            s1[axis] = ao_side;
+                            s1[u] = ui + du_off;
+                            s1[v] = vi;
+                            s2[axis] = ao_side;
+                            s2[u] = ui;
+                            s2[v] = vi + dv_off;
+                            co[axis] = ao_side;
+                            co[u] = ui + du_off;
+                            co[v] = vi + dv_off;
+
+                            let s1o = is_occluder(ox + s1[0], oy + s1[1], oz + s1[2]);
+                            let s2o = is_occluder(ox + s2[0], oy + s2[1], oz + s2[2]);
+                            let coo = is_occluder(ox + co[0], oy + co[1], oz + co[2]);
+
+                            ao[ci] = if s1o && s2o {
+                                0
+                            } else {
+                                3 - (s1o as u8 + s2o as u8 + coo as u8)
+                            };
+                        }
+
+                        MaskCell { voxel, positive, ao }
+                    });
+
+                    mask[(vi as usize) * CHUNK_SIZE + ui as usize] = mask_cell;
                 }
             }
 
@@ -137,6 +194,7 @@ pub fn build_mesh<F: Fn(i32, i32, i32) -> Voxel>(pos: ChunkPos, sample: F) -> Me
                             h as i32,
                             current.voxel,
                             current.positive,
+                            current.ao,
                         );
 
                         // Clear the consumed rectangle.
@@ -181,6 +239,7 @@ fn emit_quad(
     h: i32,
     voxel: Voxel,
     positive: bool,
+    ao: [u8; 4],
 ) {
     // Four corners of the quad in chunk-local coordinates.
     let mut p00 = [0i32; 3];
@@ -207,7 +266,7 @@ fn emit_quad(
     let mut n = [0.0f32; 3];
     n[axis] = if positive { 1.0 } else { -1.0 };
 
-    let base = positions.len() as u32;
+    let base_idx = positions.len() as u32;
 
     // Winding order depends on face direction so the front face points
     // outwards (Bevy uses CCW-front by default).
@@ -222,11 +281,33 @@ fn emit_quad(
         positions.extend_from_slice(&[p00f, p01f, p11f, p10f]);
     }
 
-    let color = voxel_color(voxel);
+    // AO -> brightness multiplier. 0 (deeply occluded) → dim; 3 (open
+    // air) → full colour. The curve is tuned so corners look chunky but
+    // not black.
+    const AO_MUL: [f32; 4] = [0.55, 0.72, 0.87, 1.00];
+    let base_color = voxel_color(voxel);
+    let tint = |a: u8| -> [f32; 4] {
+        let m = AO_MUL[a as usize];
+        [
+            base_color[0] * m,
+            base_color[1] * m,
+            base_color[2] * m,
+            base_color[3],
+        ]
+    };
+    // Color order must match the position order chosen above.
+    let (c_a, c_b, c_c, c_d) = if positive {
+        (tint(ao[0]), tint(ao[1]), tint(ao[2]), tint(ao[3]))
+    } else {
+        (tint(ao[0]), tint(ao[3]), tint(ao[2]), tint(ao[1]))
+    };
+
+    let mut n = [0.0f32; 3];
+    n[axis] = if positive { 1.0 } else { -1.0 };
     for _ in 0..4 {
         normals.push(n);
-        colors.push(color);
     }
+    colors.extend_from_slice(&[c_a, c_b, c_c, c_d]);
 
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    indices.extend_from_slice(&[base_idx, base_idx + 1, base_idx + 2, base_idx, base_idx + 2, base_idx + 3]);
 }

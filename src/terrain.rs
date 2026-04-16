@@ -249,11 +249,13 @@ impl TerrainGenerator {
                     }
 
                     // Carve caves — never inside the top layer (preserves
-                    // the surface skin) and never right at the water line
-                    // so oceans don't drain through holes.
-                    let cave_allowed = wy < surface - 3
+                    // the surface skin) and never near the water line so
+                    // oceans don't drain through holes. Keep a generous
+                    // 6-block buffer below the surface so caves can never
+                    // open up straight onto a beach or plain.
+                    let cave_allowed = wy < surface - 6
                         && wy > BEDROCK_LEVEL + 2
-                        && (wy < WATER_LEVEL - 1 || wy > WATER_LEVEL + 2);
+                        && (wy < WATER_LEVEL - 2 || wy > WATER_LEVEL + 4);
                     if cave_allowed && self.is_cave(wx as f64, wy as f64, wz as f64) {
                         continue;
                     }

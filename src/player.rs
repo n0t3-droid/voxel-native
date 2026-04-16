@@ -104,10 +104,17 @@ fn spawn_player(mut commands: Commands) {
         },
         FogSettings {
             color: Color::srgba(0.53, 0.80, 0.98, 1.0),
-            falloff: FogFalloff::Linear {
-                start: 10_000.0,
-                end: 10_000.0,
-            },
+            // Exponential-squared fog gives the nicest "atmospheric depth"
+            // look and hides the chunk-streaming edge automatically. The
+            // density is tuned so the fog kicks in at ~70% of the default
+            // render distance (32 chunks = 512 blocks) and fully saturates
+            // at the edge. Falls off faster in the vertical so looking up
+            // stays clear.
+            falloff: FogFalloff::from_visibility_colors(
+                600.0,
+                Color::srgb(0.75, 0.85, 1.0),
+                Color::srgb(0.55, 0.70, 0.95),
+            ),
             ..default()
         },
         Player {

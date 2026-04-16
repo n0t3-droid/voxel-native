@@ -1,0 +1,20 @@
+(
+    name: "R93",
+    seed: 3434685730,
+    time_of_day: 10.8,
+    time_mode: Fixed,
+    cycle_speed: 0.0,
+    weather: (
+        preset: Clear,
+        rain_intensity: 0.0,
+        snow_intensity: 0.0,
+        fog_density: 0.0,
+        wind_x: 0.0,
+        wind_z: 0.0,
+    ),
+    player_pos: (1123.782, 195.8781, -5.6009502),
+    player_yaw: -0.79246736,
+    player_pitch: -1.1425053,
+    created_epoch: 1776371412,
+    last_played_epoch: 1776371517,
+)
