@@ -52,6 +52,10 @@ pub struct Chunk {
     /// True if the chunk is entirely one opaque solid block type. These
     /// are fully hidden by neighbours and also skipped by the mesher.
     pub is_uniform_solid: bool,
+    /// When `is_uniform_solid` or `is_empty` are true, this is the voxel
+    /// value that fills the chunk (so the mesher can check "is my
+    /// neighbour the SAME voxel type?" — if yes, no face needs drawing).
+    pub uniform_voxel: Voxel,
 }
 
 impl Chunk {
@@ -62,6 +66,7 @@ impl Chunk {
             dirty: true,
             is_empty: true,
             is_uniform_solid: false,
+            uniform_voxel: AIR,
         }
     }
 
@@ -101,6 +106,7 @@ impl Chunk {
         }
         self.is_empty = uniform && first == AIR;
         self.is_uniform_solid = uniform && first != AIR;
+        self.uniform_voxel = if uniform { first } else { AIR };
     }
 
     /// Cheap ref-count clone of the voxel storage — used by background

@@ -120,10 +120,10 @@ impl VoxelWorld {
     }
 
     /// Highest chunk-y index that could contain non-air terrain for the
-    /// given chunk column, cached. Samples the surface height at 4 corners
-    /// + centre of the column so we catch the max peak without evaluating
-    /// the expensive noise at every block. Adds +1 chunk of headroom for
-    /// trees and other decorations.
+    /// given chunk column, cached. Probes the terrain on a 4×4 grid AND
+    /// clamps to `WATER_LEVEL` so oceans keep their surface. Adds +2
+    /// chunks of headroom for trees, mountain peaks that fall between
+    /// grid points, and future decorations.
     pub fn column_top_cy_cached(&mut self, cx: i32, cz: i32) -> i32 {
         if let Some(v) = self.column_top_cy.get(&(cx, cz)) {
             return *v;
@@ -131,22 +131,24 @@ impl VoxelWorld {
         let s = CHUNK_SIZE_I;
         let wx0 = cx * s;
         let wz0 = cz * s;
-        let points = [
-            (wx0, wz0),
-            (wx0 + s - 1, wz0),
-            (wx0, wz0 + s - 1),
-            (wx0 + s - 1, wz0 + s - 1),
-            (wx0 + s / 2, wz0 + s / 2),
-        ];
-        let mut max_h = i32::MIN;
-        for (x, z) in points {
-            let h = self.generator.surface_height_at(x, z);
-            if h > max_h {
-                max_h = h;
+        // 4×4 = 16 samples inside the chunk column. Cheap (each is a few
+        // noise evals) and dense enough to catch mountain peaks that the
+        // old 5-point probe missed.
+        let step = s / 4;
+        let mut max_block_y = crate::terrain::WATER_LEVEL;
+        for iz in 0..=4 {
+            for ix in 0..=4 {
+                let wx = wx0 + (ix * step).min(s - 1);
+                let wz = wz0 + (iz * step).min(s - 1);
+                let h = self.generator.surface_height_at(wx, wz);
+                if h > max_block_y {
+                    max_block_y = h;
+                }
             }
         }
-        // +1 chunk of headroom for trees / overhangs / water surface.
-        let top_cy = (max_h / s) + 1;
+        // +2 chunks of safety: covers trees (+6 blocks), tall features,
+        // and mountain peaks that might still fall between samples.
+        let top_cy = (max_block_y / s) + 2;
         self.column_top_cy.insert((cx, cz), top_cy);
         top_cy
     }
@@ -489,12 +491,12 @@ fn mesh_dirty_chunks(
             continue;
         }
 
-        // All six neighbours (XZ + Y above/below) for the uniform fast
-        // path. Critical: we ONLY skip chunks that are completely empty
-        // (all AIR) AND whose six neighbours are all empty. The stricter
-        // `is_uniform_solid` skip was removed because it was producing
-        // chunk-sized holes where a solid chunk touched mixed terrain
-        // whose uniform-flag briefly disagreed across frames.
+        // Safe fast-skip: chunk is trivially invisible iff it's uniform
+        // AND every one of its 6 neighbours is uniform of the SAME voxel
+        // type. Comparing voxel types (not just flags) closes the race
+        // the original `is_uniform_solid` skip had, because the test
+        // runs against actual voxel data instead of a flag that might
+        // disagree across frames.
         let neighbours_all = [
             ChunkPos::new(pos.x + 1, pos.y, pos.z),
             ChunkPos::new(pos.x - 1, pos.y, pos.z),
@@ -505,10 +507,20 @@ fn mesh_dirty_chunks(
         ];
         let fast_skip = {
             let center = world.chunks.get(&pos).unwrap();
-            center.is_empty
-                && neighbours_all
-                    .iter()
-                    .all(|n| world.chunks.get(n).map(|c| c.is_empty).unwrap_or(false))
+            let uniform =
+                (center.is_empty || center.is_uniform_solid) && {
+                    let cv = center.uniform_voxel;
+                    neighbours_all.iter().all(|n| {
+                        world
+                            .chunks
+                            .get(n)
+                            .map(|c| {
+                                (c.is_empty || c.is_uniform_solid) && c.uniform_voxel == cv
+                            })
+                            .unwrap_or(false)
+                    })
+                };
+            uniform
         };
         if fast_skip {
             if let Some((prev, old_handle)) = streamer.entities.remove(&pos) {
