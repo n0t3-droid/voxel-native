@@ -43,6 +43,16 @@ pub struct Player {
     /// the player onto the terrain surface. Set to `true` after the first
     /// successful placement so it doesn't repeat.
     pub placed_on_surface: bool,
+    /// Remaining window (seconds) during which a queued jump press will
+    /// fire as soon as we touch ground — makes jumps feel instant even if
+    /// pressed a frame before landing.
+    pub jump_buffer: f32,
+    /// Remaining window (seconds) during which we are allowed to jump
+    /// after walking off a ledge — classic platformer "coyote time".
+    pub coyote_time: f32,
+    /// Smoothed FOV bonus applied on top of `settings.fov_deg` — pushed
+    /// up while sprinting for a kinetic speed-rush feel.
+    pub fov_bonus: f32,
 }
 
 /// Standard Minecraft-ish hitbox: 0.6×1.8×0.6 blocks, eyes at 1.62.
@@ -78,6 +88,9 @@ fn spawn_player(mut commands: Commands) {
             fly_speed: 24.0,
             sensitivity: 0.0025,
             placed_on_surface: false,
+            jump_buffer: 0.0,
+            coyote_time: 0.0,
+            fov_bonus: 0.0,
         },
         ChunkAnchor,
     ));
@@ -85,14 +98,12 @@ fn spawn_player(mut commands: Commands) {
 
 fn update_camera_fov(
     settings: Res<WorldSettings>,
-    mut q: Query<&mut Projection, With<Player>>,
+    mut q: Query<(&mut Projection, &Player)>,
 ) {
-    if !settings.is_changed() {
-        return;
-    }
-    if let Ok(mut proj) = q.get_single_mut() {
+    if let Ok((mut proj, player)) = q.get_single_mut() {
         if let Projection::Perspective(ref mut persp) = *proj {
-            persp.fov = settings.fov_deg.clamp(30.0, 120.0).to_radians();
+            let base = settings.fov_deg.clamp(30.0, 120.0);
+            persp.fov = (base + player.fov_bonus).clamp(30.0, 140.0).to_radians();
         }
     }
 }
@@ -197,6 +208,25 @@ fn update_movement(
         player.walk_speed
     };
 
+    // Sprint FOV kick -- smoothly push FOV a few degrees up while sprinting
+    // and actually moving, then ease back when you stop.
+    let is_moving = wish.length_squared() > 0.001;
+    let target_fov_bonus = if sprint && is_moving && !player.flying { 7.0 } else { 0.0 };
+    let fov_lerp = (dt * 10.0).min(1.0);
+    player.fov_bonus += (target_fov_bonus - player.fov_bonus) * fov_lerp;
+
+    // Jump buffer + coyote time -- queue jumps and allow grace jumps after
+    // walking off ledges so input always feels instant.
+    if keys.just_pressed(KeyCode::Space) {
+        player.jump_buffer = 0.15;
+    }
+    player.jump_buffer = (player.jump_buffer - dt).max(0.0);
+    if player.on_ground {
+        player.coyote_time = 0.12;
+    } else {
+        player.coyote_time = (player.coyote_time - dt).max(0.0);
+    }
+
     // If the world hasn't streamed a chunk around the player yet, freeze
     // gravity + collision so we don't fall infinitely through AIR.
     let world_ready = world.is_column_loaded(
@@ -216,18 +246,25 @@ fn update_movement(
             player.velocity.y -= speed;
         }
     } else {
-        // Ground movement + gravity.
+        // Ground movement + asymmetric gravity (falls faster than it rises
+        // -- gives the jump that snappy platformer feel).
         let target = wish * speed;
         let accel = 40.0;
         player.velocity.x += (target.x - player.velocity.x) * (accel * dt).min(1.0);
         player.velocity.z += (target.z - player.velocity.z) * (accel * dt).min(1.0);
-        player.velocity.y -= 28.0 * dt; // gravity
+        let gravity = if player.velocity.y > 0.0 { 28.0 } else { 40.0 };
+        player.velocity.y -= gravity * dt;
         // Terminal velocity so we can never punch through terrain in a frame.
         if player.velocity.y < -55.0 {
             player.velocity.y = -55.0;
         }
-        if keys.just_pressed(KeyCode::Space) && player.on_ground {
-            player.velocity.y = 9.2;
+        // Instant jump if we have a buffered press AND are grounded (or
+        // still within the coyote-time window).
+        if player.jump_buffer > 0.0 && player.coyote_time > 0.0 && player.velocity.y <= 1.0 {
+            player.velocity.y = 9.6;
+            player.jump_buffer = 0.0;
+            player.coyote_time = 0.0;
+            player.on_ground = false;
         }
     }
 
