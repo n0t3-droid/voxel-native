@@ -1,6 +1,6 @@
 (
     name: "R9",
-    seed: 859043375,
+    seed: 1377265271,
     time_of_day: 14.7,
     time_mode: Fixed,
     cycle_speed: 0.0,
@@ -12,9 +12,9 @@
         wind_x: 0.0,
         wind_z: 0.0,
     ),
-    player_pos: (-663.14185, 127.167114, -799.5274),
-    player_yaw: 16.338713,
-    player_pitch: -0.70499873,
+    player_pos: (-1279.4513, 93.75994, -552.40857),
+    player_yaw: 33.37663,
+    player_pitch: 0.025001088,
     created_epoch: 1776367957,
-    last_played_epoch: 1776369436,
+    last_played_epoch: 1776370191,
 )

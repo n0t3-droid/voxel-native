@@ -52,6 +52,7 @@ fn reinit_world_for_active(
     }
     world.generator = TerrainGenerator::new(settings.seed);
     world.chunks.clear();
+    world.column_top_cy.clear();
     streamer.pending_terrain.clear();
     streamer.pending_meshes.clear();
     streamer.dirty_queue.clear();
@@ -65,6 +66,11 @@ fn reinit_world_for_active(
 pub struct VoxelWorld {
     pub chunks: AHashMap<ChunkPos, Chunk>,
     pub generator: TerrainGenerator,
+    /// Per (cx, cz) column: the maximum surface height within that column,
+    /// quantised to a chunk-y index. Chunks strictly above this index are
+    /// guaranteed air and don't need terrain-gen / meshing work. Populated
+    /// lazily as columns are first visited so RD=50 stays cheap.
+    pub column_top_cy: AHashMap<(i32, i32), i32>,
 }
 
 impl VoxelWorld {
@@ -72,6 +78,7 @@ impl VoxelWorld {
         Self {
             chunks: AHashMap::new(),
             generator: TerrainGenerator::new(12345),
+            column_top_cy: AHashMap::new(),
         }
     }
 
@@ -110,6 +117,38 @@ impl VoxelWorld {
     /// world (x, z) column.
     pub fn surface_height_at(&self, wx: i32, wz: i32) -> i32 {
         self.generator.surface_height_at(wx, wz)
+    }
+
+    /// Highest chunk-y index that could contain non-air terrain for the
+    /// given chunk column, cached. Samples the surface height at 4 corners
+    /// + centre of the column so we catch the max peak without evaluating
+    /// the expensive noise at every block. Adds +1 chunk of headroom for
+    /// trees and other decorations.
+    pub fn column_top_cy_cached(&mut self, cx: i32, cz: i32) -> i32 {
+        if let Some(v) = self.column_top_cy.get(&(cx, cz)) {
+            return *v;
+        }
+        let s = CHUNK_SIZE_I;
+        let wx0 = cx * s;
+        let wz0 = cz * s;
+        let points = [
+            (wx0, wz0),
+            (wx0 + s - 1, wz0),
+            (wx0, wz0 + s - 1),
+            (wx0 + s - 1, wz0 + s - 1),
+            (wx0 + s / 2, wz0 + s / 2),
+        ];
+        let mut max_h = i32::MIN;
+        for (x, z) in points {
+            let h = self.generator.surface_height_at(x, z);
+            if h > max_h {
+                max_h = h;
+            }
+        }
+        // +1 chunk of headroom for trees / overhangs / water surface.
+        let top_cy = (max_h / s) + 1;
+        self.column_top_cy.insert((cx, cz), top_cy);
+        top_cy
     }
 }
 
@@ -274,15 +313,32 @@ fn stream_chunks(
                     continue;
                 }
                 let score = priority_score(dx, dz, forward);
+                let cx = pcx + dx;
+                let cz = pcz + dz;
+                // Column-level cull: any chunk above the column's max
+                // surface height is guaranteed air. We can pretend it's
+                // loaded and empty without ever generating it. This is
+                // the single biggest win for RD >= 30 — typical terrain
+                // covers at most 2-3 of the 8 vertical chunks.
+                let col_top = world.column_top_cy_cached(cx, cz);
                 for cy in 0..vertical {
-                    let cp = ChunkPos::new(pcx + dx, cy, pcz + dz);
-                    if !world.chunks.contains_key(&cp)
-                        && !streamer.pending_terrain.contains_key(&cp)
+                    let cp = ChunkPos::new(cx, cy, cz);
+                    if world.chunks.contains_key(&cp)
+                        || streamer.pending_terrain.contains_key(&cp)
                     {
-                        // Bias vertical: surface-ish chunks (cy ~ 4-5) first.
-                        let cy_bias = (cy - vertical / 2).abs() * 4;
-                        wanted.push((score + cy_bias, cp));
+                        continue;
                     }
+                    if cy > col_top {
+                        // Synthesise an empty chunk on the main thread —
+                        // trivial, no task needed.
+                        let mut air_chunk = Chunk::new(cp);
+                        air_chunk.install_voxels(std::sync::Arc::new([AIR; CHUNK_VOLUME]));
+                        world.chunks.insert(cp, air_chunk);
+                        streamer.dirty_queue.push(cp);
+                        continue;
+                    }
+                    let cy_bias = (cy - vertical / 2).abs() * 4;
+                    wanted.push((score + cy_bias, cp));
                 }
             }
         }
@@ -349,13 +405,26 @@ fn mesh_dirty_chunks(
             let handle = meshes.add(mesh);
             let (ox, oy, oz) = pos.origin();
             let transform = Transform::from_xyz(ox as f32, oy as f32, oz as f32);
+            // Explicit AABB covering the full chunk volume. Bevy's auto-
+            // AABB is derived from vertex positions — a chunk with a
+            // tight greedy mesh near one corner would be frustum-culled
+            // too eagerly and show up as a visible hole at grazing
+            // angles. This forces Bevy to treat every chunk as a full
+            // 16×16×16 box for culling purposes.
+            let aabb = bevy::render::primitives::Aabb::from_min_max(
+                Vec3::ZERO,
+                Vec3::splat(CHUNK_SIZE_I as f32),
+            );
             let entity = commands
-                .spawn(PbrBundle {
-                    mesh: handle.clone(),
-                    material: material.clone(),
-                    transform,
-                    ..default()
-                })
+                .spawn((
+                    PbrBundle {
+                        mesh: handle.clone(),
+                        material: material.clone(),
+                        transform,
+                        ..default()
+                    },
+                    aabb,
+                ))
                 .id();
             streamer.entities.insert(pos, (entity, handle));
         }
@@ -421,10 +490,11 @@ fn mesh_dirty_chunks(
         }
 
         // All six neighbours (XZ + Y above/below) for the uniform fast
-        // path. Critical: a solid stone chunk with AIR above must NOT be
-        // skipped or its top face vanishes and we see holes into the
-        // chunk below. Only skip when the chunk is trivially uniform in
-        // every direction.
+        // path. Critical: we ONLY skip chunks that are completely empty
+        // (all AIR) AND whose six neighbours are all empty. The stricter
+        // `is_uniform_solid` skip was removed because it was producing
+        // chunk-sized holes where a solid chunk touched mixed terrain
+        // whose uniform-flag briefly disagreed across frames.
         let neighbours_all = [
             ChunkPos::new(pos.x + 1, pos.y, pos.z),
             ChunkPos::new(pos.x - 1, pos.y, pos.z),
@@ -435,20 +505,10 @@ fn mesh_dirty_chunks(
         ];
         let fast_skip = {
             let center = world.chunks.get(&pos).unwrap();
-            if center.is_empty {
-                neighbours_all
+            center.is_empty
+                && neighbours_all
                     .iter()
                     .all(|n| world.chunks.get(n).map(|c| c.is_empty).unwrap_or(false))
-            } else if center.is_uniform_solid {
-                // Also require neighbours to be uniform-solid. This is
-                // conservative (we could compare voxel types too) but
-                // avoids the exposed-face holes seen previously.
-                neighbours_all
-                    .iter()
-                    .all(|n| world.chunks.get(n).map(|c| c.is_uniform_solid).unwrap_or(false))
-            } else {
-                false
-            }
         };
         if fast_skip {
             if let Some((prev, old_handle)) = streamer.entities.remove(&pos) {

@@ -153,7 +153,7 @@ impl Default for WorldSettings {
     fn default() -> Self {
         Self {
             seed: 12345,
-            render_distance: 20,
+            render_distance: 32,
             vertical_chunks: 8,
             chunks_per_frame: 16,
             meshes_per_frame: 16,
@@ -171,19 +171,23 @@ impl Default for WorldSettings {
 }
 
 fn default_in_flight_terrain() -> u32 {
-    (num_threads() as u32).max(4) * 8
+    // 16 cores × 16 tasks = 256 simultaneous terrain gens. Terrain-gen
+    // is pure CPU (no lock contention) so the async pool scales linearly.
+    (num_threads() as u32).max(4) * 16
 }
 
 fn default_in_flight_meshes() -> u32 {
-    (num_threads() as u32).max(4) * 6
+    // Meshing is also pure CPU on Arc-shared snapshots. High concurrency
+    // here is what makes RD=32+ fill in smoothly.
+    (num_threads() as u32).max(4) * 12
 }
 
-/// Cap mesh uploads at a fixed 3/frame. Each upload allocates a GPU
-/// buffer + spawns an entity -- at 60 fps that's still 180 chunks per
-/// second, enough to populate a 20-chunk radius in ~3 seconds while
-/// staying smooth.
+/// Cap mesh uploads per frame to avoid GPU-upload spikes. Each upload
+/// allocates a GPU buffer + spawns an entity on the main thread. 6/frame
+/// @ 60 fps = 360 chunks/s — enough to populate an RD=32 disc in ~10 s
+/// while keeping frame time flat.
 fn default_mesh_applies_per_frame() -> u32 {
-    3
+    6
 }
 
 fn num_threads() -> usize {
