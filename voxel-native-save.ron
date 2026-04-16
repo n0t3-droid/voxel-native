@@ -1,0 +1,23 @@
+(
+    seed: 1377265271,
+    render_distance: 20,
+    vertical_chunks: 8,
+    chunks_per_frame: 16,
+    meshes_per_frame: 16,
+    mesh_applies_per_frame: 6,
+    max_in_flight_terrain: 256,
+    max_in_flight_meshes: 192,
+    time_mode: Fixed,
+    time_of_day: 14.7,
+    cycle_speed: 0.0,
+    graphics: Balanced,
+    fov_deg: 75.0,
+    weather: (
+        preset: Clear,
+        rain_intensity: 0.0,
+        snow_intensity: 0.0,
+        fog_density: 0.0,
+        wind_x: 0.0,
+        wind_z: 0.0,
+    ),
+)

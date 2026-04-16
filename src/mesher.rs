@@ -65,15 +65,32 @@ pub fn build_mesh<F: Fn(i32, i32, i32) -> Voxel>(pos: ChunkPos, sample: F) -> Me
                     let back_v = sample(ox + back[0], oy + back[1], oz + back[2]);
                     let front_v = sample(ox + front[0], oy + front[1], oz + front[2]);
 
-                    let back_opaque = voxel_is_opaque(back_v) && back_v != AIR;
-                    let front_opaque = voxel_is_opaque(front_v) && front_v != AIR;
-
-                    let cell = if back_opaque && !front_opaque {
-                        Some(MaskCell { voxel: back_v, positive: true })
-                    } else if front_opaque && !back_opaque {
-                        Some(MaskCell { voxel: front_v, positive: false })
-                    } else {
+                    // Face generation rule (handles transparent blocks
+                    // like water + leaves correctly):
+                    //   - same voxel on both sides: no face (interior).
+                    //   - one side AIR, other side anything: draw the
+                    //     non-air voxel's face (so water → air gives a
+                    //     water surface; stone → air gives stone).
+                    //   - both non-air different voxels: draw face of
+                    //     the more-opaque side toward the less-opaque
+                    //     side (stone-under-water shows stone). If both
+                    //     are equally (non-)opaque, no face.
+                    let cell = if back_v == front_v {
                         None
+                    } else if back_v == AIR {
+                        Some(MaskCell { voxel: front_v, positive: false })
+                    } else if front_v == AIR {
+                        Some(MaskCell { voxel: back_v, positive: true })
+                    } else {
+                        let back_opaque = voxel_is_opaque(back_v);
+                        let front_opaque = voxel_is_opaque(front_v);
+                        if back_opaque && !front_opaque {
+                            Some(MaskCell { voxel: back_v, positive: true })
+                        } else if front_opaque && !back_opaque {
+                            Some(MaskCell { voxel: front_v, positive: false })
+                        } else {
+                            None
+                        }
                     };
 
                     mask[(vi as usize) * CHUNK_SIZE + ui as usize] = cell;
