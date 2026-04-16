@@ -75,6 +75,25 @@ impl Chunk {
     pub fn voxels(&self) -> &[Voxel; CHUNK_VOLUME] {
         &self.voxels
     }
+
+    /// Heap-clone the chunk's voxel storage. Used when handing a snapshot
+    /// off to a background meshing task.
+    pub fn clone_voxels(&self) -> Box<[Voxel; CHUNK_VOLUME]> {
+        self.voxels.clone()
+    }
+
+    /// Consume the chunk's voxel storage (used by the async pipeline to
+    /// hand finished terrain data back to the main thread without a copy).
+    pub fn take_voxels(self) -> Box<[Voxel; CHUNK_VOLUME]> {
+        self.voxels
+    }
+
+    /// Replace the chunk's voxel storage with a pre-computed box (used by
+    /// the async pipeline when a background task finishes generation).
+    pub fn install_voxels(&mut self, voxels: Box<[Voxel; CHUNK_VOLUME]>) {
+        self.voxels = voxels;
+        self.dirty = true;
+    }
 }
 
 /// Convert a world-space block coordinate to (chunk, local) coordinates.

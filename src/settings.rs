@@ -27,6 +27,13 @@ pub struct WorldSettings {
     pub chunks_per_frame: u32,
     pub meshes_per_frame: u32,
 
+    /// Maximum number of background terrain + meshing tasks in flight at
+    /// any given moment. Higher = uses more cores = loads further faster.
+    #[serde(default = "default_in_flight_terrain")]
+    pub max_in_flight_terrain: u32,
+    #[serde(default = "default_in_flight_meshes")]
+    pub max_in_flight_meshes: u32,
+
     /// Either "cycle" (auto-advance) or a fixed time (0..24).
     pub time_mode: TimeMode,
     pub time_of_day: f32,
@@ -140,10 +147,12 @@ impl Default for WorldSettings {
     fn default() -> Self {
         Self {
             seed: 12345,
-            render_distance: 6,
+            render_distance: 20,
             vertical_chunks: 8,
-            chunks_per_frame: 6,
-            meshes_per_frame: 4,
+            chunks_per_frame: 16,
+            meshes_per_frame: 16,
+            max_in_flight_terrain: default_in_flight_terrain(),
+            max_in_flight_meshes: default_in_flight_meshes(),
             time_mode: TimeMode::Cycle,
             time_of_day: 10.0,
             cycle_speed: 0.01,
@@ -152,6 +161,20 @@ impl Default for WorldSettings {
             weather: WeatherSettings::default(),
         }
     }
+}
+
+fn default_in_flight_terrain() -> u32 {
+    (num_threads() as u32).max(4) * 8
+}
+
+fn default_in_flight_meshes() -> u32 {
+    (num_threads() as u32).max(4) * 6
+}
+
+fn num_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }
 
 impl WorldSettings {

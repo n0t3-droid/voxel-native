@@ -4469,6 +4469,7 @@ dependencies = [
  "ahash",
  "bevy",
  "bevy_egui",
+ "futures-lite",
  "noise",
  "rand",
  "rand_chacha",

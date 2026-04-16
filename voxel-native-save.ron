@@ -1,6 +1,6 @@
 (
     seed: 859043375,
-    render_distance: 14,
+    render_distance: 19,
     vertical_chunks: 8,
     chunks_per_frame: 6,
     meshes_per_frame: 4,

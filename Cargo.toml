@@ -27,6 +27,9 @@ ron  = "0.8"
 rand = "0.8"
 rand_chacha = "0.3"
 
+# Polling async tasks returned by Bevy's AsyncComputeTaskPool.
+futures-lite = "2"
+
 # ---- Build profiles --------------------------------------------------------
 # Dev builds: fast compile, but optimize the hot render/engine deps so the
 # editor is actually playable. This is the standard Bevy recipe.

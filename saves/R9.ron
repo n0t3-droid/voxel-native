@@ -12,9 +12,9 @@
         wind_x: 0.0,
         wind_z: 0.0,
     ),
-    player_pos: (-334.53912, 75.18349, 305.51764),
-    player_yaw: 3.1800623,
-    player_pitch: -0.30499905,
+    player_pos: (-200.05016, 91.23636, 76.99389),
+    player_yaw: 3.2400672,
+    player_pitch: -0.41999894,
     created_epoch: 1776367957,
-    last_played_epoch: 1776368283,
+    last_played_epoch: 1776368565,
 )

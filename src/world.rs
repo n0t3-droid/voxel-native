@@ -1,14 +1,17 @@
 //! World plugin — owns the chunk map, streams chunks around the player,
-//! and schedules terrain + meshing work with a per-frame budget so the
-//! frame rate never tanks when the player sprints through fresh terrain.
+//! and schedules terrain + meshing work on background threads via
+//! `AsyncComputeTaskPool` so a render distance of 20+ chunks stays snappy
+//! even on modest hardware.
 //!
 //! Port target: `lib/voxel/ChunkManager.ts` + `lib/voxel/worker.ts`.
 
 use ahash::AHashMap;
 use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, Task};
+use futures_lite::future;
 
 use crate::blocks::{voxel_is_solid, Voxel, AIR};
-use crate::chunk::{world_to_chunk, Chunk, ChunkPos, CHUNK_SIZE_I};
+use crate::chunk::{world_to_chunk, Chunk, ChunkPos, CHUNK_SIZE_I, CHUNK_VOLUME};
 use crate::mesher::build_mesh;
 use crate::settings::WorldSettings;
 use crate::terrain::TerrainGenerator;
@@ -48,6 +51,8 @@ fn reinit_world_for_active(
     }
     world.generator = TerrainGenerator::new(settings.seed);
     world.chunks.clear();
+    streamer.pending_terrain.clear();
+    streamer.pending_meshes.clear();
     for (_, entity) in streamer.entities.drain() {
         commands.entity(entity).despawn_recursive();
     }
@@ -106,12 +111,17 @@ impl VoxelWorld {
 }
 
 /// Tracks which chunk entities are currently spawned so we can despawn them
-/// when they stream out of range.
+/// when they stream out of range. Also keeps the async terrain and mesh
+/// task handles so we can poll them each frame without blocking.
 #[derive(Resource, Default)]
 pub struct ChunkStreamer {
     pub entities: AHashMap<ChunkPos, Entity>,
     pub material: Option<Handle<StandardMaterial>>,
     pub water_material: Option<Handle<StandardMaterial>>,
+    /// In-flight terrain-generation tasks (one per chunk position).
+    pub pending_terrain: AHashMap<ChunkPos, Task<(ChunkPos, Box<[Voxel; CHUNK_VOLUME]>)>>,
+    /// In-flight meshing tasks (one per chunk position).
+    pub pending_meshes: AHashMap<ChunkPos, Task<(ChunkPos, Mesh)>>,
 }
 
 fn init_world(
@@ -144,11 +154,13 @@ pub struct ChunkAnchor;
 
 /// Load chunks inside `render_distance` of the player (measured in chunks
 /// on the X/Z plane) and unload any that drift outside retention range.
-/// Also applies a per-frame budget so terrain gen can't stall the frame.
+/// Terrain generation runs on the async compute task pool, so spawning
+/// many jobs at once doesn't stall the frame.
 fn stream_chunks(
     anchors: Query<&Transform, With<ChunkAnchor>>,
     settings: Res<WorldSettings>,
     mut world: ResMut<VoxelWorld>,
+    mut streamer: ResMut<ChunkStreamer>,
 ) {
     let Ok(transform) = anchors.get_single() else {
         return;
@@ -163,11 +175,13 @@ fn stream_chunks(
 
     let rd = settings.render_distance as i32;
     let rd2 = rd * rd;
-    let retain = (settings.render_distance + 1) as i32;
+    let retain = (settings.render_distance + 2) as i32;
     let retain2 = retain * retain;
     let vertical = settings.vertical_chunks as i32;
 
-    // 1. Unload chunks outside the retention radius.
+    // 1. Unload chunks outside the retention radius (also drop stale
+    //    pending tasks for those positions so we don't keep working on
+    //    chunks the player already left behind).
     let mut to_drop = Vec::new();
     for pos in world.chunks.keys() {
         let dx = pos.x - pcx;
@@ -179,44 +193,68 @@ fn stream_chunks(
     for p in &to_drop {
         world.chunks.remove(p);
     }
+    streamer
+        .pending_terrain
+        .retain(|p, _| (p.x - pcx).pow(2) + (p.z - pcz).pow(2) <= retain2);
+    streamer
+        .pending_meshes
+        .retain(|p, _| (p.x - pcx).pow(2) + (p.z - pcz).pow(2) <= retain2);
 
-    // 2. Load missing chunks near the player, nearest-first, within budget.
-    let mut budget = settings.chunks_per_frame;
-    let mut wanted: Vec<(i32, ChunkPos)> = Vec::new();
-    for dx in -rd..=rd {
-        for dz in -rd..=rd {
-            let d2 = dx * dx + dz * dz;
-            if d2 > rd2 {
-                continue;
-            }
-            for cy in 0..vertical {
-                let cp = ChunkPos::new(pcx + dx, cy, pcz + dz);
-                if !world.chunks.contains_key(&cp) {
-                    wanted.push((d2, cp));
+    // 2. Poll finished terrain tasks and fold them back into the world.
+    let mut done: Vec<ChunkPos> = Vec::new();
+    for (pos, task) in streamer.pending_terrain.iter_mut() {
+        if let Some((cp, voxels)) = future::block_on(future::poll_once(task)) {
+            let mut chunk = Chunk::new(cp);
+            chunk.install_voxels(voxels);
+            world.chunks.insert(cp, chunk);
+            done.push(*pos);
+        }
+    }
+    for p in done {
+        streamer.pending_terrain.remove(&p);
+    }
+
+    // 3. Queue new terrain jobs for nearby chunks, nearest-first, up to
+    //    `max_in_flight_terrain` tasks total across threads.
+    let max_in_flight = settings.max_in_flight_terrain as usize;
+    if streamer.pending_terrain.len() < max_in_flight {
+        let mut wanted: Vec<(i32, ChunkPos)> = Vec::new();
+        for dx in -rd..=rd {
+            for dz in -rd..=rd {
+                let d2 = dx * dx + dz * dz;
+                if d2 > rd2 {
+                    continue;
+                }
+                for cy in 0..vertical {
+                    let cp = ChunkPos::new(pcx + dx, cy, pcz + dz);
+                    if !world.chunks.contains_key(&cp)
+                        && !streamer.pending_terrain.contains_key(&cp)
+                    {
+                        wanted.push((d2, cp));
+                    }
                 }
             }
         }
-    }
-    wanted.sort_unstable_by_key(|(d, _)| *d);
+        wanted.sort_unstable_by_key(|(d, _)| *d);
 
-    // Clone the generator handle so we can iterate without borrowing world twice.
-    let gen_seed = world.generator.seed;
-    let gen = TerrainGenerator::new(gen_seed);
-
-    for (_d, pos) in wanted {
-        if budget == 0 {
-            break;
+        let pool = AsyncComputeTaskPool::get();
+        let gen_seed = world.generator.seed;
+        let slots = max_in_flight - streamer.pending_terrain.len();
+        for (_d, pos) in wanted.into_iter().take(slots) {
+            let gen = TerrainGenerator::new(gen_seed);
+            let task = pool.spawn(async move {
+                let mut chunk = Chunk::new(pos);
+                gen.generate(&mut chunk);
+                (pos, chunk.take_voxels())
+            });
+            streamer.pending_terrain.insert(pos, task);
         }
-        let mut chunk = Chunk::new(pos);
-        gen.generate(&mut chunk);
-        world.chunks.insert(pos, chunk);
-        budget -= 1;
     }
 }
 
-/// Re-mesh every chunk marked dirty (only if all 4 cardinal neighbours on
-/// X/Z are loaded, to avoid seam artefacts). Uses a per-frame budget so a
-/// flood of dirty chunks can't freeze the game.
+/// Re-mesh every chunk marked dirty. Meshing runs on background threads
+/// using a snapshot of the chunk + its 6 cardinal neighbours so the main
+/// thread doesn't touch chunk storage while the mesher works.
 fn mesh_dirty_chunks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -228,47 +266,22 @@ fn mesh_dirty_chunks(
         return;
     };
 
-    // Collect candidate dirty chunks first (so we don't mutate while iterating).
-    let mut candidates: Vec<ChunkPos> = world
-        .chunks
-        .iter()
-        .filter_map(|(p, c)| if c.dirty { Some(*p) } else { None })
-        .collect();
-    candidates.sort_unstable_by_key(|p| p.x * p.x + p.z * p.z);
-
-    let mut budget = settings.meshes_per_frame;
-
-    for pos in candidates {
-        if budget == 0 {
-            break;
+    // 1. Poll finished meshing tasks, swap in the new mesh entity.
+    let mut finished: Vec<(ChunkPos, Mesh)> = Vec::new();
+    let mut done_keys: Vec<ChunkPos> = Vec::new();
+    for (pos, task) in streamer.pending_meshes.iter_mut() {
+        if let Some((cp, mesh)) = future::block_on(future::poll_once(task)) {
+            finished.push((cp, mesh));
+            done_keys.push(*pos);
         }
-
-        // Require 4 horizontal neighbours loaded so chunk seams don't flicker.
-        let neighbours = [
-            ChunkPos::new(pos.x + 1, pos.y, pos.z),
-            ChunkPos::new(pos.x - 1, pos.y, pos.z),
-            ChunkPos::new(pos.x, pos.y, pos.z + 1),
-            ChunkPos::new(pos.x, pos.y, pos.z - 1),
-        ];
-        if !neighbours.iter().all(|n| world.chunks.contains_key(n)) {
-            continue;
-        }
-
-        let mesh = {
-            let world_ref = &*world;
-            build_mesh(pos, |wx, wy, wz| world_ref.voxel_at(wx, wy, wz))
-        };
-
-        // Mark the source chunk clean.
-        if let Some(c) = world.chunks.get_mut(&pos) {
-            c.dirty = false;
-        }
-
+    }
+    for p in done_keys {
+        streamer.pending_meshes.remove(&p);
+    }
+    for (pos, mesh) in finished {
         let handle = meshes.add(mesh);
         let (ox, oy, oz) = pos.origin();
         let transform = Transform::from_xyz(ox as f32, oy as f32, oz as f32);
-
-        // Replace the old entity (if any) with a fresh one.
         if let Some(prev) = streamer.entities.remove(&pos) {
             commands.entity(prev).despawn_recursive();
         }
@@ -281,11 +294,65 @@ fn mesh_dirty_chunks(
             })
             .id();
         streamer.entities.insert(pos, entity);
-
-        budget -= 1;
     }
 
-    // Clean up mesh entities whose chunk has streamed out.
+    // 2. Queue new mesh jobs for dirty chunks with all cardinal XZ
+    //    neighbours loaded. We snapshot center + 6 neighbours into the
+    //    task so the mesher can sample across boundaries without taking
+    //    any locks.
+    let max_in_flight = settings.max_in_flight_meshes as usize;
+    if streamer.pending_meshes.len() >= max_in_flight {
+        return;
+    }
+
+    let mut candidates: Vec<ChunkPos> = world
+        .chunks
+        .iter()
+        .filter_map(|(p, c)| {
+            if c.dirty && !streamer.pending_meshes.contains_key(p) {
+                Some(*p)
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort_unstable_by_key(|p| p.x * p.x + p.z * p.z);
+
+    let pool = AsyncComputeTaskPool::get();
+    let mut slots = max_in_flight - streamer.pending_meshes.len();
+
+    for pos in candidates {
+        if slots == 0 {
+            break;
+        }
+        // Horizontal seam avoidance: require 4 XZ neighbours loaded.
+        let neighbours_xz = [
+            ChunkPos::new(pos.x + 1, pos.y, pos.z),
+            ChunkPos::new(pos.x - 1, pos.y, pos.z),
+            ChunkPos::new(pos.x, pos.y, pos.z + 1),
+            ChunkPos::new(pos.x, pos.y, pos.z - 1),
+        ];
+        if !neighbours_xz.iter().all(|n| world.chunks.contains_key(n)) {
+            continue;
+        }
+
+        let snap = ChunkSnapshot::build(&world, pos);
+
+        // Mark clean BEFORE the task starts so a second mutation during
+        // meshing will still re-flag the chunk as dirty.
+        if let Some(c) = world.chunks.get_mut(&pos) {
+            c.dirty = false;
+        }
+
+        let task = pool.spawn(async move {
+            let mesh = build_mesh(pos, |wx, wy, wz| snap.sample(wx, wy, wz));
+            (pos, mesh)
+        });
+        streamer.pending_meshes.insert(pos, task);
+        slots -= 1;
+    }
+
+    // 3. Clean up orphaned mesh entities whose chunk has streamed out.
     let mut orphaned = Vec::new();
     for (pos, entity) in streamer.entities.iter() {
         if !world.chunks.contains_key(pos) {
@@ -295,5 +362,68 @@ fn mesh_dirty_chunks(
     for (pos, entity) in orphaned {
         commands.entity(entity).despawn_recursive();
         streamer.entities.remove(&pos);
+    }
+}
+
+/// Immutable snapshot of a chunk + its 6 cardinal neighbours, used by
+/// the off-thread mesher. Heap-allocated arrays so the future is `Send`.
+struct ChunkSnapshot {
+    pos: ChunkPos,
+    center: Box<[Voxel; CHUNK_VOLUME]>,
+    neighbours: [Option<Box<[Voxel; CHUNK_VOLUME]>>; 6],
+}
+
+impl ChunkSnapshot {
+    fn build(world: &VoxelWorld, pos: ChunkPos) -> Self {
+        let center = world
+            .chunks
+            .get(&pos)
+            .map(|c| c.clone_voxels())
+            .unwrap_or_else(|| Box::new([AIR; CHUNK_VOLUME]));
+        let dirs = [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ];
+        let neighbours = std::array::from_fn(|i| {
+            let (dx, dy, dz) = dirs[i];
+            world
+                .chunks
+                .get(&ChunkPos::new(pos.x + dx, pos.y + dy, pos.z + dz))
+                .map(|c| c.clone_voxels())
+        });
+        Self {
+            pos,
+            center,
+            neighbours,
+        }
+    }
+
+    #[inline]
+    fn sample(&self, wx: i32, wy: i32, wz: i32) -> Voxel {
+        let (cp, lx, ly, lz) = world_to_chunk(wx, wy, wz);
+        let dx = cp.x - self.pos.x;
+        let dy = cp.y - self.pos.y;
+        let dz = cp.z - self.pos.z;
+        let idx = Chunk::index(lx, ly, lz);
+        if (dx, dy, dz) == (0, 0, 0) {
+            return self.center[idx];
+        }
+        let ni = match (dx, dy, dz) {
+            (1, 0, 0) => 0,
+            (-1, 0, 0) => 1,
+            (0, 1, 0) => 2,
+            (0, -1, 0) => 3,
+            (0, 0, 1) => 4,
+            (0, 0, -1) => 5,
+            _ => return AIR,
+        };
+        self.neighbours[ni]
+            .as_ref()
+            .map(|v| v[idx])
+            .unwrap_or(AIR)
     }
 }
