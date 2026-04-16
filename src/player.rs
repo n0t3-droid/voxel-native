@@ -15,18 +15,44 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_player).add_systems(
+        app.add_systems(Startup, spawn_player)
+            .add_systems(OnEnter(crate::menu::GameState::InGame), load_player_from_world)
+            .add_systems(
             Update,
             (
                 grab_cursor,
-                update_look,
-                place_on_surface_once,
-                update_movement,
+                update_look.run_if(in_state(crate::menu::GameState::InGame)),
+                place_on_surface_once.run_if(in_state(crate::menu::GameState::InGame)),
+                update_movement.run_if(in_state(crate::menu::GameState::InGame)),
                 update_camera_fov,
             )
                 .chain(),
         );
     }
+}
+
+/// When the player enters a world, teleport them to the saved position
+/// (from `ActiveWorld`). Forces placement on the surface again only if
+/// the saved Y is negative/default.
+fn load_player_from_world(
+    active: Option<Res<crate::settings::ActiveWorld>>,
+    mut query: Query<(&mut Transform, &mut Player)>,
+) {
+    let Some(active) = active else {
+        return;
+    };
+    let Ok((mut tf, mut player)) = query.get_single_mut() else {
+        return;
+    };
+    let pos = active.meta.player_pos;
+    tf.translation = Vec3::new(pos[0], pos[1], pos[2]);
+    player.yaw = active.meta.player_yaw;
+    player.pitch = active.meta.player_pitch;
+    player.velocity = Vec3::ZERO;
+    // Stream-in takes a moment; keep the player flying until terrain arrives.
+    player.flying = true;
+    // Placement only runs for fresh worlds (default y = 140 with no custom pos).
+    player.placed_on_surface = pos[1] < 200.0 && pos[0].abs() > 0.5;
 }
 
 #[derive(Component)]
@@ -52,8 +78,10 @@ pub struct Player {
     pub coyote_time: f32,
     /// Smoothed FOV bonus applied on top of `settings.fov_deg` — pushed
     /// up while sprinting for a kinetic speed-rush feel.
-    pub fov_bonus: f32,
-}
+    pub fov_bonus: f32,    /// Timer (seconds) used to detect a Space double-tap for fly-toggle.
+    /// Counts down from 0.3s after each Space press; if Space is pressed
+    /// again while > 0, we toggle fly-mode (Minecraft creative-style).
+    pub space_tap_timer: f32,}
 
 /// Standard Minecraft-ish hitbox: 0.6×1.8×0.6 blocks, eyes at 1.62.
 pub const PLAYER_HALF_WIDTH: f32 = 0.3;
@@ -91,6 +119,7 @@ fn spawn_player(mut commands: Commands) {
             jump_buffer: 0.0,
             coyote_time: 0.0,
             fov_bonus: 0.0,
+            space_tap_timer: 0.0,
         },
         ChunkAnchor,
     ));
@@ -110,20 +139,19 @@ fn update_camera_fov(
 
 fn grab_cursor(
     mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    editor: Option<Res<crate::editor::EditorState>>,
+    state: Res<State<crate::menu::GameState>>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else {
         return;
     };
-    // Don't grab while the editor panel is open.
-    let editor_open = editor.map(|e| e.open).unwrap_or(false);
-    if !editor_open && mouse.just_pressed(MouseButton::Left) {
-        window.cursor.grab_mode = CursorGrabMode::Locked;
-        window.cursor.visible = false;
-    }
-    if keys.just_pressed(KeyCode::Escape) {
+    // Only capture the mouse while actively playing; menus keep it free.
+    if *state.get() == crate::menu::GameState::InGame {
+        if mouse.just_pressed(MouseButton::Left) {
+            window.cursor.grab_mode = CursorGrabMode::Locked;
+            window.cursor.visible = false;
+        }
+    } else {
         window.cursor.grab_mode = CursorGrabMode::None;
         window.cursor.visible = true;
     }
@@ -168,9 +196,16 @@ fn update_movement(
     };
     let dt = time.delta_seconds().min(1.0 / 20.0); // clamp long frames
 
-    if keys.just_pressed(KeyCode::KeyF) {
-        player.flying = !player.flying;
-        player.velocity.y = 0.0;
+    // Space double-tap toggles fly-mode (Minecraft creative style).
+    player.space_tap_timer = (player.space_tap_timer - dt).max(0.0);
+    if keys.just_pressed(KeyCode::Space) {
+        if player.space_tap_timer > 0.0 {
+            player.flying = !player.flying;
+            player.velocity.y = 0.0;
+            player.space_tap_timer = 0.0;
+        } else {
+            player.space_tap_timer = 0.3;
+        }
     }
 
     // Horizontal input vector in camera yaw frame.

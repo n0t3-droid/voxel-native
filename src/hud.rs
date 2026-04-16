@@ -14,20 +14,104 @@ use crate::world::VoxelWorld;
 
 pub struct HudPlugin;
 
+/// Tracks whether the F3 debug overlay (FPS + pos + biome + time) is shown.
+#[derive(Resource)]
+pub struct DebugOverlay {
+    pub visible: bool,
+}
+
+impl Default for DebugOverlay {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin)
             .insert_resource(HotbarState::default())
+            .insert_resource(DebugOverlay::default())
             .add_systems(Startup, (spawn_crosshair, spawn_stats_text, spawn_hint, spawn_hotbar))
             .add_systems(
                 Update,
                 (
+                    toggle_debug_overlay,
                     update_stats_text,
                     update_hint,
-                    hotbar_input,
+                    hotbar_input.run_if(in_state(crate::menu::GameState::InGame)),
                     hotbar_highlight,
+                    toggle_hud_visibility,
                 ),
             );
+    }
+}
+
+/// F3 toggles the debug stats overlay.
+fn toggle_debug_overlay(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut overlay: ResMut<DebugOverlay>,
+    state: Res<State<crate::menu::GameState>>,
+) {
+    if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if keys.just_pressed(KeyCode::F3) {
+        overlay.visible = !overlay.visible;
+    }
+}
+
+/// Hide the crosshair, stats text, hotbar and hint banner whenever we're
+/// not actively playing (in a menu or paused).
+fn toggle_hud_visibility(
+    state: Res<State<crate::menu::GameState>>,
+    overlay: Res<DebugOverlay>,
+    mut crosshair_q: Query<
+        &mut Visibility,
+        (
+            With<Crosshair>,
+            Without<StatsText>,
+            Without<HintBanner>,
+            Without<HotbarSlot>,
+        ),
+    >,
+    mut stats_q: Query<
+        &mut Visibility,
+        (
+            With<StatsText>,
+            Without<Crosshair>,
+            Without<HintBanner>,
+            Without<HotbarSlot>,
+        ),
+    >,
+    mut slot_q: Query<
+        &mut Visibility,
+        (
+            With<HotbarSlot>,
+            Without<Crosshair>,
+            Without<StatsText>,
+            Without<HintBanner>,
+        ),
+    >,
+) {
+    let in_game = *state.get() == crate::menu::GameState::InGame;
+    let stats_vis = if in_game && overlay.visible {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    let hud_vis = if in_game {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    if let Ok(mut v) = crosshair_q.get_single_mut() {
+        *v = hud_vis;
+    }
+    if let Ok(mut v) = stats_q.get_single_mut() {
+        *v = stats_vis;
+    }
+    for mut v in slot_q.iter_mut() {
+        *v = hud_vis;
     }
 }
 
@@ -183,12 +267,17 @@ fn spawn_hint(mut commands: Commands) {
 
 fn update_hint(
     windows: Query<&Window, With<PrimaryWindow>>,
+    state: Res<State<crate::menu::GameState>>,
     mut q: Query<&mut Visibility, With<HintBanner>>,
 ) {
-    let Ok(window) = windows.get_single() else {
+    let Ok(mut vis) = q.get_single_mut() else {
         return;
     };
-    let Ok(mut vis) = q.get_single_mut() else {
+    if *state.get() != crate::menu::GameState::InGame {
+        *vis = Visibility::Hidden;
+        return;
+    }
+    let Ok(window) = windows.get_single() else {
         return;
     };
     *vis = if window.cursor.grab_mode == CursorGrabMode::Locked {

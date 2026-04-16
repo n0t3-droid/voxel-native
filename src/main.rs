@@ -6,6 +6,7 @@ mod chunk;
 mod daynight;
 mod editor;
 mod hud;
+mod menu;
 mod mesher;
 mod player;
 mod settings;
@@ -35,22 +36,24 @@ fn main() {
             weather::WeatherPlugin,
             hud::HudPlugin,
             editor::EditorPlugin,
+            menu::MenuPlugin,
         ))
         .add_systems(Startup, print_controls)
         .run();
 }
 
 fn print_controls() {
-    info!("-------- Voxel-Native controls --------");
-    info!("  Click window          : capture mouse");
-    info!("  Esc                   : release mouse");
-    info!("  WASD                  : move");
-    info!("  Space                 : jump / fly up");
-    info!("  Shift                 : fly down");
-    info!("  Ctrl                  : sprint / fly boost");
-    info!("  F                     : toggle fly mode");
-    info!("  F3                    : editor (terrain/weather/time)");
-    info!("  F5                    : save settings");
-    info!("  1-9                   : hotbar slot");
-    info!("---------------------------------------");
+    info!("-------- Voxel-Native Controls (Minecraft-style) --------");
+    info!("  WASD         : move");
+    info!("  Space        : jump  (double-tap = toggle fly)");
+    info!("  Ctrl         : sprint");
+    info!("  Shift        : fly down / sneak");
+    info!("  1-9          : hotbar");
+    info!("  E            : open inventory");
+    info!("  ESC          : pause menu / close overlay");
+    info!("  F3           : toggle debug overlay");
+    info!("  F2           : screenshot");
+    info!("  F5           : save world + settings");
+    info!("  LMB          : capture mouse");
+    info!("---------------------------------------------------------");
 }

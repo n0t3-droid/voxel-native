@@ -20,7 +20,31 @@ impl Plugin for WorldPlugin {
         app.insert_resource(VoxelWorld::new())
             .insert_resource(ChunkStreamer::default())
             .add_systems(Startup, init_world)
-            .add_systems(Update, (stream_chunks, mesh_dirty_chunks).chain());
+            .add_systems(
+                OnEnter(crate::menu::GameState::InGame),
+                reinit_world_for_active,
+            )
+            .add_systems(
+                Update,
+                (stream_chunks, mesh_dirty_chunks)
+                    .chain()
+                    .run_if(in_state(crate::menu::GameState::InGame)),
+            );
+    }
+}
+
+/// When the player enters a world (via main menu / load), rebuild the
+/// generator with the chosen seed and drop any stale chunks.
+fn reinit_world_for_active(
+    mut world: ResMut<VoxelWorld>,
+    mut streamer: ResMut<ChunkStreamer>,
+    settings: Res<WorldSettings>,
+    mut commands: Commands,
+) {
+    world.generator = TerrainGenerator::new(settings.seed);
+    world.chunks.clear();
+    for (_, entity) in streamer.entities.drain() {
+        commands.entity(entity).despawn_recursive();
     }
 }
 

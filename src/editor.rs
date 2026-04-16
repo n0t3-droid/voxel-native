@@ -122,16 +122,12 @@ fn style_egui(mut contexts: EguiContexts) {
 }
 
 fn toggle_editor(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut state: ResMut<EditorState>,
+    _keys: Res<ButtonInput<KeyCode>>,
+    state: Res<EditorState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    if keys.just_pressed(KeyCode::F3) {
-        state.open = !state.open;
-    }
-    if state.open && keys.just_pressed(KeyCode::Escape) {
-        state.open = false;
-    }
+    // F3/ESC handling is owned by `menu.rs` now. This system only keeps
+    // the cursor released while the editor panel is visible.
     if state.open {
         if let Ok(mut window) = windows.get_single_mut() {
             window.cursor.grab_mode = CursorGrabMode::None;
