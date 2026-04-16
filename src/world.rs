@@ -55,6 +55,11 @@ impl VoxelWorld {
     pub fn is_solid(&self, wx: i32, wy: i32, wz: i32) -> bool {
         voxel_is_solid(self.voxel_at(wx, wy, wz))
     }
+
+    /// Biome at a world (x, z) column — for HUD / editor display.
+    pub fn biome_at(&self, wx: i32, wz: i32) -> crate::terrain::Biome {
+        self.generator.biome_at(wx, wz)
+    }
 }
 
 /// Tracks which chunk entities are currently spawned so we can despawn them

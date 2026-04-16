@@ -30,12 +30,109 @@ pub struct WorldSettings {
     pub time_mode: TimeMode,
     pub time_of_day: f32,
     pub cycle_speed: f32,
+
+    /// Graphics tier: controls shadow-map resolution, fog, particles.
+    pub graphics: GraphicsMode,
+
+    /// Field of view in degrees.
+    pub fov_deg: f32,
+
+    /// Weather (rain/snow/fog/wind). See `weather.rs`.
+    pub weather: WeatherSettings,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TimeMode {
     Cycle,
     Fixed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GraphicsMode {
+    Fast,
+    Balanced,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WeatherPreset {
+    Clear,
+    LightRain,
+    Storm,
+    Snow,
+    Fog,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WeatherSettings {
+    pub preset: WeatherPreset,
+    /// 0 = no rain, 1 = heavy rain.
+    pub rain_intensity: f32,
+    /// 0 = no snow, 1 = heavy snow.
+    pub snow_intensity: f32,
+    /// 0 = clear air, 1 = dense fog.
+    pub fog_density: f32,
+    /// Horizontal wind in world units.
+    pub wind_x: f32,
+    pub wind_z: f32,
+}
+
+impl Default for WeatherSettings {
+    fn default() -> Self {
+        Self {
+            preset: WeatherPreset::Clear,
+            rain_intensity: 0.0,
+            snow_intensity: 0.0,
+            fog_density: 0.0,
+            wind_x: 0.0,
+            wind_z: 0.0,
+        }
+    }
+}
+
+impl WeatherSettings {
+    pub fn apply_preset(&mut self, preset: WeatherPreset) {
+        self.preset = preset;
+        match preset {
+            WeatherPreset::Clear => {
+                self.rain_intensity = 0.0;
+                self.snow_intensity = 0.0;
+                self.fog_density = 0.0;
+                self.wind_x = 0.0;
+                self.wind_z = 0.0;
+            }
+            WeatherPreset::LightRain => {
+                self.rain_intensity = 0.45;
+                self.snow_intensity = 0.0;
+                self.fog_density = 0.15;
+                self.wind_x = 2.0;
+                self.wind_z = 1.0;
+            }
+            WeatherPreset::Storm => {
+                self.rain_intensity = 1.0;
+                self.snow_intensity = 0.0;
+                self.fog_density = 0.35;
+                self.wind_x = 6.0;
+                self.wind_z = 4.0;
+            }
+            WeatherPreset::Snow => {
+                self.rain_intensity = 0.0;
+                self.snow_intensity = 0.8;
+                self.fog_density = 0.25;
+                self.wind_x = 1.5;
+                self.wind_z = -1.0;
+            }
+            WeatherPreset::Fog => {
+                self.rain_intensity = 0.0;
+                self.snow_intensity = 0.0;
+                self.fog_density = 0.7;
+                self.wind_x = 0.3;
+                self.wind_z = 0.0;
+            }
+            WeatherPreset::Custom => {}
+        }
+    }
 }
 
 impl Default for WorldSettings {
@@ -47,8 +144,11 @@ impl Default for WorldSettings {
             chunks_per_frame: 6,
             meshes_per_frame: 4,
             time_mode: TimeMode::Cycle,
-            time_of_day: 9.0,
+            time_of_day: 10.0,
             cycle_speed: 0.01,
+            graphics: GraphicsMode::Balanced,
+            fov_deg: 75.0,
+            weather: WeatherSettings::default(),
         }
     }
 }

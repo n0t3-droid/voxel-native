@@ -4,9 +4,11 @@
 //! Port target: `components/Player.tsx` + `lib/voxel/physics.ts`.
 
 use bevy::input::mouse::MouseMotion;
+use bevy::pbr::{FogFalloff, FogSettings};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
 
+use crate::settings::WorldSettings;
 use crate::world::{ChunkAnchor, VoxelWorld};
 
 pub struct PlayerPlugin;
@@ -19,6 +21,7 @@ impl Plugin for PlayerPlugin {
                 grab_cursor,
                 update_look,
                 update_movement,
+                update_camera_fov,
             )
                 .chain(),
         );
@@ -46,6 +49,18 @@ fn spawn_player(mut commands: Commands) {
     commands.spawn((
         Camera3dBundle {
             transform: Transform::from_xyz(0.0, 120.0, 0.0),
+            projection: Projection::Perspective(PerspectiveProjection {
+                fov: 75.0f32.to_radians(),
+                ..default()
+            }),
+            ..default()
+        },
+        FogSettings {
+            color: Color::srgba(0.53, 0.80, 0.98, 1.0),
+            falloff: FogFalloff::Linear {
+                start: 10_000.0,
+                end: 10_000.0,
+            },
             ..default()
         },
         Player {
@@ -62,15 +77,32 @@ fn spawn_player(mut commands: Commands) {
     ));
 }
 
+fn update_camera_fov(
+    settings: Res<WorldSettings>,
+    mut q: Query<&mut Projection, With<Player>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    if let Ok(mut proj) = q.get_single_mut() {
+        if let Projection::Perspective(ref mut persp) = *proj {
+            persp.fov = settings.fov_deg.clamp(30.0, 120.0).to_radians();
+        }
+    }
+}
+
 fn grab_cursor(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    editor: Option<Res<crate::editor::EditorState>>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else {
         return;
     };
-    if mouse.just_pressed(MouseButton::Left) {
+    // Don't grab while the editor panel is open.
+    let editor_open = editor.map(|e| e.open).unwrap_or(false);
+    if !editor_open && mouse.just_pressed(MouseButton::Left) {
         window.cursor.grab_mode = CursorGrabMode::Locked;
         window.cursor.visible = false;
     }

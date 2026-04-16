@@ -4,10 +4,13 @@
 mod blocks;
 mod chunk;
 mod daynight;
+mod editor;
+mod hud;
 mod mesher;
 mod player;
 mod settings;
 mod terrain;
+mod weather;
 mod world;
 
 use bevy::prelude::*;
@@ -29,6 +32,9 @@ fn main() {
             world::WorldPlugin,
             player::PlayerPlugin,
             daynight::DayNightPlugin,
+            weather::WeatherPlugin,
+            hud::HudPlugin,
+            editor::EditorPlugin,
         ))
         .add_systems(Startup, print_controls)
         .run();
@@ -43,6 +49,8 @@ fn print_controls() {
     info!("  Shift                 : fly down");
     info!("  Ctrl                  : sprint / fly boost");
     info!("  F                     : toggle fly mode");
+    info!("  F3                    : editor (terrain/weather/time)");
     info!("  F5                    : save settings");
+    info!("  1-9                   : hotbar slot");
     info!("---------------------------------------");
 }

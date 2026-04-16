@@ -273,6 +273,12 @@ impl TerrainGenerator {
 
         chunk.dirty = true;
     }
+
+    /// Public biome lookup at a world (x, z) column — used by the HUD.
+    pub fn biome_at(&self, wx: i32, wz: i32) -> Biome {
+        let (h, cont) = self.surface_height(wx as f64, wz as f64);
+        self.biome(wx as f64, wz as f64, h, cont)
+    }
 }
 
 // Derive Copy/Clone only for lookup (biome blocks helper is `&self`-free).

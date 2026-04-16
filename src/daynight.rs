@@ -72,13 +72,14 @@ fn update_sun(
     // Ambient gets a cool tint at night, warm at sunrise/sunset.
     let sunset = (1.0 - (sun_dir.y.abs()).clamp(0.0, 1.0)).powf(3.0);
     let day_color = Color::srgb(0.7, 0.82, 1.0).to_linear();
-    let night_color = Color::srgb(0.10, 0.12, 0.22).to_linear();
+    let night_color = Color::srgb(0.20, 0.25, 0.45).to_linear();
     let sunset_color = Color::srgb(1.0, 0.55, 0.35).to_linear();
 
     let base = if day > 0.0 { day_color } else { night_color };
     let amb_lin = base.mix(&sunset_color, sunset * 0.5);
     ambient.color = Color::LinearRgba(amb_lin);
-    ambient.brightness = 100.0 + day * 250.0;
+    // Much brighter ambient floor so night is still visible (was 100.0).
+    ambient.brightness = 350.0 + day * 450.0;
 
     // Sky (clear colour) interpolates similarly.
     let sky_day = Color::srgb(0.53, 0.80, 0.98).to_linear();

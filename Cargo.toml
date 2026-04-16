@@ -6,7 +6,12 @@ description = "Native voxel engine (successor to R93G) — Rust + Bevy + WGPU"
 
 [dependencies]
 # Core engine: Bevy with default features (Vulkan/DX12/Metal via wgpu).
-bevy = { version = "0.14", features = ["dynamic_linking"] }
+# Note: dynamic_linking is incompatible with bevy_egui on Windows, so we
+# disable it. Dev builds stay fast because of the opt-level tweaks below.
+bevy = "0.14"
+
+# In-game editor / debug panels (F3).
+bevy_egui = "0.28"
 
 # Noise / terrain generation (same ideas as R93G's terrain.ts).
 noise = "0.9"
