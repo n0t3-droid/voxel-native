@@ -40,6 +40,13 @@ pub struct NewWorldForm {
     pub seed_text: String,
 }
 
+/// Set to `true` by the main menu when a fresh world is created/loaded,
+/// so `OnEnter(InGame)` systems know to regenerate terrain and teleport
+/// the player. Returning from Options/Pause leaves this `false`, so the
+/// player stays exactly where they were.
+#[derive(Resource, Default)]
+pub struct PendingWorldLoad(pub bool);
+
 pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
@@ -47,6 +54,7 @@ impl Plugin for MenuPlugin {
         app.init_state::<GameState>()
             .insert_resource(PauseScreen::default())
             .insert_resource(NewWorldForm::default())
+            .insert_resource(PendingWorldLoad::default())
             .add_systems(Update, handle_keys.run_if(not_in_menu_text_edit))
             .add_systems(
                 Update,
@@ -55,7 +63,16 @@ impl Plugin for MenuPlugin {
                     draw_pause_menu.run_if(in_state(GameState::Paused)),
                     on_game_start,
                 ),
-            );
+            )
+            .add_systems(Last, clear_pending_load.run_if(in_state(GameState::InGame)));
+    }
+}
+
+/// Clears the "fresh world load" flag after the first InGame frame, so
+/// OnEnter(InGame) systems only teleport/regenerate on real world loads.
+fn clear_pending_load(mut pending: ResMut<PendingWorldLoad>) {
+    if pending.0 {
+        pending.0 = false;
     }
 }
 
@@ -139,6 +156,7 @@ fn draw_main_menu(
     mut form: ResMut<NewWorldForm>,
     mut settings: ResMut<WorldSettings>,
     mut editor: ResMut<EditorState>,
+    mut pending: ResMut<PendingWorldLoad>,
     mut exit: EventWriter<AppExit>,
 ) {
     let ctx = contexts.ctx_mut();
@@ -230,6 +248,7 @@ fn draw_main_menu(
                     apply_world_to_settings(&meta, &mut settings);
                     commands.insert_resource(ActiveWorld { meta });
                     editor.open = false;
+                    pending.0 = true;
                     form.name.clear();
                     form.seed_text.clear();
                     next.set(GameState::InGame);
@@ -266,6 +285,7 @@ fn draw_main_menu(
                                     apply_world_to_settings(&meta, &mut settings);
                                     commands.insert_resource(ActiveWorld { meta: meta.clone() });
                                     editor.open = false;
+                                    pending.0 = true;
                                     next.set(GameState::InGame);
                                 }
                                 if ui.button("X").clicked() {

@@ -32,12 +32,16 @@ impl Plugin for PlayerPlugin {
 }
 
 /// When the player enters a world, teleport them to the saved position
-/// (from `ActiveWorld`). Forces placement on the surface again only if
-/// the saved Y is negative/default.
+/// (from `ActiveWorld`). Skipped when returning from Pause/Options so
+/// tweaking settings mid-game doesn't yank the player back to spawn.
 fn load_player_from_world(
     active: Option<Res<crate::settings::ActiveWorld>>,
+    pending: Res<crate::menu::PendingWorldLoad>,
     mut query: Query<(&mut Transform, &mut Player)>,
 ) {
+    if !pending.0 {
+        return;
+    }
     let Some(active) = active else {
         return;
     };

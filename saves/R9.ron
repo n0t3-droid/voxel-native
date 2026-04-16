@@ -1,0 +1,20 @@
+(
+    name: "R9",
+    seed: 859043375,
+    time_of_day: 14.7,
+    time_mode: Fixed,
+    cycle_speed: 0.0,
+    weather: (
+        preset: Clear,
+        rain_intensity: 0.0,
+        snow_intensity: 0.0,
+        fog_density: 0.0,
+        wind_x: 0.0,
+        wind_z: 0.0,
+    ),
+    player_pos: (-334.53912, 75.18349, 305.51764),
+    player_yaw: 3.1800623,
+    player_pitch: -0.30499905,
+    created_epoch: 1776367957,
+    last_played_epoch: 1776368283,
+)

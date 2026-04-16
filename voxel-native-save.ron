@@ -1,0 +1,20 @@
+(
+    seed: 859043375,
+    render_distance: 14,
+    vertical_chunks: 8,
+    chunks_per_frame: 6,
+    meshes_per_frame: 4,
+    time_mode: Fixed,
+    time_of_day: 14.7,
+    cycle_speed: 0.0,
+    graphics: High,
+    fov_deg: 98.0,
+    weather: (
+        preset: Clear,
+        rain_intensity: 0.0,
+        snow_intensity: 0.0,
+        fog_density: 0.0,
+        wind_x: 0.0,
+        wind_z: 0.0,
+    ),
+)

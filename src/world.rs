@@ -34,13 +34,18 @@ impl Plugin for WorldPlugin {
 }
 
 /// When the player enters a world (via main menu / load), rebuild the
-/// generator with the chosen seed and drop any stale chunks.
+/// generator with the chosen seed and drop any stale chunks. Skipped when
+/// returning from Pause/Options so mid-play tweaks don't reset the world.
 fn reinit_world_for_active(
     mut world: ResMut<VoxelWorld>,
     mut streamer: ResMut<ChunkStreamer>,
     settings: Res<WorldSettings>,
+    pending: Res<crate::menu::PendingWorldLoad>,
     mut commands: Commands,
 ) {
+    if !pending.0 {
+        return;
+    }
     world.generator = TerrainGenerator::new(settings.seed);
     world.chunks.clear();
     for (_, entity) in streamer.entities.drain() {
