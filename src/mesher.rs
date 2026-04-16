@@ -1,112 +1,137 @@
-//! Chunk -> Bevy mesh.
+//! Greedy meshing — turn a chunk into the smallest mesh that still draws
+//! every visible block face.
 //!
-//! Port target: `lib/voxel/mesher.ts`. This first version is a naive
-//! face-culled mesher (only emit faces between solid and non-solid voxels).
-//! The greedy-mesher optimisation from the R93G roadmap will be added next
-//! so that mid/far LOD chunks get O(surface) triangles instead of O(volume).
+//! Port target: `lib/voxel/mesher.ts`.
+//!
+//! For each of the 3 axes we sweep through slices, build a 2D face-mask,
+//! and greedily combine equal adjacent mask cells into rectangles. The
+//! result is one quad per rectangle, instead of one quad per visible face.
+//! On flat terrain this produces orders of magnitude fewer triangles than
+//! the naive face-culled mesher (a 16×16 grass slab becomes 2 triangles).
+//!
+//! The sampler callback lets the world module answer "what voxel is at
+//! world coord (wx,wy,wz)?" — that way border faces are culled correctly
+//! against neighbouring chunks, without the mesher knowing how chunks are
+//! stored.
 
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
 
-use crate::blocks::{BlockType, AIR};
-use crate::chunk::{Chunk, CHUNK_SIZE};
+use crate::blocks::{voxel_color, voxel_is_opaque, Voxel, AIR};
+use crate::chunk::{ChunkPos, CHUNK_SIZE, CHUNK_SIZE_I};
 
-/// Convenience: which voxel lives at (x,y,z) in this chunk? Out-of-bounds
-/// returns AIR (so the border of a chunk currently meshes as if adjacent
-/// chunks were empty; the world module will later patch neighbour access).
-#[inline]
-fn voxel_at(chunk: &Chunk, x: i32, y: i32, z: i32) -> u16 {
-    let s = CHUNK_SIZE as i32;
-    if x < 0 || y < 0 || z < 0 || x >= s || y >= s || z >= s {
-        return AIR;
-    }
-    chunk.get(x as usize, y as usize, z as usize)
-}
+/// Greedy-mesh a chunk into a Bevy `Mesh`. Positions are in world-space
+/// offset so the owning entity can sit at the origin.
+pub fn build_mesh<F: Fn(i32, i32, i32) -> Voxel>(pos: ChunkPos, sample: F) -> Mesh {
+    let (ox, oy, oz) = pos.origin();
 
-#[inline]
-fn is_solid(v: u16) -> bool {
-    // SAFETY: Voxel ids 0..=Snow are a superset of what terrain emits.
-    // For any unknown id we conservatively treat as non-solid so the mesher
-    // never leaves hidden inner faces visible. Keep in sync with
-    // `BlockType::is_solid`.
-    match v {
-        0 => false,                         // Air
-        5 => false,                         // Water (transparent fluid)
-        1 | 2 | 3 | 4 | 6 | 7 | 8 => true,  // Stone/Dirt/Grass/Sand/Wood/Leaves/Snow
-        _ => false,
-    }
-}
-
-fn block_color(v: u16) -> [f32; 4] {
-    let bt = match v {
-        1 => BlockType::Stone,
-        2 => BlockType::Dirt,
-        3 => BlockType::Grass,
-        4 => BlockType::Sand,
-        5 => BlockType::Water,
-        6 => BlockType::Wood,
-        7 => BlockType::Leaves,
-        8 => BlockType::Snow,
-        _ => BlockType::Air,
-    };
-    bt.color().to_linear().to_f32_array()
-}
-
-/// Build a Bevy `Mesh` for this chunk. Positions are chunk-local; the world
-/// module places the entity at `chunk.pos * CHUNK_SIZE`.
-pub fn build_mesh(chunk: &Chunk) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // 6 axis-aligned faces: (normal, 4 corner offsets ordered CCW when viewed
-    // from outside the block).
-    const FACES: [([f32; 3], [[f32; 3]; 4], [i32; 3]); 6] = [
-        // +X
-        ([1.0, 0.0, 0.0], [[1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0]], [1, 0, 0]),
-        // -X
-        ([-1.0, 0.0, 0.0], [[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0]], [-1, 0, 0]),
-        // +Y
-        ([0.0, 1.0, 0.0], [[0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], [0, 1, 0]),
-        // -Y
-        ([0.0, -1.0, 0.0], [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]], [0, -1, 0]),
-        // +Z
-        ([0.0, 0.0, 1.0], [[1.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0]], [0, 0, 1]),
-        // -Z
-        ([0.0, 0.0, -1.0], [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]], [0, 0, -1]),
-    ];
+    // Mask entries — `None` means no face at this cell. The bool encodes
+    // whether the face points along the positive axis direction.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct MaskCell {
+        voxel: Voxel,
+        positive: bool,
+    }
 
-    let s = CHUNK_SIZE as i32;
-    for y in 0..s {
-        for z in 0..s {
-            for x in 0..s {
-                let v = voxel_at(chunk, x, y, z);
-                if !is_solid(v) {
-                    continue;
+    let mut mask: Vec<Option<MaskCell>> = vec![None; CHUNK_SIZE * CHUNK_SIZE];
+
+    // For each axis d in {0=X, 1=Y, 2=Z}: u = (d+1)%3, v = (d+2)%3.
+    for axis in 0..3 {
+        let u = (axis + 1) % 3;
+        let v = (axis + 2) % 3;
+
+        // Slice index along `axis`: 0..=CHUNK_SIZE (inclusive = one extra
+        // slice at the far side of the chunk).
+        for d in 0..=CHUNK_SIZE_I {
+            // Build the mask for this slice.
+            for vi in 0..CHUNK_SIZE_I {
+                for ui in 0..CHUNK_SIZE_I {
+                    // Build world coords of "back" (d-1) and "front" (d) cells.
+                    let mut back = [0i32; 3];
+                    let mut front = [0i32; 3];
+                    back[axis] = d - 1;
+                    back[u] = ui;
+                    back[v] = vi;
+                    front[axis] = d;
+                    front[u] = ui;
+                    front[v] = vi;
+
+                    let back_v = sample(ox + back[0], oy + back[1], oz + back[2]);
+                    let front_v = sample(ox + front[0], oy + front[1], oz + front[2]);
+
+                    let back_opaque = voxel_is_opaque(back_v) && back_v != AIR;
+                    let front_opaque = voxel_is_opaque(front_v) && front_v != AIR;
+
+                    let cell = if back_opaque && !front_opaque {
+                        Some(MaskCell { voxel: back_v, positive: true })
+                    } else if front_opaque && !back_opaque {
+                        Some(MaskCell { voxel: front_v, positive: false })
+                    } else {
+                        None
+                    };
+
+                    mask[(vi as usize) * CHUNK_SIZE + ui as usize] = cell;
                 }
-                let col = block_color(v);
+            }
 
-                for (normal, corners, offset) in FACES.iter() {
-                    let nx = x + offset[0];
-                    let ny = y + offset[1];
-                    let nz = z + offset[2];
-                    if is_solid(voxel_at(chunk, nx, ny, nz)) {
-                        continue; // face hidden by neighbour
-                    }
+            // Greedy-merge the mask into rectangles.
+            for vi in 0..CHUNK_SIZE {
+                let mut ui = 0usize;
+                while ui < CHUNK_SIZE {
+                    let idx = vi * CHUNK_SIZE + ui;
+                    if let Some(current) = mask[idx] {
+                        // Width along u: keep extending while cells match.
+                        let mut w = 1usize;
+                        while ui + w < CHUNK_SIZE
+                            && mask[vi * CHUNK_SIZE + ui + w] == Some(current)
+                        {
+                            w += 1;
+                        }
 
-                    let base = positions.len() as u32;
-                    for corner in corners {
-                        positions.push([
-                            x as f32 + corner[0],
-                            y as f32 + corner[1],
-                            z as f32 + corner[2],
-                        ]);
-                        normals.push(*normal);
-                        colors.push(col);
+                        // Height along v: extend whole rows at a time.
+                        let mut h = 1usize;
+                        'grow_h: while vi + h < CHUNK_SIZE {
+                            for k in 0..w {
+                                if mask[(vi + h) * CHUNK_SIZE + ui + k] != Some(current) {
+                                    break 'grow_h;
+                                }
+                            }
+                            h += 1;
+                        }
+
+                        emit_quad(
+                            &mut positions,
+                            &mut normals,
+                            &mut colors,
+                            &mut indices,
+                            axis,
+                            u,
+                            v,
+                            d,
+                            ui as i32,
+                            vi as i32,
+                            w as i32,
+                            h as i32,
+                            current.voxel,
+                            current.positive,
+                        );
+
+                        // Clear the consumed rectangle.
+                        for dv in 0..h {
+                            for du in 0..w {
+                                mask[(vi + dv) * CHUNK_SIZE + ui + du] = None;
+                            }
+                        }
+                        ui += w;
+                    } else {
+                        ui += 1;
                     }
-                    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
                 }
             }
         }
@@ -121,4 +146,70 @@ pub fn build_mesh(chunk: &Chunk) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_quad(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    colors: &mut Vec<[f32; 4]>,
+    indices: &mut Vec<u32>,
+    axis: usize,
+    u: usize,
+    v: usize,
+    d: i32,
+    u0: i32,
+    v0: i32,
+    w: i32,
+    h: i32,
+    voxel: Voxel,
+    positive: bool,
+) {
+    // Four corners of the quad in chunk-local coordinates.
+    let mut p00 = [0i32; 3];
+    let mut p10 = [0i32; 3];
+    let mut p11 = [0i32; 3];
+    let mut p01 = [0i32; 3];
+
+    p00[axis] = d;
+    p00[u] = u0;
+    p00[v] = v0;
+
+    p10[axis] = d;
+    p10[u] = u0 + w;
+    p10[v] = v0;
+
+    p11[axis] = d;
+    p11[u] = u0 + w;
+    p11[v] = v0 + h;
+
+    p01[axis] = d;
+    p01[u] = u0;
+    p01[v] = v0 + h;
+
+    let mut n = [0.0f32; 3];
+    n[axis] = if positive { 1.0 } else { -1.0 };
+
+    let base = positions.len() as u32;
+
+    // Winding order depends on face direction so the front face points
+    // outwards (Bevy uses CCW-front by default).
+    let p00f = [p00[0] as f32, p00[1] as f32, p00[2] as f32];
+    let p10f = [p10[0] as f32, p10[1] as f32, p10[2] as f32];
+    let p11f = [p11[0] as f32, p11[1] as f32, p11[2] as f32];
+    let p01f = [p01[0] as f32, p01[1] as f32, p01[2] as f32];
+
+    if positive {
+        positions.extend_from_slice(&[p00f, p10f, p11f, p01f]);
+    } else {
+        positions.extend_from_slice(&[p00f, p01f, p11f, p10f]);
+    }
+
+    let color = voxel_color(voxel);
+    for _ in 0..4 {
+        normals.push(n);
+        colors.push(color);
+    }
+
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
