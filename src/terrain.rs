@@ -279,6 +279,12 @@ impl TerrainGenerator {
         let (h, cont) = self.surface_height(wx as f64, wz as f64);
         self.biome(wx as f64, wz as f64, h, cont)
     }
+
+    /// Public surface height lookup — block y of the topmost solid block
+    /// at a world (x, z) column. Used to spawn the player above terrain.
+    pub fn surface_height_at(&self, wx: i32, wz: i32) -> i32 {
+        self.surface_height(wx as f64, wz as f64).0
+    }
 }
 
 // Derive Copy/Clone only for lookup (biome blocks helper is `&self`-free).

@@ -60,6 +60,20 @@ impl VoxelWorld {
     pub fn biome_at(&self, wx: i32, wz: i32) -> crate::terrain::Biome {
         self.generator.biome_at(wx, wz)
     }
+
+    /// Is at least one chunk in the vertical column at (wx, wz) loaded?
+    /// Used by the player to know when physics can safely take over.
+    pub fn is_column_loaded(&self, wx: i32, wz: i32) -> bool {
+        let cx = wx.div_euclid(crate::chunk::CHUNK_SIZE as i32);
+        let cz = wz.div_euclid(crate::chunk::CHUNK_SIZE as i32);
+        self.chunks.keys().any(|p| p.x == cx && p.z == cz)
+    }
+
+    /// Terrain surface height (block y of the topmost solid block) at a
+    /// world (x, z) column.
+    pub fn surface_height_at(&self, wx: i32, wz: i32) -> i32 {
+        self.generator.surface_height_at(wx, wz)
+    }
 }
 
 /// Tracks which chunk entities are currently spawned so we can despawn them

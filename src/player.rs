@@ -20,6 +20,7 @@ impl Plugin for PlayerPlugin {
             (
                 grab_cursor,
                 update_look,
+                place_on_surface_once,
                 update_movement,
                 update_camera_fov,
             )
@@ -38,6 +39,10 @@ pub struct Player {
     pub walk_speed: f32,
     pub fly_speed: f32,
     pub sensitivity: f32,
+    /// Once we've loaded the chunk under the spawn position we teleport
+    /// the player onto the terrain surface. Set to `true` after the first
+    /// successful placement so it doesn't repeat.
+    pub placed_on_surface: bool,
 }
 
 /// Standard Minecraft-ish hitbox: 0.6×1.8×0.6 blocks, eyes at 1.62.
@@ -68,10 +73,11 @@ fn spawn_player(mut commands: Commands) {
             pitch: -0.25,
             velocity: Vec3::ZERO,
             on_ground: false,
-            flying: true, // start flying so you can find the ground visually
+            flying: true, // start flying so terrain has time to stream in
             walk_speed: 5.5,
             fly_speed: 24.0,
             sensitivity: 0.0025,
+            placed_on_surface: false,
         },
         ChunkAnchor,
     ));
@@ -191,8 +197,15 @@ fn update_movement(
         player.walk_speed
     };
 
-    if player.flying {
-        // Direct velocity in fly mode (no gravity, no friction).
+    // If the world hasn't streamed a chunk around the player yet, freeze
+    // gravity + collision so we don't fall infinitely through AIR.
+    let world_ready = world.is_column_loaded(
+        transform.translation.x.floor() as i32,
+        transform.translation.z.floor() as i32,
+    );
+
+    if player.flying || !world_ready {
+        // Direct velocity in fly mode (or while world streams in).
         player.velocity.x = wish.x * speed;
         player.velocity.z = wish.z * speed;
         player.velocity.y = 0.0;
@@ -209,8 +222,24 @@ fn update_movement(
         player.velocity.x += (target.x - player.velocity.x) * (accel * dt).min(1.0);
         player.velocity.z += (target.z - player.velocity.z) * (accel * dt).min(1.0);
         player.velocity.y -= 28.0 * dt; // gravity
+        // Terminal velocity so we can never punch through terrain in a frame.
+        if player.velocity.y < -55.0 {
+            player.velocity.y = -55.0;
+        }
         if keys.just_pressed(KeyCode::Space) && player.on_ground {
             player.velocity.y = 9.2;
+        }
+    }
+
+    // Auto-unstuck: if the camera is somehow inside solid terrain (e.g. we
+    // just landed on a freshly-generated chunk) push straight up until clear.
+    // Only runs outside fly mode — while flying, clipping through blocks is
+    // fine.
+    if !player.flying && world_ready {
+        let mut safety = 0;
+        while safety < 32 && aabb_overlaps_solid(transform.translation, &world) {
+            transform.translation.y += 0.25;
+            safety += 1;
         }
     }
 
@@ -220,27 +249,25 @@ fn update_movement(
     let mut grounded = false;
 
     let delta = player.velocity * dt;
-    pos.x = move_axis(pos, delta.x, Axis::X, &world);
-    let new_y = move_axis(pos, delta.y, Axis::Y, &world);
-    if delta.y <= 0.0 && (new_y - pos.y).abs() < delta.y.abs() - 1e-4 {
-        // We hit ground while moving down.
-        grounded = true;
-        player.velocity.y = 0.0;
-    } else if delta.y > 0.0 && (new_y - pos.y).abs() < delta.y.abs() - 1e-4 {
-        // Bumped our head.
-        player.velocity.y = 0.0;
-    }
-    pos.y = new_y;
-    pos.z = move_axis(pos, delta.z, Axis::Z, &world);
 
-    // Kill horizontal velocity when collision clamped movement (otherwise the
-    // player would keep accelerating into a wall).
-    let moved_x = pos.x - transform.translation.x;
-    let moved_z = pos.z - transform.translation.z;
-    if moved_x.abs() < delta.x.abs() - 1e-4 {
+    let (new_x, hit_x) = move_axis(pos, delta.x, Axis::X, &world);
+    pos.x = new_x;
+    if hit_x {
         player.velocity.x = 0.0;
     }
-    if moved_z.abs() < delta.z.abs() - 1e-4 {
+
+    let (new_y, hit_y) = move_axis(pos, delta.y, Axis::Y, &world);
+    pos.y = new_y;
+    if hit_y {
+        if delta.y <= 0.0 {
+            grounded = true;
+        }
+        player.velocity.y = 0.0;
+    }
+
+    let (new_z, hit_z) = move_axis(pos, delta.z, Axis::Z, &world);
+    pos.z = new_z;
+    if hit_z {
         player.velocity.z = 0.0;
     }
 
@@ -255,21 +282,20 @@ enum Axis {
     Z,
 }
 
-/// Move one axis, stopping at the first block the player's AABB collides with.
-fn move_axis(pos: Vec3, delta: f32, axis: Axis, world: &VoxelWorld) -> f32 {
+/// Move one axis, stopping at the first block the player's AABB collides
+/// with. Returns the resulting coordinate along `axis` and whether a
+/// collision clamped the movement.
+fn move_axis(pos: Vec3, delta: f32, axis: Axis, world: &VoxelWorld) -> (f32, bool) {
+    let current = match axis {
+        Axis::X => pos.x,
+        Axis::Y => pos.y,
+        Axis::Z => pos.z,
+    };
     if delta == 0.0 {
-        return match axis {
-            Axis::X => pos.x,
-            Axis::Y => pos.y,
-            Axis::Z => pos.z,
-        };
+        return (current, false);
     }
 
-    let target = match axis {
-        Axis::X => pos.x + delta,
-        Axis::Y => pos.y + delta,
-        Axis::Z => pos.z + delta,
-    };
+    let target = current + delta;
 
     // Build the AABB at the target position.
     let (min, max) = player_aabb(Vec3::new(
@@ -292,7 +318,10 @@ fn move_axis(pos: Vec3, delta: f32, axis: Axis, world: &VoxelWorld) -> f32 {
             for bz in z0..=z1 {
                 if world.is_solid(bx, by, bz) {
                     // Clamp to the face of this block along the moving axis.
-                    return match axis {
+                    // Camera = eye. Feet = camera.y - EYE_HEIGHT.
+                    // AABB min.y = camera.y - EYE_HEIGHT
+                    // AABB max.y = camera.y + (HEIGHT - EYE_HEIGHT)
+                    let clamped = match axis {
                         Axis::X => {
                             if delta > 0.0 {
                                 (bx as f32) - PLAYER_HALF_WIDTH - 1e-3
@@ -302,9 +331,11 @@ fn move_axis(pos: Vec3, delta: f32, axis: Axis, world: &VoxelWorld) -> f32 {
                         }
                         Axis::Y => {
                             if delta > 0.0 {
-                                (by as f32) - PLAYER_HEIGHT - 1e-3
+                                // Head hits block bottom (y = by).
+                                (by as f32) - (PLAYER_HEIGHT - PLAYER_EYE_HEIGHT) - 1e-3
                             } else {
-                                (by as f32) + 1.0 + 1e-3
+                                // Feet land on block top (y = by + 1).
+                                (by as f32) + 1.0 + PLAYER_EYE_HEIGHT + 1e-3
                             }
                         }
                         Axis::Z => {
@@ -315,11 +346,12 @@ fn move_axis(pos: Vec3, delta: f32, axis: Axis, world: &VoxelWorld) -> f32 {
                             }
                         }
                     };
+                    return (clamped, true);
                 }
             }
         }
     }
-    target
+    (target, false)
 }
 
 /// Player AABB. `pos` is the player's FEET position (world-space). Eye
@@ -339,4 +371,54 @@ fn player_aabb(camera_pos: Vec3) -> (Vec3, Vec3) {
         feet.z + PLAYER_HALF_WIDTH,
     );
     (min, max)
+}
+
+/// Does the player's AABB at `camera_pos` overlap any solid block? Used
+/// for the auto-unstuck nudge.
+fn aabb_overlaps_solid(camera_pos: Vec3, world: &VoxelWorld) -> bool {
+    let (min, max) = player_aabb(camera_pos);
+    let x0 = min.x.floor() as i32;
+    let x1 = (max.x - 1e-4).floor() as i32;
+    let y0 = min.y.floor() as i32;
+    let y1 = (max.y - 1e-4).floor() as i32;
+    let z0 = min.z.floor() as i32;
+    let z1 = (max.z - 1e-4).floor() as i32;
+    for bx in x0..=x1 {
+        for by in y0..=y1 {
+            for bz in z0..=z1 {
+                if world.is_solid(bx, by, bz) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Runs every frame until the chunk under the spawn position has streamed
+/// in — then drops the player onto the terrain surface and disables
+/// fly-mode so gameplay can start.
+fn place_on_surface_once(
+    world: Res<VoxelWorld>,
+    mut query: Query<(&mut Transform, &mut Player)>,
+) {
+    let Ok((mut transform, mut player)) = query.get_single_mut() else {
+        return;
+    };
+    if player.placed_on_surface {
+        return;
+    }
+    let wx = transform.translation.x.floor() as i32;
+    let wz = transform.translation.z.floor() as i32;
+    if !world.is_column_loaded(wx, wz) {
+        return;
+    }
+    let surface_y = world.surface_height_at(wx, wz);
+    // Put the camera 2 blocks above the surface so gravity settles us
+    // cleanly onto the top face without clipping.
+    transform.translation.y = (surface_y as f32) + 2.0 + PLAYER_EYE_HEIGHT;
+    player.velocity = Vec3::ZERO;
+    player.placed_on_surface = true;
+    player.flying = false;
+    player.on_ground = false;
 }
