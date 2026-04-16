@@ -272,6 +272,7 @@ impl TerrainGenerator {
         }
 
         chunk.dirty = true;
+        chunk.finalize_uniform_flags();
     }
 
     /// Public biome lookup at a world (x, z) column — used by the HUD.

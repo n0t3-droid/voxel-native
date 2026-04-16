@@ -27,6 +27,12 @@ pub struct WorldSettings {
     pub chunks_per_frame: u32,
     pub meshes_per_frame: u32,
 
+    /// Maximum finished meshes uploaded to the GPU per frame. The mesh
+    /// upload (mesh.add() + commands.spawn()) happens on the main thread,
+    /// so capping this avoids frame spikes when many tasks finish at once.
+    #[serde(default = "default_mesh_applies_per_frame")]
+    pub mesh_applies_per_frame: u32,
+
     /// Maximum number of background terrain + meshing tasks in flight at
     /// any given moment. Higher = uses more cores = loads further faster.
     #[serde(default = "default_in_flight_terrain")]
@@ -151,6 +157,7 @@ impl Default for WorldSettings {
             vertical_chunks: 8,
             chunks_per_frame: 16,
             meshes_per_frame: 16,
+            mesh_applies_per_frame: default_mesh_applies_per_frame(),
             max_in_flight_terrain: default_in_flight_terrain(),
             max_in_flight_meshes: default_in_flight_meshes(),
             time_mode: TimeMode::Cycle,
@@ -169,6 +176,14 @@ fn default_in_flight_terrain() -> u32 {
 
 fn default_in_flight_meshes() -> u32 {
     (num_threads() as u32).max(4) * 6
+}
+
+/// Cap mesh uploads at a fixed 3/frame. Each upload allocates a GPU
+/// buffer + spawns an entity -- at 60 fps that's still 180 chunks per
+/// second, enough to populate a 20-chunk radius in ~3 seconds while
+/// staying smooth.
+fn default_mesh_applies_per_frame() -> u32 {
+    3
 }
 
 fn num_threads() -> usize {
