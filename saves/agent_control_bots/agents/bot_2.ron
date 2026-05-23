@@ -1,0 +1,36 @@
+(
+    id: 2,
+    name: "Orion",
+    role: CompanionMaker,
+    state: Idle,
+    position: (1269.949, 48.034008, 2574.8298),
+    target: (1269.949, 48.034008, 2574.8298),
+    home_id: 1,
+    crew_id: None,
+    last_interaction_epoch: 0,
+    companion: true,
+    companion_order: 1,
+    companion_mode: HoldingPosition,
+    current_task: None,
+    memory: (
+        completed_tasks: 4,
+        last_message: "Holding altitude. Standing by.",
+        known_sites: [
+            (1153.5, 59.0, 2753.5),
+        ],
+        favorite_theme: CyanAlloy,
+        relationships: [
+            (
+                other_id: 1,
+                trust: 0.55,
+                collaboration_score: 0.0,
+                last_interaction_epoch: 0,
+            ),
+        ],
+        recent_conversation_keys: [],
+        fatigue: 0.0,
+        curiosity: 1.0,
+        work_focus: 0.7,
+        last_idea_epoch: 0,
+    ),
+)

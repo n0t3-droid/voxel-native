@@ -1,0 +1,17 @@
+(
+    id: 3,
+    kind: BuildPlaza,
+    label: "Manual Build Plaza #3",
+    origin: (1267, 48, 2568),
+    size: (36, 8, 36),
+    theme: GreenPark,
+    status: Complete,
+    cursor: 10368,
+    total_steps: 10368,
+    assigned_bot: None,
+    district_id: Some(5),
+    crew_id: None,
+    idea_id: None,
+    blocked_reason: "",
+    priority: 7,
+)

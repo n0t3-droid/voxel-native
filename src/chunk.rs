@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use crate::blocks::{Voxel, AIR};
+use serde::{Deserialize, Serialize};
+
+use crate::blocks::{MaterialId, Voxel, AIR, DEFAULT_MATERIAL};
 
 pub const CHUNK_SIZE: usize = 16;
 pub const CHUNK_SIZE_I: i32 = CHUNK_SIZE as i32;
@@ -15,10 +17,11 @@ pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 /// Shared, immutable chunk voxel storage. Cheap to clone (ref-count bump)
 /// so background mesher tasks can snapshot center + neighbours in O(1).
 pub type SharedVoxels = Arc<[Voxel; CHUNK_VOLUME]>;
+pub type SharedMaterials = Arc<[MaterialId; CHUNK_VOLUME]>;
 
 /// Chunk position in chunk-space. World position of a voxel =
 /// `ChunkPos * CHUNK_SIZE + local (x, y, z)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChunkPos {
     pub x: i32,
     pub y: i32,
@@ -44,6 +47,7 @@ impl ChunkPos {
 pub struct Chunk {
     pub pos: ChunkPos,
     voxels: SharedVoxels,
+    materials: SharedMaterials,
     /// Set by the mesher/terrain; used to skip re-meshing untouched chunks.
     pub dirty: bool,
     /// True if every voxel in the chunk is AIR. Empty chunks never need
@@ -63,6 +67,7 @@ impl Chunk {
         Self {
             pos,
             voxels: Arc::new([AIR; CHUNK_VOLUME]),
+            materials: Arc::new([DEFAULT_MATERIAL; CHUNK_VOLUME]),
             dirty: true,
             is_empty: true,
             is_uniform_solid: false,
@@ -82,12 +87,47 @@ impl Chunk {
         self.voxels[Self::index(x, y, z)]
     }
 
+    #[inline]
+    #[allow(dead_code)]
+    pub fn get_material(&self, x: usize, y: usize, z: usize) -> MaterialId {
+        self.materials[Self::index(x, y, z)]
+    }
+
     /// Mutably edit the chunk's voxels. Uses copy-on-write via
     /// `Arc::make_mut` so in-flight snapshots aren't affected.
     pub fn set(&mut self, x: usize, y: usize, z: usize, v: Voxel) {
         let i = Self::index(x, y, z);
         if self.voxels[i] != v {
             Arc::make_mut(&mut self.voxels)[i] = v;
+            self.dirty = true;
+        }
+        if v == AIR {
+            self.set_material(x, y, z, DEFAULT_MATERIAL);
+        }
+    }
+
+    pub fn set_material(&mut self, x: usize, y: usize, z: usize, material: MaterialId) {
+        let i = Self::index(x, y, z);
+        if self.materials[i] != material {
+            Arc::make_mut(&mut self.materials)[i] = material;
+            self.dirty = true;
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_cell(&mut self, x: usize, y: usize, z: usize, v: Voxel, material: MaterialId) {
+        let i = Self::index(x, y, z);
+        let material = if v == AIR { DEFAULT_MATERIAL } else { material };
+        let mut changed = false;
+        if self.voxels[i] != v {
+            Arc::make_mut(&mut self.voxels)[i] = v;
+            changed = true;
+        }
+        if self.materials[i] != material {
+            Arc::make_mut(&mut self.materials)[i] = material;
+            changed = true;
+        }
+        if changed {
             self.dirty = true;
         }
     }
@@ -115,13 +155,64 @@ impl Chunk {
         self.voxels.clone()
     }
 
+    pub fn materials_shared(&self) -> SharedMaterials {
+        self.materials.clone()
+    }
+
+    pub fn voxels_vec(&self) -> Vec<Voxel> {
+        self.voxels.iter().copied().collect()
+    }
+
+    pub fn materials_vec(&self) -> Vec<MaterialId> {
+        self.materials.iter().copied().collect()
+    }
+
     /// Replace the chunk's voxel storage with a pre-computed buffer (used
     /// when a background terrain-gen task finishes).
     pub fn install_voxels(&mut self, voxels: SharedVoxels) {
         self.voxels = voxels;
+        self.materials = Arc::new([DEFAULT_MATERIAL; CHUNK_VOLUME]);
         self.dirty = true;
         self.finalize_uniform_flags();
     }
+
+    pub fn install_voxels_and_materials(
+        &mut self,
+        voxels: SharedVoxels,
+        materials: SharedMaterials,
+    ) {
+        self.voxels = voxels;
+        self.materials = materials;
+        self.dirty = true;
+        self.finalize_uniform_flags();
+    }
+}
+
+/// Sanitised `f32 -> i32` conversion. Plain `x as i32` saturates on
+/// `±inf` (producing `i32::MAX/MIN`) and returns `0` on `NaN`, which
+/// silently turns physics glitches (a NaN velocity, a freshly-broken
+/// transform) into wild coordinates that poke into random chunks.
+/// This helper clamps to the safe integer range f32 can represent
+/// exactly (`±2^24`) and maps NaN to 0 — the player stays near the
+/// origin instead of tunnelling to the i32 edge.
+#[inline]
+pub fn to_i32_safe(x: f32) -> i32 {
+    if x.is_nan() {
+        return 0;
+    }
+    const MAX_EXACT: f32 = 16_777_216.0; // 2^24
+    x.clamp(-MAX_EXACT, MAX_EXACT) as i32
+}
+
+/// `floor()` variant of [`to_i32_safe`] — same sanitisation, used at
+/// every block-coordinate sampling site.
+#[inline]
+pub fn floor_to_i32_safe(x: f32) -> i32 {
+    if x.is_nan() {
+        return 0;
+    }
+    const MAX_EXACT: f32 = 16_777_216.0;
+    x.clamp(-MAX_EXACT, MAX_EXACT).floor() as i32
 }
 
 /// Convert a world-space block coordinate to (chunk, local) coordinates.

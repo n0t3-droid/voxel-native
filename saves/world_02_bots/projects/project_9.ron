@@ -1,0 +1,17 @@
+(
+    id: 9,
+    kind: BuildResidentialBlock,
+    label: "Auto Residential Block #9",
+    origin: (-4527, 57, -4830),
+    size: (34, 12, 30),
+    theme: WhiteAlloy,
+    status: Complete,
+    cursor: 12240,
+    total_steps: 12240,
+    assigned_bot: None,
+    district_id: Some(2),
+    crew_id: None,
+    idea_id: Some(9),
+    blocked_reason: "",
+    priority: 5,
+)

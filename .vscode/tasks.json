@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Cargo: Build Release",
+      "type": "shell",
+      "command": "cargo build --release",
+      "group": "build",
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "Run Voxel Native Release",
+      "type": "shell",
+      "command": "${workspaceFolder}\\target\\release\\voxel-native.exe",
+      "group": "test",
+      "isBackground": true
+    },
+    {
+      "label": "Build Web (wasm)",
+      "type": "shell",
+      "command": "powershell -ExecutionPolicy Bypass -File scripts\\build-web.ps1",
+      "group": "build"
+    }
+  ]
+}
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Voxel Native Release",
+			"type": "shell",
+			"command": ".\\target\\release\\voxel-native.exe",
+			"isBackground": true,
+			"group": "test"
+		}
+	]
+}

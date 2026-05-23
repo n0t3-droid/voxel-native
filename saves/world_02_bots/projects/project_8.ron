@@ -1,0 +1,17 @@
+(
+    id: 8,
+    kind: ExpandRoadGrid,
+    label: "Auto Expand Road Grid #8",
+    origin: (-4538, 59, -4844),
+    size: (76, 1, 76),
+    theme: WhiteAlloy,
+    status: Complete,
+    cursor: 5776,
+    total_steps: 5776,
+    assigned_bot: None,
+    district_id: Some(2),
+    crew_id: None,
+    idea_id: Some(8),
+    blocked_reason: "",
+    priority: 5,
+)

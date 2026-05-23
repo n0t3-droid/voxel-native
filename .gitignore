@@ -1,1 +1,5 @@
 /target
+/web/pkg
+/qa_runs
+/agent_runs
+/agent_control.ron

@@ -1,0 +1,17 @@
+(
+    id: 4,
+    kind: BuildPark,
+    label: "Auto Build Park #4",
+    origin: (-4773, 54, -4893),
+    size: (30, 8, 30),
+    theme: GreenPark,
+    status: Complete,
+    cursor: 7200,
+    total_steps: 7200,
+    assigned_bot: None,
+    district_id: Some(4),
+    crew_id: None,
+    idea_id: Some(4),
+    blocked_reason: "",
+    priority: 5,
+)

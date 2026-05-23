@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>Voxel Native Web</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #02070b;
+        color: #dffbff;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          monospace;
+      }
+
+      body {
+        display: grid;
+        place-items: stretch;
+      }
+
+      canvas {
+        display: block;
+        width: 100vw !important;
+        height: 100vh !important;
+        outline: none;
+      }
+
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background:
+          linear-gradient(180deg, rgba(0, 30, 42, 0.94), rgba(2, 5, 9, 0.98)),
+          radial-gradient(circle at 50% 35%, rgba(0, 220, 255, 0.16), transparent 42%);
+        pointer-events: none;
+        transition: opacity 220ms ease;
+        z-index: 10;
+      }
+
+      #boot.hidden {
+        opacity: 0;
+      }
+
+      #boot-card {
+        border: 1px solid rgba(0, 220, 255, 0.5);
+        border-radius: 8px;
+        padding: 18px 22px;
+        background: rgba(3, 12, 18, 0.82);
+        box-shadow: 0 0 38px rgba(0, 220, 255, 0.18);
+      }
+
+      #boot-title {
+        font-size: 18px;
+        letter-spacing: 0;
+        color: #9bf7ff;
+      }
+
+      #boot-subtitle {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #8aa8b3;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="boot">
+      <div id="boot-card">
+        <div id="boot-title">VOXEL NATIVE WEB</div>
+        <div id="boot-subtitle">Loading shared browser build...</div>
+      </div>
+    </div>
+    <script type="module">
+      import init from "./pkg/voxel-native.js";
+
+      const boot = document.getElementById("boot");
+      init()
+        .then(() => {
+          boot?.classList.add("hidden");
+          setTimeout(() => boot?.remove(), 260);
+        })
+        .catch((error) => {
+          const expectedWinitControlFlow = String(error?.message ?? error).includes(
+            "Using exceptions for control flow",
+          );
+          if (expectedWinitControlFlow) {
+            boot?.classList.add("hidden");
+            setTimeout(() => boot?.remove(), 260);
+            return;
+          }
+          console.error(error);
+          if (boot) {
+            boot.classList.remove("hidden");
+            boot.querySelector("#boot-title").textContent = "WEB BOOT FAILED";
+            boot.querySelector("#boot-subtitle").textContent =
+              error?.message ?? String(error);
+          }
+        });
+    </script>
+  </body>
+</html>

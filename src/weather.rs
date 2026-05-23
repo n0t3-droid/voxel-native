@@ -11,6 +11,8 @@ use bevy::prelude::*;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+use crate::daynight::WorldIntelRuntime;
+use crate::neurocore::RuntimeBudget;
 use crate::player::Player;
 use crate::settings::{WeatherSettings, WorldSettings};
 
@@ -37,7 +39,12 @@ impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_weather).add_systems(
             Update,
-            (apply_fog, update_rain, update_snow, update_particle_visibility),
+            (
+                apply_fog,
+                update_rain,
+                update_snow,
+                update_particle_visibility,
+            ),
         );
     }
 }
@@ -106,13 +113,19 @@ fn setup_weather(
 
 fn apply_fog(
     settings: Res<WorldSettings>,
+    budget: Res<RuntimeBudget>,
+    intel: Res<WorldIntelRuntime>,
     mut fog_q: Query<&mut FogSettings, With<Camera3d>>,
     clear: Res<ClearColor>,
 ) {
     let Ok(mut fog) = fog_q.get_single_mut() else {
         return;
     };
-    let density = settings.weather.fog_density.clamp(0.0, 1.0);
+    let density = (settings.weather.fog_density
+        * budget.weather_fx_scale
+        * intel.profile.weather_fx_mul
+        * intel.profile.fog_density_mul)
+        .clamp(0.0, 1.0);
     if density <= 0.001 {
         fog.color = clear.0.with_alpha(0.0);
         fog.falloff = FogFalloff::Linear {
@@ -131,6 +144,8 @@ fn apply_fog(
 fn update_rain(
     time: Res<Time>,
     settings: Res<WorldSettings>,
+    budget: Res<RuntimeBudget>,
+    intel: Res<WorldIntelRuntime>,
     player_q: Query<&Transform, (With<Player>, Without<RainDrop>)>,
     mut drops: Query<(&mut Transform, &RainDrop), Without<Player>>,
 ) {
@@ -138,12 +153,13 @@ fn update_rain(
         return;
     };
     let w: &WeatherSettings = &settings.weather;
-    if w.rain_intensity < 0.01 {
+    let intensity =
+        (w.rain_intensity * budget.weather_fx_scale * intel.profile.weather_fx_mul).clamp(0.0, 1.0);
+    if intensity < 0.01 {
         return;
     }
     let dt = time.delta_seconds();
     let wind = Vec3::new(w.wind_x, 0.0, w.wind_z);
-    let intensity = w.rain_intensity.clamp(0.0, 1.0);
 
     for (mut tf, drop) in drops.iter_mut() {
         tf.translation += Vec3::new(0.0, -drop.fall_speed * (0.6 + intensity), 0.0) * dt;
@@ -162,6 +178,8 @@ fn update_rain(
 fn update_snow(
     time: Res<Time>,
     settings: Res<WorldSettings>,
+    budget: Res<RuntimeBudget>,
+    intel: Res<WorldIntelRuntime>,
     player_q: Query<&Transform, (With<Player>, Without<SnowFlake>)>,
     mut flakes: Query<(&mut Transform, &mut SnowFlake), Without<Player>>,
 ) {
@@ -169,16 +187,24 @@ fn update_snow(
         return;
     };
     let w = &settings.weather;
-    if w.snow_intensity < 0.01 {
+    let intensity =
+        (w.snow_intensity * budget.weather_fx_scale * intel.profile.weather_fx_mul).clamp(0.0, 1.0);
+    if intensity < 0.01 {
         return;
     }
     let dt = time.delta_seconds();
     let wind = Vec3::new(w.wind_x, 0.0, w.wind_z);
-    let intensity = w.snow_intensity.clamp(0.0, 1.0);
 
     for (mut tf, mut flake) in flakes.iter_mut() {
-        flake.sway_phase += dt * 2.0;
-        let sway = Vec3::new(flake.sway_phase.sin() * 0.6, 0.0, flake.sway_phase.cos() * 0.6);
+        // Wrap phase modulo TAU so 10h+ sessions don't lose f32
+        // precision in the sin/cos (at phase=72000 the LSB is ~0.02,
+        // which would make snowflakes visibly stutter).
+        flake.sway_phase = (flake.sway_phase + dt * 2.0) % std::f32::consts::TAU;
+        let sway = Vec3::new(
+            flake.sway_phase.sin() * 0.6,
+            0.0,
+            flake.sway_phase.cos() * 0.6,
+        );
         tf.translation +=
             (Vec3::new(0.0, -flake.fall_speed * (0.4 + intensity), 0.0) + sway + wind * 0.2) * dt;
         let rel = tf.translation - player_tf.translation;
@@ -194,13 +220,17 @@ fn update_snow(
 /// Hide/show particles based on how much of the pool the current intensity wants.
 fn update_particle_visibility(
     settings: Res<WorldSettings>,
+    budget: Res<RuntimeBudget>,
+    intel: Res<WorldIntelRuntime>,
     mut rain_q: Query<&mut Visibility, (With<RainDrop>, Without<SnowFlake>)>,
     mut snow_q: Query<&mut Visibility, (With<SnowFlake>, Without<RainDrop>)>,
 ) {
-    if !settings.is_changed() {
+    if !settings.is_changed() && !budget.is_changed() {
         return;
     }
-    let rain_active = (settings.weather.rain_intensity.clamp(0.0, 1.0) * RAIN_POOL as f32) as usize;
+    let fx = (budget.weather_fx_scale * intel.profile.weather_fx_mul).clamp(0.0, 1.0);
+    let rain_active =
+        (settings.weather.rain_intensity.clamp(0.0, 1.0) * fx * RAIN_POOL as f32) as usize;
     for (i, mut vis) in rain_q.iter_mut().enumerate() {
         *vis = if i < rain_active {
             Visibility::Visible
@@ -208,7 +238,8 @@ fn update_particle_visibility(
             Visibility::Hidden
         };
     }
-    let snow_active = (settings.weather.snow_intensity.clamp(0.0, 1.0) * SNOW_POOL as f32) as usize;
+    let snow_active =
+        (settings.weather.snow_intensity.clamp(0.0, 1.0) * fx * SNOW_POOL as f32) as usize;
     for (i, mut vis) in snow_q.iter_mut().enumerate() {
         *vis = if i < snow_active {
             Visibility::Visible

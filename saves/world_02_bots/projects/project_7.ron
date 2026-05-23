@@ -1,0 +1,17 @@
+(
+    id: 7,
+    kind: BuildGlassTower,
+    label: "Auto Glass Tower #7",
+    origin: (-4640, 50, -4705),
+    size: (17, 42, 17),
+    theme: MagentaGlass,
+    status: Complete,
+    cursor: 12138,
+    total_steps: 12138,
+    assigned_bot: None,
+    district_id: Some(3),
+    crew_id: None,
+    idea_id: Some(7),
+    blocked_reason: "",
+    priority: 5,
+)
