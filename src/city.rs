@@ -61,8 +61,9 @@ impl CityTool {
 /// Road surface material. Maps to a concrete [`BlockType`] at stamp
 /// time. More exotic surfaces (neon glass, animated texture) will
 /// arrive in later cuts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RoadStyle {
+    #[default]
     Asphalt,
     Cobble,
     Neon,
@@ -157,8 +158,9 @@ impl DistrictKind {
 /// Semantic shape for a placed road component. Straight is the cheap
 /// axis-aligned case; Corner keeps a two-leg turn as one editable object;
 /// Roundabout is reserved for circular junction components.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RoadShape {
+    #[default]
     Straight,
     Corner,
     Roundabout,
@@ -175,8 +177,8 @@ impl RoadShape {
 }
 
 /// Placed road component. Kept in-memory for gizmo drawing, direct edits,
-/// and road-snap queries; serialization lands in a later cut.
-#[derive(Debug, Clone, Copy)]
+/// road-snap queries, and a compact per-world city road save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoadSegment {
     pub a: IVec3,
     pub b: IVec3,
@@ -263,6 +265,197 @@ impl RoadSegment {
         }
         self
     }
+}
+
+const CITY_ROAD_SAVE_VERSION: u32 = 1;
+
+fn city_road_save_version() -> u32 {
+    CITY_ROAD_SAVE_VERSION
+}
+
+fn default_saved_road_width() -> u8 {
+    3
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CityRoadSave {
+    #[serde(default = "city_road_save_version")]
+    version: u32,
+    #[serde(default)]
+    roads: Vec<SavedRoadSegment>,
+}
+
+impl CityRoadSave {
+    fn from_roads(roads: &[RoadSegment]) -> Self {
+        Self {
+            version: CITY_ROAD_SAVE_VERSION,
+            roads: roads.iter().copied().map(SavedRoadSegment::from).collect(),
+        }
+    }
+
+    fn into_roads(self) -> Vec<RoadSegment> {
+        self.roads.into_iter().map(RoadSegment::from).collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct SavedRoadSegment {
+    a: [i32; 3],
+    b: [i32; 3],
+    #[serde(default)]
+    via: Option<[i32; 3]>,
+    #[serde(default)]
+    shape: RoadShape,
+    #[serde(default)]
+    roundabout_radius: u8,
+    #[serde(default = "default_saved_road_width")]
+    width: u8,
+    #[serde(default)]
+    style: RoadStyle,
+    #[serde(default)]
+    elevation_a: i16,
+    #[serde(default)]
+    elevation_via: i16,
+    #[serde(default)]
+    elevation_b: i16,
+}
+
+impl From<RoadSegment> for SavedRoadSegment {
+    fn from(road: RoadSegment) -> Self {
+        Self {
+            a: ivec3_to_array(road.a),
+            b: ivec3_to_array(road.b),
+            via: road.via.map(ivec3_to_array),
+            shape: road.shape,
+            roundabout_radius: road.roundabout_radius,
+            width: road.width,
+            style: road.style,
+            elevation_a: road.elevation_a,
+            elevation_via: road.elevation_via,
+            elevation_b: road.elevation_b,
+        }
+    }
+}
+
+impl From<SavedRoadSegment> for RoadSegment {
+    fn from(saved: SavedRoadSegment) -> Self {
+        let mut road = RoadSegment {
+            a: array_to_ivec3(saved.a),
+            b: array_to_ivec3(saved.b),
+            via: saved.via.map(array_to_ivec3),
+            shape: saved.shape,
+            roundabout_radius: saved.roundabout_radius,
+            width: saved.width.clamp(1, 17),
+            style: saved.style,
+            elevation_a: saved.elevation_a.clamp(-12, 48),
+            elevation_via: saved.elevation_via.clamp(-12, 48),
+            elevation_b: saved.elevation_b.clamp(-12, 48),
+        };
+
+        match road.shape {
+            RoadShape::Corner => {
+                if road.via.is_none() {
+                    road.via = Some(IVec3::new(road.b.x, road.a.y, road.a.z));
+                }
+                road.roundabout_radius = 0;
+            }
+            RoadShape::Roundabout => {
+                let fallback = ((road.width as i32) * 2).clamp(4, 48) as u8;
+                let radius = if road.roundabout_radius == 0 {
+                    fallback
+                } else {
+                    road.roundabout_radius
+                };
+                road.roundabout_radius = radius.clamp(4, 48);
+                road.b = IVec3::new(road.a.x + road.roundabout_radius as i32, road.a.y, road.a.z);
+                road.via = None;
+            }
+            RoadShape::Straight => {
+                road.via = None;
+                road.roundabout_radius = 0;
+            }
+        }
+        road
+    }
+}
+
+fn ivec3_to_array(p: IVec3) -> [i32; 3] {
+    [p.x, p.y, p.z]
+}
+
+fn array_to_ivec3(p: [i32; 3]) -> IVec3 {
+    IVec3::new(p[0], p[1], p[2])
+}
+
+pub fn save_city_roads_for_world(world_name: &str, roads: &[RoadSegment]) {
+    let save = CityRoadSave::from_roads(roads);
+    let Ok(text) = ron::ser::to_string_pretty(&save, ron::ser::PrettyConfig::default()) else {
+        warn!("city roads: failed serialising road components for '{world_name}'");
+        return;
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Err(e) =
+            crate::platform::browser_storage_set(&browser_city_roads_key(world_name), &text)
+        {
+            warn!("{e}");
+        }
+        return;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = city_roads_file(world_name);
+        if let Err(e) = crate::settings::atomic_write_text(&path, &text) {
+            warn!("city roads: failed writing {}: {e}", path.display());
+        }
+    }
+}
+
+pub fn load_city_roads_for_world(world_name: &str) -> Option<Vec<RoadSegment>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let text = crate::platform::browser_storage_get(&browser_city_roads_key(world_name))?;
+        return match ron::from_str::<CityRoadSave>(&text) {
+            Ok(save) => Some(save.into_roads()),
+            Err(e) => {
+                warn!("city roads: failed parsing browser road components: {e}");
+                None
+            }
+        };
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = city_roads_file(world_name);
+        let text = std::fs::read_to_string(&path).ok()?;
+        match ron::from_str::<CityRoadSave>(&text) {
+            Ok(save) => Some(save.into_roads()),
+            Err(e) => {
+                warn!("city roads: failed parsing {}: {e}", path.display());
+                None
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_city_roads_key(world_name: &str) -> String {
+    format!(
+        "voxel_native.city_roads.{}",
+        crate::settings::world_storage_stem(world_name)
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn city_roads_file(world_name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(crate::settings::SAVES_DIR)
+        .join(format!(
+            "{}_city",
+            crate::settings::world_storage_stem(world_name)
+        ))
+        .join("roads.ron")
 }
 
 /// Decorative district marker. Acts as a visual anchor + a handle for
@@ -505,7 +698,17 @@ impl Plugin for CityPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(CityState::default())
             .add_systems(Startup, setup_facade_library)
-            .add_systems(Update, (city_input, city_draw_gizmos, draw_hint_hud));
+            .add_systems(
+                Update,
+                (
+                    load_city_roads_for_pending_world,
+                    city_input,
+                    manual_save_city_roads,
+                    city_draw_gizmos,
+                    draw_hint_hud,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -537,6 +740,52 @@ fn setup_facade_library(mut city: ResMut<CityState>) {
     }
 }
 
+fn load_city_roads_for_pending_world(
+    pending: Res<crate::menu::PendingWorldLoad>,
+    active: Option<Res<crate::settings::ActiveWorld>>,
+    mut city: ResMut<CityState>,
+) {
+    if !pending.0 {
+        return;
+    }
+    let Some(active) = active else {
+        return;
+    };
+
+    let roads = load_city_roads_for_world(&active.meta.name).unwrap_or_default();
+    let count = roads.len();
+    city.roads = roads;
+    city.selected_road = None;
+    city.pending_road_a = None;
+    city.pending_building_a = None;
+    city.districts.clear();
+    city.buildings.clear();
+    city.status = if count > 0 {
+        format!("{count} Strassenkomponenten geladen.")
+    } else {
+        "Stadtwerkzeuge bereit.".into()
+    };
+}
+
+fn manual_save_city_roads(
+    keys: Res<ButtonInput<KeyCode>>,
+    active: Option<Res<crate::settings::ActiveWorld>>,
+    city: Res<CityState>,
+) {
+    if keys.just_pressed(KeyCode::F5) {
+        save_city_roads_for_active(active.as_deref(), &city.roads);
+    }
+}
+
+fn save_city_roads_for_active(
+    active: Option<&crate::settings::ActiveWorld>,
+    roads: &[RoadSegment],
+) {
+    if let Some(active) = active {
+        save_city_roads_for_world(&active.meta.name, roads);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------
@@ -548,6 +797,7 @@ fn city_input(
     mut wheel: EventReader<MouseWheel>,
     editor: Res<EditorState>,
     mode: Res<crate::mode::ModeContext>,
+    active: Option<Res<crate::settings::ActiveWorld>>,
     mut city: ResMut<CityState>,
     mut telemetry: ResMut<UnifiedTelemetry>,
     mut world: ResMut<VoxelWorld>,
@@ -745,6 +995,7 @@ fn city_input(
             if let Some(label) = label {
                 let n = restamp_road_component(&mut world, &before, &next);
                 city.roads[idx] = next;
+                save_city_roads_for_active(active.as_deref(), &city.roads);
                 city.status = format!("Strassenkomponente {}: {} ({} Bloecke)", idx + 1, label, n);
                 telemetry.city_actions = telemetry.city_actions.saturating_add(1);
                 telemetry.build_blocks_changed =
@@ -769,6 +1020,7 @@ fn city_input(
                     let seg = RoadSegment::new(a, snapped, city.road_width, city.road_style);
                     let n = stamp_road(&mut world, &seg);
                     city.roads.push(seg);
+                    save_city_roads_for_active(active.as_deref(), &city.roads);
                     city.pending_road_a = None;
                     city.status = format!(
                         "Strasse {} {} ({} Bloecke)",
@@ -853,6 +1105,7 @@ fn city_input(
                 if city.pending_road_a.take().is_some() {
                     city.status = "Startpunkt verworfen.".into();
                 } else if city.roads.pop().is_some() {
+                    save_city_roads_for_active(active.as_deref(), &city.roads);
                     city.status = "Letzte Strasse entfernt (nur Liste — Voxel bleiben).".into();
                 }
             }
@@ -2468,5 +2721,25 @@ mod tests {
         assert_eq!(larger.roundabout_radius, 14);
         assert_eq!(larger.width, 5);
         assert_eq!(larger.style, RoadStyle::Neon);
+    }
+
+    #[test]
+    fn road_component_save_roundtrip_preserves_editable_shapes() {
+        let corner = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 16),
+            7,
+            RoadStyle::Neon,
+        )
+        .with_endpoint_heights(2, 6)
+        .with_turn_height(11);
+        let roundabout = RoadSegment::roundabout(IVec3::new(64, 80, -12), 6, 5, RoadStyle::Cobble)
+            .with_endpoint_heights(4, 4);
+
+        let snapshot = CityRoadSave::from_roads(&[corner, roundabout]);
+        let text = ron::ser::to_string(&snapshot).unwrap();
+        let parsed: CityRoadSave = ron::from_str(&text).unwrap();
+
+        assert_eq!(parsed.into_roads(), vec![corner, roundabout]);
     }
 }
