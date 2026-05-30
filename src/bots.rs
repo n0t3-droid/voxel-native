@@ -479,6 +479,8 @@ pub struct BotRoadGuide {
     pub points: Vec<[i32; 3]>,
     #[serde(default)]
     pub width: u8,
+    #[serde(default)]
+    pub theme: BotTheme,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5382,7 +5384,17 @@ fn bot_road_guide_from_city_component(
         district_id: nearest_district(save, center).map(|district| district.id),
         points,
         width: road.width,
+        theme: road_style_bot_theme(road.style),
     })
+}
+
+fn road_style_bot_theme(style: crate::city::RoadStyle) -> BotTheme {
+    match style {
+        crate::city::RoadStyle::Neon => BotTheme::MagentaGlass,
+        crate::city::RoadStyle::Cobble => BotTheme::WhiteAlloy,
+        crate::city::RoadStyle::Dirt => BotTheme::GreenPark,
+        crate::city::RoadStyle::Asphalt => BotTheme::AmberStreet,
+    }
 }
 
 fn sampled_city_road_points(road: &crate::city::RoadSegment) -> Vec<[i32; 3]> {
@@ -5442,6 +5454,13 @@ fn road_guide_segments(guide: &BotRoadGuide) -> Vec<(Vec2, Vec2)> {
             (a.distance_squared(b) > 1.0).then_some((a, b))
         })
         .collect()
+}
+
+fn road_guide_length(guide: &BotRoadGuide) -> f32 {
+    road_guide_segments(guide)
+        .into_iter()
+        .map(|(a, b)| a.distance(b))
+        .sum()
 }
 
 fn road_network_points(save: &BotWorldSave, district: &BotDistrict) -> Vec<Vec2> {
@@ -7116,7 +7135,11 @@ fn nearest_district(save: &BotWorldSave, pos: Vec3) -> Option<&BotDistrict> {
 }
 
 fn district_theme(save: &BotWorldSave, district_id: u64) -> Option<BotTheme> {
-    let kind = save.districts.iter().find(|d| d.id == district_id)?.kind;
+    let district = save.districts.iter().find(|d| d.id == district_id)?;
+    if let Some(theme) = user_road_theme_for_district(save, district) {
+        return Some(theme);
+    }
+    let kind = district.kind;
     Some(match kind {
         BotDistrictKind::HubCore | BotDistrictKind::Service => BotTheme::CyanAlloy,
         BotDistrictKind::Residential => BotTheme::WhiteAlloy,
@@ -7124,6 +7147,18 @@ fn district_theme(save: &BotWorldSave, district_id: u64) -> Option<BotTheme> {
         BotDistrictKind::Park => BotTheme::GreenPark,
         BotDistrictKind::Training => BotTheme::AmberStreet,
     })
+}
+
+fn user_road_theme_for_district(save: &BotWorldSave, district: &BotDistrict) -> Option<BotTheme> {
+    save.user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+        .map(|guide| {
+            let weight = road_guide_length(guide) * guide.width.max(1) as f32;
+            (guide.theme, weight)
+        })
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(theme, _)| theme)
 }
 
 fn autonomous_project_size(kind: BotTaskKind) -> [i32; 3] {
@@ -11571,6 +11606,32 @@ mod tests {
             score > 0.85,
             "bot planner should treat player road components as real build frontage, got {score}"
         );
+    }
+
+    #[test]
+    fn user_drawn_road_texture_guides_nearby_architecture_theme() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Neon Residential Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district);
+        let road = crate::city::RoadSegment::new(
+            IVec3::new(-48, 90, 0),
+            IVec3::new(48, 90, 0),
+            7,
+            crate::city::RoadStyle::Neon,
+        );
+
+        sync_user_city_roads(&mut save, &[road]);
+
+        assert_eq!(district_theme(&save, 7), Some(BotTheme::MagentaGlass));
     }
 
     #[test]
