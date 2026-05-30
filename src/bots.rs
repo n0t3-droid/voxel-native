@@ -5152,9 +5152,10 @@ fn user_road_shape_project_for_district(
     save: &BotWorldSave,
     district: &BotDistrict,
 ) -> Option<BotTaskKind> {
-    let guide = strongest_semantic_user_road(save, district)?;
-    let kind = semantic_project_kind_for_guide(district, guide)?;
-    (!district_has_project_kind(save, district.id, kind)).then_some(kind)
+    semantic_user_roads_by_intent(save, district)
+        .into_iter()
+        .filter_map(|guide| semantic_project_kind_for_guide(district, guide))
+        .find(|kind| !district_has_project_kind(save, district.id, *kind))
 }
 
 fn semantic_project_kind_for_guide(
@@ -5609,19 +5610,22 @@ fn road_guide_length(guide: &BotRoadGuide) -> f32 {
         .sum()
 }
 
-fn strongest_semantic_user_road<'a>(
+fn semantic_user_roads_by_intent<'a>(
     save: &'a BotWorldSave,
     district: &BotDistrict,
-) -> Option<&'a BotRoadGuide> {
-    save.user_roads
+) -> Vec<&'a BotRoadGuide> {
+    let mut guides: Vec<&BotRoadGuide> = save
+        .user_roads
         .iter()
         .filter(|guide| road_guide_matches_district(guide, district))
         .filter(|guide| guide.shape != BotRoadGuideShape::Straight)
-        .max_by(|a, b| {
-            let sa = road_shape_intent_score(a);
-            let sb = road_shape_intent_score(b);
-            sa.total_cmp(&sb)
-        })
+        .collect();
+    guides.sort_by(|a, b| {
+        let sa = road_shape_intent_score(a);
+        let sb = road_shape_intent_score(b);
+        sb.total_cmp(&sa)
+    });
+    guides
 }
 
 fn road_shape_intent_score(guide: &BotRoadGuide) -> f32 {
@@ -12180,6 +12184,59 @@ mod tests {
             choose_district_project(&save, &district, 0, false),
             BotTaskKind::BuildResidentialBlock,
             "after a roundabout plaza exists, bots should diversify into district infill"
+        );
+    }
+
+    #[test]
+    fn semantic_road_guides_progress_from_roundabout_to_corner_landmark() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Layered Semantic Roads".into(),
+            center: [16.0, 90.0, 8.0],
+            radius: 140,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let roundabout = crate::city::RoadSegment::roundabout(
+            IVec3::new(0, 90, 0),
+            16,
+            7,
+            crate::city::RoadStyle::Cobble,
+        );
+        let corner = crate::city::RoadSegment::new(
+            IVec3::new(24, 90, -24),
+            IVec3::new(56, 90, 18),
+            7,
+            crate::city::RoadStyle::Neon,
+        );
+        sync_user_city_roads(&mut save, &[roundabout, corner]);
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildPlaza,
+            label: "Roundabout Plaza".into(),
+            origin: [-21, 90, -21],
+            size: autonomous_project_size(BotTaskKind::BuildPlaza),
+            theme: BotTheme::WhiteAlloy,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 8,
+            concept: BotProjectConcept::default(),
+        });
+
+        assert_eq!(
+            choose_district_project(&save, &district, 2, false),
+            BotTaskKind::BuildGlassTower,
+            "after the roundabout anchor is built, bots should continue to the remaining corner landmark before generic skyline infill"
         );
     }
 
