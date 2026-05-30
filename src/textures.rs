@@ -31,6 +31,10 @@ use crate::blocks::{BlockType, MaterialId, CUSTOM_MATERIAL_BASE};
 pub const TEX_DIR: &str = "textures";
 pub const MATERIAL_DIR: &str = "textures/materials";
 
+/// Built-in swatches are kept modest enough for low-end GPUs, but large
+/// enough that the repeated terrain texture survives mip/downsample blending.
+pub const BUILTIN_SWATCH_SIZE: u32 = 128;
+
 #[derive(Resource, Default)]
 pub struct MaterialLibrary {
     pub handles: std::collections::BTreeMap<MaterialId, Handle<StandardMaterial>>,
@@ -50,7 +54,7 @@ impl MaterialLibrary {
         self.names.clear();
         self.custom_ids.clear();
 
-        for swatch in bake_all_block_swatches(96) {
+        for swatch in bake_all_block_swatches(BUILTIN_SWATCH_SIZE) {
             let image = images.add(make_repeating_image(
                 swatch.width,
                 swatch.height,
@@ -361,6 +365,7 @@ fn bake_block_swatch(
     let color = block.color();
     let rgba = color.to_srgba();
     let base = [rgba.red, rgba.green, rgba.blue];
+    let alpha = (rgba.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
 
     let seed_base = block as u32;
     let perlin = Perlin::new(seed_base + 101);
@@ -368,6 +373,9 @@ fn bake_block_swatch(
     let warp = Perlin::new(seed_base + 303);
     let strata = Perlin::new(seed_base + 404);
     let cell = Perlin::new(seed_base + 505);
+    let macro_shape = Perlin::new(seed_base + 606);
+    let grain = Perlin::new(seed_base + 707);
+    let vein_noise = Perlin::new(seed_base + 808);
 
     let s = size as f64;
     let two_pi = std::f64::consts::TAU;
@@ -406,44 +414,151 @@ fn bake_block_swatch(
             let micro = detail.get([tx * 14.0, ty * 14.0, tz * 14.0, tw * 14.0]) * 0.35;
             let strat = strata.get([tx * 0.7, ty * 5.0, tz * 0.7, tw * 5.0]);
             let cell_n = (1.0 - cell.get([tx * 4.0, ty * 4.0, tz * 4.0, tw * 4.0]).abs()).powf(7.0);
+            let macro_n = macro_shape.get([tx * 0.55, ty * 0.55, tz * 0.55, tw * 0.55]);
+            let broad = macro_shape.get([tx * 1.15 + 9.0, ty * 1.15 - 2.0, tz * 1.15, tw * 1.15]);
+            let grain_n = grain.get([tx * 38.0, ty * 38.0, tz * 38.0, tw * 38.0]);
+            let brushed = grain.get([tx * 5.2 + fbm, ty * 1.4, tz * 5.2, tw * 1.4]);
+            let vein = (1.0
+                - vein_noise
+                    .get([tx * 2.7 + 1.7, ty * 2.7, tz * 2.7 - 3.1, tw * 2.7])
+                    .abs())
+            .powf(9.0);
+            let vein_wide = (1.0
+                - vein_noise
+                    .get([tx * 1.45 - 4.0, ty * 1.45 + 2.0, tz * 1.45, tw * 1.45])
+                    .abs())
+            .powf(4.0);
+            let macro_shadow = macro_n * 0.06 + broad * 0.04;
 
             let (bright, tint_r, tint_g, tint_b) = match style {
                 BlockStyle::Rock => {
-                    let b = 0.90 + fbm * 0.22 + micro * 0.18 - cell_n * 0.25
-                        + (strat.abs() - 0.5) * 0.14;
-                    let d = fbm as f32 * 0.05;
-                    (b, d, 0.0, -d)
+                    let aggregate = (grain_n.abs() - 0.35).max(0.0) * 0.32;
+                    let slab = (u * two_pi * 3.0 + v * two_pi * 2.0 + broad * 2.5).sin() * 0.12;
+                    let sediment =
+                        (u * two_pi * 1.35 - v * two_pi * 3.10 + macro_n * 3.4).sin() * 0.10;
+                    let weathered_face = if vein_wide > 0.42 {
+                        (vein_wide - 0.42) * 0.28
+                    } else {
+                        0.0
+                    };
+                    let mineral_wash = (macro_n * 0.045 + broad * 0.03) as f32;
+                    let b = 0.86 + macro_shadow * 1.25 + fbm * 0.28 + micro * 0.18
+                        - cell_n * 0.34
+                        - vein * 0.28
+                        + (strat.abs() - 0.5) * 0.18
+                        + aggregate
+                        + slab
+                        + sediment
+                        - weathered_face;
+                    let d = (fbm * 0.045 + broad * 0.025) as f32;
+                    (
+                        b,
+                        d + mineral_wash + (sediment as f32) * 0.035,
+                        (vein_wide as f32) * 0.030 - mineral_wash * 0.25,
+                        -d * 0.7 - mineral_wash * 0.45 - (weathered_face as f32) * 0.035,
+                    )
                 }
                 BlockStyle::Soil => {
-                    let b = 0.88 + fbm * 0.25 + micro * 0.22;
-                    (b, (micro as f32) * 0.07, -(micro as f32) * 0.03, 0.0)
+                    let pore = (grain_n.abs() - 0.20).max(0.0) * 0.10;
+                    let b = 0.82 + macro_shadow * 1.2 + fbm * 0.22 + micro * 0.19 - cell_n * 0.10
+                        + pore;
+                    (
+                        b,
+                        (micro as f32) * 0.07 + (broad as f32) * 0.025,
+                        -(micro as f32) * 0.035,
+                        -(cell_n as f32) * 0.015,
+                    )
                 }
                 BlockStyle::Grass => {
                     let blade = detail.get([tx * 18.0, ty * 3.0, tz * 18.0, tw * 3.0]);
-                    let b = 0.88 + fbm * 0.18 + blade * 0.22 + micro * 0.08;
-                    (b, 0.0, (blade as f32) * 0.08, 0.0)
+                    let moss_patch = macro_n.max(0.0) * 0.12;
+                    let soil_fleck = if grain_n < -0.55 { 0.14 } else { 0.0 };
+                    let meadow_wave =
+                        (u * two_pi * 1.75 + v * two_pi * 2.35 + broad * 2.2).sin() * 0.16;
+                    let meadow_cross =
+                        (u * two_pi * 3.65 - v * two_pi * 1.45 + macro_n * 2.8).sin() * 0.11;
+                    let lush_patch = macro_n.max(0.0) * 0.18;
+                    let dry_patch = if vein_wide > 0.50 {
+                        (vein_wide - 0.50) * 0.46
+                    } else {
+                        0.0
+                    };
+                    let b = 0.82
+                        + macro_shadow
+                        + fbm * 0.16
+                        + blade * 0.20
+                        + micro * 0.08
+                        + moss_patch
+                        + meadow_wave
+                        + meadow_cross
+                        + lush_patch * 0.45
+                        - soil_fleck * 0.80
+                        - dry_patch * 0.92;
+                    (
+                        b,
+                        (dry_patch as f32) * 0.13 - (soil_fleck as f32) * 0.04,
+                        (blade as f32) * 0.08
+                            + (moss_patch as f32) * 0.10
+                            + (meadow_wave as f32) * 0.10
+                            + (meadow_cross as f32) * 0.075
+                            + (lush_patch as f32) * 0.16
+                            - (dry_patch as f32) * 0.05,
+                        (lush_patch as f32) * 0.045
+                            - (soil_fleck as f32) * 0.03
+                            - (dry_patch as f32) * 0.06,
+                    )
                 }
                 BlockStyle::Sand => {
-                    let ripple = (v * two_pi * 6.0 + fbm * 2.0).sin() * 0.08;
-                    (0.94 + fbm * 0.10 + micro * 0.14 + ripple, 0.0, 0.0, 0.0)
+                    let ripple = (v * two_pi * 6.0 + broad * 2.4 + fbm * 2.0).sin() * 0.08;
+                    let mineral = (grain_n - 0.52).max(0.0) * 0.08;
+                    (
+                        0.91 + macro_shadow * 0.75 + fbm * 0.10 + micro * 0.14 + ripple + mineral,
+                        mineral as f32 * 0.05,
+                        0.0,
+                        -(mineral as f32) * 0.02,
+                    )
                 }
                 BlockStyle::Water => {
-                    let ripple_a = (u * two_pi * 4.0 + fbm * 3.0).sin() * 0.05;
-                    let ripple_b = (v * two_pi * 3.0 + fbm * 2.0).cos() * 0.05;
-                    (1.0 + ripple_a + ripple_b + micro * 0.05, 0.0, 0.0, 0.03)
+                    let ripple_a = (u * two_pi * 4.0 + broad * 2.0 + fbm * 3.0).sin() * 0.05;
+                    let ripple_b = (v * two_pi * 3.0 + macro_n * 2.0 + fbm * 2.0).cos() * 0.05;
+                    let caustic = vein_wide * 0.07;
+                    (
+                        1.0 + ripple_a + ripple_b + micro * 0.05 + caustic,
+                        0.0,
+                        caustic as f32 * 0.04,
+                        0.04,
+                    )
                 }
                 BlockStyle::Wood => {
                     let du = u - 0.5;
                     let dv = v - 0.5;
                     let r = (du * du + dv * dv).sqrt();
-                    let rings = (r * 32.0 + fbm * 2.0).sin();
+                    let rings = (r * 32.0 + fbm * 2.0 + broad * 1.2).sin();
                     let streak = detail.get([tx * 20.0, ty * 2.5, tz * 20.0, tw * 2.5]);
-                    let b = 0.88 + rings * 0.10 + streak * 0.18 + micro * 0.10;
-                    (b, (rings as f32) * 0.03, 0.0, 0.0)
+                    let long_grain = brushed * 0.12;
+                    let b = 0.86
+                        + macro_shadow * 0.8
+                        + rings * 0.11
+                        + streak * 0.17
+                        + long_grain
+                        + micro * 0.08;
+                    (
+                        b,
+                        (rings as f32) * 0.035 + (long_grain as f32) * 0.025,
+                        0.0,
+                        -(long_grain as f32) * 0.015,
+                    )
                 }
                 BlockStyle::Leaves => {
-                    let b = 0.80 + cell_n * 0.30 + fbm * 0.18 + micro * 0.12;
-                    (b, 0.0, (cell_n as f32) * 0.08, 0.0)
+                    let canopy = cell_n * 0.26 + macro_n.max(0.0) * 0.10;
+                    let twig = if grain_n < -0.62 { 0.10 } else { 0.0 };
+                    let b = 0.76 + macro_shadow + canopy + fbm * 0.17 + micro * 0.11 - twig * 0.75;
+                    (
+                        b,
+                        -(twig as f32) * 0.035,
+                        (canopy as f32) * 0.08,
+                        -(twig as f32) * 0.025,
+                    )
                 }
                 BlockStyle::Snow => {
                     let sparkle = detail.get([tx * 40.0, ty * 40.0, tz * 40.0, tw * 40.0]);
@@ -452,7 +567,12 @@ fn bake_block_swatch(
                     } else {
                         0.0
                     };
-                    (0.97 + fbm * 0.05 + micro * 0.03 + sp, 0.0, 0.0, 0.0)
+                    (
+                        0.96 + macro_shadow * 0.45 + fbm * 0.05 + micro * 0.03 + sp,
+                        0.0,
+                        0.0,
+                        0.0,
+                    )
                 }
                 BlockStyle::Ice => {
                     let facet = perlin.get([tx * 3.0, ty * 3.0, tz * 3.0, tw * 3.0]);
@@ -462,11 +582,23 @@ fn bake_block_swatch(
                     } else {
                         0.0
                     };
-                    (0.94 + facet * 0.10 + sp, 0.0, 0.0, 0.04)
+                    let crystalline = vein_wide * 0.08;
+                    (
+                        0.92 + macro_shadow * 0.6 + facet * 0.10 + crystalline + sp,
+                        0.0,
+                        crystalline as f32 * 0.025,
+                        0.045,
+                    )
                 }
                 BlockStyle::Lava => {
-                    let b = 0.70 + cell_n * 0.50 + fbm * 0.20;
-                    (b, (cell_n as f32) * 0.25, (cell_n as f32) * 0.08, 0.0)
+                    let heat = cell_n.max(vein_wide);
+                    let b = 0.62 + macro_n.abs() * 0.08 + heat * 0.54 + fbm * 0.18;
+                    (
+                        b,
+                        (heat as f32) * 0.28,
+                        (heat as f32) * 0.11 + (vein as f32) * 0.04,
+                        0.0,
+                    )
                 }
             };
 
@@ -478,7 +610,7 @@ fn bake_block_swatch(
             data.push((r * 255.0).round() as u8);
             data.push((g * 255.0).round() as u8);
             data.push((bl * 255.0).round() as u8);
-            data.push(255);
+            data.push(alpha);
         }
     }
 
@@ -521,4 +653,98 @@ fn load_png_as_repeating_image(path: &str) -> Option<Image> {
     let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
     let (w, h) = decoded.dimensions();
     Some(make_repeating_image(w, h, decoded.into_raw()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn luma(pixel: &[u8]) -> u8 {
+        ((pixel[0] as u16 * 54 + pixel[1] as u16 * 183 + pixel[2] as u16 * 19) / 256) as u8
+    }
+
+    fn luma_range(swatch: &BlockSwatch) -> u8 {
+        let mut min = u8::MAX;
+        let mut max = u8::MIN;
+        for pixel in swatch.rgba.chunks_exact(4) {
+            let y = luma(pixel);
+            min = min.min(y);
+            max = max.max(y);
+        }
+        max.saturating_sub(min)
+    }
+
+    fn unique_rgb_count(swatch: &BlockSwatch) -> usize {
+        let mut unique = std::collections::BTreeSet::new();
+        for pixel in swatch.rgba.chunks_exact(4) {
+            unique.insert([pixel[0], pixel[1], pixel[2]]);
+        }
+        unique.len()
+    }
+
+    fn downsample_signature_count(swatch: &BlockSwatch, step: usize) -> usize {
+        let mut unique = std::collections::BTreeSet::new();
+        let width = swatch.width as usize;
+        let height = swatch.height as usize;
+
+        for y in (0..height).step_by(step) {
+            for x in (0..width).step_by(step) {
+                let mut acc = [0u32; 3];
+                let mut count = 0u32;
+                for yy in y..(y + step).min(height) {
+                    for xx in x..(x + step).min(width) {
+                        let i = (yy * width + xx) * 4;
+                        acc[0] += swatch.rgba[i] as u32;
+                        acc[1] += swatch.rgba[i + 1] as u32;
+                        acc[2] += swatch.rgba[i + 2] as u32;
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    unique.insert([
+                        (acc[0] / count / 8) as u8,
+                        (acc[1] / count / 8) as u8,
+                        (acc[2] / count / 8) as u8,
+                    ]);
+                }
+            }
+        }
+
+        unique.len()
+    }
+
+    fn swatch_for(swatches: &[BlockSwatch], block: BlockType) -> &BlockSwatch {
+        swatches
+            .iter()
+            .find(|swatch| swatch.block == block)
+            .expect("block swatch exists")
+    }
+
+    #[test]
+    fn built_in_materials_keep_detail_after_far_distance_downsampling() {
+        assert!(BUILTIN_SWATCH_SIZE >= 128);
+
+        let swatches = bake_all_block_swatches(BUILTIN_SWATCH_SIZE);
+        let stone = swatch_for(&swatches, BlockType::Stone);
+        let grass = swatch_for(&swatches, BlockType::Grass);
+        let lava = swatch_for(&swatches, BlockType::Lava);
+        let stone_signatures = downsample_signature_count(stone, 8);
+        let grass_signatures = downsample_signature_count(grass, 8);
+        let lava_signatures = downsample_signature_count(lava, 8);
+
+        assert!(unique_rgb_count(stone) > 512);
+        assert!(luma_range(stone) > 54);
+        assert!(
+            stone_signatures > 20,
+            "stone only preserved {stone_signatures} far-distance material signatures"
+        );
+        assert!(
+            grass_signatures > 18,
+            "grass only preserved {grass_signatures} far-distance material signatures"
+        );
+        assert!(
+            lava_signatures > 14,
+            "lava only preserved {lava_signatures} far-distance material signatures"
+        );
+    }
 }

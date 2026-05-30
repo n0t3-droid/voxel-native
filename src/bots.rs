@@ -1328,6 +1328,8 @@ pub struct BotProjectConcept {
     pub street_face: Option<BuildingStreetFace>,
     #[serde(default)]
     pub block_role: Option<CityBlockRole>,
+    #[serde(default)]
+    pub semantic_anchor_shape: Option<BotRoadGuideShape>,
 }
 
 impl Default for BotProjectConcept {
@@ -1340,6 +1342,7 @@ impl Default for BotProjectConcept {
             rows: Vec::new(),
             street_face: None,
             block_role: None,
+            semantic_anchor_shape: None,
         }
     }
 }
@@ -6719,6 +6722,7 @@ fn build_project_concept(
     let block_role = project_uses_city_block_role(kind)
         .then(|| city_block_role_any_district(save, origin, size, kind))
         .flatten();
+    let semantic_anchor_shape = semantic_road_anchor_shape_for_project(save, kind, origin, size);
     let source = if manual {
         "player request"
     } else {
@@ -6863,16 +6867,25 @@ fn build_project_concept(
         rows,
         street_face,
         block_role,
+        semantic_anchor_shape,
     }
 }
 
-fn semantic_road_anchor_plan_row(
+fn semantic_road_anchor_shape_for_project(
     save: &BotWorldSave,
     kind: BotTaskKind,
     origin: [i32; 3],
     size: [i32; 3],
-    team: &str,
-) -> Option<BotPlanRow> {
+) -> Option<BotRoadGuideShape> {
+    semantic_road_anchor_match(save, kind, origin, size).map(|(_, guide, _)| guide.shape)
+}
+
+fn semantic_road_anchor_match<'a>(
+    save: &'a BotWorldSave,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<(f32, &'a BotRoadGuide, &'a BotDistrict)> {
     if is_road_project(kind) {
         return None;
     }
@@ -6901,7 +6914,17 @@ fn semantic_road_anchor_plan_row(
             }
         }
     }
-    let (_, guide, district) = best?;
+    best
+}
+
+fn semantic_road_anchor_plan_row(
+    save: &BotWorldSave,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    team: &str,
+) -> Option<BotPlanRow> {
+    let (_, guide, district) = semantic_road_anchor_match(save, kind, origin, size)?;
     let anchor = road_guide_anchor(guide);
     let (phase, detail) = match guide.shape {
         BotRoadGuideShape::Roundabout => (
@@ -8546,8 +8569,25 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 civic_edge && street_face.civic_gateway_surface_cell(local, sx, sz);
             let gateway_marker =
                 civic_edge && street_face.civic_gateway_marker_cell(local, sx, sz) && local.y <= 4;
+            let roundabout_anchor = matches!(
+                project.concept.semantic_anchor_shape,
+                Some(BotRoadGuideShape::Roundabout)
+            );
+            let half_x = sx as f32 * 0.5;
+            let half_z = sz as f32 * 0.5;
+            let dx = local.x as f32 - half_x;
+            let dz = local.z as f32 - half_z;
+            let radial_distance = (dx * dx + dz * dz).sqrt();
+            let outer_radius = sx.min(sz) as f32 * 0.5;
+            let ring_radius = (outer_radius * 0.60).max(8.0);
+            let roundabout_inside = radial_distance <= outer_radius - 1.5;
+            let roundabout_ring = (radial_distance - ring_radius).abs() <= 2.25;
             if local.y == 0 {
-                let voxel = if edge || cross || center {
+                let voxel = if roundabout_anchor && !roundabout_inside {
+                    Voxel::from(BlockType::Grass)
+                } else if roundabout_anchor && (roundabout_ring || center) {
+                    project.theme.accent()
+                } else if edge || cross || center {
                     if gateway_surface {
                         Voxel::from(BlockType::Limestone)
                     } else {
@@ -12390,6 +12430,48 @@ mod tests {
     }
 
     #[test]
+    fn roundabout_anchor_project_concept_records_structured_anchor_shape() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Roundabout Civic Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district);
+        let roundabout = crate::city::RoadSegment::roundabout(
+            IVec3::new(0, 90, 0),
+            16,
+            7,
+            crate::city::RoadStyle::Cobble,
+        );
+        sync_user_city_roads(&mut save, &[roundabout]);
+        let size = autonomous_project_size(BotTaskKind::BuildPlaza);
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::BuildPlaza,
+            BotTheme::WhiteAlloy,
+            [-21, 90, -21],
+            size,
+            "Roundabout Plaza",
+            false,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            concept.semantic_anchor_shape,
+            Some(BotRoadGuideShape::Roundabout),
+            "semantic roundabout intent should survive into the project concept for voxel stamping"
+        );
+    }
+
+    #[test]
     fn user_drawn_corner_guides_skyline_landmark_planning() {
         let district = BotDistrict {
             id: 7,
@@ -13015,6 +13097,52 @@ mod tests {
         assert_eq!(gateway_floor, Some(Voxel::from(BlockType::Limestone)));
         assert_ne!(side_edge, Some(Voxel::from(BlockType::Limestone)));
         assert_eq!(gateway_marker, Some(project.theme.signal()));
+    }
+
+    #[test]
+    fn roundabout_anchor_plaza_uses_circular_civic_ring() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(21, 21) + 1;
+        let project = BotProject {
+            id: 9,
+            kind: BotTaskKind::BuildPlaza,
+            label: "Roundabout Plaza".into(),
+            origin: [0, base_y, 0],
+            size: [42, 8, 42],
+            theme: BotTheme::WhiteAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                semantic_anchor_shape: Some(BotRoadGuideShape::Roundabout),
+                ..default()
+            },
+        };
+
+        let square_corner =
+            project_voxel(&project, IVec3::new(0, 0, 0), &world).map(|(_, voxel)| voxel);
+        let ring_paving =
+            project_voxel(&project, IVec3::new(33, 0, 21), &world).map(|(_, voxel)| voxel);
+        let fountain =
+            project_voxel(&project, IVec3::new(21, 1, 21), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(
+            square_corner,
+            Some(Voxel::from(BlockType::Grass)),
+            "roundabout plaza corners should soften into terrain instead of a square pad"
+        );
+        assert_eq!(
+            ring_paving,
+            Some(project.theme.accent()),
+            "roundabout plaza should expose a visible circular civic ring"
+        );
+        assert_eq!(fountain, Some(Voxel::from(BlockType::Water)));
     }
 
     #[test]
