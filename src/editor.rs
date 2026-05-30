@@ -2478,7 +2478,7 @@ fn draw_city_tab(ui: &mut egui::Ui, city: &mut crate::city::CityState) {
         ui.add(egui::Slider::new(&mut w, 1..=9).text("Breite"));
         city.road_width = w.clamp(1, 9) as u8;
         ui.label(
-            egui::RichText::new(format!("Plaziert: {} Segmente", city.roads.len()))
+            egui::RichText::new(format!("Plaziert: {} Komponenten", city.roads.len()))
                 .monospace()
                 .color(crate::theme::TEXT),
         );

@@ -3,8 +3,10 @@
 //! Slim Cut 1 of the plan-v3 city system:
 //!
 //! * **CA Road-Grid-Tool** — choose Road in the STADT tab or Toolbelt,
-//!   click once to set corner A, click again to commit a straight road
-//!   that follows the terrain surface. Width with `[` / `]` (1..=9).
+//!   click once to set start, click again to commit an editable road
+//!   component that follows terrain. Axis drags create straights,
+//!   diagonal drags create clean corner roads, and same-point clicks
+//!   create roundabouts. Width with `[` / `]` (1..=9).
 //! * **CC District-Theming** — choose Zone to paint district discs on
 //!   the ground; each disc is a tagged decoration, visualized as a
 //!   coloured ring gizmo. Auto-fill with prefabs comes in a later cut.
@@ -152,12 +154,35 @@ impl DistrictKind {
     }
 }
 
-/// Placed straight road segment. Kept in-memory for gizmo drawing and
-/// road-snap queries; serialization lands in a later cut.
+/// Semantic shape for a placed road component. Straight is the cheap
+/// axis-aligned case; Corner keeps a two-leg turn as one editable object;
+/// Roundabout is reserved for circular junction components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoadShape {
+    Straight,
+    Corner,
+    Roundabout,
+}
+
+impl RoadShape {
+    pub fn label(self) -> &'static str {
+        match self {
+            RoadShape::Straight => "Gerade",
+            RoadShape::Corner => "Kurve",
+            RoadShape::Roundabout => "Kreisel",
+        }
+    }
+}
+
+/// Placed road component. Kept in-memory for gizmo drawing, direct edits,
+/// and road-snap queries; serialization lands in a later cut.
 #[derive(Debug, Clone, Copy)]
 pub struct RoadSegment {
     pub a: IVec3,
     pub b: IVec3,
+    pub via: Option<IVec3>,
+    pub shape: RoadShape,
+    pub roundabout_radius: u8,
     pub width: u8,
     pub style: RoadStyle,
     pub elevation_a: i16,
@@ -166,9 +191,36 @@ pub struct RoadSegment {
 
 impl RoadSegment {
     pub fn new(a: IVec3, b: IVec3, width: u8, style: RoadStyle) -> Self {
+        if a.x == b.x && a.z == b.z {
+            let radius = ((width.clamp(1, 17) as i32) * 2).clamp(4, 48) as u8;
+            return Self::roundabout(a, radius, width, style);
+        }
+
         Self {
             a,
             b,
+            via: None,
+            shape: RoadShape::Straight,
+            roundabout_radius: 0,
+            width: 1,
+            style: RoadStyle::Asphalt,
+            elevation_a: 0,
+            elevation_b: 0,
+        }
+        .with_width(width)
+        .retextured(style)
+        .with_endpoint_heights(0, 0)
+        .with_smart_shape()
+    }
+
+    pub fn roundabout(center: IVec3, radius: u8, width: u8, style: RoadStyle) -> Self {
+        let radius = radius.clamp(4, 48);
+        Self {
+            a: center,
+            b: IVec3::new(center.x + radius as i32, center.y, center.z),
+            via: None,
+            shape: RoadShape::Roundabout,
+            roundabout_radius: radius,
             width: 1,
             style: RoadStyle::Asphalt,
             elevation_a: 0,
@@ -192,6 +244,15 @@ impl RoadSegment {
     pub fn with_endpoint_heights(mut self, a: i16, b: i16) -> Self {
         self.elevation_a = a.clamp(-12, 48);
         self.elevation_b = b.clamp(-12, 48);
+        self
+    }
+
+    fn with_smart_shape(mut self) -> Self {
+        if self.a.x != self.b.x && self.a.z != self.b.z {
+            self.shape = RoadShape::Corner;
+            self.via = Some(IVec3::new(self.b.x, self.a.y, self.a.z));
+            self.roundabout_radius = 0;
+        }
         self
     }
 }
@@ -650,10 +711,13 @@ fn city_input(
             let mut label = None;
 
             if ctrl && !shift && !alt {
-                let width = (before.width as i32 + steps * 2).clamp(1, 17) as u8;
-                next = before.with_width(width);
+                next = road_with_size_delta(before, steps * 2);
                 city.road_width = next.width;
-                label = Some(format!("Breite {}", next.width));
+                label = Some(if next.shape == RoadShape::Roundabout {
+                    format!("Radius {}", next.roundabout_radius)
+                } else {
+                    format!("Breite {}", next.width)
+                });
             } else if shift && !ctrl && !alt {
                 next = road_with_endpoint_height_delta(before, snapped, (steps * 2) as i16);
                 label = Some(format!(
@@ -694,7 +758,12 @@ fn city_input(
                     let n = stamp_road(&mut world, &seg);
                     city.roads.push(seg);
                     city.pending_road_a = None;
-                    city.status = format!("Strasse {} ({} Bloecke)", city.road_style.label(), n);
+                    city.status = format!(
+                        "Strasse {} {} ({} Bloecke)",
+                        seg.shape.label(),
+                        city.road_style.label(),
+                        n
+                    );
                     telemetry.city_actions = telemetry.city_actions.saturating_add(1);
                     telemetry.build_blocks_changed =
                         telemetry.build_blocks_changed.saturating_add(n as u64);
@@ -818,30 +887,18 @@ fn snap_cell(p: IVec3, mode: SnapMode, roads: &[RoadSegment]) -> IVec3 {
         SnapMode::Road => {
             // Find the nearest point on any existing road within 8
             // blocks. Falls back to p if nothing is close.
-            let px = p.x as f32 + 0.5;
-            let pz = p.z as f32 + 0.5;
-            let mut best: Option<(f32, (f32, f32))> = None;
+            let point = Vec2::new(p.x as f32 + 0.5, p.z as f32 + 0.5);
+            let mut best: Option<(f32, Vec2)> = None;
             for r in roads {
-                let ax = r.a.x as f32 + 0.5;
-                let az = r.a.z as f32 + 0.5;
-                let bx = r.b.x as f32 + 0.5;
-                let bz = r.b.z as f32 + 0.5;
-                let dx = bx - ax;
-                let dz = bz - az;
-                let len2 = dx * dx + dz * dz;
-                if len2 < 1e-3 {
+                let Some((q, d2)) = road_nearest_point_xz(*r, point) else {
                     continue;
-                }
-                let t = (((px - ax) * dx + (pz - az) * dz) / len2).clamp(0.0, 1.0);
-                let qx = ax + t * dx;
-                let qz = az + t * dz;
-                let d2 = (qx - px).powi(2) + (qz - pz).powi(2);
+                };
                 if d2 < 64.0 && best.map_or(true, |(bd, _)| d2 < bd) {
-                    best = Some((d2, (qx, qz)));
+                    best = Some((d2, q));
                 }
             }
             match best {
-                Some((_, (qx, qz))) => IVec3::new(qx.floor() as i32, p.y, qz.floor() as i32),
+                Some((_, q)) => IVec3::new(q.x.floor() as i32, p.y, q.y.floor() as i32),
                 None => p,
             }
         }
@@ -864,15 +921,59 @@ fn nearest_road_component(roads: &[RoadSegment], p: IVec3, max_distance: f32) ->
 }
 
 fn road_distance_xz(road: RoadSegment, point: Vec2) -> f32 {
-    let a = Vec2::new(road.a.x as f32 + 0.5, road.a.z as f32 + 0.5);
-    let b = Vec2::new(road.b.x as f32 + 0.5, road.b.z as f32 + 0.5);
+    road_nearest_point_xz(road, point)
+        .map(|(_, d2)| d2.sqrt())
+        .unwrap_or(f32::MAX)
+}
+
+fn road_nearest_point_xz(road: RoadSegment, point: Vec2) -> Option<(Vec2, f32)> {
+    match road.shape {
+        RoadShape::Straight => {
+            let a = road_point_xz(road.a);
+            let b = road_point_xz(road.b);
+            Some(point_segment_nearest_xz(a, b, point))
+        }
+        RoadShape::Corner => {
+            let a = road_point_xz(road.a);
+            let via = road_point_xz(road_corner_via(road));
+            let b = road_point_xz(road.b);
+            let av = point_segment_nearest_xz(a, via, point);
+            let vb = point_segment_nearest_xz(via, b, point);
+            Some(if av.1 <= vb.1 { av } else { vb })
+        }
+        RoadShape::Roundabout => {
+            let center = road_point_xz(road.a);
+            let radius = road.roundabout_radius.max(4) as f32;
+            let from_center = point - center;
+            let distance = from_center.length();
+            let nearest = if distance <= f32::EPSILON {
+                center + Vec2::X * radius
+            } else {
+                center + from_center / distance * radius
+            };
+            Some((nearest, nearest.distance_squared(point)))
+        }
+    }
+}
+
+fn road_point_xz(cell: IVec3) -> Vec2 {
+    Vec2::new(cell.x as f32 + 0.5, cell.z as f32 + 0.5)
+}
+
+fn point_segment_nearest_xz(a: Vec2, b: Vec2, point: Vec2) -> (Vec2, f32) {
     let ab = b - a;
     let len2 = ab.length_squared();
     if len2 <= f32::EPSILON {
-        return point.distance(a);
+        return (a, point.distance_squared(a));
     }
     let t = ((point - a).dot(ab) / len2).clamp(0.0, 1.0);
-    point.distance(a + ab * t)
+    let nearest = a + ab * t;
+    (nearest, point.distance_squared(nearest))
+}
+
+fn road_corner_via(road: RoadSegment) -> IVec3 {
+    road.via
+        .unwrap_or_else(|| IVec3::new(road.b.x, road.a.y, road.a.z))
 }
 
 fn road_with_endpoint_height_delta(road: RoadSegment, cursor: IVec3, delta: i16) -> RoadSegment {
@@ -884,6 +985,17 @@ fn road_with_endpoint_height_delta(road: RoadSegment, cursor: IVec3, delta: i16)
         road.with_endpoint_heights(road.elevation_a, shifted(road.elevation_b))
     } else {
         road.with_endpoint_heights(shifted(road.elevation_a), road.elevation_b)
+    }
+}
+
+fn road_with_size_delta(road: RoadSegment, delta: i32) -> RoadSegment {
+    if road.shape == RoadShape::Roundabout {
+        let mut next = road;
+        next.roundabout_radius = (road.roundabout_radius as i32 + delta).clamp(4, 48) as u8;
+        next.b = IVec3::new(next.a.x + next.roundabout_radius as i32, next.a.y, next.a.z);
+        next
+    } else {
+        road.with_width((road.width as i32 + delta).clamp(1, 17) as u8)
     }
 }
 
@@ -932,17 +1044,78 @@ fn line_xz(a: IVec2, b: IVec2) -> Vec<IVec2> {
     out
 }
 
-/// Stamp a straight road along `seg` onto the terrain surface. Returns
-/// the number of voxels actually changed (so the UI can show a count).
+fn road_path_xz(seg: &RoadSegment) -> Vec<IVec2> {
+    match seg.shape {
+        RoadShape::Straight => line_xz(IVec2::new(seg.a.x, seg.a.z), IVec2::new(seg.b.x, seg.b.z)),
+        RoadShape::Corner => {
+            let via = road_corner_via(*seg);
+            let mut cells = line_xz(IVec2::new(seg.a.x, seg.a.z), IVec2::new(via.x, via.z));
+            append_path_unique(
+                &mut cells,
+                line_xz(IVec2::new(via.x, via.z), IVec2::new(seg.b.x, seg.b.z)),
+            );
+            cells
+        }
+        RoadShape::Roundabout => roundabout_path_xz(seg.a, seg.roundabout_radius),
+    }
+}
+
+fn append_path_unique(into: &mut Vec<IVec2>, mut path: Vec<IVec2>) {
+    if path.is_empty() {
+        return;
+    }
+    if into.last().copied() == path.first().copied() {
+        path.remove(0);
+    }
+    into.extend(path);
+}
+
+fn roundabout_path_xz(center: IVec3, radius: u8) -> Vec<IVec2> {
+    let radius = radius.clamp(4, 48) as f32;
+    let samples = ((radius as usize) * 12).clamp(48, 768);
+    let mut cells = Vec::with_capacity(samples);
+    for i in 0..samples {
+        let t = i as f32 / samples as f32 * std::f32::consts::TAU;
+        let cell = IVec2::new(
+            center.x + (t.cos() * radius).round() as i32,
+            center.z + (t.sin() * radius).round() as i32,
+        );
+        if cells.last().copied() != Some(cell) && !cells.contains(&cell) {
+            cells.push(cell);
+        }
+    }
+    if let Some(first) = cells.first().copied() {
+        cells.push(first);
+    }
+    cells
+}
+
+fn road_width_axis_at(cells: &[IVec2], index: usize) -> (i32, i32) {
+    let prev = if index > 0 {
+        cells[index - 1]
+    } else {
+        cells[index]
+    };
+    let next = cells
+        .get(index + 1)
+        .copied()
+        .unwrap_or_else(|| cells[index]);
+    let dx = next.x - prev.x;
+    let dz = next.y - prev.y;
+    if dx.abs() >= dz.abs() {
+        (0, 1)
+    } else {
+        (1, 0)
+    }
+}
+
+/// Stamp a road component onto the terrain surface. Returns the number
+/// of voxels actually changed, so the UI can show a count.
 fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
-    let cells = line_xz(IVec2::new(seg.a.x, seg.a.z), IVec2::new(seg.b.x, seg.b.z));
+    let cells = road_path_xz(seg);
     if cells.is_empty() {
         return 0;
     }
-    // Width axis: perpendicular in XZ to the primary direction.
-    let dx = seg.b.x - seg.a.x;
-    let dz = seg.b.z - seg.a.z;
-    let (perp_x, perp_z) = if dx.abs() >= dz.abs() { (0, 1) } else { (1, 0) };
     let half = (seg.width as i32) / 2;
 
     let surface: Voxel = seg.style.surface_block().into();
@@ -953,6 +1126,7 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
     let mut changed = 0usize;
     for (i, c) in cells.iter().enumerate() {
         let elevation = road_elevation_at_sample(seg, i, last_index);
+        let (perp_x, perp_z) = road_width_axis_at(&cells, i);
         for w in -half..=half {
             let wx = c.x + perp_x * w;
             let wz = c.y + perp_z * w;
@@ -1293,33 +1467,7 @@ fn city_draw_gizmos(
         } else {
             r.style.gizmo_color()
         };
-        let a = r.a.as_vec3() + Vec3::new(0.5, 1.2 + r.elevation_a.max(0) as f32, 0.5);
-        let b = r.b.as_vec3() + Vec3::new(0.5, 1.2 + r.elevation_b.max(0) as f32, 0.5);
-        gizmos.line(a, b, col);
-        // Width flanks (two parallel lines). Draw them 1 block higher
-        // so they sit clearly above the road surface.
-        let dx = (b.x - a.x).abs();
-        let dz = (b.z - a.z).abs();
-        let (px, pz) = if dx >= dz {
-            (0.0, (r.width as f32) * 0.5)
-        } else {
-            ((r.width as f32) * 0.5, 0.0)
-        };
-        let faint = col.with_alpha(0.55);
-        gizmos.line(
-            a + Vec3::new(px, 0.0, pz),
-            b + Vec3::new(px, 0.0, pz),
-            faint,
-        );
-        gizmos.line(
-            a - Vec3::new(px, 0.0, pz),
-            b - Vec3::new(px, 0.0, pz),
-            faint,
-        );
-        if selected {
-            gizmos.sphere(a, Quat::IDENTITY, 0.65, col);
-            gizmos.sphere(b, Quat::IDENTITY, 0.65, col);
-        }
+        draw_road_component_gizmo(&mut gizmos, &world, r, col, selected);
     }
 
     // --- Districts ----------------------------------------------------
@@ -1368,11 +1516,13 @@ fn city_draw_gizmos(
                 city.road_style.gizmo_color(),
             );
             if let Some(a) = city.pending_road_a {
-                let a_world = a.as_vec3() + Vec3::new(0.5, 1.5, 0.5);
-                gizmos.line(a_world, c_world, city.road_style.gizmo_color());
-                gizmos.cuboid(
-                    Transform::from_translation(a_world).with_scale(Vec3::splat(1.1)),
+                let preview = RoadSegment::new(a, cursor, city.road_width, city.road_style);
+                draw_road_component_gizmo(
+                    &mut gizmos,
+                    &world,
+                    &preview,
                     city.road_style.gizmo_color(),
+                    true,
                 );
             }
         }
@@ -1490,9 +1640,75 @@ fn city_draw_gizmos(
     }
 }
 
-/// Draw a rectangular building footprint outline at ground height + a
+/// Draw road component paths, selected handles, and a corner
 /// vertical beacon for easy spotting. Used for previews (pending A →
-/// cursor) and for committed buildings.
+/// cursor) so previews match what will become voxels.
+fn draw_road_component_gizmo(
+    gizmos: &mut Gizmos,
+    world: &VoxelWorld,
+    road: &RoadSegment,
+    color: Color,
+    selected: bool,
+) {
+    let cells = road_path_xz(road);
+    if cells.is_empty() {
+        return;
+    }
+
+    let last_index = cells.len().saturating_sub(1);
+    let point_at = |i: usize, cell: IVec2| -> Vec3 {
+        let elevation = road_elevation_at_sample(road, i, last_index);
+        let deck_y = (world.surface_height_at(cell.x, cell.y) + elevation).max(1);
+        Vec3::new(
+            cell.x as f32 + 0.5,
+            deck_y as f32 + 1.2,
+            cell.y as f32 + 0.5,
+        )
+    };
+
+    for (i, pair) in cells.windows(2).enumerate() {
+        let a = point_at(i, pair[0]);
+        let b = point_at(i + 1, pair[1]);
+        gizmos.line(a, b, color);
+
+        let (px, pz) = road_width_axis_at(&cells, i);
+        let flank = Vec3::new(
+            px as f32 * road.width as f32 * 0.5,
+            0.0,
+            pz as f32 * road.width as f32 * 0.5,
+        );
+        let faint = color.with_alpha(0.45);
+        gizmos.line(a + flank, b + flank, faint);
+        gizmos.line(a - flank, b - flank, faint);
+    }
+
+    if selected {
+        let start = point_at(0, cells[0]);
+        gizmos.sphere(start, Quat::IDENTITY, 0.65, color);
+        if let Some(last) = cells.last().copied() {
+            let end = point_at(last_index, last);
+            gizmos.sphere(end, Quat::IDENTITY, 0.65, color);
+        }
+        if road.shape == RoadShape::Corner {
+            let via = road_corner_via(*road);
+            let via_y = (world.surface_height_at(via.x, via.z)
+                + road_elevation_at_sample(road, cells.len() / 2, last_index))
+            .max(1);
+            gizmos.cuboid(
+                Transform::from_translation(Vec3::new(
+                    via.x as f32 + 0.5,
+                    via_y as f32 + 1.2,
+                    via.z as f32 + 0.5,
+                ))
+                .with_scale(Vec3::splat(1.15)),
+                color,
+            );
+        }
+    }
+}
+
+/// Draw a rectangular building footprint outline at ground height plus
+/// a vertical beacon for committed buildings and previews.
 fn draw_footprint(gizmos: &mut Gizmos, min: IVec3, max: IVec3, color: Color, floors: i32) {
     let y = min.y as f32 + 0.6;
     let ax = min.x as f32;
@@ -1586,7 +1802,7 @@ fn draw_hint_hud(
                         format!("Komponente {}", idx + 1),
                         "direkt editierbar".into(),
                     ));
-                    lines.push(("Ctrl+Wheel".into(), "Breite".into()));
+                    lines.push(("Ctrl+Wheel".into(), "Breite / Kreisradius".into()));
                     lines.push((
                         "Shift+Wheel".into(),
                         "Brueckenhoehe am naechsten Ende".into(),
@@ -1883,5 +2099,60 @@ mod tests {
         let lowered_a = road_with_endpoint_height_delta(raised_b, IVec3::new(1, 72, 1), -4);
         assert_eq!(lowered_a.elevation_a, -4);
         assert_eq!(lowered_a.elevation_b, 6);
+    }
+
+    #[test]
+    fn diagonal_road_drag_behaves_like_single_editable_corner_component() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 16),
+            5,
+            RoadStyle::Asphalt,
+        );
+        let roads = vec![road];
+
+        assert_eq!(
+            nearest_road_component(&roads, IVec3::new(24, 72, 8), 3.0),
+            Some(0),
+            "the vertical leg of the corner should still select the same component"
+        );
+        assert_eq!(
+            nearest_road_component(&roads, IVec3::new(12, 72, 8), 1.0),
+            None,
+            "the old diagonal chord should not be treated as road surface"
+        );
+        assert_eq!(
+            snap_cell(IVec3::new(23, 72, 8), SnapMode::Road, &roads),
+            IVec3::new(24, 72, 8),
+            "road snap should land on the corner leg, not the diagonal chord"
+        );
+    }
+
+    #[test]
+    fn same_point_road_drag_creates_editable_roundabout_component() {
+        let road = RoadSegment::new(
+            IVec3::new(16, 72, 16),
+            IVec3::new(16, 72, 16),
+            5,
+            RoadStyle::Neon,
+        );
+
+        assert_eq!(road.shape, RoadShape::Roundabout);
+        assert_eq!(road.roundabout_radius, 10);
+        assert_eq!(road.width, 5);
+        assert_eq!(road.style, RoadStyle::Neon);
+        let path = road_path_xz(&road);
+        assert!(path.len() > 40);
+        assert_eq!(path.first(), path.last());
+        assert_eq!(
+            nearest_road_component(&[road], IVec3::new(26, 72, 16), 2.0),
+            Some(0)
+        );
+
+        let larger = road_with_size_delta(road, 4);
+        assert_eq!(larger.shape, RoadShape::Roundabout);
+        assert_eq!(larger.roundabout_radius, 14);
+        assert_eq!(larger.width, 5);
+        assert_eq!(larger.style, RoadStyle::Neon);
     }
 }
