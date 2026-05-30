@@ -5151,7 +5151,7 @@ fn user_road_shape_project_for_district(
     district: &BotDistrict,
 ) -> Option<BotTaskKind> {
     let guide = strongest_semantic_user_road(save, district)?;
-    match guide.shape {
+    let kind = match guide.shape {
         BotRoadGuideShape::Roundabout => Some(BotTaskKind::BuildPlaza),
         BotRoadGuideShape::Corner => Some(match district.kind {
             BotDistrictKind::Skyline | BotDistrictKind::Scenic => BotTaskKind::BuildGlassTower,
@@ -5161,7 +5161,16 @@ fn user_road_shape_project_for_district(
             BotDistrictKind::Training => BotTaskKind::TargetRange,
         }),
         BotRoadGuideShape::Straight => None,
-    }
+    }?;
+    (!district_has_project_kind(save, district.id, kind)).then_some(kind)
+}
+
+fn district_has_project_kind(save: &BotWorldSave, district_id: u64, kind: BotTaskKind) -> bool {
+    save.projects.iter().any(|project| {
+        project.district_id == Some(district_id)
+            && project.kind == kind
+            && !matches!(project.status, BotProjectStatus::Blocked)
+    })
 }
 
 fn is_road_project(kind: BotTaskKind) -> bool {
@@ -11725,6 +11734,53 @@ mod tests {
             choose_district_project(&save, &district, 0, false),
             BotTaskKind::BuildPlaza,
             "roundabouts should become civic anchors instead of another generic block"
+        );
+    }
+
+    #[test]
+    fn semantic_road_guides_yield_after_their_anchor_project_exists() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Roundabout Civic Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let roundabout = crate::city::RoadSegment::roundabout(
+            IVec3::new(0, 90, 0),
+            16,
+            7,
+            crate::city::RoadStyle::Cobble,
+        );
+        sync_user_city_roads(&mut save, &[roundabout]);
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildPlaza,
+            label: "Roundabout Plaza".into(),
+            origin: [-21, 90, -21],
+            size: autonomous_project_size(BotTaskKind::BuildPlaza),
+            theme: BotTheme::WhiteAlloy,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 8,
+            concept: BotProjectConcept::default(),
+        });
+
+        assert_eq!(
+            choose_district_project(&save, &district, 0, false),
+            BotTaskKind::BuildResidentialBlock,
+            "after a roundabout plaza exists, bots should diversify into district infill"
         );
     }
 
