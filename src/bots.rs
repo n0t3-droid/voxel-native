@@ -481,6 +481,16 @@ pub struct BotRoadGuide {
     pub width: u8,
     #[serde(default)]
     pub theme: BotTheme,
+    #[serde(default)]
+    pub shape: BotRoadGuideShape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BotRoadGuideShape {
+    #[default]
+    Straight,
+    Corner,
+    Roundabout,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5076,6 +5086,9 @@ fn choose_district_project(
     if !district_has_road_access(save, district) {
         return BotTaskKind::ExpandRoadGrid;
     }
+    if let Some(kind) = user_road_shape_project_for_district(save, district) {
+        return kind;
+    }
     if urgent {
         return match district.kind {
             BotDistrictKind::HubCore => BotTaskKind::BuildPlaza,
@@ -5130,6 +5143,24 @@ fn choose_district_project(
             BotTaskKind::BuildGlassTower,
             BotTaskKind::BuildPark,
         ][seq % 3],
+    }
+}
+
+fn user_road_shape_project_for_district(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+) -> Option<BotTaskKind> {
+    let guide = strongest_semantic_user_road(save, district)?;
+    match guide.shape {
+        BotRoadGuideShape::Roundabout => Some(BotTaskKind::BuildPlaza),
+        BotRoadGuideShape::Corner => Some(match district.kind {
+            BotDistrictKind::Skyline | BotDistrictKind::Scenic => BotTaskKind::BuildGlassTower,
+            BotDistrictKind::HubCore | BotDistrictKind::Park => BotTaskKind::BuildPlaza,
+            BotDistrictKind::Residential => BotTaskKind::BuildResidentialBlock,
+            BotDistrictKind::Service => BotTaskKind::BuildServicePad,
+            BotDistrictKind::Training => BotTaskKind::TargetRange,
+        }),
+        BotRoadGuideShape::Straight => None,
     }
 }
 
@@ -5385,6 +5416,7 @@ fn bot_road_guide_from_city_component(
         points,
         width: road.width,
         theme: road_style_bot_theme(road.style),
+        shape: road_shape_bot_guide(road.shape),
     })
 }
 
@@ -5394,6 +5426,14 @@ fn road_style_bot_theme(style: crate::city::RoadStyle) -> BotTheme {
         crate::city::RoadStyle::Cobble => BotTheme::WhiteAlloy,
         crate::city::RoadStyle::Dirt => BotTheme::GreenPark,
         crate::city::RoadStyle::Asphalt => BotTheme::AmberStreet,
+    }
+}
+
+fn road_shape_bot_guide(shape: crate::city::RoadShape) -> BotRoadGuideShape {
+    match shape {
+        crate::city::RoadShape::Straight => BotRoadGuideShape::Straight,
+        crate::city::RoadShape::Corner => BotRoadGuideShape::Corner,
+        crate::city::RoadShape::Roundabout => BotRoadGuideShape::Roundabout,
     }
 }
 
@@ -5461,6 +5501,30 @@ fn road_guide_length(guide: &BotRoadGuide) -> f32 {
         .into_iter()
         .map(|(a, b)| a.distance(b))
         .sum()
+}
+
+fn strongest_semantic_user_road<'a>(
+    save: &'a BotWorldSave,
+    district: &BotDistrict,
+) -> Option<&'a BotRoadGuide> {
+    save.user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+        .filter(|guide| guide.shape != BotRoadGuideShape::Straight)
+        .max_by(|a, b| {
+            let sa = road_shape_intent_score(a);
+            let sb = road_shape_intent_score(b);
+            sa.total_cmp(&sb)
+        })
+}
+
+fn road_shape_intent_score(guide: &BotRoadGuide) -> f32 {
+    let shape_weight = match guide.shape {
+        BotRoadGuideShape::Roundabout => 3.0,
+        BotRoadGuideShape::Corner => 2.0,
+        BotRoadGuideShape::Straight => 0.0,
+    };
+    shape_weight * 10_000.0 + road_guide_length(guide) * guide.width.max(1) as f32
 }
 
 fn road_network_points(save: &BotWorldSave, district: &BotDistrict) -> Vec<Vec2> {
@@ -11632,6 +11696,66 @@ mod tests {
         sync_user_city_roads(&mut save, &[road]);
 
         assert_eq!(district_theme(&save, 7), Some(BotTheme::MagentaGlass));
+    }
+
+    #[test]
+    fn user_drawn_roundabout_guides_civic_plaza_planning() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Roundabout Civic Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let roundabout = crate::city::RoadSegment::roundabout(
+            IVec3::new(0, 90, 0),
+            16,
+            7,
+            crate::city::RoadStyle::Cobble,
+        );
+
+        sync_user_city_roads(&mut save, &[roundabout]);
+
+        assert_eq!(
+            choose_district_project(&save, &district, 0, false),
+            BotTaskKind::BuildPlaza,
+            "roundabouts should become civic anchors instead of another generic block"
+        );
+    }
+
+    #[test]
+    fn user_drawn_corner_guides_skyline_landmark_planning() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Corner Skyline".into(),
+            center: [16.0, 90.0, 8.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let corner = crate::city::RoadSegment::new(
+            IVec3::new(0, 90, 0),
+            IVec3::new(32, 90, 24),
+            7,
+            crate::city::RoadStyle::Neon,
+        );
+
+        sync_user_city_roads(&mut save, &[corner]);
+
+        assert_eq!(
+            choose_district_project(&save, &district, 1, false),
+            BotTaskKind::BuildGlassTower,
+            "street corners should unlock skyline landmarks instead of asking for another grid"
+        );
     }
 
     #[test]
