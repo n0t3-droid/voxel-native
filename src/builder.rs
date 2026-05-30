@@ -42,6 +42,7 @@ pub struct BuilderState {
     pub prefab_name: String,
     /// Actions queued by the UI this frame.
     pub pending: Vec<BuildAction>,
+    live_flow: LiveBrushFlow,
     /// Last status line rendered beneath the builder UI.
     pub status: String,
 }
@@ -56,9 +57,72 @@ impl Default for BuilderState {
             paste_origin: IVec3::ZERO,
             prefab_name: "haus01".into(),
             pending: Vec::new(),
+            live_flow: LiveBrushFlow::default(),
             status: "Bereit.".into(),
         }
     }
+}
+
+const LIVE_BRUSH_MIN_INTERVAL_SECONDS: f32 = 0.035;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveBrushAction {
+    Place,
+    Cut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LiveBrushStamp {
+    action: LiveBrushAction,
+    origin: IVec3,
+    brush: IVec3,
+    voxel: Voxel,
+}
+
+impl LiveBrushStamp {
+    fn new(action: LiveBrushAction, origin: IVec3, brush: IVec3, voxel: Voxel) -> Self {
+        Self {
+            action,
+            origin,
+            brush,
+            voxel,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct LiveBrushFlow {
+    last: Option<LiveBrushStamp>,
+    cooldown_s: f32,
+}
+
+fn live_brush_should_stamp(
+    flow: &mut LiveBrushFlow,
+    candidate: Option<LiveBrushStamp>,
+    dt: f32,
+    just_pressed: bool,
+) -> bool {
+    flow.cooldown_s = (flow.cooldown_s - dt.max(0.0)).max(0.0);
+    let Some(candidate) = candidate else {
+        flow.last = None;
+        flow.cooldown_s = 0.0;
+        return false;
+    };
+
+    if just_pressed {
+        flow.last = Some(candidate);
+        flow.cooldown_s = LIVE_BRUSH_MIN_INTERVAL_SECONDS;
+        return true;
+    }
+    if flow.last == Some(candidate) {
+        return false;
+    }
+    if flow.cooldown_s <= 0.0 {
+        flow.last = Some(candidate);
+        flow.cooldown_s = LIVE_BRUSH_MIN_INTERVAL_SECONDS;
+        return true;
+    }
+    false
 }
 
 /// Copy/paste clipboard for an arbitrary axis-aligned region.
@@ -583,6 +647,7 @@ fn apply_build_actions(
 
 #[allow(clippy::too_many_arguments)]
 fn live_builder_input(
+    time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
     mode: Res<crate::mode::ModeContext>,
@@ -598,9 +663,11 @@ fn live_builder_input(
     let user_action =
         mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right);
     if !mode.is_build() {
+        live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         return;
     }
     if !mode.is_build_live() {
+        live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
             toolbelt.status = "Build picker is open. Choose a tool or press Tab to hide the picker before building.".into();
         }
@@ -610,6 +677,18 @@ fn live_builder_input(
     let place_tool = active_tool == ToolbeltTool::BrushPlace;
     let cut_tool = active_tool == ToolbeltTool::BrushCut;
     if !place_tool && !cut_tool {
+        live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
+        return;
+    }
+    let place_held = place_tool && mouse.pressed(MouseButton::Left);
+    let place_just = place_tool && mouse.just_pressed(MouseButton::Left);
+    let cut_held = (place_tool && mouse.pressed(MouseButton::Right))
+        || (cut_tool && (mouse.pressed(MouseButton::Left) || mouse.pressed(MouseButton::Right)));
+    let cut_just = (place_tool && mouse.just_pressed(MouseButton::Right))
+        || (cut_tool
+            && (mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right)));
+    if !place_held && !cut_held {
+        live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         return;
     }
     let cursor_locked = windows
@@ -617,6 +696,7 @@ fn live_builder_input(
         .map(|w| w.cursor.grab_mode == bevy::window::CursorGrabMode::Locked)
         .unwrap_or(false);
     if !cursor_locked {
+        live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
             toolbelt.status =
                 "Build Live needs mouse capture. Click the game view once, then use LMB/RMB."
@@ -625,6 +705,7 @@ fn live_builder_input(
         return;
     }
     let Ok(cam_tf) = cam_q.get_single() else {
+        live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
             toolbelt.status = "Build Live could not find the player camera this frame.".into();
         }
@@ -633,6 +714,7 @@ fn live_builder_input(
     let origin = cam_tf.translation();
     let dir = cam_tf.forward().as_vec3();
     let Some((hit, adj)) = live_raycast_voxel(&world, origin, dir, 100.0) else {
+        live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
             toolbelt.status = "No target face under crosshair. Aim at a visible block face.".into();
         }
@@ -641,42 +723,65 @@ fn live_builder_input(
 
     let normal = adj - hit;
     let brush = oriented_live_brush(state.brush, normal);
-
-    if place_tool && mouse.just_pressed(MouseButton::Left) {
-        let brush_origin = live_brush_origin(hit, adj, brush, normal, false);
-        let (n, note) = live_stamp_mirrored(
-            &mut world,
-            &mut history,
-            "Live place".into(),
-            brush_origin,
-            brush,
-            state.block.into(),
-            *mirror,
-        );
-        state.status = format!(
-            "LIVE PLACE {:?} {}x{}x{} ({} Bloecke). {}",
-            state.block, brush.x, brush.y, brush.z, n, note
-        );
-        toolbelt.status = state.status.clone();
-    } else if (place_tool && mouse.just_pressed(MouseButton::Right))
-        || (cut_tool
-            && (mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right)))
-    {
-        let brush_origin = live_brush_origin(hit, adj, brush, normal, true);
-        let (n, note) = live_stamp_mirrored(
-            &mut world,
-            &mut history,
-            "Live cut".into(),
-            brush_origin,
-            brush,
+    let block_voxel: Voxel = state.block.into();
+    let (action, brush_origin, voxel, just_pressed) = if cut_held {
+        (
+            LiveBrushAction::Cut,
+            live_brush_origin(hit, adj, brush, normal, true),
             AIR,
-            *mirror,
-        );
-        state.status = format!(
-            "LIVE CUT {}x{}x{} ({} Bloecke). {}",
-            brush.x, brush.y, brush.z, n, note
-        );
-        toolbelt.status = state.status.clone();
+            cut_just,
+        )
+    } else {
+        (
+            LiveBrushAction::Place,
+            live_brush_origin(hit, adj, brush, normal, false),
+            block_voxel,
+            place_just,
+        )
+    };
+    let stamp = LiveBrushStamp::new(action, brush_origin, brush, voxel);
+    if !live_brush_should_stamp(
+        &mut state.live_flow,
+        Some(stamp),
+        time.delta_seconds(),
+        just_pressed,
+    ) {
+        return;
+    }
+
+    match action {
+        LiveBrushAction::Place => {
+            let (n, note) = live_stamp_mirrored(
+                &mut world,
+                &mut history,
+                "Power brush place".into(),
+                brush_origin,
+                brush,
+                block_voxel,
+                *mirror,
+            );
+            state.status = format!(
+                "POWER BRUSH {:?} {}x{}x{} ({} Bloecke). Hold LMB to keep painting; RMB cuts. {}",
+                state.block, brush.x, brush.y, brush.z, n, note
+            );
+            toolbelt.status = state.status.clone();
+        }
+        LiveBrushAction::Cut => {
+            let (n, note) = live_stamp_mirrored(
+                &mut world,
+                &mut history,
+                "Power brush cut".into(),
+                brush_origin,
+                brush,
+                AIR,
+                *mirror,
+            );
+            state.status = format!(
+                "POWER CUT {}x{}x{} ({} Bloecke). Hold RMB to keep cutting; LMB paints. {}",
+                brush.x, brush.y, brush.z, n, note
+            );
+            toolbelt.status = state.status.clone();
+        }
     }
 }
 
@@ -1463,5 +1568,46 @@ fn flip_axis(cb: &BuilderClipboard, axis: u8) -> BuilderClipboard {
     BuilderClipboard {
         size: cb.size,
         voxels,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_brush_flow_stamps_once_per_new_target_while_held() {
+        let mut flow = LiveBrushFlow::default();
+        let brush = IVec3::new(2, 2, 2);
+        let a = LiveBrushStamp::new(
+            LiveBrushAction::Place,
+            IVec3::new(0, 4, 0),
+            brush,
+            BlockType::Stone.into(),
+        );
+        let b = LiveBrushStamp::new(
+            LiveBrushAction::Place,
+            IVec3::new(1, 4, 0),
+            brush,
+            BlockType::Stone.into(),
+        );
+        let c = LiveBrushStamp::new(
+            LiveBrushAction::Place,
+            IVec3::new(2, 4, 0),
+            brush,
+            BlockType::Stone.into(),
+        );
+
+        assert!(live_brush_should_stamp(&mut flow, Some(a), 0.016, true));
+        assert!(!live_brush_should_stamp(&mut flow, Some(a), 0.200, false));
+        assert!(live_brush_should_stamp(
+            &mut flow,
+            Some(b),
+            LIVE_BRUSH_MIN_INTERVAL_SECONDS,
+            false
+        ));
+        assert!(!live_brush_should_stamp(&mut flow, Some(c), 0.0, false));
+        assert!(!live_brush_should_stamp(&mut flow, None, 0.016, false));
+        assert!(live_brush_should_stamp(&mut flow, Some(c), 0.0, true));
     }
 }

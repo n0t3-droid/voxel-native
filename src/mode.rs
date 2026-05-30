@@ -291,7 +291,7 @@ fn mode_hotkeys(
         mode.set(
             ActiveMode::BuildLive { tool },
             format!(
-                "Creative Build: {}. LMB edits terrain; F8 arms weapons only when you ask.",
+                "Creative Build: {}. Hold LMB builds, RMB cuts; Tab opens tools.",
                 tool.label()
             ),
         );
@@ -401,7 +401,7 @@ fn mode_hotkeys(
             } else {
                 mode.set(
                     ActiveMode::BuildLive { tool },
-                    "No active build gesture to cancel. Press F8 only if you want weapons.",
+                    "Build Live stays active. Hold LMB/RMB or Tab for tools.",
                 );
             }
         }
@@ -466,7 +466,7 @@ fn quick_tool_key(keys: &ButtonInput<KeyCode>) -> Option<ToolbeltTool> {
 
 fn normalized_build_tool(tool: ToolbeltTool) -> ToolbeltTool {
     if tool == ToolbeltTool::Navigate {
-        ToolbeltTool::DrawRect
+        ToolbeltTool::BrushPlace
     } else {
         tool
     }
@@ -519,12 +519,12 @@ fn next_mode_for_tab(
 
 fn default_creative_mode() -> ActiveMode {
     ActiveMode::BuildLive {
-        tool: ToolbeltTool::DrawRect,
+        tool: ToolbeltTool::BrushPlace,
     }
 }
 
 fn default_creative_status() -> &'static str {
-    "Creative Build active. LMB edits terrain; F8 arms weapons explicitly."
+    "Creative Power Brush active. Hold LMB to build, RMB to cut; wheel sizes brush, Tab opens tools."
 }
 
 fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {
@@ -638,12 +638,14 @@ mod tests {
         assert_eq!(
             ActiveMode::default(),
             ActiveMode::BuildLive {
-                tool: ToolbeltTool::DrawRect
+                tool: ToolbeltTool::BrushPlace
             }
         );
         let mode = ModeContext::default();
         assert!(!mode.allows_weapons());
         assert!(mode.is_build_live());
+        assert!(mode.status.contains("Hold LMB"));
+        assert!(mode.status.contains("RMB"));
     }
 
     #[test]
@@ -651,7 +653,7 @@ mod tests {
         assert_eq!(
             resume_mode_after_overlay(ActiveMode::Paused),
             ActiveMode::BuildLive {
-                tool: ToolbeltTool::DrawRect
+                tool: ToolbeltTool::BrushPlace
             }
         );
         assert_eq!(

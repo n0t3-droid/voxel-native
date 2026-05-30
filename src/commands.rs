@@ -208,8 +208,8 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         label: "Build Live oeffnen",
-        detail: "Direkt bauen ohne Picker-Zwang; Waffen werden geparkt",
-        key: "F7",
+        detail: "Power Brush direkt nutzen: LMB halten baut, RMB halten schneidet",
+        key: "LMB/RMB",
         context: CommandContext::Builder,
         icon: Icon::ModeBuild,
         essential: true,
@@ -247,8 +247,8 @@ const COMMANDS: &[CommandSpec] = &[
         essential: false,
     },
     CommandSpec {
-        label: "Tool 4 Brush Place",
-        detail: "Brush-Volumen direkt setzen",
+        label: "Tool 4 Power Brush",
+        detail: "Brush-Volumen kontinuierlich setzen; RMB schneidet ohne Toolwechsel",
         key: "4",
         context: CommandContext::Builder,
         icon: Icon::Brush,
@@ -928,11 +928,13 @@ fn command_action(command: &CommandSpec) -> Option<CommandAction> {
         "Simulation einfrieren" => Some(CommandAction::ToggleSimPause),
         "Inventar oeffnen" => Some(CommandAction::OpenInventory),
         "Waffen scharf schalten" => Some(CommandAction::ArmWeapons),
-        "Build Live oeffnen" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
+        "Build Live oeffnen" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushPlace)),
         "Tool 1 Rectangle Fill" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
         "Tool 2 Sculpt Push Pull" => Some(CommandAction::SetBuildTool(ToolbeltTool::Sculpt)),
         "Tool 3 Smart Tower" => Some(CommandAction::SetBuildTool(ToolbeltTool::SmartTower)),
-        "Tool 4 Brush Place" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushPlace)),
+        "Tool 4 Power Brush" | "Tool 4 Brush Place" => {
+            Some(CommandAction::SetBuildTool(ToolbeltTool::BrushPlace))
+        }
         "Tool 5 Brush Cut" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushCut)),
         "Tool 6 Road" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityRoad)),
         "Tool 7 District" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityDistrict)),
@@ -1063,7 +1065,7 @@ fn execute_command_action(
             if *state.get() == GameState::MainMenu {
                 Some("Waffen brauchen eine geladene Welt.".into())
             } else {
-                let status = "Weapons armed explicitly. F8 holsters back to Creative Build.";
+                let status = "Weapons armed explicitly. Use the build toggle to holster again.";
                 mode.set(crate::mode::ActiveMode::Combat, status);
                 toolbelt.status = status.into();
                 editor.open = false;

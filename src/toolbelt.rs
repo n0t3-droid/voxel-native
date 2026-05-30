@@ -58,7 +58,7 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "Rectangle Fill",
             ToolbeltTool::Sculpt => "Push Pull Face",
             ToolbeltTool::SmartTower => "Smart Tower",
-            ToolbeltTool::BrushPlace => "Place Brush",
+            ToolbeltTool::BrushPlace => "Power Brush",
             ToolbeltTool::BrushCut => "Cut Brush",
             ToolbeltTool::CityRoad => "Road Tool",
             ToolbeltTool::CityDistrict => "District Zone",
@@ -74,7 +74,7 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "FILL",
             ToolbeltTool::Sculpt => "PUSH",
             ToolbeltTool::SmartTower => "TOWER",
-            ToolbeltTool::BrushPlace => "PLACE",
+            ToolbeltTool::BrushPlace => "BRUSH",
             ToolbeltTool::BrushCut => "CUT",
             ToolbeltTool::CityRoad => "ROAD",
             ToolbeltTool::CityDistrict => "ZONE",
@@ -106,8 +106,8 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "LMB fills rectangles. Alt+LMB temporarily Push/Pulls. G swaps Fill/Push.",
             ToolbeltTool::Sculpt => "LMB Push/Pulls faces. Alt+LMB temporarily fills rectangles. G swaps Fill/Push.",
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
-            ToolbeltTool::BrushPlace => "LMB stamps the current builder brush onto the targeted face.",
-            ToolbeltTool::BrushCut => "LMB cuts the current builder brush into the targeted face.",
+            ToolbeltTool::BrushPlace => "Hold LMB paints continuously; hold RMB cuts. Mouse wheel sizes the brush.",
+            ToolbeltTool::BrushCut => "Hold LMB or RMB cuts continuously with the current brush.",
             ToolbeltTool::CityRoad => "LMB sets road start and end points.",
             ToolbeltTool::CityDistrict => "LMB places a district/zone circle.",
             ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
@@ -212,8 +212,9 @@ impl Default for ToolbeltState {
         Self {
             live: false,
             palette_open: false,
-            tool: ToolbeltTool::DrawRect,
-            status: "F7 enters Build Live. 1-0 tools, Q/E cycle, Tab picker.".into(),
+            tool: ToolbeltTool::BrushPlace,
+            status: "Creative Power Brush: hold LMB to build, RMB to cut, wheel sizes brush."
+                .into(),
         }
     }
 }
@@ -256,11 +257,10 @@ fn toolbelt_hotkeys(
         if toolbelt.palette_open || toolbelt.live {
             toolbelt.palette_open = false;
             toolbelt.live = false;
-            toolbelt.status =
-                "Weapons armed explicitly. F8 holsters back to Creative Build.".into();
+            toolbelt.status = "Weapons armed explicitly. Build tools stay one click away.".into();
         } else {
             if toolbelt.tool == ToolbeltTool::Navigate {
-                toolbelt.tool = ToolbeltTool::DrawRect;
+                toolbelt.tool = ToolbeltTool::BrushPlace;
             }
             toolbelt.live = true;
             toolbelt.palette_open = true;
@@ -274,16 +274,16 @@ fn toolbelt_hotkeys(
         if !toolbelt.live {
             toolbelt.live = true;
             if toolbelt.tool == ToolbeltTool::Navigate {
-                toolbelt.tool = ToolbeltTool::DrawRect;
+                toolbelt.tool = ToolbeltTool::BrushPlace;
             }
             changed = true;
         }
         toolbelt.palette_open = !toolbelt.palette_open;
         if toolbelt.palette_open && toolbelt.tool == ToolbeltTool::Navigate {
-            toolbelt.tool = ToolbeltTool::DrawRect;
+            toolbelt.tool = ToolbeltTool::BrushPlace;
         }
         toolbelt.status = if toolbelt.palette_open {
-            "Build Studio picker: click a tool, Q/E cycles tools, F8 arms weapons.".into()
+            "Build Studio picker: click a tool, Q/E cycles tools, Tab closes.".into()
         } else {
             format!(
                 "Build Live: {}. {}",
@@ -298,7 +298,7 @@ fn toolbelt_hotkeys(
         toolbelt.palette_open = false;
         changed = true;
         toolbelt.status = if toolbelt.tool == ToolbeltTool::Navigate {
-            toolbelt.tool = ToolbeltTool::DrawRect;
+            toolbelt.tool = ToolbeltTool::BrushPlace;
             format!(
                 "Build Live: {}. {}",
                 toolbelt.tool.label(),
@@ -330,12 +330,11 @@ fn toolbelt_hotkeys(
             toolbelt.status = format!("Picker hidden. Build Live: {}.", toolbelt.tool.label());
         } else if toolbelt.live && toolbelt.tool == ToolbeltTool::DrawRect {
             toolbelt.status =
-                "Rectangle Fill: active drag cancelled. F8 arms weapons only if needed.".into();
+                "Rectangle Fill: active drag cancelled. Hold LMB/RMB for Power Brush.".into();
         } else if toolbelt.live {
             toolbelt.live = false;
             changed = true;
-            toolbelt.status =
-                "Weapons armed explicitly. F8 holsters back to Creative Build.".into();
+            toolbelt.status = "Weapons armed explicitly. Build tools stay one click away.".into();
         }
     }
 
@@ -478,7 +477,7 @@ fn sync_tool_selection(
         }
     } else {
         format!(
-            "{} selected. F3 keeps Creative Build active.",
+            "{} selected. Creative Build stays active.",
             toolbelt.tool.label()
         )
     };
@@ -512,7 +511,10 @@ fn compact_status(status: &str, tool: ToolbeltTool) -> String {
     if status.len() <= 96 {
         status.to_owned()
     } else {
-        format!("{} ready. 1-0 tools, Q/E cycle, Tab picker.", tool.label())
+        format!(
+            "{} ready. Hold LMB/RMB, wheel size, Tab tools.",
+            tool.label()
+        )
     }
 }
 
@@ -996,8 +998,8 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "Left mouse fills; hold Alt for temporary Push/Pull",
             ToolbeltTool::Sculpt => "Left mouse Push/Pulls; hold Alt for temporary Fill",
             ToolbeltTool::SmartTower => "Left mouse chooses tower corners",
-            ToolbeltTool::BrushPlace => "Left mouse places the active brush",
-            ToolbeltTool::BrushCut => "Left mouse cuts with the active brush",
+            ToolbeltTool::BrushPlace => "Hold left mouse to paint continuously",
+            ToolbeltTool::BrushCut => "Hold left mouse to cut continuously",
             ToolbeltTool::CityRoad => "Left mouse places road points",
             ToolbeltTool::CityDistrict => "Left mouse places a district",
             ToolbeltTool::CityBuilding => "Left mouse chooses building corners",
@@ -1009,14 +1011,14 @@ impl ToolbeltTool {
     fn right_hint(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Right mouse is reserved for inspect mode",
-            ToolbeltTool::BrushPlace => "Right mouse cuts with the active brush",
+            ToolbeltTool::BrushPlace => "Hold right mouse to cut continuously",
             ToolbeltTool::Sculpt => "Right mouse sets Push/Pull reference points",
             ToolbeltTool::AnimationPick => {
                 "Right mouse removes a voxel from the animation selection"
             }
             ToolbeltTool::DrawRect => "Right mouse cancels Fill; G swaps to Push",
             ToolbeltTool::SmartTower => "Right mouse cancels the tower preview",
-            ToolbeltTool::BrushCut => "Right mouse cuts with the active brush",
+            ToolbeltTool::BrushCut => "Hold right mouse to cut continuously",
             ToolbeltTool::CityRoad => "Right mouse removes or cancels the current road",
             ToolbeltTool::CityDistrict => "Right mouse removes the last district",
             ToolbeltTool::CityBuilding => "Right mouse removes or cancels the current building",
@@ -1071,7 +1073,7 @@ fn live_chip(ui: &mut egui::Ui, live: bool, expanded: bool, primary: egui::Color
         );
     }
     let clicked = response.clicked();
-    response.on_hover_text("Show/hide Build Studio picker. F8 arms weapons explicitly.");
+    response.on_hover_text("Show/hide Build Studio picker.");
     clicked
 }
 
