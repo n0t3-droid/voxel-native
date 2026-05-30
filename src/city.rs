@@ -1021,7 +1021,13 @@ fn city_input(
                 }
                 Some(a) => {
                     let target = smart_road_drag_target(a, snapped, &city.roads);
-                    let seg = RoadSegment::new(a, target, city.road_width, city.road_style);
+                    let seg = road_segment_from_drag(
+                        a,
+                        target,
+                        city.road_width,
+                        city.road_style,
+                        &city.roads,
+                    );
                     let n = stamp_road(&mut world, &seg);
                     city.roads.push(seg);
                     save_city_roads_for_active(active.as_deref(), &city.roads);
@@ -1300,6 +1306,78 @@ fn road_continuation_start(road: &RoadSegment) -> Option<IVec3> {
         RoadShape::Roundabout => None,
         RoadShape::Straight | RoadShape::Corner => Some(road.b),
     }
+}
+
+fn road_segment_from_drag(
+    start: IVec3,
+    target: IVec3,
+    width: u8,
+    style: RoadStyle,
+    roads: &[RoadSegment],
+) -> RoadSegment {
+    let mut segment = RoadSegment::new(start, target, width, style);
+    let start_height = road_handle_height_at(roads, start);
+    let end_height = road_handle_height_at(roads, target);
+    let a = start_height.unwrap_or(0);
+    let b = end_height.unwrap_or(a);
+    segment = segment.with_endpoint_heights(a, b);
+    if segment.shape == RoadShape::Corner {
+        let via = road_corner_via(segment);
+        let turn = road_handle_height_at(roads, via).unwrap_or(((a as i32 + b as i32) / 2) as i16);
+        segment = segment.with_turn_height(turn);
+    }
+    segment
+}
+
+fn road_handle_height_at(roads: &[RoadSegment], handle: IVec3) -> Option<i16> {
+    roads
+        .iter()
+        .rev()
+        .find_map(|road| road_handle_height(*road, handle))
+}
+
+fn road_handle_height(road: RoadSegment, handle: IVec3) -> Option<i16> {
+    match road.shape {
+        RoadShape::Straight => {
+            if same_road_handle_xz(handle, road.a) {
+                Some(road.elevation_a)
+            } else if same_road_handle_xz(handle, road.b) {
+                Some(road.elevation_b)
+            } else {
+                None
+            }
+        }
+        RoadShape::Corner => {
+            let via = road_corner_via(road);
+            if same_road_handle_xz(handle, road.a) {
+                Some(road.elevation_a)
+            } else if same_road_handle_xz(handle, via) {
+                Some(road.elevation_via)
+            } else if same_road_handle_xz(handle, road.b) {
+                Some(road.elevation_b)
+            } else {
+                None
+            }
+        }
+        RoadShape::Roundabout => {
+            let r = road.roundabout_radius.max(4) as i32;
+            let handles = [
+                road.a,
+                IVec3::new(road.a.x + r, road.a.y, road.a.z),
+                IVec3::new(road.a.x - r, road.a.y, road.a.z),
+                IVec3::new(road.a.x, road.a.y, road.a.z + r),
+                IVec3::new(road.a.x, road.a.y, road.a.z - r),
+            ];
+            handles
+                .iter()
+                .any(|candidate| same_road_handle_xz(handle, *candidate))
+                .then_some(((road.elevation_a as i32 + road.elevation_b as i32) / 2) as i16)
+        }
+    }
+}
+
+fn same_road_handle_xz(a: IVec3, b: IVec3) -> bool {
+    a.x == b.x && a.z == b.z
 }
 
 fn nearest_road_snap_handle(
@@ -2100,7 +2178,13 @@ fn city_draw_gizmos(
                 city.road_style.gizmo_color(),
             );
             if let Some(a) = city.pending_road_a {
-                let preview = RoadSegment::new(a, cursor, city.road_width, city.road_style);
+                let preview = road_segment_from_drag(
+                    a,
+                    cursor,
+                    city.road_width,
+                    city.road_style,
+                    &city.roads,
+                );
                 draw_road_component_gizmo(
                     &mut gizmos,
                     &world,
@@ -2376,6 +2460,7 @@ fn draw_hint_hud(
             CityTool::Road => {
                 if city.pending_road_a.is_some() {
                     lines.push(("LMB".into(), "Strassenende setzen + weiterzeichnen".into()));
+                    lines.push(("Auto".into(), "Laenge / Brueckenhoehe erben".into()));
                     lines.push(("RMB / Esc".into(), "Abbrechen".into()));
                 } else {
                     lines.push(("LMB".into(), "Strassenstart setzen".into()));
@@ -2786,6 +2871,55 @@ mod tests {
         assert_eq!(road_continuation_start(&straight), Some(straight.b));
         assert_eq!(road_continuation_start(&corner), Some(corner.b));
         assert_eq!(road_continuation_start(&roundabout), None);
+    }
+
+    #[test]
+    fn road_drag_from_raised_endpoint_inherits_bridge_height() {
+        let previous = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        )
+        .with_endpoint_heights(0, 14);
+
+        let next = road_segment_from_drag(
+            previous.b,
+            IVec3::new(64, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+            &[previous],
+        );
+
+        assert_eq!(next.elevation_a, 14);
+        assert_eq!(
+            next.elevation_b, 14,
+            "continuing from a raised bridge endpoint should keep the deck level until the player edits it down"
+        );
+    }
+
+    #[test]
+    fn road_drag_between_raised_handles_matches_both_bridge_heights() {
+        let west = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        )
+        .with_endpoint_heights(0, 10);
+        let east = RoadSegment::new(
+            IVec3::new(64, 72, 0),
+            IVec3::new(96, 72, 0),
+            5,
+            RoadStyle::Neon,
+        )
+        .with_endpoint_heights(18, 18);
+
+        let connector =
+            road_segment_from_drag(west.b, east.a, 5, RoadStyle::Asphalt, &[west, east]);
+
+        assert_eq!(connector.elevation_a, 10);
+        assert_eq!(connector.elevation_b, 18);
     }
 
     #[test]
