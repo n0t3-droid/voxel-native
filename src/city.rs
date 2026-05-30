@@ -743,7 +743,7 @@ fn city_input(
             }
 
             if let Some(label) = label {
-                let n = stamp_road(&mut world, &next);
+                let n = restamp_road_component(&mut world, &before, &next);
                 city.roads[idx] = next;
                 city.status = format!("Strassenkomponente {}: {} ({} Bloecke)", idx + 1, label, n);
                 telemetry.city_actions = telemetry.city_actions.saturating_add(1);
@@ -1162,6 +1162,77 @@ fn road_width_axis_at(cells: &[IVec2], index: usize) -> (i32, i32) {
     } else {
         (1, 0)
     }
+}
+
+fn restamp_road_component(
+    world: &mut VoxelWorld,
+    before: &RoadSegment,
+    after: &RoadSegment,
+) -> usize {
+    clear_road_component(world, before) + stamp_road(world, after)
+}
+
+/// Remove a previously stamped road component footprint before applying
+/// an edited width, texture, or height. Surface cells are restored to a
+/// biome-appropriate top block; elevated decks/supports are cleared.
+fn clear_road_component(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
+    let cells = road_path_xz(seg);
+    if cells.is_empty() {
+        return 0;
+    }
+    let half = (seg.width as i32) / 2;
+    let last_index = cells.len().saturating_sub(1);
+    let mut changed = 0usize;
+    for (i, c) in cells.iter().enumerate() {
+        let elevation = road_elevation_at_sample(seg, i, last_index);
+        let (perp_x, perp_z) = road_width_axis_at(&cells, i);
+        for w in -half..=half {
+            let wx = c.x + perp_x * w;
+            let wz = c.y + perp_z * w;
+            let sy = world.surface_height_at(wx, wz);
+            let deck_y = (sy + elevation).max(1);
+            if deck_y <= sy {
+                let restore = terrain_surface_restore_voxel(world, wx, wz);
+                for y in deck_y..=sy {
+                    if world.edit_set_voxel(wx, y, wz, restore) {
+                        changed += 1;
+                    }
+                }
+            } else {
+                if world.edit_set_voxel(wx, deck_y, wz, AIR) {
+                    changed += 1;
+                }
+                for support_y in (sy + 1)..deck_y {
+                    if world.edit_set_voxel(wx, support_y, wz, AIR) {
+                        changed += 1;
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn terrain_surface_restore_voxel(world: &VoxelWorld, x: i32, z: i32) -> Voxel {
+    let block = match world.biome_at(x, z) {
+        crate::terrain::Biome::Ocean | crate::terrain::Biome::Beach => BlockType::Sand,
+        crate::terrain::Biome::Desert => BlockType::Sand,
+        crate::terrain::Biome::Savanna => BlockType::SavannaGrass,
+        crate::terrain::Biome::Tundra => BlockType::TundraGrass,
+        crate::terrain::Biome::SnowyMountains | crate::terrain::Biome::GlacierShards => {
+            BlockType::Snow
+        }
+        crate::terrain::Biome::Mountains => BlockType::Stone,
+        crate::terrain::Biome::Mesa => BlockType::RedSand,
+        crate::terrain::Biome::Karst => BlockType::MossStone,
+        crate::terrain::Biome::CrystalSpires => BlockType::GlowSand,
+        crate::terrain::Biome::VolcanicWaste => BlockType::Basalt,
+        crate::terrain::Biome::AlienReef => BlockType::AlienMoss,
+        crate::terrain::Biome::Plains
+        | crate::terrain::Biome::Forest
+        | crate::terrain::Biome::Jungle => BlockType::Grass,
+    };
+    Voxel::from(block)
 }
 
 /// Stamp a road component onto the terrain surface. Returns the number
@@ -2093,6 +2164,34 @@ mod tests {
         assert_eq!(neon.width, road.width);
         assert_eq!(neon.style, RoadStyle::Neon);
         assert_eq!(neon.style.surface_block(), BlockType::Limestone);
+    }
+
+    #[test]
+    fn road_component_edit_clears_old_width_before_restamping() {
+        let mut world = VoxelWorld::new();
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(16, 72, 0),
+            7,
+            RoadStyle::Neon,
+        );
+        let old_flank_y = world.surface_height_at(8, 3);
+        let center_y = world.surface_height_at(8, 0);
+
+        stamp_road(&mut world, &road);
+        assert_eq!(
+            world.voxel_at(8, old_flank_y, 3),
+            Voxel::from(BlockType::Limestone)
+        );
+
+        let narrow_dirt = road.with_width(1).retextured(RoadStyle::Dirt);
+        restamp_road_component(&mut world, &road, &narrow_dirt);
+
+        assert_eq!(
+            world.voxel_at(8, old_flank_y, 3),
+            terrain_surface_restore_voxel(&world, 8, 3)
+        );
+        assert_eq!(world.voxel_at(8, center_y, 0), Voxel::from(BlockType::Dirt));
     }
 
     #[test]
