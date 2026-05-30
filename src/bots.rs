@@ -1463,6 +1463,17 @@ impl BuildingStreetFace {
             Self::East => local.x == sx && (local.z == center_z - 3 || local.z == center_z + 3),
         }
     }
+
+    fn shuttle_approach_surface_cell(self, local: IVec3, sx: i32, sz: i32) -> bool {
+        let center_x = (sx + 1) / 2;
+        let center_z = (sz + 1) / 2;
+        match self {
+            Self::North => local.z <= 4 && (local.x - center_x).abs() <= 2,
+            Self::South => local.z >= sz - 4 && (local.x - center_x).abs() <= 2,
+            Self::West => local.x <= 4 && (local.z - center_z).abs() <= 2,
+            Self::East => local.x >= sx - 4 && (local.z - center_z).abs() <= 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6382,6 +6393,11 @@ fn build_project_concept(
                 detail.push_str(
                     " Service edges get a service gate and road-facing utility access so pads connect to the street network instead of floating as isolated platforms.",
                 );
+                if matches!(kind, BotTaskKind::LandingPad) {
+                    detail.push_str(
+                        " Landing pads reserve a shuttle approach stripe from the road-facing edge into the pad center.",
+                    );
+                }
             }
         }
         rows.insert(
@@ -7456,10 +7472,13 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let gate_marker = service_edge
                 && street_face.civic_gateway_marker_cell(local, sx, sz)
                 && local.y <= 4;
+            let shuttle_approach = matches!(project.kind, BotTaskKind::LandingPad)
+                && service_edge
+                && street_face.shuttle_approach_surface_cell(local, sx, sz);
             if local.y == 0 {
                 let voxel = if beacon {
                     project.theme.signal()
-                } else if gate_surface {
+                } else if gate_surface || shuttle_approach {
                     Voxel::from(BlockType::Limestone)
                 } else if edge || cross {
                     project.theme.accent()
@@ -12053,6 +12072,82 @@ mod tests {
         assert_eq!(gate_floor, Some(Voxel::from(BlockType::Limestone)));
         assert_ne!(side_edge, Some(Voxel::from(BlockType::Limestone)));
         assert_eq!(gate_marker, Some(project.theme.signal()));
+    }
+
+    #[test]
+    fn project_concept_records_landing_pad_shuttle_approach() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Service,
+            name: "Shuttle Yard".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![[30, 90, 2], [30, 90, 4]],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::LandingPad,
+            BotTheme::CyanAlloy,
+            [0, 90, -10],
+            [25, 1, 25],
+            "Road-Facing Landing Pad",
+            false,
+            None,
+            None,
+        );
+        let city_sheet = concept
+            .rows
+            .iter()
+            .find(|row| row.phase == "City Sheet")
+            .expect("landing pad should expose its city planning sheet");
+
+        assert_eq!(concept.street_face, Some(BuildingStreetFace::East));
+        assert_eq!(concept.block_role, Some(CityBlockRole::ServiceEdge));
+        assert!(city_sheet.detail.contains("shuttle approach"));
+        assert!(city_sheet.detail.contains("road-facing"));
+    }
+
+    #[test]
+    fn road_facing_landing_pad_paints_shuttle_approach_stripes() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(24, 12) + 1;
+        let project = BotProject {
+            id: 8,
+            kind: BotTaskKind::LandingPad,
+            label: "Road-Facing Landing Pad".into(),
+            origin: [0, base_y, 0],
+            size: [25, 1, 25],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::ServiceEdge),
+                ..default()
+            },
+        };
+
+        let edge_gate =
+            project_voxel(&project, IVec3::new(24, 0, 12), &world).map(|(_, voxel)| voxel);
+        let inner_approach =
+            project_voxel(&project, IVec3::new(21, 0, 10), &world).map(|(_, voxel)| voxel);
+        let side_deck =
+            project_voxel(&project, IVec3::new(21, 0, 4), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(edge_gate, Some(Voxel::from(BlockType::Limestone)));
+        assert_eq!(inner_approach, Some(Voxel::from(BlockType::Limestone)));
+        assert_ne!(side_deck, Some(Voxel::from(BlockType::Limestone)));
     }
 
     #[test]
