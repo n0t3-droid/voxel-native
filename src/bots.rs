@@ -1348,6 +1348,49 @@ impl BuildingStreetFace {
             Self::East => local.x == sx - setback - 2 && (local.z - sz / 2).abs() <= 2,
         }
     }
+
+    fn residential_entry_cell(self, lx: i32, lz: i32, style: i32) -> bool {
+        let entry_x = lx == 3 || lx == 4 || (style == 1 && lx == 5);
+        let entry_z = lz == 3 || lz == 4 || (style == 1 && lz == 5);
+        match self {
+            Self::North => lz == 0 && entry_x,
+            Self::South => lz == 7 && entry_x,
+            Self::West => lx == 0 && entry_z,
+            Self::East => lx == 8 && entry_z,
+        }
+    }
+
+    fn residential_frontage_walk_cell(self, lx: i32, lz: i32) -> bool {
+        match self {
+            Self::North => lz == 0 && (1..=7).contains(&lx),
+            Self::South => lz == 8 && (1..=7).contains(&lx),
+            Self::West => lx == 0 && (1..=6).contains(&lz),
+            Self::East => lx == 9 && (1..=6).contains(&lz),
+        }
+    }
+
+    fn residential_stoop_cell(self, lx: i32, lz: i32, style: i32) -> bool {
+        let entry_x = lx == 3 || lx == 4 || (style == 1 && lx == 5);
+        let entry_z = lz == 3 || lz == 4 || (style == 1 && lz == 5);
+        match self {
+            Self::North => lz == 0 && entry_x,
+            Self::South => lz == 8 && entry_x,
+            Self::West => lx == 0 && entry_z,
+            Self::East => lx == 9 && entry_z,
+        }
+    }
+
+    fn residential_balcony_cell(self, lx: i32, lz: i32, style: i32) -> bool {
+        if !matches!(style, 2 | 4) {
+            return false;
+        }
+        match self {
+            Self::North => lz == 0 && (2..=6).contains(&lx),
+            Self::South => lz == 7 && (2..=6).contains(&lx),
+            Self::West => lx == 0 && (2..=5).contains(&lz),
+            Self::East => lx == 8 && (2..=5).contains(&lz),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7122,7 +7165,13 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let cell_z = local.z / 10;
             let lx = local.x % 11;
             let lz = local.z % 10;
-            let path = local.x == project.size[0] / 2 || local.z == project.size[2] / 2;
+            let street_face = project
+                .concept
+                .street_face
+                .unwrap_or(BuildingStreetFace::North);
+            let path = local.x == project.size[0] / 2
+                || local.z == project.size[2] / 2
+                || street_face.residential_frontage_walk_cell(lx, lz);
             let courtyard = cell_x == 1 && cell_z == 1;
             let lot_center_x = origin.x + cell_x * 11 + 4;
             let lot_center_z = origin.z + cell_z * 10 + 3;
@@ -7188,10 +7237,9 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             }
             let building_h =
                 (7 + (cell_x * 2 + cell_z + style).rem_euclid(5)).min(project.size[1] - 2);
-            let stoop = local.y == 1 && lz == 8 && (3..=5).contains(&lx);
+            let stoop = local.y == 1 && street_face.residential_stoop_cell(lx, lz, style);
             let balcony = matches!(style, 2 | 4)
-                && lz == 8
-                && (2..=6).contains(&lx)
+                && street_face.residential_balcony_cell(lx, lz, style)
                 && local.y > 3
                 && local.y < building_h
                 && local.y.rem_euclid(3) == 1;
@@ -7212,15 +7260,19 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 return None;
             }
             let wall = lx == 0 || lx == 8 || lz == 0 || lz == 7 || local.y == building_h;
+            let door = local.y <= 2 && street_face.residential_entry_cell(lx, lz, style);
+            if door {
+                return Some((
+                    IVec3::new(x, lot_base + local.y, z),
+                    Voxel::from(BlockType::Wood),
+                ));
+            }
             let structural = wall || (lx - 4).abs() <= 1 && (lz - 3).abs() <= 1;
             if let Some(foundation) =
                 building_foundation_voxel(world, x, z, lot_base, local.y, structural)
             {
                 return Some(foundation);
             }
-            let side_entry = matches!(style, 3 | 4) && lx == 0 && (lz == 3 || lz == 4);
-            let front_entry = lz == 0 && (lx == 3 || lx == 4 || (style == 1 && lx == 5));
-            let door = local.y <= 2 && (front_entry || side_entry);
             let window_cycle = if matches!(style, 1 | 3) { 3 } else { 2 };
             let window = wall
                 && local.y > 2
@@ -7249,9 +7301,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 3 => Voxel::from(BlockType::Stone),
                 _ => project.theme.wall(),
             };
-            let voxel = if door {
-                Voxel::from(BlockType::Wood)
-            } else if fire_escape {
+            let voxel = if fire_escape {
                 Voxel::from(BlockType::ShipHullDark)
             } else if window {
                 Voxel::from(BlockType::CockpitGlass)
@@ -11093,6 +11143,77 @@ mod tests {
             old_north_entrance,
             Some(Voxel::from(BlockType::CockpitGlass))
         );
+    }
+
+    fn residential_test_project(street_face: BuildingStreetFace, base_y: i32) -> BotProject {
+        BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildResidentialBlock,
+            label: "Street Facing Homes".into(),
+            origin: [0, base_y, 0],
+            size: [44, 16, 38],
+            theme: BotTheme::WhiteAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(street_face),
+                ..default()
+            },
+        }
+    }
+
+    #[test]
+    fn residential_block_entries_follow_planned_street_face() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(8, 4) + 1;
+        let project = residential_test_project(BuildingStreetFace::East, base_y);
+
+        let east_entry =
+            project_voxel(&project, IVec3::new(8, 2, 4), &world).map(|(_, voxel)| voxel);
+        let old_north_entry =
+            project_voxel(&project, IVec3::new(3, 2, 0), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(east_entry, Some(Voxel::from(BlockType::Wood)));
+        assert_ne!(old_north_entry, Some(Voxel::from(BlockType::Wood)));
+    }
+
+    #[test]
+    fn residential_block_frontage_walk_faces_planned_street() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(8, 4) + 1;
+        let project = residential_test_project(BuildingStreetFace::East, base_y);
+
+        let east_walk =
+            project_voxel(&project, IVec3::new(9, 0, 4), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(east_walk, Some(Voxel::from(BlockType::Limestone)));
+    }
+
+    #[test]
+    fn residential_block_frontage_walk_mirrors_north_and_west_faces() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(3, 0) + 1;
+        let north = residential_test_project(BuildingStreetFace::North, base_y);
+        let west = residential_test_project(BuildingStreetFace::West, base_y);
+
+        let north_walk = project_voxel(&north, IVec3::new(3, 0, 0), &world).map(|(_, voxel)| voxel);
+        let north_back_strip =
+            project_voxel(&north, IVec3::new(3, 0, 8), &world).map(|(_, voxel)| voxel);
+        let west_walk = project_voxel(&west, IVec3::new(0, 0, 4), &world).map(|(_, voxel)| voxel);
+        let west_back_strip =
+            project_voxel(&west, IVec3::new(9, 0, 4), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(north_walk, Some(Voxel::from(BlockType::Limestone)));
+        assert_ne!(north_back_strip, Some(Voxel::from(BlockType::Limestone)));
+        assert_eq!(west_walk, Some(Voxel::from(BlockType::Limestone)));
+        assert_ne!(west_back_strip, Some(Voxel::from(BlockType::Limestone)));
     }
 
     #[test]
