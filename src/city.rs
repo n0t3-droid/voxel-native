@@ -977,7 +977,6 @@ fn city_input(
 
             if ctrl && !shift && !alt {
                 next = road_with_size_delta(before, steps * 2);
-                city.road_width = next.width;
                 label = Some(if next.shape == RoadShape::Roundabout {
                     format!("Radius {}", next.roundabout_radius)
                 } else {
@@ -995,13 +994,13 @@ fn city_input(
                 });
             } else if alt && !ctrl && !shift {
                 next = before.retextured(next_road_style(before.style, steps));
-                city.road_style = next.style;
                 label = Some(format!("Textur {}", next.style.label()));
             }
 
             if let Some(label) = label {
                 let n = restamp_road_component(&mut world, &before, &next);
                 city.roads[idx] = next;
+                sync_road_brush_from_component(&mut city, next);
                 save_city_roads_for_active(active.as_deref(), &city.roads);
                 city.status = format!("Strassenkomponente {}: {} ({} Bloecke)", idx + 1, label, n);
                 telemetry.city_actions = telemetry.city_actions.saturating_add(1);
@@ -1363,6 +1362,11 @@ fn road_segment_from_drag(
         segment = segment.with_turn_height(turn);
     }
     segment
+}
+
+fn sync_road_brush_from_component(city: &mut CityState, road: RoadSegment) {
+    city.road_width = road.width;
+    city.road_style = road.style;
 }
 
 fn road_drag_appearance(
@@ -2764,6 +2768,40 @@ mod tests {
         assert_eq!(neon.width, road.width);
         assert_eq!(neon.style, RoadStyle::Neon);
         assert_eq!(neon.style.surface_block(), BlockType::Limestone);
+    }
+
+    #[test]
+    fn edited_road_component_syncs_active_brush_width_and_texture() {
+        let mut city = CityState::default();
+        let edited = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            11,
+            RoadStyle::Neon,
+        )
+        .with_endpoint_heights(0, 12);
+
+        sync_road_brush_from_component(&mut city, edited);
+
+        assert_eq!(city.road_width, 11);
+        assert_eq!(
+            city.road_style,
+            RoadStyle::Neon,
+            "after editing a road, the next free road should use the edited component look"
+        );
+    }
+
+    #[test]
+    fn edited_roundabout_radius_keeps_brush_on_component_width_and_texture() {
+        let mut city = CityState::default();
+        let roundabout = RoadSegment::roundabout(IVec3::new(16, 72, 16), 10, 5, RoadStyle::Cobble);
+        let larger = road_with_size_delta(roundabout, 8);
+
+        sync_road_brush_from_component(&mut city, larger);
+
+        assert_eq!(city.road_width, 5);
+        assert_eq!(city.road_style, RoadStyle::Cobble);
+        assert_eq!(larger.roundabout_radius, 18);
     }
 
     #[test]
