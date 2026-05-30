@@ -8460,7 +8460,12 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
         BotTaskKind::BuildResidentialBlock => {
             let x = origin.x + local.x;
             let z = origin.z + local.z;
-            let column_base = world.surface_height_at(x, z) + 1;
+            let terrain_column_base = world.surface_height_at(x, z) + 1;
+            let column_base = if origin.y - terrain_column_base >= 4 {
+                origin.y
+            } else {
+                terrain_column_base
+            };
             let cell_x = local.x / 11;
             let cell_z = local.z / 10;
             let lx = local.x % 11;
@@ -8475,7 +8480,12 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let courtyard = cell_x == 1 && cell_z == 1;
             let lot_center_x = origin.x + cell_x * 11 + 4;
             let lot_center_z = origin.z + cell_z * 10 + 3;
-            let lot_base = world.surface_height_at(lot_center_x, lot_center_z) + 1;
+            let terrain_lot_base = world.surface_height_at(lot_center_x, lot_center_z) + 1;
+            let lot_base = if origin.y - terrain_lot_base >= 4 {
+                origin.y
+            } else {
+                terrain_lot_base
+            };
             let style = (project_style_seed(project) + cell_x * 17 + cell_z * 29).rem_euclid(5);
             let lot_shell = cell_x <= 2 && cell_z <= 2 && lx <= 8 && lz <= 7;
             let ground_y = if lot_shell && !courtyard && !path {
@@ -8508,6 +8518,11 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                             Voxel::from(BlockType::ShipHullDark)
                         },
                     ));
+                }
+                if let Some(foundation) =
+                    building_foundation_voxel(world, x, z, column_base, local.y, false)
+                {
+                    return Some(foundation);
                 }
                 return None;
             }
@@ -14038,6 +14053,30 @@ mod tests {
         assert_ne!(north_back_strip, Some(Voxel::from(BlockType::Limestone)));
         assert_eq!(west_walk, Some(Voxel::from(BlockType::Limestone)));
         assert_ne!(west_back_strip, Some(Voxel::from(BlockType::Limestone)));
+    }
+
+    #[test]
+    fn raised_residential_frontage_walk_uses_road_grade_deck() {
+        let world = VoxelWorld::new();
+        let terrain_base = world.surface_height_at(0, 4) + 1;
+        let road_grade_base = terrain_base + 24;
+        let project = residential_test_project(BuildingStreetFace::West, road_grade_base);
+
+        let deck = project_voxel(&project, IVec3::new(0, 0, 4), &world);
+        let support = project_voxel(&project, IVec3::new(0, 1, 4), &world);
+
+        assert_eq!(
+            deck,
+            Some((
+                IVec3::new(0, road_grade_base, 4),
+                Voxel::from(BlockType::Limestone)
+            ))
+        );
+        assert_eq!(
+            support.map(|(pos, _)| pos),
+            Some(IVec3::new(0, road_grade_base - 1, 4))
+        );
+        assert_ne!(support.map(|(_, voxel)| voxel), Some(AIR));
     }
 
     #[test]

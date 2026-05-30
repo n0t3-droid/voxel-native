@@ -1444,10 +1444,11 @@ fn road_connection_sample(road: RoadSegment, cell: IVec3) -> Option<RoadConnecti
     let idx = cells
         .iter()
         .position(|candidate| candidate.x == cell.x && candidate.y == cell.z)?;
+    let deck_y = road_component_y_at_sample(&road, idx, cells.len().saturating_sub(1));
     Some(RoadConnectionSample {
         width: road.width,
         style: road.style,
-        elevation: road_elevation_at_sample(&road, idx, cells.len().saturating_sub(1)) as i16,
+        elevation: (deck_y - cell.y).clamp(-12, 48) as i16,
     })
 }
 
@@ -1783,7 +1784,7 @@ pub(crate) fn road_component_centerline_samples(seg: &RoadSegment) -> Vec<IVec3>
         .map(|(idx, cell)| {
             IVec3::new(
                 cell.x,
-                seg.a.y + road_elevation_at_sample(seg, idx, last_index),
+                road_component_y_at_sample(seg, idx, last_index),
                 cell.y,
             )
         })
@@ -1898,13 +1899,12 @@ fn clear_road_component(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
     let last_index = cells.len().saturating_sub(1);
     let mut changed = 0usize;
     for (i, c) in cells.iter().enumerate() {
-        let elevation = road_elevation_at_sample(seg, i, last_index);
         let (perp_x, perp_z) = road_width_axis_at(&cells, i);
         for w in -half..=half {
             let wx = c.x + perp_x * w;
             let wz = c.y + perp_z * w;
             let sy = world.surface_height_at(wx, wz);
-            let deck_y = (sy + elevation).max(1);
+            let deck_y = road_deck_y_at_sample(world, seg, wx, wz, i, last_index).max(1);
             if deck_y <= sy {
                 let restore = terrain_surface_restore_voxel(world, wx, wz);
                 for y in deck_y..=sy {
@@ -1965,13 +1965,12 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
 
     let mut changed = 0usize;
     for (i, c) in cells.iter().enumerate() {
-        let elevation = road_elevation_at_sample(seg, i, last_index);
         let (perp_x, perp_z) = road_width_axis_at(&cells, i);
         for w in -half..=half {
             let wx = c.x + perp_x * w;
             let wz = c.y + perp_z * w;
             let sy = world.surface_height_at(wx, wz);
-            let deck_y = (sy + elevation).max(1);
+            let deck_y = road_deck_y_at_sample(world, seg, wx, wz, i, last_index).max(1);
             // Carve up to 3 blocks of air above so we don't bury the
             // road under trees / hills that just caught the edge.
             for clear_y in (deck_y + 1)..=(deck_y + 3) {
@@ -2002,8 +2001,7 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
         // Centre stripe every 3 cells along the length axis.
         if let Some(s) = stripe {
             if i % 3 == 0 {
-                let sy = world.surface_height_at(c.x, c.y);
-                let deck_y = (sy + elevation).max(1);
+                let deck_y = road_deck_y_at_sample(world, seg, c.x, c.y, i, last_index).max(1);
                 if world.edit_set_voxel(c.x, deck_y, c.y, s) {
                     changed += 1;
                 }
@@ -2013,11 +2011,89 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
     changed
 }
 
+fn road_deck_y_at_sample(
+    world: &VoxelWorld,
+    seg: &RoadSegment,
+    wx: i32,
+    wz: i32,
+    index: usize,
+    last_index: usize,
+) -> i32 {
+    if !road_has_manual_grade(seg) {
+        return world.surface_height_at(wx, wz).max(1);
+    }
+    match seg.shape {
+        RoadShape::Roundabout => {
+            let lift = (seg.elevation_a as i32 + seg.elevation_b as i32) as f32 * 0.5;
+            (world.surface_height_at(seg.a.x, seg.a.z) as f32 + lift)
+                .round()
+                .max(1.0) as i32
+        }
+        RoadShape::Corner => {
+            let via = road_corner_via(*seg);
+            let t = sample_t(index, last_index);
+            let a = world.surface_height_at(seg.a.x, seg.a.z) as f32 + seg.elevation_a as f32;
+            let v = world.surface_height_at(via.x, via.z) as f32 + seg.elevation_via as f32;
+            let b = world.surface_height_at(seg.b.x, seg.b.z) as f32 + seg.elevation_b as f32;
+            if t <= 0.5 {
+                lerp_grade(a, v, smoothstep(t * 2.0)).round().max(1.0) as i32
+            } else {
+                lerp_grade(v, b, smoothstep((t - 0.5) * 2.0))
+                    .round()
+                    .max(1.0) as i32
+            }
+        }
+        RoadShape::Straight => {
+            let t = smoothstep(sample_t(index, last_index));
+            let a = world.surface_height_at(seg.a.x, seg.a.z) as f32 + seg.elevation_a as f32;
+            let b = world.surface_height_at(seg.b.x, seg.b.z) as f32 + seg.elevation_b as f32;
+            lerp_grade(a, b, t).round().max(1.0) as i32
+        }
+    }
+}
+
+fn road_component_y_at_sample(seg: &RoadSegment, index: usize, last_index: usize) -> i32 {
+    match seg.shape {
+        RoadShape::Roundabout => {
+            let lift = (seg.elevation_a as i32 + seg.elevation_b as i32) as f32 * 0.5;
+            (seg.a.y as f32 + lift).round().max(1.0) as i32
+        }
+        RoadShape::Corner => {
+            let via = road_corner_via(*seg);
+            let t = sample_t(index, last_index);
+            let a = seg.a.y as f32 + seg.elevation_a as f32;
+            let v = via.y as f32 + seg.elevation_via as f32;
+            let b = seg.b.y as f32 + seg.elevation_b as f32;
+            if t <= 0.5 {
+                lerp_grade(a, v, smoothstep(t * 2.0)).round().max(1.0) as i32
+            } else {
+                lerp_grade(v, b, smoothstep((t - 0.5) * 2.0))
+                    .round()
+                    .max(1.0) as i32
+            }
+        }
+        RoadShape::Straight => {
+            let t = smoothstep(sample_t(index, last_index));
+            let a = seg.a.y as f32 + seg.elevation_a as f32;
+            let b = seg.b.y as f32 + seg.elevation_b as f32;
+            lerp_grade(a, b, t).round().max(1.0) as i32
+        }
+    }
+}
+
+fn road_has_manual_grade(seg: &RoadSegment) -> bool {
+    match seg.shape {
+        RoadShape::Corner => seg.elevation_a != 0 || seg.elevation_via != 0 || seg.elevation_b != 0,
+        RoadShape::Straight | RoadShape::Roundabout => seg.elevation_a != 0 || seg.elevation_b != 0,
+    }
+}
+
+#[cfg(test)]
 fn road_elevation_at_sample(seg: &RoadSegment, index: usize, last_index: usize) -> i32 {
     if last_index == 0 {
         return seg.elevation_a as i32;
     }
-    let t = (index as f32 / last_index as f32).clamp(0.0, 1.0);
+    let t = sample_t(index, last_index);
     if seg.shape == RoadShape::Corner {
         let (start, end, local_t) = if t <= 0.5 {
             (seg.elevation_a as f32, seg.elevation_via as f32, t * 2.0)
@@ -2028,13 +2104,28 @@ fn road_elevation_at_sample(seg: &RoadSegment, index: usize, last_index: usize) 
                 (t - 0.5) * 2.0,
             )
         };
-        let eased = local_t * local_t * (3.0 - 2.0 * local_t);
-        return (start + (end - start) * eased).round() as i32;
+        return lerp_grade(start, end, smoothstep(local_t)).round() as i32;
     }
-    let eased = t * t * (3.0 - 2.0 * t);
     let start = seg.elevation_a as f32;
     let end = seg.elevation_b as f32;
-    (start + (end - start) * eased).round() as i32
+    lerp_grade(start, end, smoothstep(t)).round() as i32
+}
+
+fn sample_t(index: usize, last_index: usize) -> f32 {
+    if last_index == 0 {
+        0.0
+    } else {
+        (index as f32 / last_index as f32).clamp(0.0, 1.0)
+    }
+}
+
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp_grade(start: f32, end: f32, t: f32) -> f32 {
+    start + (end - start) * t
 }
 
 // ---------------------------------------------------------------------
@@ -2508,8 +2599,7 @@ fn draw_road_component_gizmo(
 
     let last_index = cells.len().saturating_sub(1);
     let point_at = |i: usize, cell: IVec2| -> Vec3 {
-        let elevation = road_elevation_at_sample(road, i, last_index);
-        let deck_y = (world.surface_height_at(cell.x, cell.y) + elevation).max(1);
+        let deck_y = road_deck_y_at_sample(world, road, cell.x, cell.y, i, last_index).max(1);
         Vec3::new(
             cell.x as f32 + 0.5,
             deck_y as f32 + 1.2,
@@ -2542,9 +2632,9 @@ fn draw_road_component_gizmo(
         }
         if road.shape == RoadShape::Corner {
             let via = road_corner_via(*road);
-            let via_y = (world.surface_height_at(via.x, via.z)
-                + road_elevation_at_sample(road, cells.len() / 2, last_index))
-            .max(1);
+            let via_y =
+                road_deck_y_at_sample(world, road, via.x, via.z, cells.len() / 2, last_index)
+                    .max(1);
             gizmos.cuboid(
                 Transform::from_translation(Vec3::new(
                     via.x as f32 + 0.5,
@@ -2992,6 +3082,45 @@ mod tests {
                 .windows(2)
                 .all(|pair| (pair[1] - pair[0]).abs() <= 2),
             "bridge grade should step smoothly, got {heights:?}"
+        );
+    }
+
+    #[test]
+    fn raised_road_component_stamps_absolute_smooth_bridge_deck() {
+        let mut world = VoxelWorld::new();
+        let start = IVec3::new(0, world.surface_height_at(0, 0), 0);
+        let end = IVec3::new(96, world.surface_height_at(96, 0), 0);
+        let road = RoadSegment::new(start, end, 5, RoadStyle::Cobble).with_endpoint_heights(0, 24);
+        let cells = road_path_xz(&road);
+        let last_index = cells.len().saturating_sub(1);
+        let start_deck = world.surface_height_at(road.a.x, road.a.z) + road.elevation_a as i32;
+        let end_deck = world.surface_height_at(road.b.x, road.b.z) + road.elevation_b as i32;
+
+        let sample = (1..last_index)
+            .find_map(|idx| {
+                let t = (idx as f32 / last_index as f32).clamp(0.0, 1.0);
+                let eased = t * t * (3.0 - 2.0 * t);
+                let expected =
+                    (start_deck as f32 + (end_deck - start_deck) as f32 * eased).round() as i32;
+                let c = cells[idx];
+                let terrain_relative = world.surface_height_at(c.x, c.y)
+                    + road_elevation_at_sample(&road, idx, last_index);
+                (expected != terrain_relative).then_some((idx, c, expected, terrain_relative))
+            })
+            .expect("terrain fixture should expose rough ground under a raised road");
+
+        stamp_road(&mut world, &road);
+
+        let (_idx, c, expected, terrain_relative) = sample;
+        assert_eq!(
+            world.voxel_at(c.x, expected, c.y),
+            Voxel::from(BlockType::MossStone),
+            "raised road decks should stamp on the smooth component grade, not on per-cell terrain"
+        );
+        assert_ne!(
+            world.voxel_at(c.x, terrain_relative, c.y),
+            Voxel::from(BlockType::MossStone),
+            "old terrain-relative grade left a stair-stepped deck at y={terrain_relative}"
         );
     }
 
