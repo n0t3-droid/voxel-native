@@ -1031,12 +1031,14 @@ fn city_input(
                     let n = stamp_road(&mut world, &seg);
                     city.roads.push(seg);
                     save_city_roads_for_active(active.as_deref(), &city.roads);
+                    city.road_width = seg.width;
+                    city.road_style = seg.style;
                     city.pending_road_a = road_continuation_start(&seg);
                     city.status = if let Some(next) = city.pending_road_a {
                         format!(
                             "Strasse {} {} ({} Bloecke) - weiter ab {},{}.",
                             seg.shape.label(),
-                            city.road_style.label(),
+                            seg.style.label(),
                             n,
                             next.x,
                             next.z
@@ -1045,7 +1047,7 @@ fn city_input(
                         format!(
                             "Strasse {} {} ({} Bloecke)",
                             seg.shape.label(),
-                            city.road_style.label(),
+                            seg.style.label(),
                             n
                         )
                     };
@@ -1315,6 +1317,7 @@ fn road_segment_from_drag(
     style: RoadStyle,
     roads: &[RoadSegment],
 ) -> RoadSegment {
+    let (width, style) = road_drag_appearance(start, target, width, style, roads);
     let mut segment = RoadSegment::new(start, target, width, style);
     let start_height = road_handle_height_at(roads, start);
     let end_height = road_handle_height_at(roads, target);
@@ -1329,11 +1332,56 @@ fn road_segment_from_drag(
     segment
 }
 
+fn road_drag_appearance(
+    start: IVec3,
+    target: IVec3,
+    fallback_width: u8,
+    fallback_style: RoadStyle,
+    roads: &[RoadSegment],
+) -> (u8, RoadStyle) {
+    road_handle_appearance_at(roads, start)
+        .or_else(|| road_handle_appearance_at(roads, target))
+        .unwrap_or((fallback_width, fallback_style))
+}
+
+fn road_handle_appearance_at(roads: &[RoadSegment], handle: IVec3) -> Option<(u8, RoadStyle)> {
+    roads
+        .iter()
+        .rev()
+        .find(|road| road_has_handle(**road, handle))
+        .map(|road| (road.width, road.style))
+}
+
 fn road_handle_height_at(roads: &[RoadSegment], handle: IVec3) -> Option<i16> {
     roads
         .iter()
         .rev()
         .find_map(|road| road_handle_height(*road, handle))
+}
+
+fn road_has_handle(road: RoadSegment, handle: IVec3) -> bool {
+    match road.shape {
+        RoadShape::Straight => {
+            same_road_handle_xz(handle, road.a) || same_road_handle_xz(handle, road.b)
+        }
+        RoadShape::Corner => {
+            same_road_handle_xz(handle, road.a)
+                || same_road_handle_xz(handle, road_corner_via(road))
+                || same_road_handle_xz(handle, road.b)
+        }
+        RoadShape::Roundabout => {
+            let r = road.roundabout_radius.max(4) as i32;
+            [
+                road.a,
+                IVec3::new(road.a.x + r, road.a.y, road.a.z),
+                IVec3::new(road.a.x - r, road.a.y, road.a.z),
+                IVec3::new(road.a.x, road.a.y, road.a.z + r),
+                IVec3::new(road.a.x, road.a.y, road.a.z - r),
+            ]
+            .iter()
+            .any(|candidate| same_road_handle_xz(handle, *candidate))
+        }
+    }
 }
 
 fn road_handle_height(road: RoadSegment, handle: IVec3) -> Option<i16> {
@@ -2169,29 +2217,18 @@ fn city_draw_gizmos(
             if let Some(a) = city.pending_road_a {
                 cursor = smart_road_drag_target(a, cursor, &city.roads);
             }
+            let preview = city.pending_road_a.map(|a| {
+                road_segment_from_drag(a, cursor, city.road_width, city.road_style, &city.roads)
+            });
+            let preview_color = preview
+                .as_ref()
+                .map(|road| road.style.gizmo_color())
+                .unwrap_or_else(|| city.road_style.gizmo_color());
             let c_world = cursor.as_vec3() + Vec3::new(0.5, 1.5, 0.5);
             // Cursor marker — pulses so the user never loses it.
-            gizmos.sphere(
-                c_world,
-                Quat::IDENTITY,
-                0.8 + pulse * 0.3,
-                city.road_style.gizmo_color(),
-            );
-            if let Some(a) = city.pending_road_a {
-                let preview = road_segment_from_drag(
-                    a,
-                    cursor,
-                    city.road_width,
-                    city.road_style,
-                    &city.roads,
-                );
-                draw_road_component_gizmo(
-                    &mut gizmos,
-                    &world,
-                    &preview,
-                    city.road_style.gizmo_color(),
-                    true,
-                );
+            gizmos.sphere(c_world, Quat::IDENTITY, 0.8 + pulse * 0.3, preview_color);
+            if let Some(preview) = preview {
+                draw_road_component_gizmo(&mut gizmos, &world, &preview, preview_color, true);
             }
         }
         if city.tool == CityTool::District {
@@ -2920,6 +2957,60 @@ mod tests {
 
         assert_eq!(connector.elevation_a, 10);
         assert_eq!(connector.elevation_b, 18);
+    }
+
+    #[test]
+    fn road_drag_from_existing_handle_inherits_width_and_texture() {
+        let previous = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            11,
+            RoadStyle::Neon,
+        );
+
+        let next = road_segment_from_drag(
+            previous.b,
+            IVec3::new(64, 72, 0),
+            3,
+            RoadStyle::Asphalt,
+            &[previous],
+        );
+
+        assert_eq!(
+            next.width, 11,
+            "a connected road should inherit the source component width instead of falling back to the global knob"
+        );
+        assert_eq!(
+            next.style,
+            RoadStyle::Neon,
+            "a connected road should inherit the source texture so roads blend by default"
+        );
+    }
+
+    #[test]
+    fn road_drag_between_existing_handles_prefers_start_component_texture() {
+        let west = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            9,
+            RoadStyle::Cobble,
+        );
+        let east = RoadSegment::new(
+            IVec3::new(64, 72, 0),
+            IVec3::new(96, 72, 0),
+            5,
+            RoadStyle::Neon,
+        );
+
+        let connector =
+            road_segment_from_drag(west.b, east.a, 3, RoadStyle::Asphalt, &[west, east]);
+
+        assert_eq!(connector.width, 9);
+        assert_eq!(
+            connector.style,
+            RoadStyle::Cobble,
+            "source handle should be the style authority for fast road chaining"
+        );
     }
 
     #[test]
