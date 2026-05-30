@@ -5143,6 +5143,51 @@ fn road_network_points(save: &BotWorldSave, district: &BotDistrict) -> Vec<Vec2>
     points
 }
 
+fn road_network_segments(save: &BotWorldSave, district: &BotDistrict) -> Vec<(Vec2, Vec2)> {
+    let mut segments = Vec::new();
+    for pair in district.road_anchors.windows(2) {
+        let a = Vec2::new(pair[0][0] as f32, pair[0][2] as f32);
+        let b = Vec2::new(pair[1][0] as f32, pair[1][2] as f32);
+        if a.distance_squared(b) > 1.0 {
+            segments.push((a, b));
+        }
+    }
+    for project in &save.projects {
+        if project.district_id != Some(district.id) || !is_access_road_project(project.kind) {
+            continue;
+        }
+        let center = project_center(project.origin, project.size);
+        let half_x = project.size[0] as f32 * 0.5;
+        let half_z = project.size[2] as f32 * 0.5;
+        if matches!(project.kind, BotTaskKind::ExpandRoadGrid) {
+            segments.push((
+                Vec2::new(center.x - half_x, center.z),
+                Vec2::new(center.x + half_x, center.z),
+            ));
+            segments.push((
+                Vec2::new(center.x, center.z - half_z),
+                Vec2::new(center.x, center.z + half_z),
+            ));
+        } else if project.size[0] >= project.size[2] {
+            segments.push((
+                Vec2::new(center.x - half_x, center.z),
+                Vec2::new(center.x + half_x, center.z),
+            ));
+        } else {
+            segments.push((
+                Vec2::new(center.x, center.z - half_z),
+                Vec2::new(center.x, center.z + half_z),
+            ));
+        }
+    }
+    if segments.is_empty() {
+        let center = vec3_from_arr(district.center);
+        let c = Vec2::new(center.x, center.z);
+        segments.push((c, c));
+    }
+    segments
+}
+
 fn road_access_score(save: &BotWorldSave, district: &BotDistrict, x: i32, z: i32) -> f32 {
     let here = Vec2::new(x as f32, z as f32);
     let best = road_network_points(save, district)
@@ -5150,6 +5195,92 @@ fn road_access_score(save: &BotWorldSave, district: &BotDistrict, x: i32, z: i32
         .map(|p| p.distance(here))
         .fold(f32::INFINITY, f32::min);
     (1.0 - best / 140.0).clamp(0.0, 1.0)
+}
+
+fn point_to_segment_distance(point: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    if len_sq <= f32::EPSILON {
+        return point.distance(a);
+    }
+    let t = ((point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    point.distance(a + ab * t)
+}
+
+fn cross_2d(a: Vec2, b: Vec2) -> f32 {
+    a.x * b.y - a.y * b.x
+}
+
+fn point_on_segment(point: Vec2, a: Vec2, b: Vec2) -> bool {
+    let eps = 0.001;
+    cross_2d(point - a, b - a).abs() <= eps
+        && point.x >= a.x.min(b.x) - eps
+        && point.x <= a.x.max(b.x) + eps
+        && point.y >= a.y.min(b.y) - eps
+        && point.y <= a.y.max(b.y) + eps
+}
+
+fn segments_intersect(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+    let ab = b - a;
+    let cd = d - c;
+    let o1 = cross_2d(ab, c - a);
+    let o2 = cross_2d(ab, d - a);
+    let o3 = cross_2d(cd, a - c);
+    let o4 = cross_2d(cd, b - c);
+    let eps = 0.001;
+    if ((o1 > eps && o2 < -eps) || (o1 < -eps && o2 > eps))
+        && ((o3 > eps && o4 < -eps) || (o3 < -eps && o4 > eps))
+    {
+        return true;
+    }
+    point_on_segment(c, a, b)
+        || point_on_segment(d, a, b)
+        || point_on_segment(a, c, d)
+        || point_on_segment(b, c, d)
+}
+
+fn segment_to_segment_distance(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> f32 {
+    if segments_intersect(a, b, c, d) {
+        return 0.0;
+    }
+    point_to_segment_distance(a, c, d)
+        .min(point_to_segment_distance(b, c, d))
+        .min(point_to_segment_distance(c, a, b))
+        .min(point_to_segment_distance(d, a, b))
+}
+
+fn road_frontage_score(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> f32 {
+    let min_x = origin[0] as f32;
+    let max_x = (origin[0] + size[0].max(1)) as f32;
+    let min_z = origin[2] as f32;
+    let max_z = (origin[2] + size[2].max(1)) as f32;
+    let edges = [
+        (Vec2::new(min_x, min_z), Vec2::new(max_x, min_z)),
+        (Vec2::new(min_x, max_z), Vec2::new(max_x, max_z)),
+        (Vec2::new(min_x, min_z), Vec2::new(min_x, max_z)),
+        (Vec2::new(max_x, min_z), Vec2::new(max_x, max_z)),
+    ];
+    let best = road_network_segments(save, district)
+        .into_iter()
+        .flat_map(|(road_a, road_b)| {
+            edges
+                .iter()
+                .map(move |(a, b)| segment_to_segment_distance(*a, *b, road_a, road_b))
+        })
+        .fold(f32::INFINITY, f32::min);
+    if !best.is_finite() {
+        return 0.0;
+    }
+    if best <= 18.0 {
+        1.0
+    } else {
+        (1.0 - (best - 18.0) / 54.0).clamp(0.0, 1.0)
+    }
 }
 
 fn score_planned_site(
@@ -5167,7 +5298,9 @@ fn score_planned_site(
     let road_access = if is_road_project(kind) {
         1.0
     } else {
-        road_access_score(save, district, center_x, center_z)
+        let proximity = road_access_score(save, district, center_x, center_z);
+        let frontage = road_frontage_score(save, district, origin, size);
+        (proximity * 0.35 + frontage * 0.65).clamp(0.0, 1.0)
     };
     let balance = match (district.kind, kind) {
         (BotDistrictKind::Park, BotTaskKind::BuildPark | BotTaskKind::BuildPlaza) => 1.0,
@@ -5472,7 +5605,7 @@ fn build_project_concept(
         "{label}: {source}; footprint {}x{}x{} at {},{},{}; owned by {team}; style sheet: {architecture_variant}.",
         size[0], size[1], size[2], origin[0], origin[1], origin[2]
     );
-    let rows = vec![
+    let mut rows = vec![
         BotPlanRow {
             phase: "Site".into(),
             owner: role_owner_label(save, BotRole::Surveyor, &team),
@@ -5526,6 +5659,18 @@ fn build_project_concept(
             status: "queued".into(),
         },
     ];
+    if is_road_project(kind) {
+        rows.insert(
+            2,
+            BotPlanRow {
+                phase: "Road Grade".into(),
+                owner: role_owner_label(save, BotRole::Surveyor, &team),
+                material: "terrain-aware grade sheet".into(),
+                detail: "Roads sample nearby terrain, lift shallow valleys, keep hilltops intact, and score buildings by real street-edge frontage.".into(),
+                status: "queued".into(),
+            },
+        );
+    }
     BotProjectConcept {
         brief,
         structure: structure.into(),
@@ -6151,19 +6296,40 @@ fn road_surface_span(world: &VoxelWorld, x: i32, z: i32) -> i32 {
     max - min
 }
 
-fn road_support_voxel(
-    world: &VoxelWorld,
-    x: i32,
-    z: i32,
-    road_y: i32,
-    local_y: i32,
+fn smoothed_road_grade_y(
+    surface_y: i32,
+    neighbor_surfaces: [i32; 8],
     structural_edge: bool,
-) -> Option<(IVec3, Voxel)> {
-    if local_y <= 0 || local_y > 3 {
-        return None;
+) -> i32 {
+    let total = surface_y * 3 + neighbor_surfaces.iter().sum::<i32>();
+    let target = ((total as f32) / 11.0).round() as i32;
+    if target <= surface_y {
+        return surface_y;
     }
-    let slope = road_surface_span(world, x, z);
-    let depth = if structural_edge {
+    let max_lift = if structural_edge { 6 } else { 4 };
+    target.min(surface_y + max_lift)
+}
+
+fn road_grade_y(world: &VoxelWorld, x: i32, z: i32, structural_edge: bool) -> i32 {
+    let sample = |dx: i32, dz: i32| world.surface_height_at(x + dx, z + dz) + 1;
+    smoothed_road_grade_y(
+        sample(0, 0),
+        [
+            sample(4, 0),
+            sample(-4, 0),
+            sample(0, 4),
+            sample(0, -4),
+            sample(4, 4),
+            sample(4, -4),
+            sample(-4, 4),
+            sample(-4, -4),
+        ],
+        structural_edge,
+    )
+}
+
+fn road_support_depth(surface_y: i32, road_y: i32, slope: i32, structural_edge: bool) -> i32 {
+    let slope_depth = if structural_edge {
         if slope >= 3 {
             3
         } else {
@@ -6176,6 +6342,34 @@ fn road_support_voxel(
     } else {
         0
     };
+    let lift = (road_y - surface_y).max(0);
+    let lift_depth = if lift > 1 {
+        if structural_edge {
+            lift
+        } else {
+            lift.min(3)
+        }
+    } else {
+        0
+    };
+    let max_depth = if structural_edge { 6 } else { 3 };
+    slope_depth.max(lift_depth).clamp(0, max_depth)
+}
+
+fn road_support_voxel(
+    world: &VoxelWorld,
+    x: i32,
+    z: i32,
+    road_y: i32,
+    local_y: i32,
+    structural_edge: bool,
+) -> Option<(IVec3, Voxel)> {
+    if local_y <= 0 || local_y > 6 {
+        return None;
+    }
+    let slope = road_surface_span(world, x, z);
+    let surface_y = world.surface_height_at(x, z) + 1;
+    let depth = road_support_depth(surface_y, road_y, slope, structural_edge);
     if local_y > depth {
         return None;
     }
@@ -6220,10 +6414,10 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let x = origin.x + local.x;
             let curve = ((local.x as f32 * 0.16).sin() * 2.0).round() as i32;
             let z = origin.z + local.z + curve;
-            let y = world.surface_height_at(x, z) + 1;
             let width = project.size[2].max(1);
             let sidewalk = local.z <= 1 || local.z >= width - 2;
             let curb = local.z == 2 || local.z == width - 3;
+            let y = road_grade_y(world, x, z, sidewalk || curb);
             let lane = local.z == width / 2 && local.x.rem_euclid(10) < 5;
             let crosswalk = local.x.rem_euclid(34) < 4 && local.z > 2 && local.z < width - 3;
             let signal = (local.x.rem_euclid(48) == 0) && (local.z == 1 || local.z == width - 2);
@@ -6288,7 +6482,6 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
         BotTaskKind::ExpandRoadGrid => {
             let x = origin.x + local.x;
             let z = origin.z + local.z;
-            let y = world.surface_height_at(x, z) + 1;
             let mid_x = project.size[0] / 2;
             let mid_z = project.size[2] / 2;
             let bend_x =
@@ -6313,6 +6506,12 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                     || (plan_z - mid_z).abs() == 2);
             let intersection_corner = (sidewalk_x && sidewalk_z)
                 || ((local.x - mid_x).abs() == 5 && (local.z - mid_z).abs() == 5);
+            let road_like = road_x || road_z || sidewalk_x || sidewalk_z || intersection_corner;
+            let y = if road_like {
+                road_grade_y(world, x, z, sidewalk_x || sidewalk_z || intersection_corner)
+            } else {
+                world.surface_height_at(x, z) + 1
+            };
             if local.y == 0 && (road_x || road_z) {
                 Some((
                     IVec3::new(x, y, z),
@@ -6322,7 +6521,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                         Voxel::from(BlockType::Stone)
                     },
                 ))
-            } else if local.y == 0 && (sidewalk_x || sidewalk_z) {
+            } else if local.y == 0 && (sidewalk_x || sidewalk_z || intersection_corner) {
                 Some((IVec3::new(x, y, z), Voxel::from(BlockType::Limestone)))
             } else if local.y == 0 && (local.x + local.z).rem_euclid(31) == 0 {
                 Some((IVec3::new(x, y, z), Voxel::from(BlockType::Leaves)))
@@ -6362,7 +6561,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                         IVec3::new(x, y + local.y, z),
                         Voxel::from(BlockType::ShipHullDark),
                     ))
-                } else if road_x || road_z || sidewalk_x || sidewalk_z {
+                } else if road_like {
                     road_support_voxel(
                         world,
                         x,
@@ -10065,6 +10264,228 @@ mod tests {
         let isolated = score_city_slot(0.8, 0.0, true, 0.7, true);
         assert!(connected > isolated);
         assert!(score_city_slot(1.0, 1.0, false, 1.0, true) < 0.0);
+    }
+
+    #[test]
+    fn road_grade_lifts_valleys_without_cutting_hilltops() {
+        let valley_grade = smoothed_road_grade_y(72, [80, 82, 81, 79, 83, 80, 82, 81], true);
+        assert!(valley_grade > 72);
+        assert!(valley_grade <= 78);
+
+        let hilltop_grade = smoothed_road_grade_y(92, [82, 84, 85, 83, 81, 86, 84, 82], true);
+        assert_eq!(hilltop_grade, 92);
+    }
+
+    #[test]
+    fn road_support_depth_reaches_raised_terrain_grades() {
+        assert_eq!(road_support_depth(72, 77, 1, true), 5);
+        assert_eq!(road_support_depth(72, 77, 1, false), 3);
+        assert_eq!(road_support_depth(72, 73, 0, false), 0);
+        assert_eq!(road_support_depth(72, 73, 4, false), 2);
+    }
+
+    #[test]
+    fn frontage_score_prefers_lots_with_a_real_road_edge() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Frontage Test".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 80,
+            road_anchors: vec![[0, 90, 0]],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildRoad,
+            label: "Road".into(),
+            origin: [-48, 90, 0],
+            size: [96, 7, 12],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+
+        let road_front = road_frontage_score(&save, &district, [-12, 90, 14], [24, 20, 24]);
+        let vague_nearby = road_frontage_score(&save, &district, [-12, 90, 42], [24, 20, 24]);
+
+        assert!(road_front > 0.85, "frontage score was {road_front}");
+        assert!(
+            road_front > vague_nearby + 0.30,
+            "frontage {road_front} should beat vague nearby {vague_nearby}"
+        );
+    }
+
+    #[test]
+    fn frontage_score_uses_full_road_segments_not_only_sample_points() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Long Road Test".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildRoad,
+            label: "Long Boulevard".into(),
+            origin: [-96, 90, 0],
+            size: [192, 7, 12],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+
+        let score = road_frontage_score(&save, &district, [30, 90, 14], [20, 36, 20]);
+
+        assert!(score > 0.90, "long-road frontage score was {score}");
+    }
+
+    #[test]
+    fn segment_distance_is_zero_when_segments_cross_between_endpoints() {
+        let a = Vec2::new(0.0, 0.0);
+        let b = Vec2::new(10.0, 0.0);
+        let c = Vec2::new(5.0, -5.0);
+        let d = Vec2::new(5.0, 5.0);
+
+        assert_eq!(segment_to_segment_distance(a, b, c, d), 0.0);
+    }
+
+    #[test]
+    fn road_grid_segments_include_both_street_axes() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Cross Axis Grid".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Access Grid".into(),
+            origin: [-48, 90, -48],
+            size: [96, 7, 96],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+
+        let grid_segments = road_network_segments(&save, &district);
+
+        assert_eq!(grid_segments.len(), 2);
+        assert!(grid_segments
+            .iter()
+            .any(|(a, b)| (a.y - b.y).abs() < 0.1 && (a.x - b.x).abs() > 90.0));
+        assert!(grid_segments
+            .iter()
+            .any(|(a, b)| (a.x - b.x).abs() < 0.1 && (a.y - b.y).abs() > 90.0));
+
+        save.projects[0].kind = BotTaskKind::BuildRoad;
+        save.projects[0].size = [96, 7, 12];
+        let single_axis_segments = road_network_segments(&save, &district);
+
+        assert_eq!(single_axis_segments.len(), 1);
+        assert!((single_axis_segments[0].0.y - single_axis_segments[0].1.y).abs() < 0.1);
+    }
+
+    #[test]
+    fn project_concept_keeps_road_grade_on_road_work_only() {
+        let save = BotWorldSave::default();
+        let road = build_project_concept(
+            &save,
+            BotTaskKind::ExpandRoadGrid,
+            BotTheme::AmberStreet,
+            [0, 90, 0],
+            [96, 7, 96],
+            "Grid",
+            false,
+            None,
+            None,
+        );
+        let tower = build_project_concept(
+            &save,
+            BotTaskKind::BuildGlassTower,
+            BotTheme::CyanAlloy,
+            [0, 90, 0],
+            [18, 44, 18],
+            "Tower",
+            false,
+            None,
+            None,
+        );
+
+        assert!(road.rows.iter().any(|row| row.phase == "Road Grade"));
+        assert!(!tower.rows.iter().any(|row| row.phase == "Road Grade"));
+    }
+
+    #[test]
+    fn road_grid_intersection_corners_get_grounded_surface_voxels() {
+        let project = BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Access Grid".into(),
+            origin: [0, 90, 0],
+            size: [96, 7, 96],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        };
+        let world = VoxelWorld::new();
+
+        let corner_voxel = project_voxel(&project, IVec3::new(53, 0, 53), &world);
+        let corner_support = project_voxel(&project, IVec3::new(53, 1, 53), &world);
+
+        assert!(
+            corner_voxel.is_some(),
+            "intersection corner should receive a visible sidewalk voxel"
+        );
+        assert!(
+            corner_support.is_some(),
+            "intersection corner should use the same terrain-aware support path"
+        );
     }
 
     #[test]

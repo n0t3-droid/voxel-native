@@ -12,9 +12,11 @@ use bevy_egui::{egui, EguiContexts};
 use crate::chunk::to_i32_safe;
 use crate::director::SimulationDirector;
 use crate::director::UnifiedTelemetry;
+use crate::icons::{paint_icon, Icon};
 use crate::player::{Player, SuitVitals};
 use crate::settings::{HudProfile, WorldSettings};
 use crate::terrain::Biome;
+use crate::toolbelt::ToolbeltTool;
 use crate::weapons::DestructionStats;
 use crate::world::{StreamingGovernor, VoxelWorld};
 
@@ -54,6 +56,7 @@ impl Plugin for HudPlugin {
                     toggle_debug_overlay,
                     update_stats_text,
                     draw_neon_combat_hud,
+                    draw_workflow_rail,
                     update_hint,
                     hotbar_input.run_if(in_state(crate::menu::GameState::InGame)),
                     hotbar_highlight,
@@ -793,6 +796,158 @@ fn draw_neon_combat_hud(
     }
 }
 
+#[derive(Clone, Copy)]
+struct WorkflowStep {
+    label: &'static str,
+    key: &'static str,
+    icon: Icon,
+}
+
+fn workflow_steps_for_profile(profile: HudProfile) -> Vec<WorkflowStep> {
+    if profile == HudProfile::Focused {
+        return Vec::new();
+    }
+    vec![
+        WorkflowStep {
+            label: "MOVE",
+            key: "WASD",
+            icon: Icon::Move,
+        },
+        WorkflowStep {
+            label: "BUILD",
+            key: "F7",
+            icon: Icon::ModeBuild,
+        },
+        WorkflowStep {
+            label: "CITY",
+            key: "6-9",
+            icon: Icon::City,
+        },
+        WorkflowStep {
+            label: "BOTS",
+            key: "F1",
+            icon: Icon::Wand,
+        },
+        WorkflowStep {
+            label: "SAVE",
+            key: "F5",
+            icon: Icon::Save,
+        },
+    ]
+}
+
+fn active_workflow_label(mode: Option<&crate::mode::ModeContext>) -> &'static str {
+    let Some(mode) = mode else {
+        return "MOVE";
+    };
+    if let Some(tool) = mode.build_tool() {
+        if matches!(
+            tool,
+            ToolbeltTool::CityRoad
+                | ToolbeltTool::CityDistrict
+                | ToolbeltTool::CityBuilding
+                | ToolbeltTool::CityFacade
+                | ToolbeltTool::SmartTower
+        ) {
+            "CITY"
+        } else {
+            "BUILD"
+        }
+    } else if mode.allows_weapons() {
+        "MOVE"
+    } else {
+        "BOTS"
+    }
+}
+
+fn draw_workflow_rail(
+    mut contexts: EguiContexts,
+    state: Res<State<crate::menu::GameState>>,
+    settings: Res<WorldSettings>,
+    mode: Option<Res<crate::mode::ModeContext>>,
+) {
+    if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    let steps = workflow_steps_for_profile(settings.hud_profile);
+    if steps.is_empty() {
+        return;
+    }
+    let ctx = contexts.ctx_mut();
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("workflow_rail"),
+    ));
+    let colors = settings.theme.semantic();
+    let mode_ref = mode.as_deref();
+    let active = active_workflow_label(mode_ref);
+    let rail_w = (steps.len() as f32 * 88.0 + 20.0).min(screen.width() - 44.0);
+    let rail_y = if mode_ref.map(|m| m.is_build()).unwrap_or(false) {
+        screen.bottom() - 124.0
+    } else {
+        screen.bottom() - 74.0
+    };
+    let rail = egui::Rect::from_center_size(
+        egui::pos2(screen.center().x, rail_y),
+        egui::vec2(rail_w, 48.0),
+    );
+    crate::ui_kit::hud_panel(
+        &painter,
+        rail,
+        settings.theme,
+        settings.hud_panel_opacity * 0.72,
+        colors.info,
+    );
+    let slot_w = (rail.width() - 18.0) / steps.len() as f32;
+    for (idx, step) in steps.iter().enumerate() {
+        let left = rail.left() + 9.0 + idx as f32 * slot_w;
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(left + 3.0, rail.top() + 7.0),
+            egui::vec2((slot_w - 6.0).max(54.0), 34.0),
+        );
+        let is_active = step.label == active;
+        let tint = if is_active {
+            colors.warning
+        } else {
+            colors.info.linear_multiply(0.72)
+        };
+        painter.rect_filled(
+            rect,
+            egui::Rounding::same(7.0),
+            if is_active {
+                egui::Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 48)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(4, 18, 24, 118)
+            },
+        );
+        painter.rect_stroke(
+            rect,
+            egui::Rounding::same(7.0),
+            egui::Stroke::new(1.0, tint),
+        );
+        let icon_rect = egui::Rect::from_min_size(
+            rect.left_top() + egui::vec2(7.0, 8.0),
+            egui::vec2(18.0, 18.0),
+        );
+        paint_icon(&painter, icon_rect, step.icon, tint);
+        hud_text(
+            &painter,
+            rect.left_top() + egui::vec2(31.0, 5.0),
+            step.label,
+            tint,
+            10.5,
+        );
+        hud_text(
+            &painter,
+            rect.left_top() + egui::vec2(31.0, 19.0),
+            step.key,
+            colors.text_muted,
+            9.5,
+        );
+    }
+}
+
 fn compact_hud_line(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_owned();
@@ -800,6 +955,25 @@ fn compact_hud_line(text: &str, max_chars: usize) -> String {
     let mut out: String = text.chars().take(max_chars.saturating_sub(3)).collect();
     out.push_str("...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guided_workflow_exposes_the_core_engine_loop() {
+        let steps = workflow_steps_for_profile(HudProfile::Guided);
+        let labels: Vec<&str> = steps.iter().map(|step| step.label).collect();
+        assert_eq!(labels, vec!["MOVE", "BUILD", "CITY", "BOTS", "SAVE"]);
+        assert!(steps.iter().any(|step| step.key == "F7"));
+        assert!(steps.iter().any(|step| step.key == "F1"));
+    }
+
+    #[test]
+    fn focused_hud_hides_workflow_rail() {
+        assert!(workflow_steps_for_profile(HudProfile::Focused).is_empty());
+    }
 }
 
 fn hud_text(painter: &egui::Painter, pos: egui::Pos2, text: &str, color: egui::Color32, size: f32) {
@@ -902,7 +1076,7 @@ pub struct HintBanner;
 fn spawn_hint(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
-            "LMB: MAUS FASSEN  //  F3: BUILD  //  TAB: PICKER  //  F1: DECK",
+            "LMB: MAUS FASSEN  //  F7: BUILD LIVE  //  TAB: PICKER  //  F1: DECK",
             TextStyle {
                 font_size: 16.0,
                 color: Color::srgba(0.72, 1.0, 0.80, 0.98),
