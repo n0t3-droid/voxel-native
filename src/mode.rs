@@ -300,7 +300,8 @@ fn mode_hotkeys(
 
     if keys.just_pressed(KeyCode::F8) {
         capture_player_continuity(&player_q, &mut continuity);
-        let (next, status) = next_mode_for_f8(mode.mode, toolbelt.tool);
+        let (next, status) =
+            next_mode_for_f8_with_history(mode.mode, mode.last_mode, toolbelt.tool);
         if let Some(tool) = next.build_tool() {
             toolbelt.tool = tool;
         }
@@ -310,7 +311,8 @@ fn mode_hotkeys(
 
     if keys.just_pressed(KeyCode::F7) {
         capture_player_continuity(&player_q, &mut continuity);
-        let (next, status) = next_mode_for_f7(mode.mode, toolbelt.tool);
+        let (next, status) =
+            next_mode_for_f7_with_history(mode.mode, mode.last_mode, toolbelt.tool);
         if let Some(tool) = next.build_tool() {
             toolbelt.tool = tool;
         }
@@ -476,9 +478,26 @@ fn active_or_fallback_build_tool(mode: ActiveMode, fallback_tool: ToolbeltTool) 
     normalized_build_tool(mode.build_tool().unwrap_or(fallback_tool))
 }
 
-fn next_mode_for_f8(current_mode: ActiveMode, fallback_tool: ToolbeltTool) -> (ActiveMode, String) {
+fn remembered_or_fallback_build_tool(
+    current_mode: ActiveMode,
+    last_mode: ActiveMode,
+    fallback_tool: ToolbeltTool,
+) -> ToolbeltTool {
+    normalized_build_tool(
+        current_mode
+            .build_tool()
+            .or_else(|| last_mode.build_tool())
+            .unwrap_or(fallback_tool),
+    )
+}
+
+fn next_mode_for_f8_with_history(
+    current_mode: ActiveMode,
+    last_mode: ActiveMode,
+    fallback_tool: ToolbeltTool,
+) -> (ActiveMode, String) {
     if current_mode.allows_weapons() {
-        let tool = active_or_fallback_build_tool(current_mode, fallback_tool);
+        let tool = remembered_or_fallback_build_tool(current_mode, last_mode, fallback_tool);
         (
             ActiveMode::BuildLive { tool },
             format!("Weapons holstered. Creative Build: {}.", tool.label()),
@@ -491,8 +510,12 @@ fn next_mode_for_f8(current_mode: ActiveMode, fallback_tool: ToolbeltTool) -> (A
     }
 }
 
-fn next_mode_for_f7(current_mode: ActiveMode, fallback_tool: ToolbeltTool) -> (ActiveMode, String) {
-    let tool = active_or_fallback_build_tool(current_mode, fallback_tool);
+fn next_mode_for_f7_with_history(
+    current_mode: ActiveMode,
+    last_mode: ActiveMode,
+    fallback_tool: ToolbeltTool,
+) -> (ActiveMode, String) {
+    let tool = remembered_or_fallback_build_tool(current_mode, last_mode, fallback_tool);
     (
         ActiveMode::BuildLive { tool },
         format!("Build Live: {}. {}", tool.label(), tool.hint()),
@@ -664,7 +687,11 @@ mod tests {
 
     #[test]
     fn f7_enters_build_live_without_opening_picker() {
-        let (next, _) = next_mode_for_f7(ActiveMode::Combat, ToolbeltTool::CityRoad);
+        let (next, _) = next_mode_for_f7_with_history(
+            ActiveMode::Combat,
+            ActiveMode::Combat,
+            ToolbeltTool::CityRoad,
+        );
         assert_eq!(
             next,
             ActiveMode::BuildLive {
@@ -672,7 +699,10 @@ mod tests {
             }
         );
 
-        let (next, _) = next_mode_for_f7(
+        let (next, _) = next_mode_for_f7_with_history(
+            ActiveMode::BuildPicker {
+                tool: ToolbeltTool::CityBuilding,
+            },
             ActiveMode::BuildPicker {
                 tool: ToolbeltTool::CityBuilding,
             },
@@ -713,7 +743,10 @@ mod tests {
 
     #[test]
     fn f8_only_toggles_combat_and_build_modes() {
-        let (next, _) = next_mode_for_f8(
+        let (next, _) = next_mode_for_f8_with_history(
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::Sculpt,
+            },
             ActiveMode::BuildLive {
                 tool: ToolbeltTool::Sculpt,
             },
@@ -721,12 +754,54 @@ mod tests {
         );
         assert_eq!(next, ActiveMode::Combat);
 
-        let (next, _) = next_mode_for_f8(ActiveMode::Combat, ToolbeltTool::CityBuilding);
+        let (next, _) = next_mode_for_f8_with_history(
+            ActiveMode::Combat,
+            ActiveMode::Combat,
+            ToolbeltTool::CityBuilding,
+        );
         assert_eq!(
             next,
             ActiveMode::BuildLive {
                 tool: ToolbeltTool::CityBuilding
             }
+        );
+    }
+
+    #[test]
+    fn f8_holsters_to_last_build_tool_when_toolbelt_fallback_is_stale() {
+        let (next, _) = next_mode_for_f8_with_history(
+            ActiveMode::Combat,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::CityRoad,
+            },
+            ToolbeltTool::BrushPlace,
+        );
+
+        assert_eq!(
+            next,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::CityRoad
+            },
+            "F8 should restore the exact build tool that was active before combat"
+        );
+    }
+
+    #[test]
+    fn f7_enters_last_live_build_tool_when_toolbelt_fallback_is_stale() {
+        let (next, _) = next_mode_for_f7_with_history(
+            ActiveMode::Combat,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::CityBuilding,
+            },
+            ToolbeltTool::BrushPlace,
+        );
+
+        assert_eq!(
+            next,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::CityBuilding
+            },
+            "F7 should be a direct return to the remembered Build Live tool"
         );
     }
 }
