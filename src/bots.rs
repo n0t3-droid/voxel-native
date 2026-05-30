@@ -8012,14 +8012,19 @@ fn building_foundation_voxel(
     local_y: i32,
     structural: bool,
 ) -> Option<(IVec3, Voxel)> {
-    if local_y <= 0 || local_y > 5 {
+    if local_y <= 0 {
         return None;
     }
     let surface = world.surface_height_at(x, z) + 1;
-    let y = surface + local_y - 1;
-    if y >= base_y || (!structural && local_y > 2) {
+    let gap = base_y - surface;
+    if gap <= 0 {
         return None;
     }
+    let max_depth = if structural { gap.min(48) } else { gap.min(3) };
+    if local_y > max_depth {
+        return None;
+    }
+    let y = base_y - local_y;
     let block = if structural {
         BlockType::Basalt
     } else {
@@ -13698,6 +13703,54 @@ mod tests {
         assert_ne!(
             old_north_entrance,
             Some(Voxel::from(BlockType::CockpitGlass))
+        );
+    }
+
+    #[test]
+    fn raised_tower_foundation_supports_descend_from_road_grade_deck() {
+        let world = VoxelWorld::new();
+        let terrain_base = world.surface_height_at(10, 10) + 1;
+        let road_grade_base = terrain_base + 32;
+        let project = BotProject {
+            id: 2,
+            kind: BotTaskKind::BuildGlassTower,
+            label: "Raised Bridge Tower".into(),
+            origin: [0, road_grade_base, 0],
+            size: [21, 58, 21],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                ..default()
+            },
+        };
+
+        let upper_support = project_voxel(&project, IVec3::new(10, 1, 10), &world);
+        let lower_support = project_voxel(&project, IVec3::new(10, 30, 10), &world);
+
+        assert_eq!(
+            upper_support,
+            Some((
+                IVec3::new(10, road_grade_base - 1, 10),
+                Voxel::from(BlockType::Basalt)
+            )),
+            "raised foundations should start directly below the road-grade deck"
+        );
+        assert_eq!(
+            lower_support,
+            Some((
+                IVec3::new(10, road_grade_base - 30, 10),
+                Voxel::from(BlockType::Basalt)
+            )),
+            "raised foundations should continue downward instead of leaving a floating tower"
         );
     }
 
