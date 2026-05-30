@@ -19,6 +19,7 @@
 //! existing async mesher picks changes up within a frame or two; no
 //! coupling to the builder state machine needed.
 
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
@@ -159,6 +160,40 @@ pub struct RoadSegment {
     pub b: IVec3,
     pub width: u8,
     pub style: RoadStyle,
+    pub elevation_a: i16,
+    pub elevation_b: i16,
+}
+
+impl RoadSegment {
+    pub fn new(a: IVec3, b: IVec3, width: u8, style: RoadStyle) -> Self {
+        Self {
+            a,
+            b,
+            width: 1,
+            style: RoadStyle::Asphalt,
+            elevation_a: 0,
+            elevation_b: 0,
+        }
+        .with_width(width)
+        .retextured(style)
+        .with_endpoint_heights(0, 0)
+    }
+
+    pub fn with_width(mut self, width: u8) -> Self {
+        self.width = width.clamp(1, 17);
+        self
+    }
+
+    pub fn retextured(mut self, style: RoadStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn with_endpoint_heights(mut self, a: i16, b: i16) -> Self {
+        self.elevation_a = a.clamp(-12, 48);
+        self.elevation_b = b.clamp(-12, 48);
+        self
+    }
 }
 
 /// Decorative district marker. Acts as a visual anchor + a handle for
@@ -359,6 +394,7 @@ pub struct CityState {
     /// First click of a building footprint in progress.
     pub pending_building_a: Option<IVec3>,
     pub roads: Vec<RoadSegment>,
+    pub selected_road: Option<usize>,
     pub districts: Vec<District>,
     pub buildings: Vec<Building>,
     pub facades: Vec<FacadePrefab>,
@@ -380,6 +416,7 @@ impl Default for CityState {
             pending_road_a: None,
             pending_building_a: None,
             roads: Vec::new(),
+            selected_road: None,
             districts: Vec::new(),
             buildings: Vec::new(),
             facades: Vec::new(),
@@ -439,6 +476,7 @@ fn setup_facade_library(mut city: ResMut<CityState>) {
 fn city_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    mut wheel: EventReader<MouseWheel>,
     editor: Res<EditorState>,
     mode: Res<crate::mode::ModeContext>,
     mut city: ResMut<CityState>,
@@ -454,6 +492,7 @@ fn city_input(
         .is_some()
         && mode.is_build_live();
     if !editor_city_active && !live_city_active {
+        wheel.clear();
         return;
     }
     if live_city_active {
@@ -462,6 +501,7 @@ fn city_input(
             .map(|w| w.cursor.grab_mode == bevy::window::CursorGrabMode::Locked)
             .unwrap_or(false);
         if !cursor_locked {
+            wheel.clear();
             return;
         }
     }
@@ -568,6 +608,7 @@ fn city_input(
 
     // --- Crosshair pick -----------------------------------------------
     let Ok(cam_tf) = cam_q.get_single() else {
+        wheel.clear();
         return;
     };
     let origin = cam_tf.translation();
@@ -589,6 +630,56 @@ fn city_input(
     let ground = IVec3::new(hit_cell.x, surface_y, hit_cell.z);
     let snapped = snap_cell(ground, city.snap, &city.roads);
 
+    city.selected_road = if city.tool == CityTool::Road {
+        nearest_road_component(&city.roads, snapped, 5.0)
+    } else {
+        None
+    };
+
+    let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
+    if city.tool == CityTool::Road && wheel_delta.abs() > f32::EPSILON {
+        let mut steps = wheel_delta.round() as i32;
+        if steps == 0 {
+            steps = wheel_delta.signum() as i32;
+        }
+        steps = steps.clamp(-4, 4);
+
+        if let Some(idx) = city.selected_road {
+            let before = city.roads[idx];
+            let mut next = before;
+            let mut label = None;
+
+            if ctrl && !shift && !alt {
+                let width = (before.width as i32 + steps * 2).clamp(1, 17) as u8;
+                next = before.with_width(width);
+                city.road_width = next.width;
+                label = Some(format!("Breite {}", next.width));
+            } else if shift && !ctrl && !alt {
+                next = road_with_endpoint_height_delta(before, snapped, (steps * 2) as i16);
+                label = Some(format!(
+                    "Hoehe A/B {}:{}",
+                    next.elevation_a, next.elevation_b
+                ));
+            } else if alt && !ctrl && !shift {
+                next = before.retextured(next_road_style(before.style, steps));
+                city.road_style = next.style;
+                label = Some(format!("Textur {}", next.style.label()));
+            }
+
+            if let Some(label) = label {
+                let n = stamp_road(&mut world, &next);
+                city.roads[idx] = next;
+                city.status = format!("Strassenkomponente {}: {} ({} Bloecke)", idx + 1, label, n);
+                telemetry.city_actions = telemetry.city_actions.saturating_add(1);
+                telemetry.build_blocks_changed =
+                    telemetry.build_blocks_changed.saturating_add(n as u64);
+                return;
+            }
+        } else if ctrl || shift || alt {
+            city.status = "Strassen-Edit: auf eine Strassenkomponente zielen.".into();
+        }
+    }
+
     // --- Mouse: commit action -----------------------------------------
     if bare && mouse.just_pressed(MouseButton::Left) {
         match city.tool {
@@ -599,12 +690,7 @@ fn city_input(
                         format!("Start @ {},{} — 2. Klick setzt Ende.", snapped.x, snapped.z);
                 }
                 Some(a) => {
-                    let seg = RoadSegment {
-                        a,
-                        b: snapped,
-                        width: city.road_width,
-                        style: city.road_style,
-                    };
+                    let seg = RoadSegment::new(a, snapped, city.road_width, city.road_style);
                     let n = stamp_road(&mut world, &seg);
                     city.roads.push(seg);
                     city.pending_road_a = None;
@@ -762,6 +848,55 @@ fn snap_cell(p: IVec3, mode: SnapMode, roads: &[RoadSegment]) -> IVec3 {
     }
 }
 
+fn nearest_road_component(roads: &[RoadSegment], p: IVec3, max_distance: f32) -> Option<usize> {
+    let point = Vec2::new(p.x as f32 + 0.5, p.z as f32 + 0.5);
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, road) in roads.iter().enumerate() {
+        let distance = road_distance_xz(*road, point);
+        let pick_radius = max_distance + road.width as f32 * 0.5;
+        if distance <= pick_radius
+            && best.map_or(true, |(_, best_distance)| distance < best_distance)
+        {
+            best = Some((idx, distance));
+        }
+    }
+    best.map(|(idx, _)| idx)
+}
+
+fn road_distance_xz(road: RoadSegment, point: Vec2) -> f32 {
+    let a = Vec2::new(road.a.x as f32 + 0.5, road.a.z as f32 + 0.5);
+    let b = Vec2::new(road.b.x as f32 + 0.5, road.b.z as f32 + 0.5);
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    if len2 <= f32::EPSILON {
+        return point.distance(a);
+    }
+    let t = ((point - a).dot(ab) / len2).clamp(0.0, 1.0);
+    point.distance(a + ab * t)
+}
+
+fn road_with_endpoint_height_delta(road: RoadSegment, cursor: IVec3, delta: i16) -> RoadSegment {
+    let p = Vec2::new(cursor.x as f32 + 0.5, cursor.z as f32 + 0.5);
+    let a = Vec2::new(road.a.x as f32 + 0.5, road.a.z as f32 + 0.5);
+    let b = Vec2::new(road.b.x as f32 + 0.5, road.b.z as f32 + 0.5);
+    let shifted = |height: i16| -> i16 { (height as i32 + delta as i32).clamp(-12, 48) as i16 };
+    if p.distance_squared(b) <= p.distance_squared(a) {
+        road.with_endpoint_heights(road.elevation_a, shifted(road.elevation_b))
+    } else {
+        road.with_endpoint_heights(shifted(road.elevation_a), road.elevation_b)
+    }
+}
+
+fn next_road_style(style: RoadStyle, steps: i32) -> RoadStyle {
+    let all = RoadStyle::all();
+    let index = all
+        .iter()
+        .position(|candidate| *candidate == style)
+        .unwrap_or(0) as i32;
+    let next = (index + steps).rem_euclid(all.len() as i32) as usize;
+    all[next]
+}
+
 // ---------------------------------------------------------------------
 // Road stamping
 // ---------------------------------------------------------------------
@@ -812,21 +947,41 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
 
     let surface: Voxel = seg.style.surface_block().into();
     let stripe: Option<Voxel> = seg.style.stripe_block().map(|b| b.into());
+    let support: Voxel = BlockType::Basalt.into();
+    let last_index = cells.len().saturating_sub(1);
 
     let mut changed = 0usize;
     for (i, c) in cells.iter().enumerate() {
+        let elevation = road_elevation_at_sample(seg, i, last_index);
         for w in -half..=half {
             let wx = c.x + perp_x * w;
             let wz = c.y + perp_z * w;
             let sy = world.surface_height_at(wx, wz);
+            let deck_y = (sy + elevation).max(1);
             // Carve up to 3 blocks of air above so we don't bury the
             // road under trees / hills that just caught the edge.
-            for dy in 1..=3 {
-                if world.is_solid(wx, sy + dy, wz) && world.edit_set_voxel(wx, sy + dy, wz, AIR) {
+            for clear_y in (deck_y + 1)..=(deck_y + 3) {
+                if world.is_solid(wx, clear_y, wz) && world.edit_set_voxel(wx, clear_y, wz, AIR) {
                     changed += 1;
                 }
             }
-            if world.edit_set_voxel(wx, sy, wz, surface) {
+            if deck_y > sy + 1 {
+                let edge_or_pier = w.abs() == half || (w == 0 && i % 5 == 0);
+                if edge_or_pier {
+                    for support_y in (sy + 1)..deck_y {
+                        if world.edit_set_voxel(wx, support_y, wz, support) {
+                            changed += 1;
+                        }
+                    }
+                }
+            } else if deck_y < sy {
+                for cut_y in (deck_y + 1)..=sy {
+                    if world.is_solid(wx, cut_y, wz) && world.edit_set_voxel(wx, cut_y, wz, AIR) {
+                        changed += 1;
+                    }
+                }
+            }
+            if world.edit_set_voxel(wx, deck_y, wz, surface) {
                 changed += 1;
             }
         }
@@ -834,13 +989,25 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
         if let Some(s) = stripe {
             if i % 3 == 0 {
                 let sy = world.surface_height_at(c.x, c.y);
-                if world.edit_set_voxel(c.x, sy, c.y, s) {
+                let deck_y = (sy + elevation).max(1);
+                if world.edit_set_voxel(c.x, deck_y, c.y, s) {
                     changed += 1;
                 }
             }
         }
     }
     changed
+}
+
+fn road_elevation_at_sample(seg: &RoadSegment, index: usize, last_index: usize) -> i32 {
+    if last_index == 0 {
+        return seg.elevation_a as i32;
+    }
+    let t = (index as f32 / last_index as f32).clamp(0.0, 1.0);
+    let eased = t * t * (3.0 - 2.0 * t);
+    let start = seg.elevation_a as f32;
+    let end = seg.elevation_b as f32;
+    (start + (end - start) * eased).round() as i32
 }
 
 // ---------------------------------------------------------------------
@@ -1119,10 +1286,15 @@ fn city_draw_gizmos(
     let pulse = 0.45 + 0.55 * phase;
 
     // --- Committed roads ---------------------------------------------
-    for r in &city.roads {
-        let col = r.style.gizmo_color();
-        let a = r.a.as_vec3() + Vec3::new(0.5, 1.2, 0.5);
-        let b = r.b.as_vec3() + Vec3::new(0.5, 1.2, 0.5);
+    for (idx, r) in city.roads.iter().enumerate() {
+        let selected = city.selected_road == Some(idx);
+        let col = if selected {
+            Color::srgb(1.0, 0.84, 0.22)
+        } else {
+            r.style.gizmo_color()
+        };
+        let a = r.a.as_vec3() + Vec3::new(0.5, 1.2 + r.elevation_a.max(0) as f32, 0.5);
+        let b = r.b.as_vec3() + Vec3::new(0.5, 1.2 + r.elevation_b.max(0) as f32, 0.5);
         gizmos.line(a, b, col);
         // Width flanks (two parallel lines). Draw them 1 block higher
         // so they sit clearly above the road surface.
@@ -1144,6 +1316,10 @@ fn city_draw_gizmos(
             b - Vec3::new(px, 0.0, pz),
             faint,
         );
+        if selected {
+            gizmos.sphere(a, Quat::IDENTITY, 0.65, col);
+            gizmos.sphere(b, Quat::IDENTITY, 0.65, col);
+        }
     }
 
     // --- Districts ----------------------------------------------------
@@ -1405,6 +1581,18 @@ fn draw_hint_hud(
                     lines.push(("LMB".into(), "Strassenstart setzen".into()));
                     lines.push(("RMB".into(), "Letzte Strasse loeschen".into()));
                 }
+                if let Some(idx) = city.selected_road {
+                    lines.push((
+                        format!("Komponente {}", idx + 1),
+                        "direkt editierbar".into(),
+                    ));
+                    lines.push(("Ctrl+Wheel".into(), "Breite".into()));
+                    lines.push((
+                        "Shift+Wheel".into(),
+                        "Brueckenhoehe am naechsten Ende".into(),
+                    ));
+                    lines.push(("Alt+Wheel".into(), "Textur".into()));
+                }
                 lines.push(("[ / ]".into(), format!("Breite ({})", city.road_width)));
                 lines.push(("N".into(), "Strassen-Tool AUS".into()));
             }
@@ -1594,4 +1782,106 @@ fn raycast_voxel(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn road_component_adjustments_keep_geometry_and_change_style_or_width() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(48, 72, 0),
+            3,
+            RoadStyle::Asphalt,
+        );
+
+        let wider = road.with_width(11);
+        let neon = road.retextured(RoadStyle::Neon);
+
+        assert_eq!(wider.a, road.a);
+        assert_eq!(wider.b, road.b);
+        assert_eq!(wider.width, 11);
+        assert_eq!(wider.style, road.style);
+        assert_eq!(neon.a, road.a);
+        assert_eq!(neon.b, road.b);
+        assert_eq!(neon.width, road.width);
+        assert_eq!(neon.style, RoadStyle::Neon);
+        assert_eq!(neon.style.surface_block(), BlockType::Limestone);
+    }
+
+    #[test]
+    fn raised_road_component_uses_smooth_bridge_grade() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        )
+        .with_endpoint_heights(0, 14);
+
+        let heights: Vec<i32> = (0..=16)
+            .map(|idx| road_elevation_at_sample(&road, idx, 16))
+            .collect();
+
+        assert_eq!(heights.first().copied(), Some(0));
+        assert_eq!(heights.last().copied(), Some(14));
+        assert!(heights.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!(
+            heights
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0]).abs() <= 2),
+            "bridge grade should step smoothly, got {heights:?}"
+        );
+    }
+
+    #[test]
+    fn road_component_hover_picks_nearest_segment() {
+        let roads = vec![
+            RoadSegment::new(
+                IVec3::new(0, 72, 0),
+                IVec3::new(32, 72, 0),
+                5,
+                RoadStyle::Asphalt,
+            ),
+            RoadSegment::new(
+                IVec3::new(0, 72, 24),
+                IVec3::new(32, 72, 24),
+                5,
+                RoadStyle::Neon,
+            ),
+        ];
+
+        assert_eq!(
+            nearest_road_component(&roads, IVec3::new(9, 72, 2), 4.0),
+            Some(0)
+        );
+        assert_eq!(
+            nearest_road_component(&roads, IVec3::new(9, 72, 22), 4.0),
+            Some(1)
+        );
+        assert_eq!(
+            nearest_road_component(&roads, IVec3::new(9, 72, 12), 2.0),
+            None
+        );
+    }
+
+    #[test]
+    fn road_component_height_delta_targets_closest_endpoint() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+
+        let raised_b = road_with_endpoint_height_delta(road, IVec3::new(31, 72, 1), 6);
+        assert_eq!(raised_b.elevation_a, 0);
+        assert_eq!(raised_b.elevation_b, 6);
+
+        let lowered_a = road_with_endpoint_height_delta(raised_b, IVec3::new(1, 72, 1), -4);
+        assert_eq!(lowered_a.elevation_a, -4);
+        assert_eq!(lowered_a.elevation_b, 6);
+    }
 }
