@@ -1317,10 +1317,12 @@ fn road_segment_from_drag(
     style: RoadStyle,
     roads: &[RoadSegment],
 ) -> RoadSegment {
-    let (width, style) = road_drag_appearance(start, target, width, style, roads);
+    let start_sample = road_connection_sample_at(roads, start);
+    let target_sample = road_connection_sample_at(roads, target);
+    let (width, style) = road_drag_appearance(start_sample, target_sample, width, style);
     let mut segment = RoadSegment::new(start, target, width, style);
-    let start_height = road_handle_height_at(roads, start);
-    let end_height = road_handle_height_at(roads, target);
+    let start_height = start_sample.map(|sample| sample.elevation);
+    let end_height = target_sample.map(|sample| sample.elevation);
     let a = start_height.unwrap_or(0);
     let b = end_height.unwrap_or(a);
     segment = segment.with_endpoint_heights(a, b);
@@ -1333,23 +1335,29 @@ fn road_segment_from_drag(
 }
 
 fn road_drag_appearance(
-    start: IVec3,
-    target: IVec3,
+    start_sample: Option<RoadConnectionSample>,
+    target_sample: Option<RoadConnectionSample>,
     fallback_width: u8,
     fallback_style: RoadStyle,
-    roads: &[RoadSegment],
 ) -> (u8, RoadStyle) {
-    road_handle_appearance_at(roads, start)
-        .or_else(|| road_handle_appearance_at(roads, target))
+    start_sample
+        .or(target_sample)
+        .map(|sample| (sample.width, sample.style))
         .unwrap_or((fallback_width, fallback_style))
 }
 
-fn road_handle_appearance_at(roads: &[RoadSegment], handle: IVec3) -> Option<(u8, RoadStyle)> {
+#[derive(Debug, Clone, Copy)]
+struct RoadConnectionSample {
+    width: u8,
+    style: RoadStyle,
+    elevation: i16,
+}
+
+fn road_connection_sample_at(roads: &[RoadSegment], cell: IVec3) -> Option<RoadConnectionSample> {
     roads
         .iter()
         .rev()
-        .find(|road| road_has_handle(**road, handle))
-        .map(|road| (road.width, road.style))
+        .find_map(|road| road_connection_sample(*road, cell))
 }
 
 fn road_handle_height_at(roads: &[RoadSegment], handle: IVec3) -> Option<i16> {
@@ -1359,29 +1367,23 @@ fn road_handle_height_at(roads: &[RoadSegment], handle: IVec3) -> Option<i16> {
         .find_map(|road| road_handle_height(*road, handle))
 }
 
-fn road_has_handle(road: RoadSegment, handle: IVec3) -> bool {
-    match road.shape {
-        RoadShape::Straight => {
-            same_road_handle_xz(handle, road.a) || same_road_handle_xz(handle, road.b)
-        }
-        RoadShape::Corner => {
-            same_road_handle_xz(handle, road.a)
-                || same_road_handle_xz(handle, road_corner_via(road))
-                || same_road_handle_xz(handle, road.b)
-        }
-        RoadShape::Roundabout => {
-            let r = road.roundabout_radius.max(4) as i32;
-            [
-                road.a,
-                IVec3::new(road.a.x + r, road.a.y, road.a.z),
-                IVec3::new(road.a.x - r, road.a.y, road.a.z),
-                IVec3::new(road.a.x, road.a.y, road.a.z + r),
-                IVec3::new(road.a.x, road.a.y, road.a.z - r),
-            ]
-            .iter()
-            .any(|candidate| same_road_handle_xz(handle, *candidate))
-        }
+fn road_connection_sample(road: RoadSegment, cell: IVec3) -> Option<RoadConnectionSample> {
+    if let Some(elevation) = road_handle_height(road, cell) {
+        return Some(RoadConnectionSample {
+            width: road.width,
+            style: road.style,
+            elevation,
+        });
     }
+    let cells = road_path_xz(&road);
+    let idx = cells
+        .iter()
+        .position(|candidate| candidate.x == cell.x && candidate.y == cell.z)?;
+    Some(RoadConnectionSample {
+        width: road.width,
+        style: road.style,
+        elevation: road_elevation_at_sample(&road, idx, cells.len().saturating_sub(1)) as i16,
+    })
 }
 
 fn road_handle_height(road: RoadSegment, handle: IVec3) -> Option<i16> {
@@ -3010,6 +3012,67 @@ mod tests {
             connector.style,
             RoadStyle::Cobble,
             "source handle should be the style authority for fast road chaining"
+        );
+    }
+
+    #[test]
+    fn road_branch_from_mid_road_inherits_width_texture_and_height() {
+        let arterial = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            9,
+            RoadStyle::Neon,
+        )
+        .with_endpoint_heights(0, 12);
+
+        let branch = road_segment_from_drag(
+            IVec3::new(16, 72, 0),
+            IVec3::new(16, 72, 24),
+            3,
+            RoadStyle::Asphalt,
+            &[arterial],
+        );
+
+        assert_eq!(
+            branch.width, 9,
+            "branches started from a snapped road path should inherit road width"
+        );
+        assert_eq!(
+            branch.style,
+            RoadStyle::Neon,
+            "branches started from a snapped road path should inherit road texture"
+        );
+        assert_eq!(
+            branch.elevation_a, 6,
+            "branch should start at the sampled bridge deck height, not ground zero"
+        );
+        assert_eq!(branch.elevation_b, 6);
+    }
+
+    #[test]
+    fn road_branch_into_mid_road_inherits_target_bridge_height_when_start_is_free() {
+        let arterial = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            7,
+            RoadStyle::Cobble,
+        )
+        .with_endpoint_heights(4, 12);
+
+        let branch = road_segment_from_drag(
+            IVec3::new(16, 72, 24),
+            IVec3::new(16, 72, 0),
+            3,
+            RoadStyle::Asphalt,
+            &[arterial],
+        );
+
+        assert_eq!(branch.width, 7);
+        assert_eq!(branch.style, RoadStyle::Cobble);
+        assert_eq!(branch.elevation_a, 0);
+        assert_eq!(
+            branch.elevation_b, 8,
+            "target end should meet the sampled mid-road bridge height"
         );
     }
 
