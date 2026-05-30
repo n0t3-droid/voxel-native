@@ -5423,6 +5423,74 @@ fn road_grid_bend_z_from_origin(origin_z: i32, local_x: i32) -> i32 {
     ((local_x as f32 * 0.083 + origin_z as f32 * 0.013).sin() * 4.0).round() as i32
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RoadGridProfile {
+    road_x: bool,
+    road_z: bool,
+    sidewalk_x: bool,
+    sidewalk_z: bool,
+    lane: bool,
+    crosswalk: bool,
+    intersection: bool,
+    intersection_corner: bool,
+    road_like: bool,
+    boulevard: bool,
+    median: bool,
+    structural_edge: bool,
+}
+
+fn road_grid_profile(origin: [i32; 3], size: [i32; 3], local: IVec3) -> RoadGridProfile {
+    let width = size[0].max(1);
+    let depth = size[2].max(1);
+    let mid_x = width / 2;
+    let mid_z = depth / 2;
+    let bend_x = road_grid_bend_x_from_origin(origin[0], local.z);
+    let bend_z = road_grid_bend_z_from_origin(origin[2], local.x);
+    let plan_x = local.x + bend_x;
+    let plan_z = local.z + bend_z;
+    let cell_x = plan_x.rem_euclid(28);
+    let cell_z = plan_z.rem_euclid(28);
+    let boulevard_x = (plan_x - mid_x).abs() <= 5;
+    let boulevard_z = (plan_z - mid_z).abs() <= 5;
+    let boulevard_sidewalk_x = (plan_x - mid_x).abs() == 6;
+    let boulevard_sidewalk_z = (plan_z - mid_z).abs() == 6;
+    let road_x = cell_x <= 5 || boulevard_x;
+    let road_z = cell_z <= 5 || boulevard_z;
+    let sidewalk_x = cell_x == 6 || cell_x == 27 || boulevard_sidewalk_x;
+    let sidewalk_z = cell_z == 6 || cell_z == 27 || boulevard_sidewalk_z;
+    let intersection = road_x && road_z;
+    let crosswalk = intersection
+        && (cell_x == 4
+            || cell_z == 4
+            || (plan_x - mid_x).abs() == 3
+            || (plan_z - mid_z).abs() == 3);
+    let intersection_corner = (sidewalk_x && sidewalk_z)
+        || ((local.x - mid_x).abs() == 5 && (local.z - mid_z).abs() == 5);
+    let boulevard = boulevard_x || boulevard_z;
+    let median = !intersection
+        && ((boulevard_x && (plan_x - mid_x).abs() <= 1)
+            || (boulevard_z && (plan_z - mid_z).abs() <= 1));
+    let road_like = road_x || road_z || sidewalk_x || sidewalk_z || intersection_corner;
+    let structural_edge = sidewalk_x || sidewalk_z || intersection_corner || boulevard;
+    let lane = !median
+        && ((road_x && (cell_x == 2 || boulevard_x) && plan_z.rem_euclid(12) < 5)
+            || (road_z && (cell_z == 2 || boulevard_z) && plan_x.rem_euclid(12) < 5));
+    RoadGridProfile {
+        road_x,
+        road_z,
+        sidewalk_x,
+        sidewalk_z,
+        lane,
+        crosswalk,
+        intersection,
+        intersection_corner,
+        road_like,
+        boulevard,
+        median,
+        structural_edge,
+    }
+}
+
 fn build_road_centerline_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
     let length = project.size[0].max(1);
     let last_x = (length - 1).max(0);
@@ -7204,60 +7272,44 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
         BotTaskKind::ExpandRoadGrid => {
             let x = origin.x + local.x;
             let z = origin.z + local.z;
-            let mid_x = project.size[0] / 2;
-            let mid_z = project.size[2] / 2;
-            let bend_x = road_grid_bend_x(project, local.z);
-            let bend_z = road_grid_bend_z(project, local.x);
-            let plan_x = local.x + bend_x;
-            let plan_z = local.z + bend_z;
-            let cell_x = plan_x.rem_euclid(28);
-            let cell_z = plan_z.rem_euclid(28);
-            let road_x = cell_x <= 5 || (plan_x - mid_x).abs() <= 3;
-            let road_z = cell_z <= 5 || (plan_z - mid_z).abs() <= 3;
-            let sidewalk_x = cell_x == 6 || cell_x == 27 || (plan_x - mid_x).abs() == 4;
-            let sidewalk_z = cell_z == 6 || cell_z == 27 || (plan_z - mid_z).abs() == 4;
-            let lane = (road_x && (cell_x == 2 || plan_x == mid_x) && plan_z.rem_euclid(12) < 5)
-                || (road_z && (cell_z == 2 || plan_z == mid_z) && plan_x.rem_euclid(12) < 5);
-            let intersection = road_x && road_z;
-            let crosswalk = intersection
-                && (cell_x == 4
-                    || cell_z == 4
-                    || (plan_x - mid_x).abs() == 2
-                    || (plan_z - mid_z).abs() == 2);
-            let intersection_corner = (sidewalk_x && sidewalk_z)
-                || ((local.x - mid_x).abs() == 5 && (local.z - mid_z).abs() == 5);
-            let road_like = road_x || road_z || sidewalk_x || sidewalk_z || intersection_corner;
-            let y = if road_like {
-                road_grade_y(world, x, z, sidewalk_x || sidewalk_z || intersection_corner)
+            let profile = road_grid_profile(project.origin, project.size, local);
+            let y = if profile.road_like {
+                road_grade_y(world, x, z, profile.structural_edge)
             } else {
                 world.surface_height_at(x, z) + 1
             };
-            if local.y == 0 && (road_x || road_z) {
+            if local.y == 0 && (profile.road_x || profile.road_z) {
                 Some((
                     IVec3::new(x, y, z),
-                    if lane || crosswalk {
+                    if profile.median {
+                        Voxel::from(BlockType::Leaves)
+                    } else if profile.lane || profile.crosswalk {
                         Voxel::from(BlockType::Limestone)
                     } else {
                         Voxel::from(BlockType::Stone)
                     },
                 ))
-            } else if local.y == 0 && (sidewalk_x || sidewalk_z || intersection_corner) {
+            } else if local.y == 0
+                && (profile.sidewalk_x || profile.sidewalk_z || profile.intersection_corner)
+            {
                 Some((IVec3::new(x, y, z), Voxel::from(BlockType::Limestone)))
             } else if local.y == 0 && (local.x + local.z).rem_euclid(31) == 0 {
                 Some((IVec3::new(x, y, z), Voxel::from(BlockType::Leaves)))
             } else if local.y == 0 && (local.x * 13 + local.z * 7).rem_euclid(149) == 0 {
                 Some((IVec3::new(x, y, z), project.theme.signal()))
             } else {
-                let traffic_light =
-                    intersection_corner && (local.x + local.z).rem_euclid(5) == 0 && local.y <= 5;
-                let lamp = (sidewalk_x || sidewalk_z)
+                let traffic_light = profile.intersection_corner
+                    && profile.intersection
+                    && (local.x + local.z).rem_euclid(5) == 0
+                    && local.y <= 5;
+                let lamp = (profile.sidewalk_x || profile.sidewalk_z || profile.boulevard)
                     && (local.x * 5 + local.z * 3).rem_euclid(97) == 0
                     && local.y <= 4;
                 let bench = local.y == 1
-                    && (sidewalk_x || sidewalk_z)
+                    && (profile.sidewalk_x || profile.sidewalk_z)
                     && (local.x * 7 + local.z * 11).rem_euclid(89) <= 1;
                 let guard = local.y == 1
-                    && (sidewalk_x || sidewalk_z || intersection_corner)
+                    && (profile.sidewalk_x || profile.sidewalk_z || profile.intersection_corner)
                     && road_surface_span(world, x, z) >= 3
                     && (local.x * 3 + local.z * 5).rem_euclid(11) == 0;
                 if traffic_light {
@@ -7281,15 +7333,8 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                         IVec3::new(x, y + local.y, z),
                         Voxel::from(BlockType::ShipHullDark),
                     ))
-                } else if road_like {
-                    road_support_voxel(
-                        world,
-                        x,
-                        z,
-                        y,
-                        local.y,
-                        sidewalk_x || sidewalk_z || intersection_corner,
-                    )
+                } else if profile.road_like {
+                    road_support_voxel(world, x, z, y, local.y, profile.structural_edge)
                 } else {
                     None
                 }
@@ -11706,6 +11751,51 @@ mod tests {
             corner_support.is_some(),
             "intersection corner should use the same terrain-aware support path"
         );
+    }
+
+    #[test]
+    fn road_grid_profile_distinguishes_boulevards_from_local_streets() {
+        let origin = [0, 90, 0];
+        let size = [96, 7, 96];
+        let boulevard_median = road_grid_profile(origin, size, IVec3::new(44, 0, 20));
+        let local_street = road_grid_profile(origin, size, IVec3::new(26, 0, 20));
+
+        assert!(boulevard_median.road_like);
+        assert!(boulevard_median.boulevard);
+        assert!(boulevard_median.median);
+        assert!(local_street.road_like);
+        assert!(!local_street.boulevard);
+        assert!(!local_street.median);
+    }
+
+    #[test]
+    fn road_grid_boulevard_medians_render_as_planted_surface() {
+        let project = BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Access Grid".into(),
+            origin: [0, 90, 0],
+            size: [96, 7, 96],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        };
+        let world = VoxelWorld::new();
+
+        let median = project_voxel(&project, IVec3::new(44, 0, 20), &world).map(|(_, voxel)| voxel);
+        let local_lane =
+            project_voxel(&project, IVec3::new(26, 0, 20), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(median, Some(Voxel::from(BlockType::Leaves)));
+        assert_ne!(local_lane, Some(Voxel::from(BlockType::Leaves)));
     }
 
     #[test]
