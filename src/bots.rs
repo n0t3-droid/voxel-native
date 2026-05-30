@@ -5435,6 +5435,8 @@ struct RoadGridProfile {
     intersection_corner: bool,
     road_like: bool,
     boulevard: bool,
+    roundabout: bool,
+    roundabout_center: bool,
     median: bool,
     structural_edge: bool,
 }
@@ -5454,6 +5456,12 @@ fn road_grid_profile(origin: [i32; 3], size: [i32; 3], local: IVec3) -> RoadGrid
     let boulevard_z = (plan_z - mid_z).abs() <= 5;
     let boulevard_sidewalk_x = (plan_x - mid_x).abs() == 6;
     let boulevard_sidewalk_z = (plan_z - mid_z).abs() == 6;
+    let boulevard_dx = plan_x - mid_x;
+    let boulevard_dz = plan_z - mid_z;
+    let boulevard_center_dist2 = boulevard_dx * boulevard_dx + boulevard_dz * boulevard_dz;
+    let roundabout = boulevard_x && boulevard_z && boulevard_center_dist2 <= 36;
+    let roundabout_island = roundabout && boulevard_center_dist2 <= 8;
+    let roundabout_center = roundabout && boulevard_center_dist2 <= 1;
     let road_x = cell_x <= 5 || boulevard_x;
     let road_z = cell_z <= 5 || boulevard_z;
     let sidewalk_x = cell_x == 6 || cell_x == 27 || boulevard_sidewalk_x;
@@ -5467,14 +5475,17 @@ fn road_grid_profile(origin: [i32; 3], size: [i32; 3], local: IVec3) -> RoadGrid
     let intersection_corner = (sidewalk_x && sidewalk_z)
         || ((local.x - mid_x).abs() == 5 && (local.z - mid_z).abs() == 5);
     let boulevard = boulevard_x || boulevard_z;
-    let median = !intersection
-        && ((boulevard_x && (plan_x - mid_x).abs() <= 1)
-            || (boulevard_z && (plan_z - mid_z).abs() <= 1));
+    let median = roundabout_island
+        || (!intersection
+            && ((boulevard_x && (plan_x - mid_x).abs() <= 1)
+                || (boulevard_z && (plan_z - mid_z).abs() <= 1)));
     let road_like = road_x || road_z || sidewalk_x || sidewalk_z || intersection_corner;
-    let structural_edge = sidewalk_x || sidewalk_z || intersection_corner || boulevard;
+    let structural_edge =
+        sidewalk_x || sidewalk_z || intersection_corner || boulevard || roundabout;
     let lane = !median
         && ((road_x && (cell_x == 2 || boulevard_x) && plan_z.rem_euclid(12) < 5)
-            || (road_z && (cell_z == 2 || boulevard_z) && plan_x.rem_euclid(12) < 5));
+            || (road_z && (cell_z == 2 || boulevard_z) && plan_x.rem_euclid(12) < 5)
+            || (roundabout && boulevard_center_dist2 >= 12));
     RoadGridProfile {
         road_x,
         road_z,
@@ -5486,6 +5497,8 @@ fn road_grid_profile(origin: [i32; 3], size: [i32; 3], local: IVec3) -> RoadGrid
         intersection_corner,
         road_like,
         boulevard,
+        roundabout,
+        roundabout_center,
         median,
         structural_edge,
     }
@@ -7298,7 +7311,9 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             } else if local.y == 0 && (local.x * 13 + local.z * 7).rem_euclid(149) == 0 {
                 Some((IVec3::new(x, y, z), project.theme.signal()))
             } else {
-                let traffic_light = profile.intersection_corner
+                let roundabout_marker = profile.roundabout_center && local.y <= 4;
+                let traffic_light = !profile.roundabout
+                    && profile.intersection_corner
                     && profile.intersection
                     && (local.x + local.z).rem_euclid(5) == 0
                     && local.y <= 5;
@@ -7312,7 +7327,14 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                     && (profile.sidewalk_x || profile.sidewalk_z || profile.intersection_corner)
                     && road_surface_span(world, x, z) >= 3
                     && (local.x * 3 + local.z * 5).rem_euclid(11) == 0;
-                if traffic_light {
+                if roundabout_marker {
+                    let voxel = if local.y == 4 {
+                        project.theme.signal()
+                    } else {
+                        Voxel::from(BlockType::Crystal)
+                    };
+                    Some((IVec3::new(x, y + local.y, z), voxel))
+                } else if traffic_light {
                     let voxel = if local.y == 5 {
                         project.theme.signal()
                     } else {
@@ -11796,6 +11818,55 @@ mod tests {
 
         assert_eq!(median, Some(Voxel::from(BlockType::Leaves)));
         assert_ne!(local_lane, Some(Voxel::from(BlockType::Leaves)));
+    }
+
+    #[test]
+    fn boulevard_intersection_gets_planted_roundabout_center() {
+        let project = BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Boulevard Roundabout".into(),
+            origin: [0, 90, 0],
+            size: [96, 7, 96],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        };
+        let world = VoxelWorld::new();
+
+        let center = project_voxel(&project, IVec3::new(52, 0, 52), &world).map(|(_, voxel)| voxel);
+        let ring_lane =
+            project_voxel(&project, IVec3::new(57, 0, 52), &world).map(|(_, voxel)| voxel);
+        let approach =
+            project_voxel(&project, IVec3::new(52, 0, 62), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(center, Some(Voxel::from(BlockType::Leaves)));
+        assert_ne!(ring_lane, Some(Voxel::from(BlockType::Leaves)));
+        assert_ne!(approach, Some(Voxel::from(BlockType::Leaves)));
+    }
+
+    #[test]
+    fn road_grid_profile_identifies_roundabout_geometry() {
+        let origin = [0, 90, 0];
+        let size = [96, 7, 96];
+        let island = road_grid_profile(origin, size, IVec3::new(52, 0, 52));
+        let ring = road_grid_profile(origin, size, IVec3::new(57, 0, 52));
+        let approach = road_grid_profile(origin, size, IVec3::new(52, 0, 62));
+
+        assert!(island.roundabout);
+        assert!(island.median);
+        assert!(ring.roundabout);
+        assert!(!ring.median);
+        assert!(approach.boulevard);
+        assert!(!approach.roundabout);
     }
 
     #[test]
