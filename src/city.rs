@@ -1744,8 +1744,20 @@ fn road_path_xz(seg: &RoadSegment) -> Vec<IVec2> {
     }
 }
 
-pub(crate) fn road_component_centerline_xz(seg: &RoadSegment) -> Vec<IVec2> {
-    road_path_xz(seg)
+pub(crate) fn road_component_centerline_samples(seg: &RoadSegment) -> Vec<IVec3> {
+    let cells = road_path_xz(seg);
+    let last_index = cells.len().saturating_sub(1);
+    cells
+        .into_iter()
+        .enumerate()
+        .map(|(idx, cell)| {
+            IVec3::new(
+                cell.x,
+                seg.a.y + road_elevation_at_sample(seg, idx, last_index),
+                cell.y,
+            )
+        })
+        .collect()
 }
 
 fn smooth_corner_path_xz(a: IVec3, via: IVec3, b: IVec3) -> Vec<IVec2> {

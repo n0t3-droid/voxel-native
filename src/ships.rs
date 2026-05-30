@@ -42,6 +42,7 @@ impl Plugin for ShipPlugin {
                     draw_ship_boarding_hud,
                     update_cockpit_transition,
                     ship_flight_input,
+                    update_ship_energy_trails,
                     update_ship_projectiles,
                     spawn_enemy_drones,
                     update_enemy_drones,
@@ -325,6 +326,34 @@ enum ProjectileOwner {
 struct ShipExplosion {
     life: f32,
     max_life: f32,
+}
+
+#[derive(Component)]
+struct ShipEnergyTrail {
+    base_translation: Vec3,
+    base_scale: Vec3,
+    phase: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShipTrailTone {
+    Cyan,
+    Amber,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShipTrailSpec {
+    base_translation: Vec3,
+    base_scale: Vec3,
+    phase: f32,
+    tone: ShipTrailTone,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShipWaveResponse {
+    vertical_velocity: f32,
+    pitch: f32,
+    roll: f32,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -618,6 +647,7 @@ fn scout_blueprint() -> ShipBlueprint {
         );
     }
     add_scout_realism(&mut voxels);
+    add_future_wave_shuttle_skin(&mut voxels, ShipKind::ScoutShuttle);
     ShipBlueprint {
         voxels,
         cockpit_offset: Vec3::new(0.0, 2.6, -3.8),
@@ -725,6 +755,7 @@ fn strike_blueprint() -> ShipBlueprint {
     }
 
     add_strike_realism(&mut voxels);
+    add_future_wave_shuttle_skin(&mut voxels, ShipKind::StrikeFighter);
     ShipBlueprint {
         voxels,
         cockpit_offset: Vec3::new(0.0, 0.0, -3.5),
@@ -891,6 +922,7 @@ fn dropship_blueprint() -> ShipBlueprint {
     );
 
     add_dropship_realism(&mut voxels);
+    add_future_wave_shuttle_skin(&mut voxels, ShipKind::HeavyDropship);
     ShipBlueprint {
         voxels,
         cockpit_offset: Vec3::new(0.0, 4.0, -5.5),
@@ -1114,6 +1146,166 @@ fn add_dropship_realism(voxels: &mut Vec<ShipVoxel>) {
     );
 }
 
+fn add_future_wave_shuttle_skin(voxels: &mut Vec<ShipVoxel>, kind: ShipKind) {
+    // Reference-video traits: bright shuttle skin, smoked opaque cockpit nose,
+    // dual cyan exhaust sources and warm heat panels around the rear body.
+    push_box(
+        voxels,
+        IVec3::new(-2, 0, -8),
+        IVec3::new(2, 1, 6),
+        BlockType::ShipHullAlloy,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-3, 1, -4),
+        IVec3::new(3, 2, 4),
+        BlockType::ShipHullAlloy,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, 2, -10),
+        IVec3::new(1, 2, -8),
+        BlockType::ShipHullAlloy,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-3, 1, -8),
+        IVec3::new(3, 2, -5),
+        BlockType::ShipHullDark,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-2, 2, -9),
+        IVec3::new(2, 3, -5),
+        BlockType::CockpitGlass,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, 1, -10),
+        IVec3::new(1, 1, -9),
+        BlockType::CockpitGlass,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-3, 0, 6),
+        IVec3::new(3, 2, 7),
+        BlockType::ShipHullDark,
+    );
+    for sx in [-1, 1] {
+        push_box(
+            voxels,
+            IVec3::new(sx * 2, 0, 8),
+            IVec3::new(sx * 3, 1, 9),
+            BlockType::EngineCore,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 3, 0, 5),
+            IVec3::new(sx * 4, 1, 7),
+            BlockType::NeonAmber,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 2, 2, 4),
+            IVec3::new(sx * 3, 4, 7),
+            BlockType::ShipHullAlloy,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 3, 0, -1),
+            IVec3::new(sx * 8, 0, 3),
+            BlockType::ShipHullAlloy,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 7, 0, -2),
+            IVec3::new(sx * 9, 0, 1),
+            BlockType::ShipHullDark,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 5, 1, -1),
+            IVec3::new(sx * 8, 1, -1),
+            BlockType::NeonCyan,
+        );
+    }
+
+    match kind {
+        ShipKind::ScoutShuttle => {
+            push_box(
+                voxels,
+                IVec3::new(-1, -1, -6),
+                IVec3::new(1, -1, 5),
+                BlockType::ShipHullDark,
+            );
+            for sx in [-1, 1] {
+                push_box(
+                    voxels,
+                    IVec3::new(sx * 4, -1, 0),
+                    IVec3::new(sx * 7, -1, 5),
+                    BlockType::ShipHullAlloy,
+                );
+            }
+        }
+        ShipKind::StrikeFighter => {
+            push_box(
+                voxels,
+                IVec3::new(-1, -2, -5),
+                IVec3::new(1, -1, 3),
+                BlockType::ShipHullDark,
+            );
+            for sx in [-1, 1] {
+                push_box(
+                    voxels,
+                    IVec3::new(sx * 6, -3, -2),
+                    IVec3::new(sx * 8, 3, 5),
+                    BlockType::ShipHullDark,
+                );
+                push_box(
+                    voxels,
+                    IVec3::new(sx * 6, -2, -1),
+                    IVec3::new(sx * 6, 2, 4),
+                    BlockType::NeonCyan,
+                );
+            }
+        }
+        ShipKind::HeavyDropship => {
+            push_box(
+                voxels,
+                IVec3::new(-4, -1, -3),
+                IVec3::new(4, 3, 7),
+                BlockType::ShipHullAlloy,
+            );
+            push_box(
+                voxels,
+                IVec3::new(-4, 0, -1),
+                IVec3::new(4, 2, 5),
+                BlockType::ShipHullDark,
+            );
+            push_box(
+                voxels,
+                IVec3::new(-3, 1, -8),
+                IVec3::new(3, 3, -5),
+                BlockType::CockpitGlass,
+            );
+            for sx in [-1, 1] {
+                push_box(
+                    voxels,
+                    IVec3::new(sx * 5, 2, 0),
+                    IVec3::new(sx * 9, 3, 5),
+                    BlockType::ShipHullAlloy,
+                );
+                push_box(
+                    voxels,
+                    IVec3::new(sx * 3, 1, 8),
+                    IVec3::new(sx * 4, 2, 10),
+                    BlockType::EngineCore,
+                );
+            }
+        }
+    }
+}
+
 fn push_box(out: &mut Vec<ShipVoxel>, min: IVec3, max: IVec3, block: BlockType) {
     let lo = IVec3::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
     let hi = IVec3::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
@@ -1196,6 +1388,7 @@ fn spawn_ship_entity(
         }
         if !preview {
             spawn_cockpit_holograms(p, materials, fx, &cube, &bp);
+            spawn_ship_energy_trails(p, materials, fx, &cube, kind);
             p.spawn(PointLightBundle {
                 point_light: PointLight {
                     color: Color::srgb(0.64, 0.92, 1.0),
@@ -1346,23 +1539,23 @@ fn ship_texture_image(block: BlockType, preview: bool) -> Image {
                 }
                 BlockType::ShipHullAlloy => {
                     let brushed = (u * 22.0).sin() * 0.035 + (v * 51.0 + hash).sin() * 0.025;
-                    r = (0.34 + brushed + panel as f32 * 0.035).clamp(0.0, 1.0);
-                    g = (0.42 + brushed + panel as f32 * 0.040).clamp(0.0, 1.0);
-                    b = (0.49 + brushed + panel as f32 * 0.045).clamp(0.0, 1.0);
+                    r = (0.72 + brushed + panel as f32 * 0.045).clamp(0.0, 1.0);
+                    g = (0.78 + brushed + panel as f32 * 0.050).clamp(0.0, 1.0);
+                    b = (0.84 + brushed + panel as f32 * 0.055).clamp(0.0, 1.0);
                     if seam || diag {
-                        r += 0.08;
+                        r += 0.10;
                         g += 0.12;
-                        b += 0.15;
+                        b += 0.14;
                     }
                     if rivet {
-                        r += 0.16;
-                        g += 0.17;
-                        b += 0.17;
+                        r += 0.12;
+                        g += 0.13;
+                        b += 0.13;
                     }
                     if scratch {
-                        r -= 0.06;
-                        g -= 0.05;
-                        b -= 0.04;
+                        r -= 0.045;
+                        g -= 0.040;
+                        b -= 0.035;
                     }
                 }
                 BlockType::CockpitGlass => {
@@ -1432,6 +1625,143 @@ fn ship_texture_image(block: BlockType, preview: bool) -> Image {
         ..ImageSamplerDescriptor::linear()
     });
     image
+}
+
+fn ship_trail_specs(kind: ShipKind) -> Vec<ShipTrailSpec> {
+    let mut specs = vec![
+        ShipTrailSpec {
+            base_translation: Vec3::new(-2.65, 0.55, 11.3),
+            base_scale: Vec3::new(0.34, 0.22, 6.8),
+            phase: 0.0,
+            tone: ShipTrailTone::Cyan,
+        },
+        ShipTrailSpec {
+            base_translation: Vec3::new(2.65, 0.55, 11.3),
+            base_scale: Vec3::new(0.34, 0.22, 6.8),
+            phase: 1.7,
+            tone: ShipTrailTone::Cyan,
+        },
+        ShipTrailSpec {
+            base_translation: Vec3::new(0.0, 0.70, 8.7),
+            base_scale: Vec3::new(3.9, 1.15, 1.9),
+            phase: 0.8,
+            tone: ShipTrailTone::Amber,
+        },
+    ];
+    match kind {
+        ShipKind::ScoutShuttle => {
+            specs.push(ShipTrailSpec {
+                base_translation: Vec3::new(0.0, -0.20, 12.0),
+                base_scale: Vec3::new(0.24, 0.16, 5.2),
+                phase: 2.8,
+                tone: ShipTrailTone::Cyan,
+            });
+        }
+        ShipKind::StrikeFighter => {
+            specs[0].base_translation = Vec3::new(-7.4, 4.5, 8.2);
+            specs[1].base_translation = Vec3::new(7.4, -3.4, 8.2);
+            specs[0].base_scale = Vec3::new(0.22, 0.42, 7.4);
+            specs[1].base_scale = Vec3::new(0.22, 0.42, 7.4);
+            specs.push(ShipTrailSpec {
+                base_translation: Vec3::new(0.0, 0.0, 8.8),
+                base_scale: Vec3::new(0.62, 0.34, 5.4),
+                phase: 3.1,
+                tone: ShipTrailTone::Cyan,
+            });
+        }
+        ShipKind::HeavyDropship => {
+            specs[0].base_translation = Vec3::new(-3.6, 2.0, 12.5);
+            specs[1].base_translation = Vec3::new(3.6, 2.0, 12.5);
+            specs[0].base_scale = Vec3::new(0.46, 0.34, 5.6);
+            specs[1].base_scale = Vec3::new(0.46, 0.34, 5.6);
+            specs[2].base_scale = Vec3::new(5.3, 1.55, 2.3);
+        }
+    }
+    specs
+}
+
+fn spawn_ship_energy_trails(
+    parent: &mut ChildBuilder,
+    materials: &mut Assets<StandardMaterial>,
+    fx: &mut ShipFxCache,
+    cube: &Handle<Mesh>,
+    kind: ShipKind,
+) {
+    for spec in ship_trail_specs(kind) {
+        let material = ship_trail_material(fx, materials, spec.tone);
+        parent.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material,
+                transform: Transform::from_translation(spec.base_translation)
+                    .with_scale(spec.base_scale),
+                ..default()
+            },
+            ShipEnergyTrail {
+                base_translation: spec.base_translation,
+                base_scale: spec.base_scale,
+                phase: spec.phase,
+            },
+            Name::new(match spec.tone {
+                ShipTrailTone::Cyan => "CyanEnergyWake",
+                ShipTrailTone::Amber => "AmberHeatBloom",
+            }),
+        ));
+    }
+}
+
+fn ship_trail_material(
+    fx: &mut ShipFxCache,
+    materials: &mut Assets<StandardMaterial>,
+    tone: ShipTrailTone,
+) -> Handle<StandardMaterial> {
+    match tone {
+        ShipTrailTone::Cyan => cockpit_material(
+            fx,
+            materials,
+            21,
+            Color::srgba(0.02, 0.88, 1.0, 0.38),
+            LinearRgba::rgb(0.2, 7.5, 9.5),
+            AlphaMode::Add,
+            true,
+        ),
+        ShipTrailTone::Amber => cockpit_material(
+            fx,
+            materials,
+            22,
+            Color::srgba(1.0, 0.36, 0.06, 0.34),
+            LinearRgba::rgb(8.5, 2.4, 0.12),
+            AlphaMode::Add,
+            true,
+        ),
+    }
+}
+
+fn update_ship_energy_trails(
+    time: Res<Time>,
+    pilot: Res<PilotState>,
+    ship_q: Query<(&ShipInstance, &ShipMotion)>,
+    mut trails: Query<(&ShipEnergyTrail, &mut Transform)>,
+) {
+    let intensity = pilot
+        .active_ship
+        .and_then(|ship| ship_q.get(ship).ok())
+        .map(|(ship, motion)| {
+            let bp = blueprint(ship.kind);
+            (motion.speed / bp.max_speed.max(1.0)).clamp(0.0, 1.0)
+        })
+        .unwrap_or(0.18);
+    let seconds = time.elapsed_seconds_wrapped();
+    for (trail, mut tf) in trails.iter_mut() {
+        let wave = (seconds * 7.4 + trail.phase).sin();
+        let pulse = 0.72 + intensity * 0.55 + wave.abs() * 0.22;
+        tf.translation = trail.base_translation + Vec3::new(0.0, wave * 0.08, wave * 0.28);
+        tf.scale = Vec3::new(
+            trail.base_scale.x * (0.86 + pulse * 0.14),
+            trail.base_scale.y * (0.82 + pulse * 0.18),
+            trail.base_scale.z * (0.78 + pulse * 0.28),
+        );
+    }
 }
 
 fn spawn_cockpit_holograms(
@@ -2129,6 +2459,34 @@ fn draw_ship_boarding_hud(
     );
 }
 
+fn ship_wave_response(
+    kind: ShipKind,
+    speed: f32,
+    max_speed: f32,
+    seconds: f32,
+) -> ShipWaveResponse {
+    let intensity = (speed / max_speed.max(1.0)).clamp(0.0, 1.0);
+    if intensity <= 0.001 {
+        return ShipWaveResponse {
+            vertical_velocity: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+        };
+    }
+    let (freq, lift_amp, pitch_amp, roll_amp) = match kind {
+        ShipKind::ScoutShuttle => (3.9, 0.78, 0.034, 0.052),
+        ShipKind::StrikeFighter => (4.8, 0.54, 0.028, 0.064),
+        ShipKind::HeavyDropship => (2.7, 0.48, 0.022, 0.036),
+    };
+    let phase = seconds * freq + kind as u8 as f32 * 1.31;
+    let softened = intensity * intensity * (3.0 - 2.0 * intensity);
+    ShipWaveResponse {
+        vertical_velocity: phase.cos() * lift_amp * freq * softened,
+        pitch: (phase * 0.71).sin() * pitch_amp * softened,
+        roll: (phase * 1.17).sin() * roll_amp * softened,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ship_flight_input(
     time: Res<Time>,
@@ -2279,16 +2637,24 @@ fn ship_flight_input(
     }
     motion.speed = motion.speed.clamp(0.0, bp.max_speed);
 
+    let wave = ship_wave_response(
+        ship.kind,
+        motion.speed,
+        bp.max_speed,
+        time.elapsed_seconds_wrapped(),
+    );
     ship_tf.rotation = Quat::from_rotation_y(motion.yaw)
         * Quat::from_rotation_x(motion.pitch)
-        * Quat::from_rotation_z(motion.roll);
+        * Quat::from_rotation_z(motion.roll)
+        * Quat::from_rotation_x(wave.pitch)
+        * Quat::from_rotation_z(wave.roll);
     let forward = *ship_tf.forward();
     let right = *ship_tf.right();
     // Keep only a whisper of bank drift; A/D should feel like turning the ship,
     // not sliding sideways across the terrain.
     let target_lateral = -motion.roll * motion.speed * 0.025;
     motion.lateral_speed += (target_lateral - motion.lateral_speed) * (1.0 - (-dt * 4.5).exp());
-    let lift_speed = pitch_input * bp.max_speed * 0.34;
+    let lift_speed = pitch_input * bp.max_speed * 0.34 + wave.vertical_velocity;
     ship_tf.translation +=
         (forward * motion.speed + right * motion.lateral_speed + Vec3::Y * lift_speed) * dt;
 
@@ -3454,6 +3820,73 @@ mod tests {
             assert!(bp.cockpit_offset.length() < 18.0);
             assert!(bp.exit_offset.length() < 20.0);
         }
+    }
+
+    #[test]
+    fn blueprints_have_future_shuttle_reference_traits() {
+        for kind in ShipKind::ALL {
+            let bp = blueprint(kind);
+            assert!(
+                bp.voxels
+                    .iter()
+                    .any(|v| v.block == BlockType::CockpitGlass && v.pos.z < -3),
+                "{kind:?} should have a solid smoked cockpit nose"
+            );
+            assert!(
+                bp.voxels
+                    .iter()
+                    .filter(|v| v.block == BlockType::ShipHullAlloy)
+                    .count()
+                    >= 48,
+                "{kind:?} should read as a bright shuttle hull, not a sparse wireframe"
+            );
+            assert!(
+                bp.voxels
+                    .iter()
+                    .filter(|v| v.block == BlockType::EngineCore)
+                    .count()
+                    >= 2,
+                "{kind:?} should expose visible engine cores for the cyan wake"
+            );
+        }
+    }
+
+    #[test]
+    fn all_ship_kinds_spawn_cyan_and_amber_energy_wakes() {
+        for kind in ShipKind::ALL {
+            let specs = ship_trail_specs(kind);
+            assert!(
+                specs
+                    .iter()
+                    .filter(|spec| spec.tone == ShipTrailTone::Cyan)
+                    .count()
+                    >= 2,
+                "{kind:?} should leave dual cyan energy trails"
+            );
+            assert!(
+                specs.iter().any(|spec| spec.tone == ShipTrailTone::Amber),
+                "{kind:?} should have an amber heat bloom around high thrust"
+            );
+            assert!(
+                specs.iter().any(|spec| spec.base_scale.z >= 4.0),
+                "{kind:?} trails should be long enough to read at flight speed"
+            );
+        }
+    }
+
+    #[test]
+    fn ship_wave_response_is_idle_safe_and_visible_at_speed() {
+        let idle = ship_wave_response(ShipKind::ScoutShuttle, 0.0, 90.0, 2.0);
+        assert_eq!(idle.vertical_velocity, 0.0);
+        assert_eq!(idle.pitch, 0.0);
+        assert_eq!(idle.roll, 0.0);
+
+        let cruise = ship_wave_response(ShipKind::ScoutShuttle, 72.0, 90.0, 2.0);
+        assert!(cruise.vertical_velocity.abs() > 0.01);
+        assert!(cruise.pitch.abs() > 0.001 || cruise.roll.abs() > 0.001);
+        assert!(cruise.vertical_velocity.abs() <= 4.0);
+        assert!(cruise.pitch.abs() <= 0.045);
+        assert!(cruise.roll.abs() <= 0.065);
     }
 
     #[test]

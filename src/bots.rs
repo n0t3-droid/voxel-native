@@ -5506,7 +5506,7 @@ fn road_shape_bot_guide(shape: crate::city::RoadShape) -> BotRoadGuideShape {
 }
 
 fn sampled_city_road_points(road: &crate::city::RoadSegment) -> Vec<[i32; 3]> {
-    let cells = crate::city::road_component_centerline_xz(road);
+    let cells = crate::city::road_component_centerline_samples(road);
     let sample_step = if road.shape == crate::city::RoadShape::Roundabout {
         6
     } else {
@@ -5516,7 +5516,7 @@ fn sampled_city_road_points(road: &crate::city::RoadSegment) -> Vec<[i32; 3]> {
     let mut points = Vec::new();
     for (idx, cell) in cells.into_iter().enumerate() {
         if idx == 0 || idx == last || idx % sample_step == 0 {
-            push_road_guide_point(&mut points, [cell.x, road.a.y, cell.y]);
+            push_road_guide_point(&mut points, [cell.x, cell.y, cell.z]);
         }
     }
     points
@@ -6898,16 +6898,47 @@ fn player_road_frontage_plan_row(
         }
     }
     let (_, guide, district) = best?;
+    let grade = road_guide_grade_detail(guide);
     Some(BotPlanRow {
         phase: "Player Road Frontage".into(),
         owner: role_owner_label(save, BotRole::Planner, team),
         material: format!("{} road component", guide.theme.label()),
         detail: format!(
-            "Use the player road in {} as frontage; keep entries, doors, height rhythm, setbacks, and later retexture choices tied to this width {} editable road component.",
-            district.name, guide.width
+            "Use the {} player road in {} as frontage; keep entries, doors, height rhythm, setbacks, and later retexture choices tied to this width {} editable road component. {}",
+            road_guide_shape_label(guide.shape),
+            district.name,
+            guide.width,
+            grade
         ),
         status: "queued".into(),
     })
+}
+
+fn road_guide_shape_label(shape: BotRoadGuideShape) -> &'static str {
+    match shape {
+        BotRoadGuideShape::Straight => "straight",
+        BotRoadGuideShape::Corner => "corner",
+        BotRoadGuideShape::Roundabout => "roundabout",
+    }
+}
+
+fn road_guide_grade_detail(guide: &BotRoadGuide) -> String {
+    let mut ys = guide.points.iter().map(|point| point[1]);
+    let Some(first) = ys.next() else {
+        return "Road deck grade is unknown; keep building entries conservative.".into();
+    };
+    let (mut min_y, mut max_y) = (first, first);
+    for y in ys {
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    if max_y == min_y {
+        format!("Road deck is level at y={min_y}; align thresholds and frontage pads to that curb.")
+    } else {
+        format!(
+            "Road bridge grade {min_y}->{max_y}; terrace podiums, stairs, ramps, and skyline bases so architecture blends into the smooth road height change."
+        )
+    }
 }
 
 fn project_uses_street_face(kind: BotTaskKind) -> bool {
@@ -12014,6 +12045,63 @@ mod tests {
                     && row.detail.contains("player road")
                     && row.detail.contains("width 7")),
             "bot spreadsheet should expose the straight player road frontage: {:?}",
+            project.concept.rows
+        );
+    }
+
+    #[test]
+    fn player_road_frontage_concept_records_bridge_grade_from_component() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Bridge District".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district);
+        let road = crate::city::RoadSegment::new(
+            IVec3::new(-48, 90, 0),
+            IVec3::new(48, 90, 0),
+            7,
+            crate::city::RoadStyle::Neon,
+        )
+        .with_endpoint_heights(0, 18);
+        sync_user_city_roads(&mut save, &[road]);
+        let guide = save.user_roads.first().unwrap();
+        assert!(
+            guide.points.iter().map(|point| point[1]).max().unwrap()
+                > guide.points.iter().map(|point| point[1]).min().unwrap(),
+            "bot road guide should keep sampled bridge grade heights: {:?}",
+            guide.points
+        );
+        let size = autonomous_project_size(BotTaskKind::BuildGlassTower);
+
+        add_project_unchecked(
+            &mut save,
+            BotTaskKind::BuildGlassTower,
+            [-22, 90, 14],
+            size,
+            BotTheme::MagentaGlass,
+            None,
+            Some(7),
+            None,
+            8,
+            false,
+        )
+        .unwrap();
+
+        let project = save.projects.last().unwrap();
+        assert!(
+            project.concept.rows.iter().any(|row| {
+                row.phase == "Player Road Frontage"
+                    && row.detail.contains("bridge grade")
+                    && row.detail.contains("90->108")
+            }),
+            "bot concept should tell builders how the road bridge grade blends into architecture: {:?}",
             project.concept.rows
         );
     }
