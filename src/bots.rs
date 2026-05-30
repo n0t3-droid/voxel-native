@@ -6716,6 +6716,7 @@ fn build_project_concept(
             status: "queued".into(),
         },
     ];
+    let semantic_anchor_row = semantic_road_anchor_plan_row(save, kind, origin, size, &team);
     if is_road_project(kind) {
         rows.insert(
             2,
@@ -6778,6 +6779,9 @@ fn build_project_concept(
             },
         );
     }
+    if let Some(row) = semantic_anchor_row {
+        rows.insert(2, row);
+    }
     BotProjectConcept {
         brief,
         structure: structure.into(),
@@ -6787,6 +6791,73 @@ fn build_project_concept(
         street_face,
         block_role,
     }
+}
+
+fn semantic_road_anchor_plan_row(
+    save: &BotWorldSave,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    team: &str,
+) -> Option<BotPlanRow> {
+    if is_road_project(kind) {
+        return None;
+    }
+    let project_center = project_center(origin, size);
+    let project_xz = Vec2::new(project_center.x, project_center.z);
+    let mut best: Option<(f32, &BotRoadGuide, &BotDistrict)> = None;
+    for district in &save.districts {
+        for guide in &save.user_roads {
+            if !road_guide_matches_district(guide, district)
+                || semantic_project_kind_for_guide(district, guide) != Some(kind)
+            {
+                continue;
+            }
+            let anchor = road_guide_anchor(guide);
+            let distance = project_xz.distance(Vec2::new(anchor.x, anchor.z));
+            let reach = match guide.shape {
+                BotRoadGuideShape::Roundabout => 64.0,
+                BotRoadGuideShape::Corner => 72.0,
+                BotRoadGuideShape::Straight => 0.0,
+            };
+            if reach > 0.0
+                && distance <= reach
+                && best.map_or(true, |(best_distance, _, _)| distance < best_distance)
+            {
+                best = Some((distance, guide, district));
+            }
+        }
+    }
+    let (_, guide, district) = best?;
+    let anchor = road_guide_anchor(guide);
+    let (phase, detail) = match guide.shape {
+        BotRoadGuideShape::Roundabout => (
+            "Roundabout Anchor",
+            format!(
+                "Use the player road roundabout at {},{} as the civic center for {}; align plaza ring, entries, seating, and connecting streets around that editable component.",
+                anchor.x.round() as i32,
+                anchor.z.round() as i32,
+                district.name
+            ),
+        ),
+        BotRoadGuideShape::Corner => (
+            "Corner Landmark",
+            format!(
+                "Use the player road corner at {},{} as the landmark hinge for {}; face the podium, entry light, and skyline detail toward both streets.",
+                anchor.x.round() as i32,
+                anchor.z.round() as i32,
+                district.name
+            ),
+        ),
+        BotRoadGuideShape::Straight => return None,
+    };
+    Some(BotPlanRow {
+        phase: phase.into(),
+        owner: role_owner_label(save, BotRole::Planner, team),
+        material: format!("{} road component", guide.theme.label()),
+        detail,
+        status: "queued".into(),
+    })
 }
 
 fn project_uses_street_face(kind: BotTaskKind) -> bool {
@@ -11957,6 +12028,56 @@ mod tests {
         assert!(
             distance <= 8.0,
             "roundabout plaza should center on the user road anchor, got center {center:?}"
+        );
+    }
+
+    #[test]
+    fn roundabout_anchor_project_concept_records_player_road_intent() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Roundabout Civic Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district);
+        let roundabout = crate::city::RoadSegment::roundabout(
+            IVec3::new(0, 90, 0),
+            16,
+            7,
+            crate::city::RoadStyle::Cobble,
+        );
+        sync_user_city_roads(&mut save, &[roundabout]);
+        let size = autonomous_project_size(BotTaskKind::BuildPlaza);
+
+        add_project_unchecked(
+            &mut save,
+            BotTaskKind::BuildPlaza,
+            [-21, 90, -21],
+            size,
+            BotTheme::WhiteAlloy,
+            None,
+            Some(7),
+            None,
+            8,
+            false,
+        )
+        .unwrap();
+
+        let project = save.projects.last().unwrap();
+        assert!(
+            project
+                .concept
+                .rows
+                .iter()
+                .any(|row| row.phase == "Roundabout Anchor"
+                    && row.detail.contains("player road roundabout")),
+            "bot spreadsheet should expose the user roundabout as the reason for this plaza: {:?}",
+            project.concept.rows
         );
     }
 

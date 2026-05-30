@@ -1020,17 +1020,29 @@ fn city_input(
                         format!("Start @ {},{} — 2. Klick setzt Ende.", snapped.x, snapped.z);
                 }
                 Some(a) => {
-                    let seg = RoadSegment::new(a, snapped, city.road_width, city.road_style);
+                    let target = smart_road_drag_target(a, snapped, &city.roads);
+                    let seg = RoadSegment::new(a, target, city.road_width, city.road_style);
                     let n = stamp_road(&mut world, &seg);
                     city.roads.push(seg);
                     save_city_roads_for_active(active.as_deref(), &city.roads);
-                    city.pending_road_a = None;
-                    city.status = format!(
-                        "Strasse {} {} ({} Bloecke)",
-                        seg.shape.label(),
-                        city.road_style.label(),
-                        n
-                    );
+                    city.pending_road_a = road_continuation_start(&seg);
+                    city.status = if let Some(next) = city.pending_road_a {
+                        format!(
+                            "Strasse {} {} ({} Bloecke) - weiter ab {},{}.",
+                            seg.shape.label(),
+                            city.road_style.label(),
+                            n,
+                            next.x,
+                            next.z
+                        )
+                    } else {
+                        format!(
+                            "Strasse {} {} ({} Bloecke)",
+                            seg.shape.label(),
+                            city.road_style.label(),
+                            n
+                        )
+                    };
                     telemetry.city_actions = telemetry.city_actions.saturating_add(1);
                     telemetry.build_blocks_changed =
                         telemetry.build_blocks_changed.saturating_add(n as u64);
@@ -1107,9 +1119,24 @@ fn city_input(
             CityTool::Road => {
                 if city.pending_road_a.take().is_some() {
                     city.status = "Startpunkt verworfen.".into();
-                } else if city.roads.pop().is_some() {
+                } else if let Some(idx) = city
+                    .selected_road
+                    .filter(|idx| *idx < city.roads.len())
+                    .or_else(|| city.roads.len().checked_sub(1))
+                {
+                    let changed =
+                        delete_road_component(&mut world, &mut city.roads, idx).unwrap_or_default();
+                    city.selected_road = None;
                     save_city_roads_for_active(active.as_deref(), &city.roads);
-                    city.status = "Letzte Strasse entfernt (nur Liste — Voxel bleiben).".into();
+                    city.status = format!(
+                        "Strassenkomponente {} geloescht ({} Bloecke bereinigt).",
+                        idx + 1,
+                        changed
+                    );
+                    telemetry.city_actions = telemetry.city_actions.saturating_add(1);
+                    telemetry.build_blocks_changed = telemetry
+                        .build_blocks_changed
+                        .saturating_add(changed as u64);
                 }
             }
             CityTool::District => {
@@ -1173,6 +1200,105 @@ fn snap_cell(p: IVec3, mode: SnapMode, roads: &[RoadSegment]) -> IVec3 {
                 None => p,
             }
         }
+    }
+}
+
+const SMART_ROAD_AXIS_JITTER: i32 = 3;
+const SMART_ROAD_AXIS_RATIO: i32 = 3;
+const SMART_ROAD_LENGTH_TOLERANCE: i32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoadDragAxis {
+    X,
+    Z,
+}
+
+fn smart_road_drag_target(start: IVec3, raw: IVec3, roads: &[RoadSegment]) -> IVec3 {
+    let dx = raw.x - start.x;
+    let dz = raw.z - start.z;
+    let Some(axis) = dominant_road_drag_axis(dx, dz) else {
+        return raw;
+    };
+
+    let mut target = raw;
+    let raw_len = match axis {
+        RoadDragAxis::X => {
+            target.z = start.z;
+            dx.abs()
+        }
+        RoadDragAxis::Z => {
+            target.x = start.x;
+            dz.abs()
+        }
+    };
+    if raw_len == 0 {
+        return raw;
+    }
+
+    if let Some(span) = matching_reference_road_span(raw_len, roads) {
+        match axis {
+            RoadDragAxis::X => target.x = start.x + dx.signum() * span,
+            RoadDragAxis::Z => target.z = start.z + dz.signum() * span,
+        }
+    }
+    target
+}
+
+fn dominant_road_drag_axis(dx: i32, dz: i32) -> Option<RoadDragAxis> {
+    let ax = dx.abs();
+    let az = dz.abs();
+    if ax == 0 && az == 0 {
+        return None;
+    }
+    if ax >= az && (az <= SMART_ROAD_AXIS_JITTER || ax >= az.saturating_mul(SMART_ROAD_AXIS_RATIO))
+    {
+        return Some(RoadDragAxis::X);
+    }
+    if az >= ax && (ax <= SMART_ROAD_AXIS_JITTER || az >= ax.saturating_mul(SMART_ROAD_AXIS_RATIO))
+    {
+        return Some(RoadDragAxis::Z);
+    }
+    None
+}
+
+fn matching_reference_road_span(raw_len: i32, roads: &[RoadSegment]) -> Option<i32> {
+    let mut best: Option<(i32, i32)> = None;
+    for road in roads.iter().rev().take(8) {
+        visit_road_reference_spans(*road, |span| {
+            if span < 4 {
+                return;
+            }
+            let delta = (span - raw_len).abs();
+            if delta <= SMART_ROAD_LENGTH_TOLERANCE
+                && best.map_or(true, |(best_delta, _)| delta < best_delta)
+            {
+                best = Some((delta, span));
+            }
+        });
+    }
+    best.map(|(_, span)| span)
+}
+
+fn visit_road_reference_spans(road: RoadSegment, mut visit: impl FnMut(i32)) {
+    match road.shape {
+        RoadShape::Straight => {
+            visit((road.b.x - road.a.x).abs().max((road.b.z - road.a.z).abs()));
+        }
+        RoadShape::Corner => {
+            let via = road_corner_via(road);
+            visit((via.x - road.a.x).abs() + (via.z - road.a.z).abs());
+            visit((road.b.x - via.x).abs() + (road.b.z - via.z).abs());
+        }
+        RoadShape::Roundabout => {
+            visit(road.roundabout_radius.max(4) as i32 * 2);
+        }
+    }
+}
+
+fn road_continuation_start(road: &RoadSegment) -> Option<IVec3> {
+    match road.shape {
+        RoadShape::Roundabout => None,
+        RoadShape::Straight | RoadShape::Corner => Some(road.b),
     }
 }
 
@@ -1474,6 +1600,18 @@ fn restamp_road_component(
     after: &RoadSegment,
 ) -> usize {
     clear_road_component(world, before) + stamp_road(world, after)
+}
+
+fn delete_road_component(
+    world: &mut VoxelWorld,
+    roads: &mut Vec<RoadSegment>,
+    idx: usize,
+) -> Option<usize> {
+    if idx >= roads.len() {
+        return None;
+    }
+    let road = roads.remove(idx);
+    Some(clear_road_component(world, &road))
 }
 
 /// Remove a previously stamped road component footprint before applying
@@ -1945,11 +2083,14 @@ fn city_draw_gizmos(
             });
             let (hit_cell, _) = picked;
             let sy = world.surface_height_at(hit_cell.x, hit_cell.z);
-            let cursor = snap_cell(
+            let mut cursor = snap_cell(
                 IVec3::new(hit_cell.x, sy, hit_cell.z),
                 city.snap,
                 &city.roads,
             );
+            if let Some(a) = city.pending_road_a {
+                cursor = smart_road_drag_target(a, cursor, &city.roads);
+            }
             let c_world = cursor.as_vec3() + Vec3::new(0.5, 1.5, 0.5);
             // Cursor marker — pulses so the user never loses it.
             gizmos.sphere(
@@ -2234,7 +2375,7 @@ fn draw_hint_hud(
         match city.tool {
             CityTool::Road => {
                 if city.pending_road_a.is_some() {
-                    lines.push(("LMB".into(), "Strassenende setzen".into()));
+                    lines.push(("LMB".into(), "Strassenende setzen + weiterzeichnen".into()));
                     lines.push(("RMB / Esc".into(), "Abbrechen".into()));
                 } else {
                     lines.push(("LMB".into(), "Strassenstart setzen".into()));
@@ -2587,6 +2728,67 @@ mod tests {
     }
 
     #[test]
+    fn smart_road_drag_snap_keeps_accidental_jitter_straight() {
+        let target = smart_road_drag_target(IVec3::new(0, 72, 0), IVec3::new(31, 72, 2), &[]);
+
+        assert_eq!(
+            target,
+            IVec3::new(31, 72, 0),
+            "small hand jitter while drawing should stay a straight road instead of creating a corner"
+        );
+    }
+
+    #[test]
+    fn smart_road_drag_snap_reuses_previous_component_length() {
+        let previous = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+        let target =
+            smart_road_drag_target(IVec3::new(0, 72, 16), IVec3::new(30, 72, 18), &[previous]);
+
+        assert_eq!(
+            target,
+            IVec3::new(32, 72, 16),
+            "drawing near an existing road length should snap to the same exact span"
+        );
+    }
+
+    #[test]
+    fn smart_road_drag_snap_preserves_deliberate_corner_intent() {
+        let target = smart_road_drag_target(IVec3::new(0, 72, 0), IVec3::new(24, 72, 16), &[]);
+
+        assert_eq!(
+            target,
+            IVec3::new(24, 72, 16),
+            "deliberate two-axis drags should still create one editable corner component"
+        );
+    }
+
+    #[test]
+    fn road_chain_continues_from_component_end() {
+        let straight = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+        let corner = RoadSegment::new(
+            IVec3::new(32, 72, 0),
+            IVec3::new(48, 72, 24),
+            5,
+            RoadStyle::Neon,
+        );
+        let roundabout = RoadSegment::roundabout(IVec3::new(64, 72, 0), 10, 5, RoadStyle::Cobble);
+
+        assert_eq!(road_continuation_start(&straight), Some(straight.b));
+        assert_eq!(road_continuation_start(&corner), Some(corner.b));
+        assert_eq!(road_continuation_start(&roundabout), None);
+    }
+
+    #[test]
     fn road_component_height_delta_targets_closest_endpoint() {
         let road = RoadSegment::new(
             IVec3::new(0, 72, 0),
@@ -2728,6 +2930,34 @@ mod tests {
         assert_eq!(larger.roundabout_radius, 14);
         assert_eq!(larger.width, 5);
         assert_eq!(larger.style, RoadStyle::Neon);
+    }
+
+    #[test]
+    fn deleting_selected_road_component_clears_its_voxels() {
+        let mut world = VoxelWorld::new();
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(16, 72, 0),
+            5,
+            RoadStyle::Neon,
+        );
+        let center_y = world.surface_height_at(8, 0);
+        let mut roads = vec![road];
+
+        stamp_road(&mut world, &road);
+        assert_eq!(
+            world.voxel_at(8, center_y, 0),
+            Voxel::from(BlockType::Limestone)
+        );
+
+        let changed = delete_road_component(&mut world, &mut roads, 0).unwrap();
+
+        assert!(changed > 0);
+        assert!(roads.is_empty());
+        assert_eq!(
+            world.voxel_at(8, center_y, 0),
+            terrain_surface_restore_voxel(&world, 8, 0)
+        );
     }
 
     #[test]
