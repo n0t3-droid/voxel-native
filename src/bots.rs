@@ -5151,7 +5151,15 @@ fn user_road_shape_project_for_district(
     district: &BotDistrict,
 ) -> Option<BotTaskKind> {
     let guide = strongest_semantic_user_road(save, district)?;
-    let kind = match guide.shape {
+    let kind = semantic_project_kind_for_guide(district, guide)?;
+    (!district_has_project_kind(save, district.id, kind)).then_some(kind)
+}
+
+fn semantic_project_kind_for_guide(
+    district: &BotDistrict,
+    guide: &BotRoadGuide,
+) -> Option<BotTaskKind> {
+    match guide.shape {
         BotRoadGuideShape::Roundabout => Some(BotTaskKind::BuildPlaza),
         BotRoadGuideShape::Corner => Some(match district.kind {
             BotDistrictKind::Skyline | BotDistrictKind::Scenic => BotTaskKind::BuildGlassTower,
@@ -5161,8 +5169,7 @@ fn user_road_shape_project_for_district(
             BotDistrictKind::Training => BotTaskKind::TargetRange,
         }),
         BotRoadGuideShape::Straight => None,
-    }?;
-    (!district_has_project_kind(save, district.id, kind)).then_some(kind)
+    }
 }
 
 fn district_has_project_kind(save: &BotWorldSave, district_id: u64, kind: BotTaskKind) -> bool {
@@ -5262,12 +5269,32 @@ fn find_loaded_build_site(
             ));
         }
     }
+    if !is_road_project(kind) {
+        let semantic_candidates = semantic_road_site_origins(save, world, district, kind, size);
+        if let Some(origin) =
+            best_build_site_from_candidates(save, world, district, kind, size, semantic_candidates)
+        {
+            return Some(origin);
+        }
+    }
     if is_road_project(kind) {
         candidates.extend(district_road_origins(save, world, district, size));
     } else {
         candidates.extend(roadside_lot_origins(save, world, district, kind, size, seq));
     }
 
+    best_build_site_from_candidates(save, world, district, kind, size, candidates)
+}
+
+fn best_build_site_from_candidates(
+    save: &BotWorldSave,
+    world: &VoxelWorld,
+    district: &BotDistrict,
+    kind: BotTaskKind,
+    size: [i32; 3],
+    candidates: Vec<[i32; 3]>,
+) -> Option<[i32; 3]> {
+    let bounds = save.primary_bounds();
     candidates
         .into_iter()
         .filter(|origin| bounds.contains_box(*origin, size))
@@ -5277,6 +5304,22 @@ fn find_loaded_build_site(
             let sb = score_planned_site(save, world, district, *b, size, kind);
             sa.total_cmp(&sb)
         })
+}
+
+fn semantic_road_site_origins(
+    save: &BotWorldSave,
+    world: &VoxelWorld,
+    district: &BotDistrict,
+    kind: BotTaskKind,
+    size: [i32; 3],
+) -> Vec<[i32; 3]> {
+    let bounds = save.primary_bounds();
+    save.user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+        .filter(|guide| semantic_project_kind_for_guide(district, guide) == Some(kind))
+        .map(|guide| project_origin_from_center(world, bounds, road_guide_anchor(guide), size))
+        .collect()
 }
 
 fn district_road_origins(
@@ -5479,6 +5522,41 @@ fn road_guide_center(points: &[[i32; 3]]) -> Vec3 {
         sum += Vec3::new(point[0] as f32, point[1] as f32, point[2] as f32);
     }
     sum * inv
+}
+
+fn road_guide_anchor(guide: &BotRoadGuide) -> Vec3 {
+    match guide.shape {
+        BotRoadGuideShape::Corner => guide
+            .points
+            .get(guide.points.len() / 2)
+            .map(|point| Vec3::new(point[0] as f32, point[1] as f32, point[2] as f32))
+            .unwrap_or_else(|| road_guide_center(&guide.points)),
+        BotRoadGuideShape::Roundabout => road_guide_bounds_center(&guide.points),
+        BotRoadGuideShape::Straight => road_guide_center(&guide.points),
+    }
+}
+
+fn road_guide_bounds_center(points: &[[i32; 3]]) -> Vec3 {
+    let Some(first) = points.first() else {
+        return Vec3::ZERO;
+    };
+    let mut min_x = first[0];
+    let mut max_x = first[0];
+    let mut min_z = first[2];
+    let mut max_z = first[2];
+    let mut sum_y = 0.0;
+    for point in points {
+        min_x = min_x.min(point[0]);
+        max_x = max_x.max(point[0]);
+        min_z = min_z.min(point[2]);
+        max_z = max_z.max(point[2]);
+        sum_y += point[1] as f32;
+    }
+    Vec3::new(
+        (min_x + max_x) as f32 * 0.5,
+        sum_y / points.len().max(1) as f32,
+        (min_z + max_z) as f32 * 0.5,
+    )
 }
 
 fn road_guide_matches_district(guide: &BotRoadGuide, district: &BotDistrict) -> bool {
@@ -6214,7 +6292,41 @@ fn score_planned_site(
     let inside = bounds.contains_box(origin, size);
     score_city_slot_with_route_fit(flatness, road_access, inside, balance, true, route_fit)
         + block_fit.clamp(0.0, 1.0) * 0.55
+        + semantic_road_anchor_score(save, district, origin, size, kind) * 2.5
         - bounds.distance_from_center(center_x as f32, center_z as f32) * 0.0005
+}
+
+fn semantic_road_anchor_score(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> f32 {
+    if is_road_project(kind) {
+        return 0.0;
+    }
+    let center = project_center(origin, size);
+    let center_xz = Vec2::new(center.x, center.z);
+    save.user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+        .filter(|guide| semantic_project_kind_for_guide(district, guide) == Some(kind))
+        .map(|guide| {
+            let anchor = road_guide_anchor(guide);
+            let dist = center_xz.distance(Vec2::new(anchor.x, anchor.z));
+            let reach = match guide.shape {
+                BotRoadGuideShape::Roundabout => 42.0,
+                BotRoadGuideShape::Corner => 54.0,
+                BotRoadGuideShape::Straight => 0.0,
+            };
+            if reach <= 0.0 {
+                0.0
+            } else {
+                (1.0 - dist / reach).clamp(0.0, 1.0)
+            }
+        })
+        .fold(0.0, f32::max)
 }
 
 fn score_city_slot(
@@ -11351,6 +11463,14 @@ fn despawn(commands: &mut Commands, entity: Entity) {
 mod tests {
     use super::*;
 
+    fn mark_test_city_columns_loaded(world: &mut VoxelWorld, min: i32, max: i32) {
+        for cx in min..=max {
+            for cz in min..=max {
+                world.loaded_column_counts.insert((cx, cz), 1);
+            }
+        }
+    }
+
     #[test]
     fn bot_world_save_round_trips() {
         let mut save = BotWorldSave::default();
@@ -11781,6 +11901,43 @@ mod tests {
             choose_district_project(&save, &district, 0, false),
             BotTaskKind::BuildResidentialBlock,
             "after a roundabout plaza exists, bots should diversify into district infill"
+        );
+    }
+
+    #[test]
+    fn roundabout_plaza_site_centers_on_user_road_anchor() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -8, 8);
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Roundabout Civic Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let roundabout = crate::city::RoadSegment::roundabout(
+            IVec3::new(0, 90, 0),
+            16,
+            7,
+            crate::city::RoadStyle::Cobble,
+        );
+        sync_user_city_roads(&mut save, &[roundabout]);
+        let size = autonomous_project_size(BotTaskKind::BuildPlaza);
+
+        let origin =
+            find_loaded_build_site(&save, &world, &district, BotTaskKind::BuildPlaza, size, 0)
+                .unwrap();
+        let center = project_center(origin, size);
+        let distance = Vec2::new(center.x, center.z).distance(Vec2::ZERO);
+
+        assert!(
+            distance <= 8.0,
+            "roundabout plaza should center on the user road anchor, got center {center:?}"
         );
     }
 
