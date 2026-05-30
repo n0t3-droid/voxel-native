@@ -1373,6 +1373,19 @@ impl BuildingStreetFace {
         }
     }
 
+    fn skyline_corner_marker_cell(self, local: IVec3, sx: i32, sz: i32, setback: i32) -> bool {
+        let near_min_x = (local.x - (setback + 1)).abs() <= 1;
+        let near_max_x = (local.x - (sx - setback - 1)).abs() <= 1;
+        let near_min_z = (local.z - (setback + 1)).abs() <= 1;
+        let near_max_z = (local.z - (sz - setback - 1)).abs() <= 1;
+        match self {
+            Self::North => local.z == setback && (near_min_x || near_max_x),
+            Self::South => local.z == sz - setback && (near_min_x || near_max_x),
+            Self::West => local.x == setback && (near_min_z || near_max_z),
+            Self::East => local.x == sx - setback && (near_min_z || near_max_z),
+        }
+    }
+
     fn residential_entry_cell(self, lx: i32, lz: i32, style: i32) -> bool {
         let entry_x = lx == 3 || lx == 4 || (style == 1 && lx == 5);
         let entry_z = lz == 3 || lz == 4 || (style == 1 && lz == 5);
@@ -6318,6 +6331,11 @@ fn build_project_concept(
             detail.push_str(
                 " so massing, entries, and public edges fit the intersection or midblock condition.",
             );
+            if matches!(role, CityBlockRole::CornerLandmark) {
+                detail.push_str(
+                    " Corner landmark towers get a signal crown and lit vertical spine on the street-facing corner.",
+                );
+            }
         }
         rows.insert(
             2,
@@ -7485,6 +7503,11 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 .concept
                 .street_face
                 .unwrap_or(BuildingStreetFace::North);
+            let corner_landmark = matches!(
+                project.concept.block_role,
+                Some(CityBlockRole::CornerLandmark)
+            ) && street_face
+                .skyline_corner_marker_cell(local, sx, sz, setback);
             let entrance = podium
                 && local.y <= 2
                 && street_face.contains_centered_entrance(local, sx, sz, setback);
@@ -7532,7 +7555,9 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                     && (local.x - (sx - setback)).abs() > 1
                     && (local.z - (sz - setback)).abs() > 1
                     && (local.x + local.z).rem_euclid(9) == 0;
-                if antenna {
+                if corner_landmark {
+                    project.theme.signal()
+                } else if antenna {
                     project.theme.signal()
                 } else if roof_garden {
                     Voxel::from(BlockType::Leaves)
@@ -7543,6 +7568,8 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 }
             } else if entrance {
                 Voxel::from(BlockType::CockpitGlass)
+            } else if corner_landmark && local.y > sy / 2 {
+                project.theme.signal()
             } else if vertical_fin {
                 project.theme.accent()
             } else if terrace {
@@ -11629,6 +11656,8 @@ mod tests {
         assert_eq!(concept.block_role, Some(CityBlockRole::CornerLandmark));
         assert!(city_sheet.detail.contains("corner landmark"));
         assert!(city_sheet.detail.contains("intersection"));
+        assert!(city_sheet.detail.contains("crown"));
+        assert!(city_sheet.detail.contains("vertical spine"));
     }
 
     #[test]
@@ -11667,6 +11696,113 @@ mod tests {
             old_north_entrance,
             Some(Voxel::from(BlockType::CockpitGlass))
         );
+    }
+
+    #[test]
+    fn corner_landmark_tower_marks_street_facing_roof_corners() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(20, 10) + 1;
+        let project = BotProject {
+            id: 3,
+            kind: BotTaskKind::BuildGlassTower,
+            label: "Corner Landmark Tower".into(),
+            origin: [0, base_y, 0],
+            size: [21, 58, 21],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::CornerLandmark),
+                ..default()
+            },
+        };
+        let variant = project_style_variant(&project, 5);
+        let setback = match variant {
+            1 | 3 => 3,
+            4 => 1,
+            _ => 2,
+        };
+        let sx = project.size[0] - 1;
+        let sy = project.size[1] - 1;
+
+        let street_corner =
+            project_voxel(&project, IVec3::new(sx - setback, sy, setback + 1), &world)
+                .map(|(_, voxel)| voxel);
+        let quiet_back_corner =
+            project_voxel(&project, IVec3::new(setback, sy, setback + 1), &world)
+                .map(|(_, voxel)| voxel);
+        let mut midblock = project.clone();
+        midblock.concept.block_role = Some(CityBlockRole::MidblockStreetWall);
+        let midblock_corner =
+            project_voxel(&midblock, IVec3::new(sx - setback, sy, setback + 1), &world)
+                .map(|(_, voxel)| voxel);
+
+        assert_eq!(street_corner, Some(project.theme.signal()));
+        assert_ne!(quiet_back_corner, Some(project.theme.signal()));
+        assert_ne!(midblock_corner, Some(project.theme.signal()));
+    }
+
+    #[test]
+    fn corner_landmark_tower_adds_lit_vertical_corner_spine() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(20, 10) + 1;
+        let project = BotProject {
+            id: 3,
+            kind: BotTaskKind::BuildGlassTower,
+            label: "Corner Landmark Tower".into(),
+            origin: [0, base_y, 0],
+            size: [21, 58, 21],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::CornerLandmark),
+                ..default()
+            },
+        };
+        let sx = project.size[0] - 1;
+        let sy = project.size[1] - 1;
+        let variant = project_style_variant(&project, 5);
+        let setback = match variant {
+            1 | 3 => 3,
+            4 => 1,
+            _ => 2,
+        };
+        let upper_y = sy - 7;
+
+        let spine = project_voxel(
+            &project,
+            IVec3::new(sx - setback, upper_y, setback + 1),
+            &world,
+        )
+        .map(|(_, voxel)| voxel);
+        let mut midblock = project.clone();
+        midblock.concept.block_role = Some(CityBlockRole::MidblockStreetWall);
+        let midblock_same_cell = project_voxel(
+            &midblock,
+            IVec3::new(sx - setback, upper_y, setback + 1),
+            &world,
+        )
+        .map(|(_, voxel)| voxel);
+
+        assert_eq!(spine, Some(project.theme.signal()));
+        assert_ne!(midblock_same_cell, Some(project.theme.signal()));
     }
 
     fn residential_test_project(street_face: BuildingStreetFace, base_y: i32) -> BotProject {
