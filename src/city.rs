@@ -934,12 +934,8 @@ fn road_nearest_point_xz(road: RoadSegment, point: Vec2) -> Option<(Vec2, f32)> 
             Some(point_segment_nearest_xz(a, b, point))
         }
         RoadShape::Corner => {
-            let a = road_point_xz(road.a);
-            let via = road_point_xz(road_corner_via(road));
-            let b = road_point_xz(road.b);
-            let av = point_segment_nearest_xz(a, via, point);
-            let vb = point_segment_nearest_xz(via, b, point);
-            Some(if av.1 <= vb.1 { av } else { vb })
+            let via = road_corner_via(road);
+            road_segments_nearest_point_xz(&smooth_corner_segments_xz(road.a, via, road.b), point)
         }
         RoadShape::Roundabout => {
             let center = road_point_xz(road.a);
@@ -969,6 +965,21 @@ fn point_segment_nearest_xz(a: Vec2, b: Vec2, point: Vec2) -> (Vec2, f32) {
     let t = ((point - a).dot(ab) / len2).clamp(0.0, 1.0);
     let nearest = a + ab * t;
     (nearest, point.distance_squared(nearest))
+}
+
+fn road_segments_nearest_point_xz(segments: &[(IVec2, IVec2)], point: Vec2) -> Option<(Vec2, f32)> {
+    let mut best: Option<(Vec2, f32)> = None;
+    for (a, b) in segments {
+        let candidate = point_segment_nearest_xz(road_cell_xz(*a), road_cell_xz(*b), point);
+        if best.map_or(true, |(_, best_d2)| candidate.1 < best_d2) {
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+fn road_cell_xz(cell: IVec2) -> Vec2 {
+    Vec2::new(cell.x as f32 + 0.5, cell.y as f32 + 0.5)
 }
 
 fn road_corner_via(road: RoadSegment) -> IVec3 {
@@ -1049,15 +1060,37 @@ fn road_path_xz(seg: &RoadSegment) -> Vec<IVec2> {
         RoadShape::Straight => line_xz(IVec2::new(seg.a.x, seg.a.z), IVec2::new(seg.b.x, seg.b.z)),
         RoadShape::Corner => {
             let via = road_corner_via(*seg);
-            let mut cells = line_xz(IVec2::new(seg.a.x, seg.a.z), IVec2::new(via.x, via.z));
-            append_path_unique(
-                &mut cells,
-                line_xz(IVec2::new(via.x, via.z), IVec2::new(seg.b.x, seg.b.z)),
-            );
-            cells
+            smooth_corner_path_xz(seg.a, via, seg.b)
         }
         RoadShape::Roundabout => roundabout_path_xz(seg.a, seg.roundabout_radius),
     }
+}
+
+fn smooth_corner_path_xz(a: IVec3, via: IVec3, b: IVec3) -> Vec<IVec2> {
+    let segments = smooth_corner_segments_xz(a, via, b);
+    let mut cells = Vec::new();
+    for (a, b) in segments {
+        append_path_unique(&mut cells, line_xz(a, b));
+    }
+    cells
+}
+
+fn smooth_corner_segments_xz(a: IVec3, via: IVec3, b: IVec3) -> Vec<(IVec2, IVec2)> {
+    let a2 = IVec2::new(a.x, a.z);
+    let via2 = IVec2::new(via.x, via.z);
+    let b2 = IVec2::new(b.x, b.z);
+    let len_a = (via2.x - a2.x).abs() + (via2.y - a2.y).abs();
+    let len_b = (b2.x - via2.x).abs() + (b2.y - via2.y).abs();
+    let turn = len_a.min(len_b).min(6);
+    if turn < 3 {
+        return vec![(a2, via2), (via2, b2)];
+    }
+
+    let step_from_a = IVec2::new((via2.x - a2.x).signum(), (via2.y - a2.y).signum());
+    let step_to_b = IVec2::new((b2.x - via2.x).signum(), (b2.y - via2.y).signum());
+    let turn_start = via2 - step_from_a * turn;
+    let turn_end = via2 + step_to_b * turn;
+    vec![(a2, turn_start), (turn_start, turn_end), (turn_end, b2)]
 }
 
 fn append_path_unique(into: &mut Vec<IVec2>, mut path: Vec<IVec2>) {
@@ -2125,6 +2158,35 @@ mod tests {
             snap_cell(IVec3::new(23, 72, 8), SnapMode::Road, &roads),
             IVec3::new(24, 72, 8),
             "road snap should land on the corner leg, not the diagonal chord"
+        );
+    }
+
+    #[test]
+    fn diagonal_road_drag_uses_smooth_corner_transition_path() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 16),
+            5,
+            RoadStyle::Asphalt,
+        );
+        let path = road_path_xz(&road);
+
+        assert!(
+            path.contains(&IVec2::new(21, 3)),
+            "corner path should arc through a transition cell instead of snapping at the via point"
+        );
+        assert!(
+            path.contains(&IVec2::new(24, 8)),
+            "corner path should still continue along the second leg after the smooth turn"
+        );
+        assert!(
+            !path.contains(&IVec2::new(24, 0)),
+            "hard corner via cell should be replaced by a smoothed transition"
+        );
+        assert_eq!(
+            snap_cell(IVec3::new(21, 72, 3), SnapMode::Road, &[road]),
+            IVec3::new(21, 72, 3),
+            "road snap should follow the smoothed transition path"
         );
     }
 
