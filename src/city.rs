@@ -900,6 +900,9 @@ fn snap_cell(p: IVec3, mode: SnapMode, roads: &[RoadSegment]) -> IVec3 {
             // Find the nearest point on any existing road within 8
             // blocks. Falls back to p if nothing is close.
             let point = Vec2::new(p.x as f32 + 0.5, p.z as f32 + 0.5);
+            if let Some(handle) = nearest_road_snap_handle(roads, point, 4.0) {
+                return IVec3::new(handle.x, p.y, handle.z);
+            }
             let mut best: Option<(f32, Vec2)> = None;
             for r in roads {
                 let Some((q, d2)) = road_nearest_point_xz(*r, point) else {
@@ -913,6 +916,47 @@ fn snap_cell(p: IVec3, mode: SnapMode, roads: &[RoadSegment]) -> IVec3 {
                 Some((_, q)) => IVec3::new(q.x.floor() as i32, p.y, q.y.floor() as i32),
                 None => p,
             }
+        }
+    }
+}
+
+fn nearest_road_snap_handle(
+    roads: &[RoadSegment],
+    point: Vec2,
+    max_distance: f32,
+) -> Option<IVec3> {
+    let max_d2 = max_distance * max_distance;
+    let mut best: Option<(f32, IVec3)> = None;
+    for road in roads {
+        visit_road_snap_handles(*road, |handle| {
+            let d2 = point.distance_squared(road_point_xz(handle));
+            if d2 <= max_d2 && best.map_or(true, |(best_d2, _)| d2 < best_d2) {
+                best = Some((d2, handle));
+            }
+        });
+    }
+    best.map(|(_, handle)| handle)
+}
+
+fn visit_road_snap_handles(mut road: RoadSegment, mut visit: impl FnMut(IVec3)) {
+    match road.shape {
+        RoadShape::Straight => {
+            visit(road.a);
+            visit(road.b);
+        }
+        RoadShape::Corner => {
+            visit(road.a);
+            visit(road_corner_via(road));
+            visit(road.b);
+        }
+        RoadShape::Roundabout => {
+            let r = road.roundabout_radius.max(4) as i32;
+            road.b = IVec3::new(road.a.x + r, road.a.y, road.a.z);
+            visit(road.a);
+            visit(road.b);
+            visit(IVec3::new(road.a.x - r, road.a.y, road.a.z));
+            visit(IVec3::new(road.a.x, road.a.y, road.a.z + r));
+            visit(IVec3::new(road.a.x, road.a.y, road.a.z - r));
         }
     }
 }
@@ -2247,6 +2291,38 @@ mod tests {
         assert_eq!(
             nearest_road_component(&roads, IVec3::new(9, 72, 12), 2.0),
             None
+        );
+    }
+
+    #[test]
+    fn road_snap_prefers_component_endpoint_handles() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+
+        assert_eq!(
+            snap_cell(IVec3::new(31, 72, 2), SnapMode::Road, &[road]),
+            IVec3::new(32, 72, 0),
+            "road snap should lock to nearby endpoints for fast exact connections"
+        );
+    }
+
+    #[test]
+    fn road_snap_prefers_corner_turn_handles() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 16),
+            5,
+            RoadStyle::Asphalt,
+        );
+
+        assert_eq!(
+            snap_cell(IVec3::new(24, 72, 2), SnapMode::Road, &[road]),
+            IVec3::new(24, 72, 0),
+            "road snap should expose the editable turn handle even when the visible curve is smoothed"
         );
     }
 
