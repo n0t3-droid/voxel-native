@@ -1296,6 +1296,8 @@ pub struct BotProjectConcept {
     pub visual_goal: String,
     #[serde(default)]
     pub rows: Vec<BotPlanRow>,
+    #[serde(default)]
+    pub street_face: Option<BuildingStreetFace>,
 }
 
 impl Default for BotProjectConcept {
@@ -1306,6 +1308,44 @@ impl Default for BotProjectConcept {
             material_plan: String::new(),
             visual_goal: String::new(),
             rows: Vec::new(),
+            street_face: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BuildingStreetFace {
+    North,
+    South,
+    West,
+    East,
+}
+
+impl BuildingStreetFace {
+    fn label(self) -> &'static str {
+        match self {
+            Self::North => "north/min-z street face",
+            Self::South => "south/max-z street face",
+            Self::West => "west/min-x street face",
+            Self::East => "east/max-x street face",
+        }
+    }
+
+    fn contains_centered_entrance(self, local: IVec3, sx: i32, sz: i32, setback: i32) -> bool {
+        match self {
+            Self::North => local.z == setback && (local.x - sx / 2).abs() <= 2,
+            Self::South => local.z == sz - setback && (local.x - sx / 2).abs() <= 2,
+            Self::West => local.x == setback && (local.z - sz / 2).abs() <= 2,
+            Self::East => local.x == sx - setback && (local.z - sz / 2).abs() <= 2,
+        }
+    }
+
+    fn lobby_detail_cell(self, local: IVec3, sx: i32, sz: i32, setback: i32) -> bool {
+        match self {
+            Self::North => local.z == setback + 2 && (local.x - sx / 2).abs() <= 2,
+            Self::South => local.z == sz - setback - 2 && (local.x - sx / 2).abs() <= 2,
+            Self::West => local.x == setback + 2 && (local.z - sz / 2).abs() <= 2,
+            Self::East => local.x == sx - setback - 2 && (local.z - sz / 2).abs() <= 2,
         }
     }
 }
@@ -5423,30 +5463,99 @@ fn segment_to_segment_distance(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> f32 {
         .min(point_to_segment_distance(d, a, b))
 }
 
+fn building_edge_segments(
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> [(BuildingStreetFace, Vec2, Vec2); 4] {
+    let min_x = origin[0] as f32;
+    let max_x = (origin[0] + size[0].max(1)) as f32;
+    let min_z = origin[2] as f32;
+    let max_z = (origin[2] + size[2].max(1)) as f32;
+    [
+        (
+            BuildingStreetFace::North,
+            Vec2::new(min_x, min_z),
+            Vec2::new(max_x, min_z),
+        ),
+        (
+            BuildingStreetFace::South,
+            Vec2::new(min_x, max_z),
+            Vec2::new(max_x, max_z),
+        ),
+        (
+            BuildingStreetFace::West,
+            Vec2::new(min_x, min_z),
+            Vec2::new(min_x, max_z),
+        ),
+        (
+            BuildingStreetFace::East,
+            Vec2::new(max_x, min_z),
+            Vec2::new(max_x, max_z),
+        ),
+    ]
+}
+
+fn nearest_road_building_edge(
+    road_segments: &[(Vec2, Vec2)],
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<(BuildingStreetFace, f32)> {
+    let edges = building_edge_segments(origin, size);
+    road_segments
+        .iter()
+        .flat_map(|(road_a, road_b)| {
+            edges.iter().map(move |(face, edge_a, edge_b)| {
+                (
+                    *face,
+                    segment_to_segment_distance(*edge_a, *edge_b, *road_a, *road_b),
+                )
+            })
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+}
+
+#[cfg(test)]
+fn road_facing_building_edge(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<BuildingStreetFace> {
+    let segments = road_network_segments(save, district);
+    if !segments.iter().any(|(a, b)| a.distance_squared(*b) > 1.0) {
+        return None;
+    }
+    nearest_road_building_edge(&segments, origin, size).map(|(face, _)| face)
+}
+
+fn road_facing_building_edge_any_district(
+    save: &BotWorldSave,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<BuildingStreetFace> {
+    save.districts
+        .iter()
+        .filter_map(|district| {
+            let segments = road_network_segments(save, district);
+            if !segments.iter().any(|(a, b)| a.distance_squared(*b) > 1.0) {
+                return None;
+            }
+            nearest_road_building_edge(&segments, origin, size)
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(face, _)| face)
+}
+
 fn road_frontage_score(
     save: &BotWorldSave,
     district: &BotDistrict,
     origin: [i32; 3],
     size: [i32; 3],
 ) -> f32 {
-    let min_x = origin[0] as f32;
-    let max_x = (origin[0] + size[0].max(1)) as f32;
-    let min_z = origin[2] as f32;
-    let max_z = (origin[2] + size[2].max(1)) as f32;
-    let edges = [
-        (Vec2::new(min_x, min_z), Vec2::new(max_x, min_z)),
-        (Vec2::new(min_x, max_z), Vec2::new(max_x, max_z)),
-        (Vec2::new(min_x, min_z), Vec2::new(min_x, max_z)),
-        (Vec2::new(max_x, min_z), Vec2::new(max_x, max_z)),
-    ];
-    let best = road_network_segments(save, district)
-        .into_iter()
-        .flat_map(|(road_a, road_b)| {
-            edges
-                .iter()
-                .map(move |(a, b)| segment_to_segment_distance(*a, *b, road_a, road_b))
-        })
-        .fold(f32::INFINITY, f32::min);
+    let road_segments = road_network_segments(save, district);
+    let best = nearest_road_building_edge(&road_segments, origin, size)
+        .map(|(_, distance)| distance)
+        .unwrap_or(f32::INFINITY);
     if !best.is_finite() {
         return 0.0;
     }
@@ -5770,6 +5879,9 @@ fn build_project_concept(
     let team = project_owner_label(save, assigned_bot, crew_id);
     let (structure, material_plan, visual_goal) = project_design_language(kind, theme);
     let architecture_variant = project_architecture_variant(kind, origin, size);
+    let street_face = project_uses_street_face(kind)
+        .then(|| road_facing_building_edge_any_district(save, origin, size))
+        .flatten();
     let source = if manual {
         "player request"
     } else {
@@ -5845,13 +5957,19 @@ fn build_project_concept(
             },
         );
     } else if let Some(detail) = project_city_sheet_detail(kind) {
+        let mut detail = detail.to_owned();
+        if let Some(face) = street_face {
+            detail.push_str(" Street face: ");
+            detail.push_str(face.label());
+            detail.push_str(" so doors, podiums, and service edges meet the road graph.");
+        }
         rows.insert(
             2,
             BotPlanRow {
                 phase: "City Sheet".into(),
                 owner: role_owner_label(save, BotRole::Planner, &team),
                 material: "frontage / height / style matrix".into(),
-                detail: detail.into(),
+                detail,
                 status: "queued".into(),
             },
         );
@@ -5862,7 +5980,19 @@ fn build_project_concept(
         material_plan: material_plan.into(),
         visual_goal: visual_goal.into(),
         rows,
+        street_face,
     }
+}
+
+fn project_uses_street_face(kind: BotTaskKind) -> bool {
+    matches!(
+        kind,
+        BotTaskKind::BuildHome
+            | BotTaskKind::BuildTower
+            | BotTaskKind::BuildGlassTower
+            | BotTaskKind::MakeTaller
+            | BotTaskKind::BuildResidentialBlock
+    )
 }
 
 fn project_owner_label(
@@ -6895,7 +7025,13 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 || ((local.z + setback + variant * 2).rem_euclid(window_pitch) == 1);
             let window = shell && !podium && local.y < sy && !floor_band && window_slot;
             let glass_tower = matches!(project.kind, BotTaskKind::BuildGlassTower);
-            let entrance = podium && local.y <= 2 && at_front && (local.x - sx / 2).abs() <= 2;
+            let street_face = project
+                .concept
+                .street_face
+                .unwrap_or(BuildingStreetFace::North);
+            let entrance = podium
+                && local.y <= 2
+                && street_face.contains_centered_entrance(local, sx, sz, setback);
             let vertical_fin = shell
                 && !podium
                 && matches!(variant, 1 | 3)
@@ -6924,7 +7060,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let lobby_detail = !shell
                 && podium
                 && local.y == 2
-                && (local.z == setback + 2 || local.x == sx - setback - 2);
+                && street_face.lobby_detail_cell(local, sx, sz, setback);
             let voxel = if local.y == 0 {
                 Voxel::from(BlockType::Limestone)
             } else if local.y == sy {
@@ -10862,6 +10998,101 @@ mod tests {
         assert_eq!(city_sheet.material, "frontage / height / style matrix");
         assert!(city_sheet.detail.contains("road segment"));
         assert!(city_sheet.detail.contains("height band"));
+    }
+
+    #[test]
+    fn building_street_face_selects_nearest_road_edge() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Street Face".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![[44, 90, 2], [44, 90, 4]],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let save = BotWorldSave::default();
+
+        assert_eq!(
+            road_facing_building_edge(&save, &district, [16, 90, -8], [22, 58, 22]),
+            Some(BuildingStreetFace::East)
+        );
+    }
+
+    #[test]
+    fn project_concept_records_street_face_in_city_sheet() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Street Face District".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![[44, 90, 2], [44, 90, 4]],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::BuildGlassTower,
+            BotTheme::CyanAlloy,
+            [16, 90, -8],
+            [22, 58, 22],
+            "Road-Facing Tower",
+            false,
+            None,
+            None,
+        );
+        let city_sheet = concept
+            .rows
+            .iter()
+            .find(|row| row.phase == "City Sheet")
+            .expect("tower should expose its city planning sheet");
+
+        assert_eq!(concept.street_face, Some(BuildingStreetFace::East));
+        assert!(city_sheet.detail.contains("east/max-x street face"));
+        assert!(city_sheet.detail.contains("doors"));
+        assert!(city_sheet.detail.contains("road graph"));
+    }
+
+    #[test]
+    fn tower_podium_entrance_faces_planned_street() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(20, 10) + 1;
+        let project = BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildGlassTower,
+            label: "Street Facing Tower".into(),
+            origin: [0, base_y, 0],
+            size: [21, 58, 21],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                ..default()
+            },
+        };
+
+        let east_entrance =
+            project_voxel(&project, IVec3::new(20, 1, 10), &world).map(|(_, voxel)| voxel);
+        let old_north_entrance =
+            project_voxel(&project, IVec3::new(10, 1, 0), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(east_entrance, Some(Voxel::from(BlockType::CockpitGlass)));
+        assert_ne!(
+            old_north_entrance,
+            Some(Voxel::from(BlockType::CockpitGlass))
+        );
     }
 
     #[test]
