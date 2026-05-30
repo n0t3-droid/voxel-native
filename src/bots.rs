@@ -5321,8 +5321,70 @@ fn semantic_road_site_origins(
         .iter()
         .filter(|guide| road_guide_matches_district(guide, district))
         .filter(|guide| semantic_project_kind_for_guide(district, guide) == Some(kind))
-        .map(|guide| project_origin_from_center(world, bounds, road_guide_anchor(guide), size))
+        .flat_map(|guide| semantic_road_lot_origins(world, bounds, guide, kind, size))
         .collect()
+}
+
+fn semantic_road_lot_origins(
+    world: &VoxelWorld,
+    bounds: BotCityBounds,
+    guide: &BotRoadGuide,
+    kind: BotTaskKind,
+    size: [i32; 3],
+) -> Vec<[i32; 3]> {
+    if guide.shape == BotRoadGuideShape::Corner && project_uses_street_face(kind) {
+        let centers = semantic_corner_frontage_centers(guide, size);
+        if !centers.is_empty() {
+            return centers
+                .into_iter()
+                .map(|center| project_origin_from_center(world, bounds, center, size))
+                .collect();
+        }
+    }
+    vec![project_origin_from_center(
+        world,
+        bounds,
+        road_guide_anchor(guide),
+        size,
+    )]
+}
+
+fn semantic_corner_frontage_centers(guide: &BotRoadGuide, size: [i32; 3]) -> Vec<Vec3> {
+    let anchor = road_guide_anchor(guide);
+    let setback_x = size[0].max(1) as f32 * 0.5 + guide.width.max(1) as f32 * 0.5 + 8.0;
+    let setback_z = size[2].max(1) as f32 * 0.5 + guide.width.max(1) as f32 * 0.5 + 8.0;
+    let mut centers = Vec::with_capacity(4);
+    for (sx, sz) in semantic_corner_quadrant_order(guide) {
+        let center = Vec3::new(
+            anchor.x + sx as f32 * setback_x,
+            anchor.y,
+            anchor.z + sz as f32 * setback_z,
+        );
+        if centers.iter().all(|existing: &Vec3| {
+            Vec2::new(existing.x, existing.z).distance_squared(Vec2::new(center.x, center.z)) > 4.0
+        }) {
+            centers.push(center);
+        }
+    }
+    centers
+}
+
+fn semantic_corner_quadrant_order(guide: &BotRoadGuide) -> Vec<(i32, i32)> {
+    let anchor = road_guide_anchor(guide);
+    let anchor_xz = Vec2::new(anchor.x, anchor.z);
+    let mut quadrants: Vec<(i32, i32, f32)> = [(-1, -1), (-1, 1), (1, -1), (1, 1)]
+        .into_iter()
+        .map(|(sx, sz)| {
+            let probe = anchor_xz + Vec2::new(sx as f32, sz as f32);
+            let nearest = road_guide_segments(guide)
+                .into_iter()
+                .map(|(a, b)| point_to_segment_distance(probe, a, b))
+                .fold(f32::INFINITY, f32::min);
+            (sx, sz, nearest)
+        })
+        .collect();
+    quadrants.sort_by(|a, b| b.2.total_cmp(&a.2));
+    quadrants.into_iter().map(|(sx, sz, _)| (sx, sz)).collect()
 }
 
 fn district_road_origins(
@@ -12358,7 +12420,7 @@ mod tests {
     }
 
     #[test]
-    fn corner_landmark_site_centers_on_user_road_turn() {
+    fn corner_landmark_site_sets_back_from_user_road_turn() {
         let mut world = VoxelWorld::new();
         mark_test_city_columns_loaded(&mut world, -8, 8);
         let district = BotDistrict {
@@ -12392,11 +12454,17 @@ mod tests {
         )
         .unwrap();
         let center = project_center(origin, size);
-        let distance = Vec2::new(center.x, center.z).distance(Vec2::new(32.0, 0.0));
+        let turn = Vec2::new(32.0, 0.0);
+        let distance = Vec2::new(center.x, center.z).distance(turn);
+        let frontage = road_frontage_score(&save, &district, origin, size);
 
         assert!(
-            distance <= 4.0,
-            "corner tower should center on the user road turn, got center {center:?}"
+            distance >= 18.0,
+            "corner tower should become an adjacent street-facing lot, not occupy the road turn; got center {center:?}"
+        );
+        assert!(
+            frontage > 0.85,
+            "set-back corner tower should still read as road frontage, got score {frontage} at origin {origin:?}"
         );
     }
 
