@@ -478,6 +478,8 @@ pub struct BotRoadGuide {
     #[serde(default)]
     pub points: Vec<[i32; 3]>,
     #[serde(default)]
+    pub anchor: Option<[i32; 3]>,
+    #[serde(default)]
     pub width: u8,
     #[serde(default)]
     pub theme: BotTheme,
@@ -5466,10 +5468,24 @@ fn bot_road_guide_from_city_component(
     Some(BotRoadGuide {
         district_id: nearest_district(save, center).map(|district| district.id),
         points,
+        anchor: semantic_anchor_from_city_road(road),
         width: road.width,
         theme: road_style_bot_theme(road.style),
         shape: road_shape_bot_guide(road.shape),
     })
+}
+
+fn semantic_anchor_from_city_road(road: &crate::city::RoadSegment) -> Option<[i32; 3]> {
+    match road.shape {
+        crate::city::RoadShape::Corner => {
+            let via = road
+                .via
+                .unwrap_or_else(|| IVec3::new(road.b.x, road.a.y, road.a.z));
+            Some([via.x, via.y, via.z])
+        }
+        crate::city::RoadShape::Roundabout => Some([road.a.x, road.a.y, road.a.z]),
+        crate::city::RoadShape::Straight => None,
+    }
 }
 
 fn road_style_bot_theme(style: crate::city::RoadStyle) -> BotTheme {
@@ -5525,6 +5541,9 @@ fn road_guide_center(points: &[[i32; 3]]) -> Vec3 {
 }
 
 fn road_guide_anchor(guide: &BotRoadGuide) -> Vec3 {
+    if let Some(anchor) = guide.anchor {
+        return Vec3::new(anchor[0] as f32, anchor[1] as f32, anchor[2] as f32);
+    }
     match guide.shape {
         BotRoadGuideShape::Corner => guide
             .points
@@ -11968,6 +11987,49 @@ mod tests {
             choose_district_project(&save, &district, 1, false),
             BotTaskKind::BuildGlassTower,
             "street corners should unlock skyline landmarks instead of asking for another grid"
+        );
+    }
+
+    #[test]
+    fn corner_landmark_site_centers_on_user_road_turn() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -8, 8);
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Corner Skyline".into(),
+            center: [16.0, 90.0, 8.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let corner = crate::city::RoadSegment::new(
+            IVec3::new(0, 90, 0),
+            IVec3::new(32, 90, 24),
+            7,
+            crate::city::RoadStyle::Neon,
+        );
+        sync_user_city_roads(&mut save, &[corner]);
+        let size = autonomous_project_size(BotTaskKind::BuildGlassTower);
+
+        let origin = find_loaded_build_site(
+            &save,
+            &world,
+            &district,
+            BotTaskKind::BuildGlassTower,
+            size,
+            1,
+        )
+        .unwrap();
+        let center = project_center(origin, size);
+        let distance = Vec2::new(center.x, center.z).distance(Vec2::new(32.0, 0.0));
+
+        assert!(
+            distance <= 4.0,
+            "corner tower should center on the user road turn, got center {center:?}"
         );
     }
 
