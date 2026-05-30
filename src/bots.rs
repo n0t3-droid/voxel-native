@@ -6378,6 +6378,10 @@ fn build_project_concept(
                 detail.push_str(
                     " Civic edges get a public gateway on the road-facing edge so plazas and parks open directly into the street network.",
                 );
+            } else if matches!(role, CityBlockRole::ServiceEdge) {
+                detail.push_str(
+                    " Service edges get a service gate and road-facing utility access so pads connect to the street network instead of floating as isolated platforms.",
+                );
             }
         }
         rows.insert(
@@ -6413,6 +6417,9 @@ fn project_uses_street_face(kind: BotTaskKind) -> bool {
             | BotTaskKind::BuildPark
             | BotTaskKind::BuildPlaza
             | BotTaskKind::UpgradeDistrict
+            | BotTaskKind::LandingPad
+            | BotTaskKind::BuildServicePad
+            | BotTaskKind::TargetRange
     )
 }
 
@@ -7436,15 +7443,37 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 || local.z == project.size[2] - 1;
             let cross = local.x == project.size[0] / 2 || local.z == project.size[2] / 2;
             let beacon = edge && (local.x + local.z).rem_euclid(10) == 0;
+            let sx = project.size[0] - 1;
+            let sz = project.size[2] - 1;
+            let street_face = project
+                .concept
+                .street_face
+                .unwrap_or(BuildingStreetFace::North);
+            let service_edge =
+                matches!(project.concept.block_role, Some(CityBlockRole::ServiceEdge));
+            let gate_surface =
+                service_edge && street_face.civic_gateway_surface_cell(local, sx, sz);
+            let gate_marker = service_edge
+                && street_face.civic_gateway_marker_cell(local, sx, sz)
+                && local.y <= 4;
             if local.y == 0 {
                 let voxel = if beacon {
                     project.theme.signal()
+                } else if gate_surface {
+                    Voxel::from(BlockType::Limestone)
                 } else if edge || cross {
                     project.theme.accent()
                 } else {
                     Voxel::from(BlockType::ShipHullAlloy)
                 };
                 Some((IVec3::new(x, y, z), voxel))
+            } else if matches!(project.kind, BotTaskKind::BuildServicePad) && gate_marker {
+                let voxel = if local.y == 4 {
+                    project.theme.signal()
+                } else {
+                    Voxel::from(BlockType::ShipHullDark)
+                };
+                Some((IVec3::new(x, y + local.y, z), voxel))
             } else if matches!(project.kind, BotTaskKind::BuildServicePad)
                 && local.y <= 5
                 && (local.x < 5 || local.x > project.size[0] - 6)
@@ -11948,6 +11977,82 @@ mod tests {
         assert_eq!(gateway_floor, Some(Voxel::from(BlockType::Limestone)));
         assert_eq!(gateway_marker, Some(project.theme.signal()));
         assert_ne!(side_edge_tree, Some(project.theme.signal()));
+    }
+
+    #[test]
+    fn project_concept_records_service_pad_road_gate() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Service,
+            name: "Service Yard".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![[36, 90, 2], [36, 90, 4]],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::BuildServicePad,
+            BotTheme::CyanAlloy,
+            [0, 90, -12],
+            [31, 8, 31],
+            "Road-Facing Service Pad",
+            false,
+            None,
+            None,
+        );
+        let city_sheet = concept
+            .rows
+            .iter()
+            .find(|row| row.phase == "City Sheet")
+            .expect("service pad should expose its city planning sheet");
+
+        assert_eq!(concept.street_face, Some(BuildingStreetFace::East));
+        assert_eq!(concept.block_role, Some(CityBlockRole::ServiceEdge));
+        assert!(city_sheet.detail.contains("service gate"));
+        assert!(city_sheet.detail.contains("road-facing utility access"));
+    }
+
+    #[test]
+    fn road_facing_service_pad_opens_utility_gate() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(30, 15) + 1;
+        let project = BotProject {
+            id: 7,
+            kind: BotTaskKind::BuildServicePad,
+            label: "Road-Facing Service Pad".into(),
+            origin: [0, base_y, 0],
+            size: [31, 8, 31],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::ServiceEdge),
+                ..default()
+            },
+        };
+
+        let gate_floor =
+            project_voxel(&project, IVec3::new(30, 0, 15), &world).map(|(_, voxel)| voxel);
+        let side_edge =
+            project_voxel(&project, IVec3::new(30, 0, 4), &world).map(|(_, voxel)| voxel);
+        let gate_marker =
+            project_voxel(&project, IVec3::new(30, 4, 12), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(gate_floor, Some(Voxel::from(BlockType::Limestone)));
+        assert_ne!(side_edge, Some(Voxel::from(BlockType::Limestone)));
+        assert_eq!(gate_marker, Some(project.theme.signal()));
     }
 
     #[test]
