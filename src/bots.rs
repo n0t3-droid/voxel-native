@@ -1441,6 +1441,28 @@ impl BuildingStreetFace {
             Self::East => lx == 8 && (north_corner || south_corner),
         }
     }
+
+    fn civic_gateway_surface_cell(self, local: IVec3, sx: i32, sz: i32) -> bool {
+        let center_x = (sx + 1) / 2;
+        let center_z = (sz + 1) / 2;
+        match self {
+            Self::North => local.z == 0 && (local.x - center_x).abs() <= 4,
+            Self::South => local.z == sz && (local.x - center_x).abs() <= 4,
+            Self::West => local.x == 0 && (local.z - center_z).abs() <= 4,
+            Self::East => local.x == sx && (local.z - center_z).abs() <= 4,
+        }
+    }
+
+    fn civic_gateway_marker_cell(self, local: IVec3, sx: i32, sz: i32) -> bool {
+        let center_x = (sx + 1) / 2;
+        let center_z = (sz + 1) / 2;
+        match self {
+            Self::North => local.z == 0 && (local.x == center_x - 3 || local.x == center_x + 3),
+            Self::South => local.z == sz && (local.x == center_x - 3 || local.x == center_x + 3),
+            Self::West => local.x == 0 && (local.z == center_z - 3 || local.z == center_z + 3),
+            Self::East => local.x == sx && (local.z == center_z - 3 || local.z == center_z + 3),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6352,6 +6374,10 @@ fn build_project_concept(
                 detail.push_str(
                     " Residential corners get a glass corner bay, side-street visibility, and a lit awning so homes read as part of an intersection.",
                 );
+            } else if matches!(role, CityBlockRole::CivicEdge) {
+                detail.push_str(
+                    " Civic edges get a public gateway on the road-facing edge so plazas and parks open directly into the street network.",
+                );
             }
         }
         rows.insert(
@@ -6384,6 +6410,9 @@ fn project_uses_street_face(kind: BotTaskKind) -> bool {
             | BotTaskKind::BuildGlassTower
             | BotTaskKind::MakeTaller
             | BotTaskKind::BuildResidentialBlock
+            | BotTaskKind::BuildPark
+            | BotTaskKind::BuildPlaza
+            | BotTaskKind::UpgradeDistrict
     )
 }
 
@@ -7838,9 +7867,22 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let cross = local.x == project.size[0] / 2 || local.z == project.size[2] / 2;
             let center = (local.x - project.size[0] / 2).abs() <= 2
                 && (local.z - project.size[2] / 2).abs() <= 2;
+            let street_face = project
+                .concept
+                .street_face
+                .unwrap_or(BuildingStreetFace::North);
+            let civic_edge = matches!(project.concept.block_role, Some(CityBlockRole::CivicEdge));
+            let gateway_surface =
+                civic_edge && street_face.civic_gateway_surface_cell(local, sx, sz);
+            let gateway_marker =
+                civic_edge && street_face.civic_gateway_marker_cell(local, sx, sz) && local.y <= 4;
             if local.y == 0 {
                 let voxel = if edge || cross || center {
-                    project.theme.accent()
+                    if gateway_surface {
+                        Voxel::from(BlockType::Limestone)
+                    } else {
+                        project.theme.accent()
+                    }
                 } else {
                     Voxel::from(BlockType::Limestone)
                 };
@@ -7849,6 +7891,13 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 let voxel = if local.y <= 2 {
                     Voxel::from(BlockType::Water)
                 } else if local.y == 4 {
+                    project.theme.signal()
+                } else {
+                    Voxel::from(BlockType::CockpitGlass)
+                };
+                Some((IVec3::new(x, base + local.y, z), voxel))
+            } else if gateway_marker {
+                let voxel = if local.y == 4 {
                     project.theme.signal()
                 } else {
                     Voxel::from(BlockType::CockpitGlass)
@@ -11727,6 +11776,82 @@ mod tests {
         assert_eq!(concept.block_role, Some(CityBlockRole::ResidentialCorner));
         assert!(city_sheet.detail.contains("corner bay"));
         assert!(city_sheet.detail.contains("side-street"));
+    }
+
+    #[test]
+    fn project_concept_records_civic_edge_gateway() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Park,
+            name: "Civic Plaza".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![[44, 90, 2], [44, 90, 4]],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::BuildPlaza,
+            BotTheme::WhiteAlloy,
+            [0, 90, -16],
+            [42, 8, 42],
+            "Road-Facing Plaza",
+            false,
+            None,
+            None,
+        );
+        let city_sheet = concept
+            .rows
+            .iter()
+            .find(|row| row.phase == "City Sheet")
+            .expect("plaza should expose its city planning sheet");
+
+        assert_eq!(concept.street_face, Some(BuildingStreetFace::East));
+        assert_eq!(concept.block_role, Some(CityBlockRole::CivicEdge));
+        assert!(city_sheet.detail.contains("public gateway"));
+        assert!(city_sheet.detail.contains("road-facing edge"));
+    }
+
+    #[test]
+    fn civic_plaza_opens_gateway_toward_planned_street() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(41, 21) + 1;
+        let project = BotProject {
+            id: 5,
+            kind: BotTaskKind::BuildPlaza,
+            label: "Road-Facing Plaza".into(),
+            origin: [0, base_y, 0],
+            size: [42, 8, 42],
+            theme: BotTheme::WhiteAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::CivicEdge),
+                ..default()
+            },
+        };
+
+        let gateway_floor =
+            project_voxel(&project, IVec3::new(41, 0, 21), &world).map(|(_, voxel)| voxel);
+        let side_edge =
+            project_voxel(&project, IVec3::new(41, 0, 8), &world).map(|(_, voxel)| voxel);
+        let gateway_marker =
+            project_voxel(&project, IVec3::new(41, 4, 18), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(gateway_floor, Some(Voxel::from(BlockType::Limestone)));
+        assert_ne!(side_edge, Some(Voxel::from(BlockType::Limestone)));
+        assert_eq!(gateway_marker, Some(project.theme.signal()));
     }
 
     #[test]
