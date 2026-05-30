@@ -997,7 +997,7 @@ fn city_input(
                     format!("Hoehe A/B {}:{}", next.elevation_a, next.elevation_b)
                 });
             } else if alt && !ctrl && !shift {
-                next = before.retextured(next_road_style(before.style, steps));
+                next = road_with_texture_delta(before, steps);
                 label = Some(format!("Textur {}", next.style.label()));
             }
 
@@ -1015,6 +1015,32 @@ fn city_input(
         } else if ctrl || shift || alt {
             city.status = "Strassen-Edit: auf eine Strassenkomponente zielen.".into();
         }
+    }
+
+    if bare
+        && city.tool == CityTool::Road
+        && city.pending_road_a.is_none()
+        && mouse.just_pressed(MouseButton::Middle)
+    {
+        if let Some(idx) = city.selected_road.filter(|idx| *idx < city.roads.len()) {
+            let before = city.roads[idx];
+            let next = road_with_texture_delta(before, 1);
+            let n = restamp_road_component(&mut world, &before, &next);
+            city.roads[idx] = next;
+            sync_road_brush_from_component(&mut city, next);
+            save_city_roads_for_active(active.as_deref(), &city.roads);
+            city.status = format!(
+                "Strassenkomponente {}: Textur {} ({} Bloecke)",
+                idx + 1,
+                next.style.label(),
+                n
+            );
+            telemetry.city_actions = telemetry.city_actions.saturating_add(1);
+            telemetry.build_blocks_changed =
+                telemetry.build_blocks_changed.saturating_add(n as u64);
+            return;
+        }
+        city.status = "Textur: auf eine Strassenkomponente zielen.".into();
     }
 
     // --- Mouse: commit action -----------------------------------------
@@ -1686,6 +1712,10 @@ fn road_with_size_delta(road: RoadSegment, delta: i32) -> RoadSegment {
     } else {
         road.with_width((road.width as i32 + delta).clamp(1, 17) as u8)
     }
+}
+
+fn road_with_texture_delta(road: RoadSegment, delta: i32) -> RoadSegment {
+    road.retextured(next_road_style(road.style, delta))
 }
 
 fn next_road_style(style: RoadStyle, steps: i32) -> RoadStyle {
@@ -2633,7 +2663,7 @@ fn draw_hint_hud(
                         "Shift+Wheel".into(),
                         "Brueckenhoehe am naechsten Ende".into(),
                     ));
-                    lines.push(("Alt+Wheel".into(), "Textur".into()));
+                    lines.push(("MMB / Alt+Wheel".into(), "Textur direkt wechseln".into()));
                 }
                 lines.push(("[ / ]".into(), format!("Breite ({})", city.road_width)));
                 lines.push(("N".into(), "Strassen-Tool AUS".into()));
@@ -2851,6 +2881,31 @@ mod tests {
         assert_eq!(neon.width, road.width);
         assert_eq!(neon.style, RoadStyle::Neon);
         assert_eq!(neon.style.surface_block(), BlockType::Limestone);
+    }
+
+    #[test]
+    fn quick_road_texture_cycle_preserves_component_edit_state() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 16),
+            7,
+            RoadStyle::Asphalt,
+        )
+        .with_endpoint_heights(3, 9)
+        .with_turn_height(6);
+
+        let retextured = road_with_texture_delta(road, 1);
+
+        assert_eq!(retextured.a, road.a);
+        assert_eq!(retextured.b, road.b);
+        assert_eq!(retextured.via, road.via);
+        assert_eq!(retextured.shape, road.shape);
+        assert_eq!(retextured.width, road.width);
+        assert_eq!(retextured.elevation_a, road.elevation_a);
+        assert_eq!(retextured.elevation_via, road.elevation_via);
+        assert_eq!(retextured.elevation_b, road.elevation_b);
+        assert_eq!(retextured.style, RoadStyle::Cobble);
+        assert_eq!(road_with_texture_delta(retextured, -1).style, road.style);
     }
 
     #[test]

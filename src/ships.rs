@@ -356,6 +356,25 @@ struct ShipWaveResponse {
     roll: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CockpitPanelTone {
+    Cyan,
+    Magenta,
+    Amber,
+    Shell,
+    Seat,
+    Frame,
+    Glass,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CockpitPanelSpec {
+    offset: Vec3,
+    scale: Vec3,
+    rotation: Quat,
+    tone: CockpitPanelTone,
+}
+
 #[derive(Resource, Debug, Clone)]
 struct CockpitTransition {
     active: bool,
@@ -1228,6 +1247,30 @@ fn add_future_wave_shuttle_skin(voxels: &mut Vec<ShipVoxel>, kind: ShipKind) {
             IVec3::new(sx * 8, 1, -1),
             BlockType::NeonCyan,
         );
+        push_box(
+            voxels,
+            IVec3::new(sx * 2, 3, -8),
+            IVec3::new(sx * 2, 3, -6),
+            BlockType::LuminiteCrystal,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 4, 2, -2),
+            IVec3::new(sx * 4, 2, 0),
+            BlockType::LuminiteCrystal,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 3, 3, 5),
+            IVec3::new(sx * 3, 3, 7),
+            BlockType::NeonMagenta,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 6, 1, 2),
+            IVec3::new(sx * 7, 1, 2),
+            BlockType::NeonMagenta,
+        );
     }
 
     match kind {
@@ -1303,6 +1346,39 @@ fn add_future_wave_shuttle_skin(voxels: &mut Vec<ShipVoxel>, kind: ShipKind) {
                 );
             }
         }
+    }
+
+    for sx in [-1, 1] {
+        push_box(
+            voxels,
+            IVec3::new(sx * 3, 2, -3),
+            IVec3::new(sx * 3, 2, -3),
+            BlockType::LuminiteCrystal,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 5, 1, 1),
+            IVec3::new(sx * 5, 1, 1),
+            BlockType::LuminiteCrystal,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 7, 0, 3),
+            IVec3::new(sx * 7, 0, 3),
+            BlockType::LuminiteCrystal,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 2, 2, 6),
+            IVec3::new(sx * 2, 2, 6),
+            BlockType::NeonMagenta,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 4, 0, 4),
+            IVec3::new(sx * 4, 0, 4),
+            BlockType::NeonMagenta,
+        );
     }
 }
 
@@ -1387,7 +1463,7 @@ fn spawn_ship_entity(
             });
         }
         if !preview {
-            spawn_cockpit_holograms(p, materials, fx, &cube, &bp);
+            spawn_cockpit_holograms(p, materials, fx, &cube, kind, &bp);
             spawn_ship_energy_trails(p, materials, fx, &cube, kind);
             p.spawn(PointLightBundle {
                 point_light: PointLight {
@@ -1769,175 +1845,317 @@ fn spawn_cockpit_holograms(
     materials: &mut Assets<StandardMaterial>,
     fx: &mut ShipFxCache,
     cube: &Handle<Mesh>,
+    kind: ShipKind,
     bp: &ShipBlueprint,
 ) {
-    let cyan = cockpit_material(
-        fx,
-        materials,
-        1,
-        Color::srgba(0.04, 0.95, 1.0, 0.52),
-        LinearRgba::rgb(0.25, 4.5, 5.5),
-        AlphaMode::Add,
-        true,
-    );
-    let magenta = cockpit_material(
-        fx,
-        materials,
-        2,
-        Color::srgba(1.0, 0.10, 0.78, 0.46),
-        LinearRgba::rgb(4.5, 0.25, 3.2),
-        AlphaMode::Add,
-        true,
-    );
-    let amber = cockpit_material(
-        fx,
-        materials,
-        3,
-        Color::srgba(1.0, 0.48, 0.08, 0.72),
-        LinearRgba::rgb(4.8, 1.7, 0.18),
-        AlphaMode::Add,
-        true,
-    );
-    let console_shell = cockpit_material(
-        fx,
-        materials,
-        4,
-        Color::srgb(0.010, 0.020, 0.030),
-        LinearRgba::rgb(0.0, 0.18, 0.25),
-        AlphaMode::Opaque,
-        false,
-    );
-    let seat = cockpit_material(
-        fx,
-        materials,
-        5,
-        Color::srgb(0.018, 0.019, 0.024),
-        LinearRgba::BLACK,
-        AlphaMode::Opaque,
-        false,
-    );
-    let frame = cockpit_material(
-        fx,
-        materials,
-        6,
-        Color::srgb(0.23, 0.28, 0.32),
-        LinearRgba::rgb(0.02, 0.05, 0.06),
-        AlphaMode::Opaque,
-        false,
-    );
-
-    let c = bp.cockpit_offset;
-    spawn_panel(
-        parent,
-        cube,
-        seat.clone(),
-        c + Vec3::new(0.0, -1.35, 0.72),
-        Vec3::new(1.10, 0.26, 1.18),
-        Quat::IDENTITY,
-    );
-    spawn_panel(
-        parent,
-        cube,
-        seat,
-        c + Vec3::new(0.0, -0.70, 1.08),
-        Vec3::new(1.12, 1.05, 0.18),
-        Quat::from_rotation_x(0.28),
-    );
-    spawn_panel(
-        parent,
-        cube,
-        frame.clone(),
-        c + Vec3::new(0.0, 0.64, -0.96),
-        Vec3::new(3.20, 0.16, 0.22),
-        Quat::IDENTITY,
-    );
-    for side in [-1.0, 1.0] {
-        spawn_panel(
-            parent,
-            cube,
-            frame.clone(),
-            c + Vec3::new(side * 1.62, -0.08, -0.74),
-            Vec3::new(0.15, 1.48, 0.20),
-            Quat::from_rotation_z(side * 0.10),
-        );
-        spawn_panel(
-            parent,
-            cube,
-            frame.clone(),
-            c + Vec3::new(side * 0.48, -0.50, -0.92),
-            Vec3::new(0.12, 0.12, 0.58),
-            Quat::from_rotation_x(-0.24) * Quat::from_rotation_z(side * 0.30),
-        );
-    }
-    spawn_panel(
-        parent,
-        cube,
-        console_shell.clone(),
-        c + Vec3::new(0.0, -0.82, -1.10),
-        Vec3::new(3.1, 0.08, 1.35),
-        Quat::from_rotation_x(-0.46),
-    );
-    spawn_panel(
-        parent,
-        cube,
-        cyan.clone(),
-        c + Vec3::new(0.0, -0.75, -1.18),
-        Vec3::new(2.55, 0.035, 0.78),
-        Quat::from_rotation_x(-0.46),
-    );
-    spawn_panel(
-        parent,
-        cube,
-        console_shell,
-        c + Vec3::new(-2.15, -0.88, -0.55),
-        Vec3::new(1.10, 0.08, 1.05),
-        Quat::from_rotation_x(-0.35) * Quat::from_rotation_z(0.10),
-    );
-    spawn_panel(
-        parent,
-        cube,
-        cyan.clone(),
-        c + Vec3::new(-2.15, -0.80, -0.62),
-        Vec3::new(0.74, 0.04, 0.68),
-        Quat::from_rotation_x(-0.35) * Quat::from_rotation_z(0.10),
-    );
-    spawn_panel(
-        parent,
-        cube,
-        magenta.clone(),
-        c + Vec3::new(2.15, -0.84, -0.60),
-        Vec3::new(0.78, 0.04, 0.78),
-        Quat::from_rotation_x(-0.35) * Quat::from_rotation_z(-0.10),
-    );
-
-    for i in 0..6 {
-        let x = -1.25 + i as f32 * 0.50;
-        let mat = if i % 3 == 0 {
-            amber.clone()
-        } else if i % 2 == 0 {
-            magenta.clone()
-        } else {
-            cyan.clone()
-        };
+    for panel in cockpit_panel_specs(kind, bp) {
+        let mat = cockpit_panel_material(fx, materials, panel.tone);
         spawn_panel(
             parent,
             cube,
             mat,
-            c + Vec3::new(x, -0.62, -0.56),
-            Vec3::new(0.22, 0.065, 0.16),
+            bp.cockpit_offset + panel.offset,
+            panel.scale,
+            panel.rotation,
+        );
+    }
+}
+
+fn cockpit_panel_specs(kind: ShipKind, bp: &ShipBlueprint) -> Vec<CockpitPanelSpec> {
+    let mut panels = Vec::with_capacity(40);
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(0.0, -1.35, 0.72),
+        Vec3::new(1.10, 0.26, 1.18),
+        Quat::IDENTITY,
+        CockpitPanelTone::Seat,
+    );
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(0.0, -0.70, 1.08),
+        Vec3::new(1.12, 1.05, 0.18),
+        Quat::from_rotation_x(0.28),
+        CockpitPanelTone::Seat,
+    );
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(0.0, 0.64, -0.96),
+        Vec3::new(3.20, 0.16, 0.22),
+        Quat::IDENTITY,
+        CockpitPanelTone::Frame,
+    );
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(0.0, 0.92, -1.15),
+        Vec3::new(2.25, 0.045, 0.58),
+        Quat::from_rotation_x(0.10),
+        CockpitPanelTone::Glass,
+    );
+    for side in [-1.0, 1.0] {
+        push_cockpit_panel(
+            &mut panels,
+            Vec3::new(side * 1.62, -0.08, -0.74),
+            Vec3::new(0.15, 1.48, 0.20),
+            Quat::from_rotation_z(side * 0.10),
+            CockpitPanelTone::Frame,
+        );
+        push_cockpit_panel(
+            &mut panels,
+            Vec3::new(side * 0.48, -0.50, -0.92),
+            Vec3::new(0.12, 0.12, 0.58),
+            Quat::from_rotation_x(-0.24) * Quat::from_rotation_z(side * 0.30),
+            CockpitPanelTone::Frame,
+        );
+        push_cockpit_panel(
+            &mut panels,
+            Vec3::new(side * 1.18, 0.28, -1.02),
+            Vec3::new(0.08, 1.08, 0.18),
+            Quat::from_rotation_z(side * 0.28),
+            CockpitPanelTone::Glass,
+        );
+        push_cockpit_panel(
+            &mut panels,
+            Vec3::new(side * 3.0, -0.72, 0.18),
+            Vec3::new(0.30, 0.08, 1.65),
+            Quat::from_rotation_z(side * 0.14),
+            CockpitPanelTone::Amber,
+        );
+        push_cockpit_panel(
+            &mut panels,
+            Vec3::new(side * 2.44, -0.47, -0.92),
+            Vec3::new(0.42, 0.045, 0.74),
+            Quat::from_rotation_x(-0.30) * Quat::from_rotation_z(side * 0.18),
+            if side < 0.0 {
+                CockpitPanelTone::Cyan
+            } else {
+                CockpitPanelTone::Magenta
+            },
+        );
+    }
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(0.0, -0.82, -1.10),
+        Vec3::new(3.1, 0.08, 1.35),
+        Quat::from_rotation_x(-0.46),
+        CockpitPanelTone::Shell,
+    );
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(0.0, -0.75, -1.18),
+        Vec3::new(2.55, 0.035, 0.78),
+        Quat::from_rotation_x(-0.46),
+        CockpitPanelTone::Cyan,
+    );
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(-2.15, -0.88, -0.55),
+        Vec3::new(1.10, 0.08, 1.05),
+        Quat::from_rotation_x(-0.35) * Quat::from_rotation_z(0.10),
+        CockpitPanelTone::Shell,
+    );
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(-2.15, -0.80, -0.62),
+        Vec3::new(0.74, 0.04, 0.68),
+        Quat::from_rotation_x(-0.35) * Quat::from_rotation_z(0.10),
+        CockpitPanelTone::Cyan,
+    );
+    push_cockpit_panel(
+        &mut panels,
+        Vec3::new(2.15, -0.84, -0.60),
+        Vec3::new(0.78, 0.04, 0.78),
+        Quat::from_rotation_x(-0.35) * Quat::from_rotation_z(-0.10),
+        CockpitPanelTone::Magenta,
+    );
+
+    for i in 0..8 {
+        let x = -1.55 + i as f32 * 0.44;
+        let tone = match i % 4 {
+            0 => CockpitPanelTone::Amber,
+            1 => CockpitPanelTone::Cyan,
+            2 => CockpitPanelTone::Magenta,
+            _ => CockpitPanelTone::Cyan,
+        };
+        push_cockpit_panel(
+            &mut panels,
+            Vec3::new(x, -0.62, -0.56),
+            Vec3::new(0.20, 0.065, 0.16),
             Quat::from_rotation_x(-0.36),
+            tone,
         );
     }
 
-    for side in [-1.0, 1.0] {
-        spawn_panel(
-            parent,
-            cube,
-            amber.clone(),
-            c + Vec3::new(side * 3.0, -0.72, 0.18),
-            Vec3::new(0.30, 0.08, 1.65),
-            Quat::from_rotation_z(side * 0.14),
-        );
+    let scale = (bp.hull_radius / 8.0).clamp(0.72, 1.22);
+    match kind {
+        ShipKind::ScoutShuttle => {
+            for side in [-1.0, 1.0] {
+                push_cockpit_panel(
+                    &mut panels,
+                    Vec3::new(side * 0.72, -0.22, -1.54),
+                    Vec3::new(0.40, 0.035, 0.72),
+                    Quat::from_rotation_x(-0.58) * Quat::from_rotation_z(side * 0.12),
+                    CockpitPanelTone::Cyan,
+                );
+            }
+            push_cockpit_panel(
+                &mut panels,
+                Vec3::new(0.0, -0.22, -1.80),
+                Vec3::new(1.15, 0.035, 0.30),
+                Quat::from_rotation_x(-0.58),
+                CockpitPanelTone::Amber,
+            );
+        }
+        ShipKind::StrikeFighter => {
+            for side in [-1.0, 1.0] {
+                push_cockpit_panel(
+                    &mut panels,
+                    Vec3::new(side * 0.94, -0.14, -1.48),
+                    Vec3::new(0.38, 0.035, 0.90),
+                    Quat::from_rotation_x(-0.62) * Quat::from_rotation_z(side * 0.32),
+                    if side < 0.0 {
+                        CockpitPanelTone::Cyan
+                    } else {
+                        CockpitPanelTone::Magenta
+                    },
+                );
+                push_cockpit_panel(
+                    &mut panels,
+                    Vec3::new(side * 1.38, 0.16, -0.86),
+                    Vec3::new(0.10, 1.18, 0.16),
+                    Quat::from_rotation_z(side * 0.45),
+                    CockpitPanelTone::Frame,
+                );
+            }
+            push_cockpit_panel(
+                &mut panels,
+                Vec3::new(0.0, -0.18, -1.82),
+                Vec3::new(1.55, 0.035, 0.24),
+                Quat::from_rotation_x(-0.64),
+                CockpitPanelTone::Amber,
+            );
+        }
+        ShipKind::HeavyDropship => {
+            for seat_x in [-0.58, 0.58] {
+                push_cockpit_panel(
+                    &mut panels,
+                    Vec3::new(seat_x, -1.30, 1.42),
+                    Vec3::new(0.82, 0.22, 0.92),
+                    Quat::IDENTITY,
+                    CockpitPanelTone::Seat,
+                );
+                push_cockpit_panel(
+                    &mut panels,
+                    Vec3::new(seat_x, -0.62, 1.72),
+                    Vec3::new(0.80, 0.96, 0.16),
+                    Quat::from_rotation_x(0.24),
+                    CockpitPanelTone::Seat,
+                );
+            }
+            for side in [-1.0, 1.0] {
+                push_cockpit_panel(
+                    &mut panels,
+                    Vec3::new(side * 1.30, -0.18, -1.52),
+                    Vec3::new(0.48 * scale, 0.04, 0.90),
+                    Quat::from_rotation_x(-0.52) * Quat::from_rotation_z(side * 0.16),
+                    CockpitPanelTone::Cyan,
+                );
+            }
+            push_cockpit_panel(
+                &mut panels,
+                Vec3::new(0.0, 0.36, -1.40),
+                Vec3::new(2.45, 0.045, 0.32),
+                Quat::from_rotation_x(-0.10),
+                CockpitPanelTone::Amber,
+            );
+        }
+    }
+    panels
+}
+
+fn push_cockpit_panel(
+    panels: &mut Vec<CockpitPanelSpec>,
+    offset: Vec3,
+    scale: Vec3,
+    rotation: Quat,
+    tone: CockpitPanelTone,
+) {
+    panels.push(CockpitPanelSpec {
+        offset,
+        scale,
+        rotation,
+        tone,
+    });
+}
+
+fn cockpit_panel_material(
+    fx: &mut ShipFxCache,
+    materials: &mut Assets<StandardMaterial>,
+    tone: CockpitPanelTone,
+) -> Handle<StandardMaterial> {
+    match tone {
+        CockpitPanelTone::Cyan => cockpit_material(
+            fx,
+            materials,
+            1,
+            Color::srgba(0.04, 0.95, 1.0, 0.52),
+            LinearRgba::rgb(0.25, 4.5, 5.5),
+            AlphaMode::Add,
+            true,
+        ),
+        CockpitPanelTone::Magenta => cockpit_material(
+            fx,
+            materials,
+            2,
+            Color::srgba(1.0, 0.10, 0.78, 0.46),
+            LinearRgba::rgb(4.5, 0.25, 3.2),
+            AlphaMode::Add,
+            true,
+        ),
+        CockpitPanelTone::Amber => cockpit_material(
+            fx,
+            materials,
+            3,
+            Color::srgba(1.0, 0.48, 0.08, 0.72),
+            LinearRgba::rgb(4.8, 1.7, 0.18),
+            AlphaMode::Add,
+            true,
+        ),
+        CockpitPanelTone::Shell => cockpit_material(
+            fx,
+            materials,
+            4,
+            Color::srgb(0.010, 0.020, 0.030),
+            LinearRgba::rgb(0.0, 0.18, 0.25),
+            AlphaMode::Opaque,
+            false,
+        ),
+        CockpitPanelTone::Seat => cockpit_material(
+            fx,
+            materials,
+            5,
+            Color::srgb(0.018, 0.019, 0.024),
+            LinearRgba::BLACK,
+            AlphaMode::Opaque,
+            false,
+        ),
+        CockpitPanelTone::Frame => cockpit_material(
+            fx,
+            materials,
+            6,
+            Color::srgb(0.23, 0.28, 0.32),
+            LinearRgba::rgb(0.02, 0.05, 0.06),
+            AlphaMode::Opaque,
+            false,
+        ),
+        CockpitPanelTone::Glass => cockpit_material(
+            fx,
+            materials,
+            7,
+            Color::srgba(0.05, 0.32, 0.40, 0.72),
+            LinearRgba::rgb(0.08, 0.48, 0.62),
+            AlphaMode::Blend,
+            false,
+        ),
     }
 }
 
@@ -3847,6 +4065,75 @@ mod tests {
                     .count()
                     >= 2,
                 "{kind:?} should expose visible engine cores for the cyan wake"
+            );
+        }
+    }
+
+    #[test]
+    fn all_ship_exteriors_have_luminous_detail_language() {
+        for kind in ShipKind::ALL {
+            let bp = blueprint(kind);
+            let luminite = bp
+                .voxels
+                .iter()
+                .filter(|v| v.block == BlockType::LuminiteCrystal)
+                .count();
+            let magenta = bp
+                .voxels
+                .iter()
+                .filter(|v| v.block == BlockType::NeonMagenta)
+                .count();
+            assert!(
+                luminite >= 6,
+                "{kind:?} exterior should have liquid-glass luminite edge markers, got {luminite}"
+            );
+            assert!(
+                magenta >= 4,
+                "{kind:?} exterior should have secondary magenta signal accents, got {magenta}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_ship_cockpits_have_rich_kind_specific_interiors() {
+        for kind in ShipKind::ALL {
+            let bp = blueprint(kind);
+            let panels = cockpit_panel_specs(kind, &bp);
+            let lit = panels
+                .iter()
+                .filter(|panel| {
+                    matches!(
+                        panel.tone,
+                        CockpitPanelTone::Cyan
+                            | CockpitPanelTone::Magenta
+                            | CockpitPanelTone::Amber
+                    )
+                })
+                .count();
+            let structure = panels
+                .iter()
+                .filter(|panel| {
+                    matches!(
+                        panel.tone,
+                        CockpitPanelTone::Shell
+                            | CockpitPanelTone::Seat
+                            | CockpitPanelTone::Frame
+                            | CockpitPanelTone::Glass
+                    )
+                })
+                .count();
+            assert!(
+                panels.len() >= 28,
+                "{kind:?} cockpit should have a dense interior layout, got {} panels",
+                panels.len()
+            );
+            assert!(
+                lit >= 13,
+                "{kind:?} cockpit should have layered holographic controls, got {lit}"
+            );
+            assert!(
+                structure >= 10,
+                "{kind:?} cockpit should have visible seats, frames, ribs and glass structure, got {structure}"
             );
         }
     }
