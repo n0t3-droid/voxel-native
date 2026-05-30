@@ -1,34 +1,71 @@
-# voxel-native
+# Voxel-Native
 
-Nativer Voxel-Engine-Nachfolger von **R93G** (<https://github.com/n0t3-droid/N5>).
-Gebaut mit **Rust + Bevy** (wgpu → Vulkan / DX12 / Metal). Kein Browser,
-kein Electron — echte native Performance.
+Voxel-Native is the native Rust successor to R93G: a Bevy/wgpu voxel engine
+focused on fast streaming worlds, shuttle flight, shooter systems, friendly
+robots, and autonomous city construction that can still run on modest PCs.
 
-## Status
+The project goal is not just a voxel sandbox. It is a playable engine where the
+world, the UI, the spacecraft, the bots, and the terrain all work together as a
+coherent sci-fi game.
 
-Scaffold / Tag 0. Läuft bereits:
+## Engine Pillars
 
-- 3D-Fenster mit Himmel + Sonnenlicht
-- Chunk-Datenstruktur (16×16×16)
-- Einfacher Terrain-Generator (Perlin-Heightmap, Grass/Dirt/Stone)
-- Face-culled Mesher (nur sichtbare Flächen)
-- Fly-Kamera (WASD + Maus, Space/Shift hoch/runter, Ctrl = schneller, Esc = Maus frei)
+- **Native performance:** Rust + Bevy + wgpu for DX12/Vulkan/Metal instead of
+  an Electron or browser shell.
+- **Low-end friendly streaming:** chunk budgets, mesh budgets, and NeuroCore
+  runtime throttling keep the game responsive while the visible horizon loads.
+- **Bot-built cities:** friendly bot crews plan road-first city growth, keep a
+  player-safe build buffer, and store project concepts with phases, owners,
+  materials, structure, architecture, texture, and detail rows.
+- **Cinematic voxel terrain:** procedural coastline, forests, terrain height,
+  water, caves, and sci-fi landmarks are generated as real voxels.
+- **Shuttle and shooter loop:** ships, weapons, drone combat, editor tools, and
+  bot companions live in the same world instead of separate demos.
+- **Liquid-glass engine UI:** HUD, toolbelt, bot panels, and system surfaces are
+  styled as in-game engine controls rather than flat debug windows.
 
-## Build & Run
+## Current Focus
+
+The latest engine work improves the bot-city workflow and max-distance world
+streaming:
+
+- autonomous builds no longer use the player as the default construction anchor;
+- a wider no-build buffer keeps projects away from the player and parked ships;
+- starter city recovery is road-first, so decorative street work cannot replace
+  access roads before the city has a real road grid;
+- bot edit slices pause while the effective render horizon is far below the
+  requested max chunk distance;
+- the auto streaming governor recovers the horizon faster after startup stalls;
+- regression tests cover player clearance, road-access planning, queued project
+  pressure, and runtime budget behavior.
+
+## Build And Run
 
 ```powershell
-# Debug (schneller kompilieren, spielbar dank opt-level=1 + deps opt=3)
+# Debug build
 cargo run
 
-# Release (volle Performance)
+# Release build
 cargo run --release
 ```
 
-## Autonomous QA / Screenshot Runs
+The first Bevy build can take a while. Later builds are faster because the dev
+profile optimizes dependencies while keeping the game code incremental.
 
-Der native Build kann sich selbst testen: `--qa` startet eine Testwelt,
-fliegt eine Kameraroute, speichert Screenshots und schreibt einen RON-Report
-mit FPS, maximalem Frame-Time-Spike und Stalls.
+## Controls
+
+- `WASD` move
+- mouse look
+- `Space` / `Shift` fly up and down
+- `Ctrl` sprint
+- `Esc` release mouse / pause
+- `F3` opens the in-game engine tools
+
+## Autonomous QA
+
+The engine can run deterministic visual/performance QA without manual play. QA
+flies a route, captures screenshots locally, and writes a RON report with frame
+timing, chunk counts, mesh queues, dirty chunks, render distance, and stalls.
 
 ```powershell
 $env:VOXEL_NATIVE_QA='1'
@@ -37,133 +74,80 @@ $env:VOXEL_NATIVE_QA_SCREENSHOT_INTERVAL='7'
 .\target\release\voxel-native.exe --qa
 ```
 
-Output landet unter `qa_runs\run_<timestamp>\`:
+Generated QA output is local-only:
 
-- `shot_0000.png`, `shot_0001.png`, ... — automatisch aufgenommene Bilder
-- `report.ron` — Dauer, FPS, Chunk-/Mesh-Queues und alle Frame-Stalls >100ms
+- `qa_runs\run_<timestamp>\report.ron`
+- `qa_runs\run_<timestamp>\shot_0000.png`
+- saved bot project state under `saves\<world>_bots\`
 
-## Live Agent Control
+These captures are intentionally ignored by Git. The repository should stay
+focused on source, design, and reproducible engine behavior.
 
-`--agent-control` startet eine sichtbare Spielsession und liest laufend
-`agent_control.ron`. Damit kann ein externer Agent ohne Benutzerklicks
-Bewegung, Blickrichtung, Feuer, Scope, Screenshots und Exit steuern.
-Der Modus hat im Fenster einen kleinen `AI LIVE`-Schalter: `AN` aktiviert die
-Bridge, `AUS` gibt sofort alle Eingaben frei und laesst dich normal spielen.
+## Agent Control
+
+`--agent-control` starts a visible session controlled by `agent_control.ron`.
+This is used for external automation, visual checks, movement, screenshots,
+weapon testing, and engine state inspection.
 
 ```powershell
 .\target\release\voxel-native.exe --agent-control
 ```
 
-Beispiel für `agent_control.ron`:
+Example:
 
 ```ron
 (
-   enabled: true,
-   sequence: 1,
-   forward: 1.0,
-   right: 0.0,
-   up: 0.0,
-   sprint: true,
-   fly: true,
-   look_x: 0.35,
-   look_y: -0.05,
-   fire: false,
-   scope: false,
-   keys: [],
-   mouse_buttons: [],
-   game_state: "",
-   build_mode: "",
-   build_tool: "",
-   handoff: false,
-   screenshot: true,
-   exit: false,
+    enabled: true,
+    sequence: 1,
+    forward: 1.0,
+    right: 0.0,
+    up: 0.0,
+    sprint: true,
+    fly: true,
+    look_x: 0.35,
+    look_y: -0.05,
+    fire: false,
+    scope: false,
+    screenshot: true,
+    exit: false,
 )
 ```
 
-Eine kopierbare Vorlage liegt in `agent_control.example.ron`; beim Start wird
-`agent_control.ron` automatisch erzeugt, falls sie fehlt.
+Status and live screenshots are written under `agent_runs\live_<timestamp>\`.
 
-`forward`, `right`, `up` sind Achsen von -1 bis 1. `look_x` und `look_y`
-sind Maus-ähnliche Blickraten in Radiant pro Sekunde. Für einmalige Aktionen
-wie Screenshot oder Exit `sequence` erhöhen. Status und Live-Screenshots
-landen unter `agent_runs\live_<timestamp>\`.
-`keys` und `mouse_buttons` fuettern die normalen Bevy-Input-Ressourcen. Damit
-lassen sich echte Hotkeys und Klick-Tools testen, zum Beispiel:
-`keys: ["F3"]` fuer Build Studio, `keys: ["Digit3"]` fuer Sniper,
-`mouse_buttons: ["Left"]` fuer LMB oder `keys: ["ControlLeft", "P"]` fuer
-den Command Deck Shortcut.
-Fuer deterministische Tool-Matrix-Tests kann der Agent zusaetzlich
-`build_mode: "live"` oder `build_mode: "picker"` und ein `build_tool` wie
-`"DrawRect"`, `"Sculpt"`, `"SmartTower"`, `"BrushPlace"`, `"BrushCut"`,
-`"CityRoad"`, `"CityDistrict"`, `"CityBuilding"`, `"CityFacade"` oder
-`"AnimationPick"` setzen.
+## Architecture
 
-Um den Agenten im laufenden Spiel auszuschalten und normal weiterzuspielen,
-klicke `AI LIVE: AUS` oder schreibe:
+| Area | Rust Modules |
+| --- | --- |
+| Blocks, chunks, world data | `src/blocks.rs`, `src/chunk.rs`, `src/world.rs` |
+| Terrain and meshing | `src/terrain.rs`, `src/mesher.rs` |
+| Runtime budgets | `src/neurocore.rs`, `src/settings.rs` |
+| Player, weapons, ships | `src/player.rs`, `src/weapons.rs`, `src/ships.rs` |
+| Bots and city autonomy | `src/bots.rs`, `src/city.rs` |
+| UI and engine tools | `src/hud.rs`, `src/editor.rs`, `src/toolbelt.rs`, `src/theme.rs` |
+| QA and automation | `src/qa.rs`, `src/agent_control.rs` |
 
-```ron
-(
-   enabled: false,
-   sequence: 999,
-   game_state: "ingame",
-   build_mode: "combat",
-   handoff: true,
-)
-```
+## Development Standard
 
-Das laesst die Session offen, gibt synthetische Keys/Maus los, schliesst
-Build-/Picker-Modi und blendet das Agent-Overlay aus. Inventar, Pause, F3,
-Command Deck und normale Maus-/Keyboard-Eingaben bleiben danach wieder beim
-Spieler. Ohne `--agent-control` startet der Build komplett ohne Agent-Bridge.
-
-Der Agent-Test-Loop ist:
-
-1. `cargo build --release --color never`
-2. `.\target\release\voxel-native.exe --agent-control`
-3. `agent_control.ron` mit neuer `sequence` schreiben
-4. `agent_runs\live_<timestamp>\status.ron` lesen
-5. `last_screenshot` mit Bildanalyse prüfen
-6. bei Bugs neue Sequenz schreiben oder `exit: true` setzen
-
-`status.ron` enthaelt unter anderem `game_state`, `command_sequence`,
-aktive Waffe, aktives Tool, Position, Yaw/Pitch, FPS, Durchschnitts-FPS,
-`max_frame_ms`, `stall_count`, Chunk-/Mesh-Queues, `last_error`, Screenshot-Zahl
-und den letzten Bildpfad.
-Damit kann ein Agent nicht nur spielen, sondern auch Performance-Spikes,
-Parsing-Fehler, leere Screenshots und visuelle Regressionen protokollieren.
-Im sichtbaren Fenster rendert der Modus zusaetzlich OCR-freundliche `OCR_*`
-Zeilen mit State, Sequenz, Position, Frame-Zeiten, Fire/Scope und Fehlerstatus,
-damit Vision-Modelle den Zustand direkt aus dem Bild lesen koennen.
-
-Periodische Screenshots sind standardmäßig aus. Für automatische Capture-Läufe:
+Before presenting a change as ready:
 
 ```powershell
-$env:VOXEL_NATIVE_AGENT_SCREENSHOT_INTERVAL='3'
-.\target\release\voxel-native.exe --agent-control
+cargo fmt --all
+cargo test --workspace --quiet
+cargo build --quiet
 ```
 
-Erster Build dauert lange (Bevy zieht viele Crates). Folgende Builds
-sind dank Incremental Compilation + `dynamic_linking`-Feature deutlich
-schneller.
+For visual or streaming changes, also run a QA world and inspect the generated
+`report.ron` plus the latest screenshot.
 
-## Modul-Layout (gespiegelt zu R93G)
+## Roadmap
 
-| Rust-Modul       | R93G-Pendant                            |
-| ---------------- | --------------------------------------- |
-| `src/blocks.rs`  | `lib/voxel/blocks.ts`                   |
-| `src/chunk.rs`   | `lib/voxel/world.ts` (Chunk-Teil)       |
-| `src/terrain.rs` | `lib/voxel/terrain.ts`                  |
-| `src/mesher.rs`  | `lib/voxel/mesher.ts`                   |
-| `src/world.rs`   | `lib/voxel/ChunkManager.ts`             |
-| `src/player.rs`  | `components/Player.tsx` + `physics.ts`  |
-
-## Roadmap (Reihenfolge: echte Wins zuerst)
-
-1. **Chunk-Streaming** rund um den Spieler + Unload (aus `ChunkManager.ts`).
-2. **Greedy Meshing** für mid/far LOD — drastisch weniger Dreiecke.
-3. **Echter Terrain-Stack**: Domain Warping + Ridged FBM + Narrow-Band-Caves
-   und Biomes (Temperature/Moisture) — 1:1 aus `terrain.ts` portiert.
-4. **Block-Kollision + Gravitation** (aus `physics.ts`).
-5. **Texture-Atlas** statt Vertex-Farben.
-6. **Day/Night + Weather Shader** (aus `VoxelEngine.tsx` / `WeatherEditor.tsx`).
-7. **Save/Load** (RON-Format, Serde ist schon drin).
+1. Make bot city planning increasingly architectural: road hierarchy, terrain
+   following, skyline rules, residential variation, plazas, parks, service pads,
+   and readable human-scale details.
+2. Continue terrain beautification across the whole engine without replacing
+   performance with noisy decoration.
+3. Push ships toward solid, detailed cockpit and hull designs that read as real
+   spacecraft from gameplay distance.
+4. Keep low-end PCs as a first-class target by making every visual upgrade pass
+   through chunk, mesh, and frame-budget verification.

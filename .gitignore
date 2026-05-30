@@ -3,3 +3,8 @@
 /qa_runs
 /agent_runs
 /agent_control.ron
+/screenshot_*.png
+/voxel-native-web*.png
+/voxel-web-smoke.png
+/engine-current-window.png
+/.playwright-mcp/*.png

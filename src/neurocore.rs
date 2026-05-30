@@ -499,13 +499,14 @@ impl NeuroCore {
         let target = (settings.render_distance as i32).max(2);
         let floor = match self.intent {
             RuntimeIntent::Combat => target.min(12).max(6),
-            RuntimeIntent::Build | RuntimeIntent::Editor => target.min(8).max(4),
+            RuntimeIntent::Build => (target / 4).clamp(8, 16).min(target),
+            RuntimeIntent::Editor => (target / 5).clamp(6, 12).min(target),
             RuntimeIntent::Menu => target.min(6).max(3),
-            RuntimeIntent::Explore => target.min(10).max(5),
+            RuntimeIntent::Explore => (target / 3).clamp(8, 18).min(target),
         };
 
         if self.effective_render_distance <= 0 {
-            self.effective_render_distance = target.min(24).max(floor);
+            self.effective_render_distance = target.min(32).max(floor);
         }
         if self.effective_render_distance > target {
             self.effective_render_distance = target;
@@ -546,8 +547,25 @@ impl NeuroCore {
             self.effective_render_distance = (self.effective_render_distance - 2).max(floor);
         } else if stable && self.effective_render_distance < target {
             self.stable_samples = self.stable_samples.saturating_add(1);
-            if self.stable_samples >= 2 {
-                self.effective_render_distance += 1;
+            let fast_recovery = pressure < 0.18 && (fps <= 0.0 || fps >= target_fps * 0.98);
+            let required_samples = if fast_recovery { 1 } else { 2 };
+            if self.stable_samples >= required_samples {
+                let gap = target - self.effective_render_distance;
+                let step = if fast_recovery {
+                    if gap > 24 {
+                        4
+                    } else if gap > 12 {
+                        3
+                    } else if gap > 6 {
+                        2
+                    } else {
+                        1
+                    }
+                } else {
+                    1
+                };
+                self.effective_render_distance =
+                    (self.effective_render_distance + step).min(target);
                 self.stable_samples = 0;
             }
         } else {
@@ -772,7 +790,8 @@ mod tests {
         let expanded =
             core.update_budget(&settings, telemetry(60.0, 0.0, RuntimeIntent::Explore), 0.6);
         assert!(held.render_distance >= throttled.render_distance);
-        assert_eq!(expanded.render_distance, held.render_distance + 1);
+        assert!(expanded.render_distance > held.render_distance);
+        assert!(expanded.render_distance <= settings.render_distance as i32);
     }
 
     #[test]

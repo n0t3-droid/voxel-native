@@ -23,6 +23,7 @@ use crate::blocks::{BlockType, Voxel, AIR};
 use crate::builder::BuilderHistory;
 use crate::editor::{EditorState, EditorTab};
 use crate::menu::{GameState, PendingWorldLoad};
+use crate::neurocore::RuntimeBudget;
 use crate::player::Player;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::settings::SAVES_DIR;
@@ -35,6 +36,7 @@ use crate::world::{
 
 const MEGA_CITY_RADIUS: i32 = 1024;
 const DEFAULT_MAX_ACTIVE_PROJECTS: usize = 8;
+const AUTONOMY_BURST_ACTIVE_PROJECTS: usize = 12;
 const MAX_ACTIVE_PROJECTS_LIMIT: usize = 48;
 const MAX_CREW_BOTS_PER_PROJECT: usize = 32;
 const COMPANION_WORKERS_PER_LEADER: u8 = 4;
@@ -44,6 +46,12 @@ const BOT_MEET_DISTANCE: f32 = 58.0;
 const BOT_MEET_OFFSET: f32 = 11.0;
 const BOT_BUSY_RETARGET_INTERVAL: f32 = 3.5;
 const BOT_GREETER_INTERVAL: f32 = 4.0;
+const BOT_PLAYER_EDIT_RADIUS: f32 = 14.0;
+const BOT_PLAYER_PROJECT_MARGIN: f32 = 128.0;
+const BOT_SHIP_EDIT_RADIUS: f32 = 14.0;
+const BOT_SHIP_PROJECT_MARGIN: f32 = 32.0;
+const BOT_MAX_FRAME_EDITS: usize = 420;
+const BOT_MAX_PROJECT_SLICE_EDITS: usize = 160;
 const COMPANION_FOLLOW_DEFAULT: f32 = 3.2;
 const COMPANION_FOLLOW_MIN: f32 = 1.25;
 const COMPANION_FOLLOW_MAX: f32 = 22.0;
@@ -151,6 +159,7 @@ pub struct FriendlyWorldBrain {
     greeter_timer: f32,
     busy_timer: f32,
     plan_timer: f32,
+    project_scan_cursor: usize,
     world_name: String,
     dirty: bool,
 }
@@ -173,6 +182,7 @@ impl Default for FriendlyWorldBrain {
             greeter_timer: 1.0,
             busy_timer: 1.0,
             plan_timer: 2.0,
+            project_scan_cursor: 0,
             world_name: String::new(),
             dirty: false,
         }
@@ -499,6 +509,7 @@ impl BotWorldSave {
     }
 
     fn normalize(&mut self) {
+        let legacy_version = self.version;
         self.version = bot_save_version();
         self.next_bot_id = self.next_bot_id.max(1);
         self.next_project_id = self.next_project_id.max(1);
@@ -506,6 +517,9 @@ impl BotWorldSave {
         self.next_idea_id = self.next_idea_id.max(1);
         self.next_conversation_id = self.next_conversation_id.max(1);
         self.next_crew_id = self.next_crew_id.max(1);
+        if legacy_version < 2 {
+            self.autonomy.enabled = false;
+        }
 
         for settlement in &mut self.settlements {
             settlement.radius = MEGA_CITY_RADIUS;
@@ -517,11 +531,17 @@ impl BotWorldSave {
                 .clamp(1, MAX_ACTIVE_PROJECTS_LIMIT);
         }
         ensure_city_districts(self);
-        normalize_companion_swarm(self);
+        if legacy_version < 2 {
+            normalize_legacy_companions(self);
+        } else {
+            normalize_companion_swarm(self);
+        }
         self.next_bot_id = self
             .next_bot_id
             .max(self.agents.iter().map(|b| b.id).max().unwrap_or(0) + 1);
-        ensure_companion_worker_swarms(self);
+        if legacy_version >= 2 {
+            ensure_companion_worker_swarms(self);
+        }
         restore_project_assignments(self);
         normalize_relationships(self);
 
@@ -621,6 +641,57 @@ impl BotWorldSave {
             hub[0], hub[1], hub[2]
         )));
         save
+    }
+}
+
+fn normalize_legacy_companions(save: &mut BotWorldSave) {
+    let hub = save
+        .settlements
+        .first()
+        .map(|s| vec3_from_arr(s.hub))
+        .unwrap_or(Vec3::new(0.0, 120.0, 0.0));
+    save.agents.clear();
+    for (name, role, offset, order) in [
+        (
+            "Iris",
+            BotRole::CompanionGuide,
+            Vec3::new(-3.0, 1.5, -5.0),
+            0_u8,
+        ),
+        (
+            "Orion",
+            BotRole::CompanionMaker,
+            Vec3::new(3.0, 1.5, -5.0),
+            1_u8,
+        ),
+    ] {
+        let id = save.next_bot_id;
+        save.next_bot_id += 1;
+        let p = hub + offset;
+        save.agents.push(BotAgent {
+            id,
+            name: name.into(),
+            role,
+            state: BotState::Idle,
+            position: [p.x, p.y, p.z],
+            target: [p.x, p.y, p.z],
+            home_id: save.settlements.first().map(|s| s.id).unwrap_or(1),
+            crew_id: None,
+            last_interaction_epoch: 0,
+            companion: true,
+            companion_order: order,
+            swarm_leader_id: None,
+            swarm_index: 0,
+            companion_mode: BotCompanionMode::AwaitingInstruction,
+            current_task: None,
+            memory: BotMemory {
+                completed_tasks: 0,
+                last_message: "Legacy companion restored; awaiting your instruction.".into(),
+                known_sites: vec![[hub.x, hub.y, hub.z]],
+                favorite_theme: role.default_theme(),
+                ..Default::default()
+            },
+        });
     }
 }
 
@@ -908,7 +979,15 @@ fn ensure_companion_worker_swarms(save: &mut BotWorldSave) {
         .agents
         .iter()
         .filter(|bot| bot.companion)
-        .map(|bot| (bot.id, bot.name.clone(), bot.companion_order, bot.position, bot.home_id))
+        .map(|bot| {
+            (
+                bot.id,
+                bot.name.clone(),
+                bot.companion_order,
+                bot.position,
+                bot.home_id,
+            )
+        })
         .collect();
     let roles = [
         BotRole::Surveyor,
@@ -1016,11 +1095,20 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
 
     for (idx, project_id, kind, assigned_bot, crew_id, origin, label) in project_specs {
         let valid_crew = crew_id.filter(|id| save.crews.iter().any(|crew| crew.id == *id));
-        let crew_id = valid_crew.or_else(|| create_project_crew(save, project_id, kind, assigned_bot, origin));
+        let crew_id = valid_crew
+            .or_else(|| create_project_crew(save, project_id, kind, assigned_bot, origin));
         if let Some(project) = save.projects.get_mut(idx) {
             project.crew_id = crew_id;
         }
-        assign_crew_task(save, crew_id, assigned_bot, project_id, kind, &label, origin);
+        assign_crew_task(
+            save,
+            crew_id,
+            assigned_bot,
+            project_id,
+            kind,
+            &label,
+            origin,
+        );
     }
 }
 
@@ -1503,6 +1591,7 @@ pub enum BotProjectStatus {
     Queued,
     Active,
     WaitingForChunks,
+    WaitingForPlayer,
     Complete,
     Blocked,
 }
@@ -3645,6 +3734,7 @@ fn tick_friendly_world(
     mut brain: ResMut<FriendlyWorldBrain>,
     mut world: ResMut<VoxelWorld>,
     mut history: ResMut<BuilderHistory>,
+    budget: Res<RuntimeBudget>,
     player_q: Query<&Transform, With<Player>>,
     ship_q: Query<&Transform, With<ShipInstance>>,
 ) {
@@ -3670,12 +3760,32 @@ fn tick_friendly_world(
         return;
     }
     process_queued_commands(&mut brain, &world, player_pos, &ship_positions);
+    let open_projects_before_planning = planner_project_count(&brain.save);
+    let allow_new_city_work = bot_allows_new_city_work(&budget);
+    let allow_road_front_infill =
+        open_projects_before_planning <= 1 && open_access_road_project_count(&brain.save) > 0;
+    let allow_planner_tick = allow_new_city_work
+        || allow_road_front_infill
+        || open_projects_before_planning == 0
+        || brain.force_city_idea;
     if brain.force_city_idea || (brain.save.autonomy.enabled && brain.plan_timer <= 0.0) {
         brain.plan_timer = planner_interval(&brain.save);
         let urgent = brain.force_city_idea;
         brain.force_city_idea = false;
-        if run_city_planner(&mut brain, &world, player_pos, &ship_positions, urgent) {
+        if allow_planner_tick
+            && run_city_planner(
+                &mut brain,
+                &world,
+                player_pos,
+                &ship_positions,
+                urgent,
+                &budget,
+            )
+        {
             brain.dirty = true;
+        } else if !allow_new_city_work && brain.message_cooldown <= 0.0 {
+            brain.hud_message = "Bot city paused while terrain and mesh streaming catch up.".into();
+            brain.message_cooldown = VISIBLE_MESSAGE_COOLDOWN;
         }
     }
 
@@ -3683,30 +3793,59 @@ fn tick_friendly_world(
 
     let mut completed = Vec::new();
     let mut blocked = Vec::new();
+    let open_projects = planner_project_count(&brain.save);
+    let frame_edit_budget = bot_frame_edit_budget(&budget, open_projects);
+    let per_project_budget = bot_project_slice_budget(frame_edit_budget, open_projects);
+    let project_scan_budget = bot_project_scan_budget(open_projects);
     let mut changed_total = 0usize;
     let bounds = brain.save.primary_bounds();
 
-    for idx in 0..brain.save.projects.len() {
-        if brain.save.projects[idx].status.is_done() {
-            continue;
+    if frame_edit_budget > 0 {
+        let project_len = brain.save.projects.len();
+        let scan_limit = project_len.min(project_scan_budget);
+        let start = if project_len == 0 {
+            0
+        } else {
+            brain.project_scan_cursor % project_len
+        };
+        let mut scanned = 0usize;
+        while scanned < scan_limit {
+            let idx = (start + scanned) % project_len;
+            scanned += 1;
+            if brain.save.projects[idx].status.is_done() {
+                continue;
+            }
+            let remaining = frame_edit_budget.saturating_sub(changed_total);
+            if remaining == 0 {
+                break;
+            }
+            let result = advance_project_slice(
+                &mut brain.save.projects[idx],
+                &mut world,
+                &mut history,
+                player_pos,
+                &ship_positions,
+                bounds,
+                remaining.min(per_project_budget),
+            );
+            changed_total += result.changed;
+            if result.completed {
+                completed.push(idx);
+            } else if result.blocked {
+                blocked.push(idx);
+            }
+            if changed_total >= frame_edit_budget {
+                break;
+            }
         }
-        let result = advance_project_slice(
-            &mut brain.save.projects[idx],
-            &mut world,
-            &mut history,
-            player_pos,
-            &ship_positions,
-            bounds,
-        );
-        changed_total += result.changed;
-        if result.completed {
-            completed.push(idx);
-        } else if result.blocked {
-            blocked.push(idx);
-        }
-        if changed_total >= 1_400 {
-            break;
-        }
+        brain.project_scan_cursor = if project_len == 0 {
+            0
+        } else {
+            (start + scanned).min(start + project_len) % project_len
+        };
+    } else if brain.message_cooldown <= 0.0 {
+        brain.hud_message = "Bot builders are yielding to max-distance world streaming.".into();
+        brain.message_cooldown = VISIBLE_MESSAGE_COOLDOWN;
     }
 
     for idx in completed {
@@ -3717,8 +3856,12 @@ fn tick_friendly_world(
             format!("{label} complete. Bot city is growing."),
             8,
         );
-        brain.force_city_idea = true;
-        brain.plan_timer = 0.0;
+        if allow_new_city_work {
+            brain.force_city_idea = true;
+            brain.plan_timer = 0.0;
+        } else {
+            brain.plan_timer = brain.plan_timer.max(planner_interval(&brain.save) * 2.0);
+        }
         brain.dirty = true;
     }
 
@@ -3817,6 +3960,7 @@ fn add_project_with_site_search(
     ship_positions: &[Vec3],
 ) -> Result<u64, String> {
     let seq = save.projects.len() + save.completed_projects as usize;
+    let site_search_player_anchor = if manual { player_pos } else { None };
     let candidates = command_site_candidates(
         save,
         world,
@@ -3824,10 +3968,15 @@ fn add_project_with_site_search(
         size,
         district_anchor,
         bot_anchor,
+        site_search_player_anchor,
         player_pos,
         seq,
     );
-    let mut last_error = "no loaded safe build site near you yet".to_string();
+    let mut last_error = if manual {
+        "no loaded safe build site near you yet".to_string()
+    } else {
+        "no loaded safe city lot near the road grid yet".to_string()
+    };
     for origin in candidates {
         let district_id = nearest_district(save, project_center(origin, size)).map(|d| d.id);
         match add_project(
@@ -3860,13 +4009,14 @@ fn command_site_candidates(
     size: [i32; 3],
     district_anchor: Vec3,
     bot_anchor: Vec3,
-    player_pos: Option<Vec3>,
+    player_anchor_pos: Option<Vec3>,
+    player_clearance_pos: Option<Vec3>,
     seq: usize,
 ) -> Vec<[i32; 3]> {
     let bounds = save.primary_bounds();
     let half = Vec3::new(size[0] as f32 * 0.5, 0.0, size[2] as f32 * 0.5);
     let mut anchors = Vec::new();
-    if let Some(player) = player_pos {
+    if let Some(player) = player_anchor_pos {
         anchors.push(player);
     }
     anchors.push(bot_anchor);
@@ -3875,7 +4025,7 @@ fn command_site_candidates(
         anchors.push(hub);
     }
 
-    let base_radius = match kind {
+    let base_radius: f32 = match kind {
         BotTaskKind::ExpandRoadGrid => 72.0,
         BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad | BotTaskKind::DecorateStreet => 42.0,
         BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower | BotTaskKind::MakeTaller => 54.0,
@@ -3888,13 +4038,28 @@ fn command_site_candidates(
 
     let mut out = Vec::new();
     for (anchor_idx, anchor) in anchors.into_iter().enumerate() {
-        for step in 0..18 {
-            let ring = base_radius + (step / 6) as f32 * 28.0;
+        for step in 0..24 {
+            let player_clearance_ring =
+                size[0].max(size[2]) as f32 * 0.72 + BOT_PLAYER_PROJECT_MARGIN;
+            let anchor_needs_clearance_ring = player_clearance_pos
+                .map(|player| {
+                    Vec2::new(anchor.x - player.x, anchor.z - player.z).length()
+                        < player_clearance_ring + base_radius
+                })
+                .unwrap_or(false);
+            let ring_base = if anchor_needs_clearance_ring
+                || (anchor_idx == 0 && player_anchor_pos.is_some())
+            {
+                base_radius.max(player_clearance_ring)
+            } else {
+                base_radius
+            };
+            let ring = ring_base + (step / 6) as f32 * 36.0;
             let angle = (seq + step + anchor_idx * 7) as f32 * 2.399_963_1;
             let center = anchor + Vec3::new(angle.cos() * ring, 0.0, angle.sin() * ring);
             let target_origin = clamp_to_bounds(bounds, center - half);
             let origin = project_origin(world, target_origin);
-            if !bounds.contains_box(origin, size) || !project_columns_loaded(world, origin, size) {
+            if !bounds.contains_box(origin, size) || !project_anchor_loaded(world, origin, size) {
                 continue;
             }
             if !out.contains(&origin) {
@@ -3910,51 +4075,64 @@ fn queue_mega_city_starter_projects(
     world: &VoxelWorld,
     player_pos: Vec3,
     ship_positions: &[Vec3],
+    max_to_queue: usize,
 ) -> usize {
-    let district_anchor = nearest_district(save, player_pos)
+    let district = nearest_district(save, player_pos).cloned();
+    let district_anchor = district
+        .as_ref()
         .map(|d| vec3_from_arr(d.center))
         .or_else(|| save.settlements.first().map(|s| vec3_from_arr(s.hub)))
         .unwrap_or(player_pos);
-    let specs = [
-        (
-            BotTaskKind::ClearFlatten,
-            [40, 8, 40],
-            BotTheme::WhiteAlloy,
-            BotRole::Builder,
-            10,
-        ),
-        (
+    let road_ready = district.as_ref().map_or_else(
+        || settlement_has_access_roads(save),
+        |district| district_has_road_access(save, district),
+    );
+    let specs = if road_ready {
+        vec![
+            (
+                BotTaskKind::BuildGlassTower,
+                autonomous_project_size(BotTaskKind::BuildGlassTower),
+                BotTheme::MagentaGlass,
+                BotRole::Architect,
+                9,
+            ),
+            (
+                BotTaskKind::BuildResidentialBlock,
+                autonomous_project_size(BotTaskKind::BuildResidentialBlock),
+                BotTheme::WhiteAlloy,
+                BotRole::Planner,
+                8,
+            ),
+            (
+                BotTaskKind::BuildPlaza,
+                autonomous_project_size(BotTaskKind::BuildPlaza),
+                BotTheme::WhiteAlloy,
+                BotRole::Architect,
+                7,
+            ),
+            (
+                BotTaskKind::DecorateStreet,
+                [88, 7, 11],
+                BotTheme::AmberStreet,
+                BotRole::RepairTech,
+                8,
+            ),
+        ]
+    } else {
+        vec![(
             BotTaskKind::ExpandRoadGrid,
             autonomous_project_size(BotTaskKind::ExpandRoadGrid),
             BotTheme::AmberStreet,
             BotRole::RoadCrew,
             10,
-        ),
-        (
-            BotTaskKind::BuildGlassTower,
-            autonomous_project_size(BotTaskKind::BuildGlassTower),
-            BotTheme::MagentaGlass,
-            BotRole::Architect,
-            9,
-        ),
-        (
-            BotTaskKind::BuildResidentialBlock,
-            autonomous_project_size(BotTaskKind::BuildResidentialBlock),
-            BotTheme::WhiteAlloy,
-            BotRole::Planner,
-            8,
-        ),
-        (
-            BotTaskKind::DecorateStreet,
-            [88, 7, 11],
-            BotTheme::AmberStreet,
-            BotRole::RepairTech,
-            8,
-        ),
-    ];
+        )]
+    };
     let mut queued = 0usize;
     let mut last_error = String::new();
     for (kind, size, theme, role, priority) in specs {
+        if queued >= max_to_queue {
+            break;
+        }
         let assigned = pick_bot(save, role).or_else(|| pick_bot(save, kind.preferred_role()));
         match add_project_with_site_search(
             save,
@@ -3966,7 +4144,7 @@ fn queue_mega_city_starter_projects(
             priority,
             false,
             district_anchor,
-            player_pos,
+            district_anchor,
             Some(player_pos),
             ship_positions,
         ) {
@@ -4358,11 +4536,115 @@ fn active_project_limit(save: &BotWorldSave) -> usize {
         .min(intensity_limit)
 }
 
+fn active_project_limit_for_budget(save: &BotWorldSave, budget: &RuntimeBudget) -> usize {
+    let base = active_project_limit(save);
+    let pressure = bot_streaming_pressure(budget);
+    if !bot_allows_new_city_work(budget) {
+        if open_access_road_project_count(save) > 0 {
+            return base.min(2);
+        }
+        return base.min(1);
+    }
+    if pressure > 0.55 {
+        base.min(2)
+    } else if pressure > 0.35 {
+        base.min(4)
+    } else {
+        base
+    }
+}
+
 fn planner_project_count(save: &BotWorldSave) -> usize {
     save.projects
         .iter()
-        .filter(|project| matches!(project.status, BotProjectStatus::Queued | BotProjectStatus::Active))
+        .filter(|project| !project.status.is_done())
         .count()
+}
+
+fn open_access_road_project_count(save: &BotWorldSave) -> usize {
+    save.projects
+        .iter()
+        .filter(|project| !project.status.is_done() && is_access_road_project(project.kind))
+        .count()
+}
+
+fn bot_streaming_pressure(budget: &RuntimeBudget) -> f32 {
+    let rd_pressure = if budget.target_render_distance <= 2 {
+        0.0
+    } else {
+        1.0 - budget.render_distance as f32 / budget.target_render_distance as f32
+    };
+    budget
+        .queue_pressure
+        .max(budget.frame_pressure)
+        .max(rd_pressure)
+        .clamp(0.0, 1.25)
+}
+
+fn bot_horizon_gap_ratio(budget: &RuntimeBudget) -> f32 {
+    if budget.target_render_distance <= 2 {
+        return 0.0;
+    }
+    let target = budget.target_render_distance.max(1) as f32;
+    let gap = budget
+        .target_render_distance
+        .saturating_sub(budget.render_distance)
+        .max(0) as f32;
+    (gap / target).clamp(0.0, 1.0)
+}
+
+fn bot_allows_new_city_work(budget: &RuntimeBudget) -> bool {
+    let pressure = bot_streaming_pressure(budget);
+    let rd_gap = budget
+        .target_render_distance
+        .saturating_sub(budget.render_distance);
+    pressure < 0.62 && rd_gap <= (budget.target_render_distance / 3).max(4)
+}
+
+fn bot_frame_edit_budget(budget: &RuntimeBudget, open_projects: usize) -> usize {
+    let horizon_gap = bot_horizon_gap_ratio(budget);
+    if budget.target_render_distance >= 24 && horizon_gap >= 0.30 {
+        return 0;
+    }
+    let pressure = bot_streaming_pressure(budget);
+    let mut edit_budget = if pressure >= 0.90 {
+        0
+    } else if pressure >= 0.72 {
+        48
+    } else if pressure >= 0.52 {
+        96
+    } else if pressure >= 0.32 {
+        180
+    } else {
+        BOT_MAX_FRAME_EDITS
+    };
+    if budget.target_render_distance >= 24 && horizon_gap >= 0.20 {
+        edit_budget = edit_budget.min(24);
+    }
+    if open_projects > DEFAULT_MAX_ACTIVE_PROJECTS {
+        edit_budget /= 2;
+    }
+    edit_budget
+}
+
+fn bot_project_slice_budget(frame_budget: usize, open_projects: usize) -> usize {
+    if frame_budget == 0 {
+        return 0;
+    }
+    let divisor = open_projects.clamp(1, 4);
+    (frame_budget / divisor)
+        .clamp(24, BOT_MAX_PROJECT_SLICE_EDITS)
+        .min(frame_budget)
+}
+
+fn bot_project_scan_budget(open_projects: usize) -> usize {
+    if open_projects <= DEFAULT_MAX_ACTIVE_PROJECTS {
+        96
+    } else if open_projects <= MAX_ACTIVE_PROJECTS_LIMIT {
+        128
+    } else {
+        160
+    }
 }
 
 fn queue_visible_city_work(
@@ -4370,11 +4652,19 @@ fn queue_visible_city_work(
     world: &VoxelWorld,
     player_pos: Option<Vec3>,
     ship_positions: &[Vec3],
+    max_to_queue: usize,
 ) -> usize {
+    if max_to_queue == 0 {
+        return 0;
+    }
     let anchor = player_pos
-        .or_else(|| save.settlements.first().map(|settlement| vec3_from_arr(settlement.hub)))
+        .or_else(|| {
+            save.settlements
+                .first()
+                .map(|settlement| vec3_from_arr(settlement.hub))
+        })
         .unwrap_or(Vec3::ZERO);
-    queue_mega_city_starter_projects(save, world, anchor, ship_positions)
+    queue_mega_city_starter_projects(save, world, anchor, ship_positions, max_to_queue)
 }
 
 fn run_city_planner(
@@ -4383,19 +4673,27 @@ fn run_city_planner(
     player_pos: Option<Vec3>,
     ship_positions: &[Vec3],
     urgent: bool,
+    budget: &RuntimeBudget,
 ) -> bool {
     let active = planner_project_count(&brain.save);
-    let limit = active_project_limit(&brain.save);
+    let limit = active_project_limit_for_budget(&brain.save, budget);
     if active >= limit && !urgent {
         return false;
     }
 
     let Some(idea_id) = propose_city_idea(&mut brain.save, world, urgent) else {
-        let queued = queue_visible_city_work(&mut brain.save, world, player_pos, ship_positions);
+        let available = limit.saturating_sub(active).max(usize::from(urgent));
+        let queued = queue_visible_city_work(
+            &mut brain.save,
+            world,
+            player_pos,
+            ship_positions,
+            available.min(2),
+        );
         if queued > 0 {
             show_city_message(
                 brain,
-                format!("Autonomy refilled {queued} city build(s) near the active area."),
+                format!("Autonomy refilled {queued} city build(s) on the active city grid."),
                 8,
             );
             return true;
@@ -4464,11 +4762,19 @@ fn run_city_planner(
             brain.save.last_blocked_reason = reason.clone();
             show_city_message(brain, format!("City idea rejected: {reason}"), 6);
             if planner_project_count(&brain.save) == 0 {
-                let queued = queue_visible_city_work(&mut brain.save, world, player_pos, ship_positions);
+                let queued = queue_visible_city_work(
+                    &mut brain.save,
+                    world,
+                    player_pos,
+                    ship_positions,
+                    limit.min(2),
+                );
                 if queued > 0 {
                     show_city_message(
                         brain,
-                        format!("Swarm recovered with {queued} loaded city build(s) near you."),
+                        format!(
+                            "Swarm recovered with {queued} loaded city build(s) on the city grid."
+                        ),
                         8,
                     );
                 }
@@ -4556,6 +4862,14 @@ fn choose_planning_district(save: &BotWorldSave, seq: usize) -> Option<&BotDistr
     }
     let mut districts: Vec<&BotDistrict> = save.districts.iter().collect();
     districts.sort_by_key(|d| (d.completed_projects, d.id));
+    if seq % 3 != 1 {
+        if let Some(road_ready) = districts.iter().copied().find(|district| {
+            !matches!(district.kind, BotDistrictKind::HubCore)
+                && district_has_road_access(save, district)
+        }) {
+            return Some(road_ready);
+        }
+    }
     let preferred = seq % districts.len();
     districts.get(preferred).copied()
 }
@@ -4566,6 +4880,9 @@ fn choose_district_project(
     seq: usize,
     urgent: bool,
 ) -> BotTaskKind {
+    if !district_has_road_access(save, district) {
+        return BotTaskKind::ExpandRoadGrid;
+    }
     if urgent {
         return match district.kind {
             BotDistrictKind::HubCore => BotTaskKind::BuildPlaza,
@@ -4577,7 +4894,11 @@ fn choose_district_project(
             BotDistrictKind::Scenic => BotTaskKind::BuildPlaza,
         };
     }
-    if seq % 4 == 1 || save.settlements.first().map(|s| s.road_count).unwrap_or(0) < 4 {
+    let road_count = save.settlements.first().map(|s| s.road_count).unwrap_or(0);
+    if road_count < 2 && seq % 3 == 1 {
+        return BotTaskKind::ExpandRoadGrid;
+    }
+    if road_count < 4 && seq % 5 == 1 {
         return BotTaskKind::ExpandRoadGrid;
     }
     match district.kind {
@@ -4619,6 +4940,43 @@ fn choose_district_project(
     }
 }
 
+fn is_road_project(kind: BotTaskKind) -> bool {
+    matches!(
+        kind,
+        BotTaskKind::BuildRoad
+            | BotTaskKind::RecolorRoad
+            | BotTaskKind::ExpandRoadGrid
+            | BotTaskKind::DecorateStreet
+            | BotTaskKind::AddLights
+    )
+}
+
+fn is_access_road_project(kind: BotTaskKind) -> bool {
+    matches!(
+        kind,
+        BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad | BotTaskKind::ExpandRoadGrid
+    )
+}
+
+fn settlement_has_access_roads(save: &BotWorldSave) -> bool {
+    save.settlements.first().map(|s| s.road_count).unwrap_or(0) > 0
+        || save.projects.iter().any(|project| {
+            is_access_road_project(project.kind)
+                && !matches!(project.status, BotProjectStatus::Blocked)
+        })
+}
+
+fn district_has_road_access(save: &BotWorldSave, district: &BotDistrict) -> bool {
+    if matches!(district.kind, BotDistrictKind::HubCore) {
+        return true;
+    }
+    save.projects.iter().any(|project| {
+        project.district_id == Some(district.id)
+            && is_access_road_project(project.kind)
+            && !matches!(project.status, BotProjectStatus::Blocked)
+    })
+}
+
 fn find_loaded_build_site(
     save: &BotWorldSave,
     world: &VoxelWorld,
@@ -4630,32 +4988,168 @@ fn find_loaded_build_site(
     let bounds = save.primary_bounds();
     let mut candidates = Vec::new();
     for slot in &district.build_slots {
-        candidates.push(Vec3::new(slot[0] as f32, slot[1] as f32, slot[2] as f32));
+        candidates.push(project_origin(
+            world,
+            clamp_to_bounds(
+                bounds,
+                Vec3::new(slot[0] as f32, slot[1] as f32, slot[2] as f32),
+            ),
+        ));
     }
     let center = vec3_from_arr(district.center);
     for step in 0..16 {
         let angle = (seq + step) as f32 * 2.399_963_1;
         let ring = 16.0 + (step / 4) as f32 * 18.0;
-        candidates.push(center + Vec3::new(angle.cos() * ring, 0.0, angle.sin() * ring));
+        candidates.push(project_origin(
+            world,
+            clamp_to_bounds(
+                bounds,
+                center + Vec3::new(angle.cos() * ring, 0.0, angle.sin() * ring),
+            ),
+        ));
     }
     if let Some(hub) = save.settlements.first().map(|s| vec3_from_arr(s.hub)) {
         for step in 0..10 {
             let angle = (seq + step * 3) as f32 * 1.618_033_9;
             let ring = 24.0 + step as f32 * 8.0;
-            candidates.push(hub + Vec3::new(angle.cos() * ring, 0.0, angle.sin() * ring));
+            candidates.push(project_origin(
+                world,
+                clamp_to_bounds(
+                    bounds,
+                    hub + Vec3::new(angle.cos() * ring, 0.0, angle.sin() * ring),
+                ),
+            ));
         }
+    }
+    if is_road_project(kind) {
+        candidates.extend(district_road_origins(save, world, district, size));
+    } else {
+        candidates.extend(roadside_lot_origins(save, world, district, kind, size, seq));
     }
 
     candidates
         .into_iter()
-        .map(|target| project_origin(world, clamp_to_bounds(bounds, target)))
         .filter(|origin| bounds.contains_box(*origin, size))
-        .filter(|origin| project_columns_loaded(world, *origin, size))
+        .filter(|origin| project_anchor_loaded(world, *origin, size))
         .max_by(|a, b| {
             let sa = score_planned_site(save, world, district, *a, size, kind);
             let sb = score_planned_site(save, world, district, *b, size, kind);
             sa.total_cmp(&sb)
         })
+}
+
+fn district_road_origins(
+    save: &BotWorldSave,
+    world: &VoxelWorld,
+    district: &BotDistrict,
+    size: [i32; 3],
+) -> Vec<[i32; 3]> {
+    let bounds = save.primary_bounds();
+    let center = vec3_from_arr(district.center);
+    let mut centers = vec![center];
+    if let Some(hub) = save.settlements.first().map(|s| vec3_from_arr(s.hub)) {
+        centers.push(hub.lerp(center, 0.50));
+        centers.push(hub.lerp(center, 0.74));
+    }
+    centers
+        .into_iter()
+        .map(|center| project_origin_from_center(world, bounds, center, size))
+        .collect()
+}
+
+fn roadside_lot_origins(
+    save: &BotWorldSave,
+    world: &VoxelWorld,
+    district: &BotDistrict,
+    kind: BotTaskKind,
+    size: [i32; 3],
+    seq: usize,
+) -> Vec<[i32; 3]> {
+    let bounds = save.primary_bounds();
+    let lot_spacing = match kind {
+        BotTaskKind::BuildGlassTower | BotTaskKind::BuildTower | BotTaskKind::MakeTaller => 32.0,
+        BotTaskKind::BuildResidentialBlock => 34.0,
+        BotTaskKind::BuildHome => 18.0,
+        BotTaskKind::BuildPark | BotTaskKind::BuildPlaza => 28.0,
+        _ => 24.0,
+    };
+    let dirs = [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(0.0, -1.0),
+    ];
+    let mut out = Vec::new();
+    for (idx, point) in road_network_points(save, district)
+        .into_iter()
+        .take(18)
+        .enumerate()
+    {
+        for turn in 0..dirs.len() {
+            let dir = dirs[(seq + idx + turn) % dirs.len()];
+            let stagger = ((seq + idx * 3 + turn) % 3) as f32 * 8.0 - 8.0;
+            let center = Vec3::new(
+                point.x + dir.x * lot_spacing - dir.y * stagger,
+                0.0,
+                point.y + dir.y * lot_spacing + dir.x * stagger,
+            );
+            out.push(project_origin_from_center(world, bounds, center, size));
+        }
+    }
+    out
+}
+
+fn project_origin_from_center(
+    world: &VoxelWorld,
+    bounds: BotCityBounds,
+    center: Vec3,
+    size: [i32; 3],
+) -> [i32; 3] {
+    let half_x = size[0] as f32 * 0.5;
+    let half_z = size[2] as f32 * 0.5;
+    let target = clamp_to_bounds(
+        bounds,
+        Vec3::new(center.x - half_x, center.y, center.z - half_z),
+    );
+    project_origin(world, target)
+}
+
+fn road_network_points(save: &BotWorldSave, district: &BotDistrict) -> Vec<Vec2> {
+    let mut points: Vec<Vec2> = district
+        .road_anchors
+        .iter()
+        .map(|a| Vec2::new(a[0] as f32, a[2] as f32))
+        .collect();
+    for project in &save.projects {
+        if project.district_id != Some(district.id) || !is_access_road_project(project.kind) {
+            continue;
+        }
+        let center = project_center(project.origin, project.size);
+        points.push(Vec2::new(center.x, center.z));
+        let half_x = project.size[0] as f32 * 0.5;
+        let half_z = project.size[2] as f32 * 0.5;
+        if project.size[0] >= project.size[2] {
+            points.push(Vec2::new(center.x - half_x, center.z));
+            points.push(Vec2::new(center.x + half_x, center.z));
+        } else {
+            points.push(Vec2::new(center.x, center.z - half_z));
+            points.push(Vec2::new(center.x, center.z + half_z));
+        }
+    }
+    if points.is_empty() {
+        let center = vec3_from_arr(district.center);
+        points.push(Vec2::new(center.x, center.z));
+    }
+    points
+}
+
+fn road_access_score(save: &BotWorldSave, district: &BotDistrict, x: i32, z: i32) -> f32 {
+    let here = Vec2::new(x as f32, z as f32);
+    let best = road_network_points(save, district)
+        .into_iter()
+        .map(|p| p.distance(here))
+        .fold(f32::INFINITY, f32::min);
+    (1.0 - best / 140.0).clamp(0.0, 1.0)
 }
 
 fn score_planned_site(
@@ -4670,10 +5164,11 @@ fn score_planned_site(
     let center_x = origin[0] + size[0] / 2;
     let center_z = origin[2] + size[2] / 2;
     let flatness = terrain_flatness(world, center_x, center_z, size[0].max(size[2]).min(36));
-    let connected = district
-        .road_anchors
-        .iter()
-        .any(|a| Vec2::new((a[0] - center_x) as f32, (a[2] - center_z) as f32).length() < 96.0);
+    let road_access = if is_road_project(kind) {
+        1.0
+    } else {
+        road_access_score(save, district, center_x, center_z)
+    };
     let balance = match (district.kind, kind) {
         (BotDistrictKind::Park, BotTaskKind::BuildPark | BotTaskKind::BuildPlaza) => 1.0,
         (BotDistrictKind::Skyline, BotTaskKind::BuildGlassTower | BotTaskKind::BuildTower) => 1.0,
@@ -4686,13 +5181,13 @@ fn score_planned_site(
         _ => 0.65,
     };
     let inside = bounds.contains_box(origin, size);
-    score_city_slot(flatness, connected, inside, balance, true)
+    score_city_slot(flatness, road_access, inside, balance, true)
         - bounds.distance_from_center(center_x as f32, center_z as f32) * 0.0005
 }
 
 fn score_city_slot(
     flatness: f32,
-    connected: bool,
+    road_access: f32,
     inside_bounds: bool,
     district_balance: f32,
     player_clearance: bool,
@@ -4700,7 +5195,7 @@ fn score_city_slot(
     if !inside_bounds || !player_clearance {
         return -10_000.0;
     }
-    flatness * 2.5 + if connected { 2.0 } else { 0.0 } + district_balance.clamp(0.0, 1.0) * 1.8
+    flatness * 2.5 + road_access.clamp(0.0, 1.0) * 2.4 + district_balance.clamp(0.0, 1.0) * 1.8
 }
 
 fn terrain_flatness(world: &VoxelWorld, x: i32, z: i32, radius: i32) -> f32 {
@@ -4711,10 +5206,23 @@ fn terrain_flatness(world: &VoxelWorld, x: i32, z: i32, radius: i32) -> f32 {
         world.surface_height_at(x - r, z),
         world.surface_height_at(x, z + r),
         world.surface_height_at(x, z - r),
+        world.surface_height_at(x + r, z + r),
+        world.surface_height_at(x + r, z - r),
+        world.surface_height_at(x - r, z + r),
+        world.surface_height_at(x - r, z - r),
     ];
     let min = samples.iter().min().copied().unwrap_or(0);
     let max = samples.iter().max().copied().unwrap_or(0);
-    (1.0 - (max - min) as f32 / 18.0).clamp(0.0, 1.0)
+    let center = samples[0];
+    let average_delta = samples
+        .iter()
+        .skip(1)
+        .map(|h| (h - center).abs() as f32)
+        .sum::<f32>()
+        / 8.0;
+    let range_score = (1.0 - (max - min) as f32 / 18.0).clamp(0.0, 1.0);
+    let slope_score = (1.0 - average_delta / 8.0).clamp(0.0, 1.0);
+    range_score * 0.72 + slope_score * 0.28
 }
 
 fn record_planning_conversation(save: &mut BotWorldSave, idea_index: usize) -> Option<String> {
@@ -4954,13 +5462,14 @@ fn build_project_concept(
 ) -> BotProjectConcept {
     let team = project_owner_label(save, assigned_bot, crew_id);
     let (structure, material_plan, visual_goal) = project_design_language(kind, theme);
+    let architecture_variant = project_architecture_variant(kind, origin, size);
     let source = if manual {
         "player request"
     } else {
         "autonomous city planner"
     };
     let brief = format!(
-        "{label}: {source}; footprint {}x{}x{} at {},{},{}; owned by {team}.",
+        "{label}: {source}; footprint {}x{}x{} at {},{},{}; owned by {team}; style sheet: {architecture_variant}.",
         size[0], size[1], size[2], origin[0], origin[1], origin[2]
     );
     let rows = vec![
@@ -4975,10 +5484,31 @@ fn build_project_concept(
             status: "queued".into(),
         },
         BotPlanRow {
+            phase: "Access".into(),
+            owner: role_owner_label(save, BotRole::RoadCrew, &team),
+            material: "road-front lots".into(),
+            detail: project_access_detail(kind).into(),
+            status: "queued".into(),
+        },
+        BotPlanRow {
+            phase: "Sequence".into(),
+            owner: role_owner_label(save, BotRole::Planner, &team),
+            material: "city dependency rule".into(),
+            detail: project_sequence_rule(kind).into(),
+            status: "queued".into(),
+        },
+        BotPlanRow {
             phase: "Structure".into(),
             owner: role_owner_label(save, kind.preferred_role(), &team),
             material: material_plan.into(),
             detail: structure.into(),
+            status: "queued".into(),
+        },
+        BotPlanRow {
+            phase: "Architecture".into(),
+            owner: role_owner_label(save, BotRole::Architect, &team),
+            material: "deterministic style sheet".into(),
+            detail: architecture_variant.into(),
             status: "queued".into(),
         },
         BotPlanRow {
@@ -5044,6 +5574,127 @@ fn role_owner_label(save: &BotWorldSave, role: BotRole, fallback: &str) -> Strin
         .unwrap_or_else(|| fallback.into())
 }
 
+fn project_plan_seed(kind: BotTaskKind, origin: [i32; 3], size: [i32; 3]) -> i32 {
+    let mut seed = (kind as i32).wrapping_mul(97);
+    for value in [origin[0], origin[1], origin[2], size[0], size[1], size[2]] {
+        seed = seed.wrapping_mul(31).wrapping_add(value);
+    }
+    seed
+}
+
+fn project_plan_variant(kind: BotTaskKind, origin: [i32; 3], size: [i32; 3], count: i32) -> i32 {
+    if count <= 1 {
+        0
+    } else {
+        project_plan_seed(kind, origin, size).rem_euclid(count)
+    }
+}
+
+fn project_architecture_variant(
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> &'static str {
+    let variant = project_plan_variant(kind, origin, size, 5);
+    match kind {
+        BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad | BotTaskKind::ExpandRoadGrid => {
+            match variant {
+                0 => "curved boulevard grid with supported sidewalks and sparse signal corners",
+                1 => "service-road lattice with tighter lane paint and planted pocket breaks",
+                2 => "wide civic avenue with heavier curb structure and open crosswalk rhythm",
+                3 => "terrain-following hillside roads with short retaining runs",
+                _ => "mixed avenue plan with staggered corners and quiet lamp spacing",
+            }
+        }
+        BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower | BotTaskKind::MakeTaller => {
+            match variant {
+                0 => "stepped glass tower with framed podium and clean roof machinery",
+                1 => "chamfered corner tower with vertical glass fins and compact crown",
+                2 => "ribbed alloy tower with offset window rhythm and planted roof corners",
+                3 => "slender skyline shard with asymmetric setbacks and signal crown",
+                _ => "broad mixed-use tower with civic podium, terraces, and service core",
+            }
+        }
+        BotTaskKind::BuildResidentialBlock | BotTaskKind::BuildHome => match variant {
+            0 => "courtyard housing with stoops, roof tanks, and varied window spacing",
+            1 => "compact modern row homes with glass stair slots and shared green pocket",
+            2 => "futuristic low-rise block with alloy trim, balconies, and roof gardens",
+            3 => "dense street wall with fire escapes, shopfront doors, and warm roof gear",
+            _ => "mixed residential cluster with alternating heights and corner entries",
+        },
+        BotTaskKind::BuildPark => match variant {
+            0 => "cross-path grove with benches and low skyline sight lines",
+            1 => "pocket park with tree clusters around a clear central lawn",
+            2 => "linear green relief that frames adjacent roads",
+            3 => "quiet plaza-garden with staggered trees and seating edges",
+            _ => "small urban forest breaks between denser projects",
+        },
+        BotTaskKind::BuildPlaza | BotTaskKind::UpgradeDistrict => match variant {
+            0 => "civic square with clear axis paths and a glass-water center",
+            1 => "market plaza with edge kiosks, bollards, and corner lights",
+            2 => "monument court with framed approaches from the road grid",
+            3 => "transit-like public room with dark trim and bright wayfinding",
+            _ => "open gathering square that leaves skyline views through the block",
+        },
+        _ => "structured city project with deterministic variation from its site plan",
+    }
+}
+
+fn project_access_detail(kind: BotTaskKind) -> &'static str {
+    match kind {
+        BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad | BotTaskKind::ExpandRoadGrid => {
+            "Lay roads first, follow terrain height, and add supports only where slopes need them."
+        }
+        BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower | BotTaskKind::MakeTaller => {
+            "Face podium doors toward the nearest road and reserve a readable service edge."
+        }
+        BotTaskKind::BuildResidentialBlock | BotTaskKind::BuildHome => {
+            "Keep homes on road-front lots with paths, stoops, and courtyards tied to the street."
+        }
+        BotTaskKind::BuildPark | BotTaskKind::BuildPlaza | BotTaskKind::UpgradeDistrict => {
+            "Leave public edges open so roads, paths, and landmarks read as one city fabric."
+        }
+        _ => "Fit the project into the nearest road, path, or service approach.",
+    }
+}
+
+fn project_sequence_rule(kind: BotTaskKind) -> &'static str {
+    match kind {
+        BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad | BotTaskKind::ExpandRoadGrid => {
+            "Road geometry is the city skeleton: complete access before skyline, housing, or public detail expands."
+        }
+        BotTaskKind::ClearFlatten => {
+            "Prepare only the minimum footprint; do not erase terrain character that roads can follow."
+        }
+        BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower | BotTaskKind::MakeTaller => {
+            "Build after road access exists; podium, entrance, roof, and service core must read from the street."
+        }
+        BotTaskKind::BuildResidentialBlock | BotTaskKind::BuildHome => {
+            "Use road-front lots, then vary heights, entries, courtyards, and roof detail per block."
+        }
+        BotTaskKind::BuildPark | BotTaskKind::BuildPlaza | BotTaskKind::UpgradeDistrict => {
+            "Place public space where it connects roads, sight lines, and district identity."
+        }
+        BotTaskKind::AddLights | BotTaskKind::DecorateStreet => {
+            "Decorate only after a true road grid exists; keep lights sparse enough for readable streets."
+        }
+        _ => "Fit into the district dependency chain before adding extra detail.",
+    }
+}
+
+fn project_style_seed(project: &BotProject) -> i32 {
+    project_plan_seed(project.kind, project.origin, project.size)
+        .wrapping_add((project.id as i32).wrapping_mul(131))
+}
+
+fn project_style_variant(project: &BotProject, count: i32) -> i32 {
+    if count <= 1 {
+        0
+    } else {
+        project_style_seed(project).rem_euclid(count)
+    }
+}
+
 fn project_design_language(
     kind: BotTaskKind,
     theme: BotTheme,
@@ -5055,19 +5706,19 @@ fn project_design_language(
             "Readable city street first; neon only as signal accents.",
         ),
         BotTaskKind::ExpandRoadGrid => (
-            "Orthogonal avenues with cross streets, intersection markings, sidewalks, and planted pockets.",
+            "Terrain-aware curved avenues with cross streets, intersection markings, sidewalks, and planted pockets.",
             "stone asphalt, limestone sidewalks, alloy curbs",
-            "A Manhattan-like block grammar that future towers can snap to.",
+            "A readable road grammar that gives future towers and homes a real frontage.",
         ),
         BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower | BotTaskKind::MakeTaller => (
             "Setback tower with podium, window grid, floor bands, roof parapet, HVAC blocks, and antenna detail.",
             "alloy frame, glass windows, stone podium, restrained signs",
-            "Dense skyline massing with readable facade rhythm and roof equipment.",
+            "Dense skyline massing attached to streets, with readable facade rhythm and roof equipment.",
         ),
         BotTaskKind::BuildResidentialBlock | BotTaskKind::BuildHome => (
             "Perimeter housing block with entries, courtyards, stoops, windows, fire-escape rhythm, and roof tanks.",
             "limestone walls, glass windows, wood doors, dark roof trim",
-            "Human-scale residential streets rather than isolated boxes.",
+            "Human-scale residential streets with doors and courtyards oriented toward the road network.",
         ),
         BotTaskKind::BuildPark => (
             "Paths, grass panels, trees, seating, low lights, and a central open pocket.",
@@ -5118,8 +5769,8 @@ fn validate_project_request(
     ship_positions: &[Vec3],
 ) -> Result<(), String> {
     validate_project_shape_and_bounds(save, origin, size)?;
-    if !project_columns_loaded(world, origin, size) {
-        return Err("target area is not loaded yet".into());
+    if !project_anchor_loaded(world, origin, size) {
+        return Err("target center is not loaded yet".into());
     }
     let center = project_center(origin, size);
     let center_block = IVec3::new(
@@ -5129,6 +5780,9 @@ fn validate_project_request(
     );
     if protected_position(center_block, player_pos, ship_positions) {
         return Err("too close to player or shuttle".into());
+    }
+    if protected_project_area(origin, size, player_pos, ship_positions) {
+        return Err("project footprint would build too close to player or shuttle".into());
     }
     Ok(())
 }
@@ -5152,18 +5806,10 @@ fn validate_project_shape_and_bounds(
     Ok(())
 }
 
-fn project_columns_loaded(world: &VoxelWorld, origin: [i32; 3], size: [i32; 3]) -> bool {
-    let max_x = origin[0] + size[0].max(1) - 1;
-    let max_z = origin[2] + size[2].max(1) - 1;
-    [
-        (origin[0], origin[2]),
-        (max_x, origin[2]),
-        (origin[0], max_z),
-        (max_x, max_z),
-        (origin[0] + size[0] / 2, origin[2] + size[2] / 2),
-    ]
-    .into_iter()
-    .all(|(x, z)| world.is_column_loaded(x, z))
+fn project_anchor_loaded(world: &VoxelWorld, origin: [i32; 3], size: [i32; 3]) -> bool {
+    let center_x = origin[0] + size[0].max(1) / 2;
+    let center_z = origin[2] + size[2].max(1) / 2;
+    world.is_column_loaded(center_x, center_z)
 }
 
 fn project_center(origin: [i32; 3], size: [i32; 3]) -> Vec3 {
@@ -5361,12 +6007,13 @@ fn complete_project_at(save: &mut BotWorldSave, idx: usize) {
     }
     if let Some(settlement) = save.settlements.first_mut() {
         match project.kind {
-            BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad | BotTaskKind::ExpandRoadGrid => {
+            kind if is_access_road_project(kind) => {
                 settlement.road_count = settlement.road_count.saturating_add(1)
             }
             BotTaskKind::BuildPark | BotTaskKind::BuildPlaza => {
                 settlement.park_count = settlement.park_count.saturating_add(1)
             }
+            BotTaskKind::ClearFlatten | BotTaskKind::AddLights | BotTaskKind::DecorateStreet => {}
             _ => settlement.building_count = settlement.building_count.saturating_add(1),
         }
         let center = project_center(project.origin, project.size);
@@ -5429,12 +6076,22 @@ fn advance_project_slice(
     player_pos: Option<Vec3>,
     ship_positions: &[Vec3],
     bounds: BotCityBounds,
+    budget: usize,
 ) -> ProjectAdvance {
-    project.status = BotProjectStatus::Active;
     let mut out = ProjectAdvance::default();
+    if budget == 0 {
+        return out;
+    }
+    if protected_project_area(project.origin, project.size, player_pos, ship_positions) {
+        project.status = BotProjectStatus::WaitingForPlayer;
+        project.blocked_reason =
+            "waiting until player and shuttle clear the build footprint".into();
+        return out;
+    }
+    project.status = BotProjectStatus::Active;
+    project.blocked_reason.clear();
     let mut batch = WorldEditBatch::default();
     let mut changes = Vec::new();
-    let budget = 560usize;
     let mut attempts = 0usize;
     while project.cursor < project.total_steps && out.changed < budget && attempts < budget * 3 {
         attempts += 1;
@@ -5451,6 +6108,7 @@ fn advance_project_slice(
         }
         if !world.is_column_loaded(pos.x, pos.z) {
             project.status = BotProjectStatus::WaitingForChunks;
+            project.blocked_reason = "waiting for the next build column to stream in".into();
             break;
         }
         if protected_position(pos, player_pos, ship_positions) {
@@ -5480,6 +6138,81 @@ fn advance_project_slice(
     out
 }
 
+fn road_surface_span(world: &VoxelWorld, x: i32, z: i32) -> i32 {
+    let samples = [
+        world.surface_height_at(x, z),
+        world.surface_height_at(x + 1, z),
+        world.surface_height_at(x - 1, z),
+        world.surface_height_at(x, z + 1),
+        world.surface_height_at(x, z - 1),
+    ];
+    let min = samples.iter().min().copied().unwrap_or(0);
+    let max = samples.iter().max().copied().unwrap_or(0);
+    max - min
+}
+
+fn road_support_voxel(
+    world: &VoxelWorld,
+    x: i32,
+    z: i32,
+    road_y: i32,
+    local_y: i32,
+    structural_edge: bool,
+) -> Option<(IVec3, Voxel)> {
+    if local_y <= 0 || local_y > 3 {
+        return None;
+    }
+    let slope = road_surface_span(world, x, z);
+    let depth = if structural_edge {
+        if slope >= 3 {
+            3
+        } else {
+            2
+        }
+    } else if slope >= 4 {
+        2
+    } else if slope >= 3 {
+        1
+    } else {
+        0
+    };
+    if local_y > depth {
+        return None;
+    }
+    let block = if structural_edge {
+        BlockType::Basalt
+    } else if local_y == 1 {
+        BlockType::Stone
+    } else {
+        BlockType::Limestone
+    };
+    Some((IVec3::new(x, road_y - local_y, z), Voxel::from(block)))
+}
+
+fn building_foundation_voxel(
+    world: &VoxelWorld,
+    x: i32,
+    z: i32,
+    base_y: i32,
+    local_y: i32,
+    structural: bool,
+) -> Option<(IVec3, Voxel)> {
+    if local_y <= 0 || local_y > 5 {
+        return None;
+    }
+    let surface = world.surface_height_at(x, z) + 1;
+    let y = surface + local_y - 1;
+    if y >= base_y || (!structural && local_y > 2) {
+        return None;
+    }
+    let block = if structural {
+        BlockType::Basalt
+    } else {
+        BlockType::Limestone
+    };
+    Some((IVec3::new(x, y, z), Voxel::from(block)))
+}
+
 fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Option<(IVec3, Voxel)> {
     let origin = IVec3::new(project.origin[0], project.origin[1], project.origin[2]);
     match project.kind {
@@ -5493,7 +6226,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let curb = local.z == 2 || local.z == width - 3;
             let lane = local.z == width / 2 && local.x.rem_euclid(10) < 5;
             let crosswalk = local.x.rem_euclid(34) < 4 && local.z > 2 && local.z < width - 3;
-            let signal = (local.x.rem_euclid(28) == 0) && (local.z == 1 || local.z == width - 2);
+            let signal = (local.x.rem_euclid(48) == 0) && (local.z == 1 || local.z == width - 2);
             if local.y == 0 {
                 let voxel = if signal {
                     project.theme.signal()
@@ -5507,12 +6240,31 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 return Some((IVec3::new(x, y, z), voxel));
             }
             let pole = signal && local.y <= 5;
-            let lamp = local.x.rem_euclid(16) == 0
+            let lamp = local.x.rem_euclid(36) == 0
                 && (local.z == 1 || local.z == width - 2)
                 && local.y <= 4;
             let bench = local.y == 1
-                && local.x.rem_euclid(18) <= 3
+                && local.x.rem_euclid(40) <= 3
                 && (local.z == 0 || local.z == width - 1);
+            let guard = local.y == 1
+                && (sidewalk || curb)
+                && !pole
+                && !lamp
+                && !bench
+                && road_surface_span(world, x, z) >= 3
+                && local.x.rem_euclid(7) == 0;
+            if guard {
+                return Some((
+                    IVec3::new(x, y + local.y, z),
+                    Voxel::from(BlockType::ShipHullDark),
+                ));
+            }
+            if !pole && !lamp && !bench {
+                if let Some(support) = road_support_voxel(world, x, z, y, local.y, sidewalk || curb)
+                {
+                    return Some(support);
+                }
+            }
             if pole {
                 let voxel = if local.y == 5 {
                     project.theme.signal()
@@ -5539,17 +6291,28 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let y = world.surface_height_at(x, z) + 1;
             let mid_x = project.size[0] / 2;
             let mid_z = project.size[2] / 2;
-            let cell_x = local.x.rem_euclid(24);
-            let cell_z = local.z.rem_euclid(24);
-            let road_x = cell_x <= 7 || (local.x - mid_x).abs() <= 4;
-            let road_z = cell_z <= 7 || (local.z - mid_z).abs() <= 4;
-            let sidewalk_x = cell_x == 8 || cell_x == 23 || (local.x - mid_x).abs() == 5;
-            let sidewalk_z = cell_z == 8 || cell_z == 23 || (local.z - mid_z).abs() == 5;
-            let lane = (road_x && (cell_x == 3 || local.x == mid_x) && local.z.rem_euclid(10) < 5)
-                || (road_z && (cell_z == 3 || local.z == mid_z) && local.x.rem_euclid(10) < 5);
+            let bend_x =
+                ((local.z as f32 * 0.095 + origin.x as f32 * 0.017).sin() * 4.0).round() as i32;
+            let bend_z =
+                ((local.x as f32 * 0.083 + origin.z as f32 * 0.013).sin() * 4.0).round() as i32;
+            let plan_x = local.x + bend_x;
+            let plan_z = local.z + bend_z;
+            let cell_x = plan_x.rem_euclid(28);
+            let cell_z = plan_z.rem_euclid(28);
+            let road_x = cell_x <= 5 || (plan_x - mid_x).abs() <= 3;
+            let road_z = cell_z <= 5 || (plan_z - mid_z).abs() <= 3;
+            let sidewalk_x = cell_x == 6 || cell_x == 27 || (plan_x - mid_x).abs() == 4;
+            let sidewalk_z = cell_z == 6 || cell_z == 27 || (plan_z - mid_z).abs() == 4;
+            let lane = (road_x && (cell_x == 2 || plan_x == mid_x) && plan_z.rem_euclid(12) < 5)
+                || (road_z && (cell_z == 2 || plan_z == mid_z) && plan_x.rem_euclid(12) < 5);
             let intersection = road_x && road_z;
             let crosswalk = intersection
-                && (cell_x == 6 || cell_z == 6 || local.x == mid_x || local.z == mid_z);
+                && (cell_x == 4
+                    || cell_z == 4
+                    || (plan_x - mid_x).abs() == 2
+                    || (plan_z - mid_z).abs() == 2);
+            let intersection_corner = (sidewalk_x && sidewalk_z)
+                || ((local.x - mid_x).abs() == 5 && (local.z - mid_z).abs() == 5);
             if local.y == 0 && (road_x || road_z) {
                 Some((
                     IVec3::new(x, y, z),
@@ -5563,18 +6326,21 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 Some((IVec3::new(x, y, z), Voxel::from(BlockType::Limestone)))
             } else if local.y == 0 && (local.x + local.z).rem_euclid(31) == 0 {
                 Some((IVec3::new(x, y, z), Voxel::from(BlockType::Leaves)))
-            } else if local.y == 0 && (local.x * 13 + local.z * 7).rem_euclid(47) == 0 {
+            } else if local.y == 0 && (local.x * 13 + local.z * 7).rem_euclid(149) == 0 {
                 Some((IVec3::new(x, y, z), project.theme.signal()))
             } else {
-                let intersection_corner = (sidewalk_x && sidewalk_z)
-                    || ((local.x - mid_x).abs() == 5 && (local.z - mid_z).abs() == 5);
-                let traffic_light = intersection_corner && local.y <= 5;
+                let traffic_light =
+                    intersection_corner && (local.x + local.z).rem_euclid(5) == 0 && local.y <= 5;
                 let lamp = (sidewalk_x || sidewalk_z)
-                    && (local.x * 5 + local.z * 3).rem_euclid(29) == 0
+                    && (local.x * 5 + local.z * 3).rem_euclid(97) == 0
                     && local.y <= 4;
                 let bench = local.y == 1
                     && (sidewalk_x || sidewalk_z)
-                    && (local.x * 7 + local.z * 11).rem_euclid(41) <= 3;
+                    && (local.x * 7 + local.z * 11).rem_euclid(89) <= 1;
+                let guard = local.y == 1
+                    && (sidewalk_x || sidewalk_z || intersection_corner)
+                    && road_surface_span(world, x, z) >= 3
+                    && (local.x * 3 + local.z * 5).rem_euclid(11) == 0;
                 if traffic_light {
                     let voxel = if local.y == 5 {
                         project.theme.signal()
@@ -5591,6 +6357,20 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                     Some((IVec3::new(x, y + local.y, z), voxel))
                 } else if bench {
                     Some((IVec3::new(x, y + local.y, z), Voxel::from(BlockType::Wood)))
+                } else if guard {
+                    Some((
+                        IVec3::new(x, y + local.y, z),
+                        Voxel::from(BlockType::ShipHullDark),
+                    ))
+                } else if road_x || road_z || sidewalk_x || sidewalk_z {
+                    road_support_voxel(
+                        world,
+                        x,
+                        z,
+                        y,
+                        local.y,
+                        sidewalk_x || sidewalk_z || intersection_corner,
+                    )
                 } else {
                     None
                 }
@@ -5640,58 +6420,95 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
         | BotTaskKind::BuildGlassTower
         | BotTaskKind::MakeTaller => {
             let p = origin + local;
-            let surface = world.surface_height_at(p.x, p.z) + 1;
-            if local.y <= 4 && surface + local.y < origin.y {
-                let perimeter = local.x == 0
-                    || local.z == 0
-                    || local.x == project.size[0] - 1
-                    || local.z == project.size[2] - 1;
-                if perimeter || (local.x + local.z).rem_euclid(5) == 0 {
-                    return Some((
-                        IVec3::new(p.x, surface + local.y, p.z),
-                        Voxel::from(BlockType::Basalt),
-                    ));
-                }
-            }
             let sx = project.size[0] - 1;
             let sy = project.size[1] - 1;
             let sz = project.size[2] - 1;
+            let variant = project_style_variant(project, 5);
+            let tower_kind = matches!(
+                project.kind,
+                BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower | BotTaskKind::MakeTaller
+            );
+            let perimeter = local.x == 0 || local.z == 0 || local.x == sx || local.z == sz;
+            let foundation_core = (local.x - sx / 2).abs() <= 1 && (local.z - sz / 2).abs() <= 1;
+            let foundation_grid = (local.x + variant).rem_euclid(7) == 0
+                && (local.z + variant * 2).rem_euclid(7) == 0;
+            if let Some(foundation) = building_foundation_voxel(
+                world,
+                p.x,
+                p.z,
+                origin.y,
+                local.y,
+                perimeter || foundation_core || foundation_grid,
+            ) {
+                return Some(foundation);
+            }
             let upper = local.y > sy * 2 / 3;
             let mid = local.y > sy / 3;
-            let setback = if matches!(
-                project.kind,
-                BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower
-            ) && upper
-            {
-                2
-            } else if matches!(
-                project.kind,
-                BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower
-            ) && mid
-            {
-                1
+            let setback = if tower_kind && upper {
+                match variant {
+                    1 | 3 => 3,
+                    4 => 1,
+                    _ => 2,
+                }
+            } else if tower_kind && mid {
+                match variant {
+                    2 | 4 => 2,
+                    _ => 1,
+                }
             } else {
                 0
             };
+            let at_left = local.x == setback;
+            let at_right = local.x == sx - setback;
+            let at_front = local.z == setback;
+            let at_back = local.z == sz - setback;
+            let corner_cut = tower_kind
+                && matches!(variant, 1 | 3)
+                && local.y > 3
+                && (at_left || at_right)
+                && (at_front || at_back);
             let in_mass = local.x >= setback
                 && local.x <= sx - setback
                 && local.z >= setback
-                && local.z <= sz - setback;
+                && local.z <= sz - setback
+                && !corner_cut;
             if !in_mass && local.y > 0 {
                 return Some((p, AIR));
             }
-            let shell = local.x == setback
-                || local.x == sx - setback
-                || local.y == 0
-                || local.y == sy
-                || local.z == setback
-                || local.z == sz - setback;
+            let shell = at_left || at_right || local.y == 0 || local.y == sy || at_front || at_back;
             let podium = local.y <= 3;
-            let floor_band = local.y > 3 && local.y % 5 == 0;
-            let window_slot = ((local.x + setback).rem_euclid(4) == 1)
-                || ((local.z + setback).rem_euclid(4) == 1);
+            let floor_stride = match variant {
+                1 => 4,
+                2 => 6,
+                3 => 5,
+                4 => 3,
+                _ => 5,
+            };
+            let window_pitch = match variant {
+                1 => 3,
+                2 => 5,
+                4 => 6,
+                _ => 4,
+            };
+            let floor_band = local.y > 3 && local.y % floor_stride == 0;
+            let window_slot = ((local.x + setback + variant).rem_euclid(window_pitch) == 1)
+                || ((local.z + setback + variant * 2).rem_euclid(window_pitch) == 1);
             let window = shell && !podium && local.y < sy && !floor_band && window_slot;
             let glass_tower = matches!(project.kind, BotTaskKind::BuildGlassTower);
+            let entrance = podium && local.y <= 2 && at_front && (local.x - sx / 2).abs() <= 2;
+            let vertical_fin = shell
+                && !podium
+                && matches!(variant, 1 | 3)
+                && (at_left || at_right)
+                && local.y.rem_euclid(8) <= 4;
+            let terrace = tower_kind
+                && matches!(variant, 2 | 4)
+                && (local.y == sy / 3 || local.y == sy * 2 / 3)
+                && !shell
+                && ((local.x - setback).abs() <= 2
+                    || (local.z - setback).abs() <= 2
+                    || (local.x - (sx - setback)).abs() <= 2
+                    || (local.z - (sz - setback)).abs() <= 2);
             let core = !shell
                 && (local.x - sx / 2).abs() <= 1
                 && (local.z - sz / 2).abs() <= 1
@@ -5700,10 +6517,10 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let interior_wall = !shell
                 && local.y > 4
                 && local.y < sy
-                && local.y % 5 != 0
-                && local.y % 5 <= 3
-                && ((local.x - setback).rem_euclid(7) == 0
-                    || (local.z - setback).rem_euclid(7) == 0);
+                && local.y % floor_stride != 0
+                && local.y % floor_stride <= (floor_stride - 2)
+                && ((local.x - setback + variant).rem_euclid(7) == 0
+                    || (local.z - setback + variant).rem_euclid(7) == 0);
             let lobby_detail = !shell
                 && podium
                 && local.y == 2
@@ -5711,20 +6528,33 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let voxel = if local.y == 0 {
                 Voxel::from(BlockType::Limestone)
             } else if local.y == sy {
-                let hvac = (local.x - sx / 2).abs() <= 2 && (local.z - sz / 2).abs() <= 1;
-                let antenna = local.x == sx / 2 && local.z == sz / 2;
+                let hvac = match variant {
+                    1 => (local.x - sx / 2).abs() <= 1 && (local.z - sz / 2).abs() <= 3,
+                    2 => (local.x - sx / 2).abs() <= 3 && (local.z - sz / 2).abs() <= 1,
+                    _ => (local.x - sx / 2).abs() <= 2 && (local.z - sz / 2).abs() <= 1,
+                };
+                let antenna = local.x == sx / 2 && local.z == sz / 2 && !matches!(variant, 2);
+                let roof_garden = matches!(variant, 2 | 4)
+                    && (local.x - setback).abs() > 1
+                    && (local.z - setback).abs() > 1
+                    && (local.x - (sx - setback)).abs() > 1
+                    && (local.z - (sz - setback)).abs() > 1
+                    && (local.x + local.z).rem_euclid(9) == 0;
                 if antenna {
                     project.theme.signal()
-                } else if hvac
-                    || local.x == setback
-                    || local.x == sx - setback
-                    || local.z == setback
-                    || local.z == sz - setback
-                {
+                } else if roof_garden {
+                    Voxel::from(BlockType::Leaves)
+                } else if hvac || at_left || at_right || at_front || at_back {
                     Voxel::from(BlockType::ShipHullDark)
                 } else {
                     Voxel::from(BlockType::Basalt)
                 }
+            } else if entrance {
+                Voxel::from(BlockType::CockpitGlass)
+            } else if vertical_fin {
+                project.theme.accent()
+            } else if terrace {
+                Voxel::from(BlockType::Limestone)
             } else if window || (glass_tower && shell && local.y > 3 && !floor_band) {
                 Voxel::from(BlockType::CockpitGlass)
             } else if shell {
@@ -5751,61 +6581,138 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
         BotTaskKind::BuildResidentialBlock => {
             let x = origin.x + local.x;
             let z = origin.z + local.z;
-            let base = world.surface_height_at(x, z) + 1;
+            let column_base = world.surface_height_at(x, z) + 1;
             let cell_x = local.x / 11;
             let cell_z = local.z / 10;
             let lx = local.x % 11;
             let lz = local.z % 10;
             let path = local.x == project.size[0] / 2 || local.z == project.size[2] / 2;
             let courtyard = cell_x == 1 && cell_z == 1;
+            let lot_center_x = origin.x + cell_x * 11 + 4;
+            let lot_center_z = origin.z + cell_z * 10 + 3;
+            let lot_base = world.surface_height_at(lot_center_x, lot_center_z) + 1;
+            let style = (project_style_seed(project) + cell_x * 17 + cell_z * 29).rem_euclid(5);
+            let lot_shell = cell_x <= 2 && cell_z <= 2 && lx <= 8 && lz <= 7;
+            let ground_y = if lot_shell && !courtyard && !path {
+                lot_base
+            } else {
+                column_base
+            };
             if local.y == 0 {
                 return Some((
-                    IVec3::new(x, base, z),
+                    IVec3::new(x, ground_y, z),
                     if path {
                         Voxel::from(BlockType::Limestone)
                     } else if courtyard {
+                        Voxel::from(BlockType::Grass)
+                    } else if lz == 8 || lx == 9 {
                         Voxel::from(BlockType::Grass)
                     } else {
                         project.theme.floor()
                     },
                 ));
             }
-            if cell_x > 2 || cell_z > 2 || lx > 8 || lz > 7 {
+            if path {
+                let bollard = local.y <= 2 && (local.x * 3 + local.z * 5).rem_euclid(31) == 0;
+                if bollard {
+                    return Some((
+                        IVec3::new(x, column_base + local.y, z),
+                        if local.y == 2 {
+                            project.theme.signal()
+                        } else {
+                            Voxel::from(BlockType::ShipHullDark)
+                        },
+                    ));
+                }
+                return None;
+            }
+            if cell_x > 2 || cell_z > 2 {
                 return None;
             }
             if courtyard {
                 if local.y <= 4 && (lx == 1 || lx == 7) && (lz == 1 || lz == 6) {
                     return Some((
-                        IVec3::new(x, base + local.y, z),
+                        IVec3::new(x, column_base + local.y, z),
                         Voxel::from(BlockType::Wood),
                     ));
                 }
                 if local.y == 5 && (lx == 1 || lx == 7) && (lz == 1 || lz == 6) {
                     return Some((
-                        IVec3::new(x, base + local.y, z),
+                        IVec3::new(x, column_base + local.y, z),
                         Voxel::from(BlockType::Leaves),
+                    ));
+                }
+                if local.y == 1 && (lx - 4).abs() <= 1 && (lz - 4).abs() <= 1 {
+                    return Some((
+                        IVec3::new(x, column_base + local.y, z),
+                        Voxel::from(BlockType::Water),
                     ));
                 }
                 return None;
             }
-            let building_h = (8 + (cell_x + cell_z).rem_euclid(3)).min(project.size[1] - 2);
+            let building_h =
+                (7 + (cell_x * 2 + cell_z + style).rem_euclid(5)).min(project.size[1] - 2);
+            let stoop = local.y == 1 && lz == 8 && (3..=5).contains(&lx);
+            let balcony = matches!(style, 2 | 4)
+                && lz == 8
+                && (2..=6).contains(&lx)
+                && local.y > 3
+                && local.y < building_h
+                && local.y.rem_euclid(3) == 1;
+            if stoop || balcony {
+                return Some((
+                    IVec3::new(x, lot_base + local.y, z),
+                    if balcony {
+                        Voxel::from(BlockType::ShipHullDark)
+                    } else {
+                        Voxel::from(BlockType::Limestone)
+                    },
+                ));
+            }
+            if lx > 8 || lz > 7 {
+                return None;
+            }
             if local.y > building_h {
                 return None;
             }
             let wall = lx == 0 || lx == 8 || lz == 0 || lz == 7 || local.y == building_h;
-            let door = local.y <= 2 && lz == 0 && (lx == 3 || lx == 4);
+            let structural = wall || (lx - 4).abs() <= 1 && (lz - 3).abs() <= 1;
+            if let Some(foundation) =
+                building_foundation_voxel(world, x, z, lot_base, local.y, structural)
+            {
+                return Some(foundation);
+            }
+            let side_entry = matches!(style, 3 | 4) && lx == 0 && (lz == 3 || lz == 4);
+            let front_entry = lz == 0 && (lx == 3 || lx == 4 || (style == 1 && lx == 5));
+            let door = local.y <= 2 && (front_entry || side_entry);
+            let window_cycle = if matches!(style, 1 | 3) { 3 } else { 2 };
             let window = wall
                 && local.y > 2
                 && local.y < building_h
-                && local.y % 2 == 0
-                && (lx == 2 || lx == 5 || lz == 2 || lz == 5);
-            let fire_escape = lz == 7
+                && local.y % window_cycle == 0
+                && ((lx + style).rem_euclid(3) == 2 || (lz + style).rem_euclid(3) == 2);
+            let fire_escape = matches!(style, 0 | 3)
+                && lz == 7
                 && local.y > 3
                 && local.y < building_h
                 && local.y % 3 == 0
                 && lx >= 2
                 && lx <= 6;
-            let roof_tank = local.y == building_h && (lx - 4).abs() <= 1 && (lz - 4).abs() <= 1;
+            let roof_tank = local.y == building_h
+                && matches!(style, 0 | 3)
+                && (lx - 4).abs() <= 1
+                && (lz - 4).abs() <= 1;
+            let solar = local.y == building_h
+                && style == 2
+                && (2..=6).contains(&lx)
+                && (2..=5).contains(&lz);
+            let roof_garden = local.y == building_h && style == 4 && (lx + lz).rem_euclid(3) == 0;
+            let wall_voxel = match style {
+                1 => Voxel::from(BlockType::Limestone),
+                2 => Voxel::from(BlockType::ShipHullAlloy),
+                3 => Voxel::from(BlockType::Stone),
+                _ => project.theme.wall(),
+            };
             let voxel = if door {
                 Voxel::from(BlockType::Wood)
             } else if fire_escape {
@@ -5814,16 +6721,20 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 Voxel::from(BlockType::CockpitGlass)
             } else if roof_tank {
                 Voxel::from(BlockType::Wood)
+            } else if solar {
+                Voxel::from(BlockType::CockpitGlass)
+            } else if roof_garden {
+                Voxel::from(BlockType::Leaves)
             } else if wall {
                 if local.y == building_h {
                     project.theme.accent()
                 } else {
-                    project.theme.wall()
+                    wall_voxel
                 }
             } else {
                 AIR
             };
-            Some((IVec3::new(x, base + local.y, z), voxel))
+            Some((IVec3::new(x, lot_base + local.y, z), voxel))
         }
         BotTaskKind::BuildPark => {
             let x = origin.x + local.x;
@@ -5900,7 +6811,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let z = origin.z + local.z;
             let edge = local.z == 0 || local.z == project.size[2] - 1;
             let base = world.surface_height_at(x, z) + 1;
-            let lamp = edge && local.x % 8 == 0;
+            let lamp = edge && local.x % 16 == 0;
             let bench = matches!(project.kind, BotTaskKind::DecorateStreet)
                 && local.y == 1
                 && local.x % 12 <= 3
@@ -6014,10 +6925,52 @@ fn command_size(command: BotTaskCommand) -> [i32; 3] {
 
 fn protected_position(pos: IVec3, player: Option<Vec3>, ships: &[Vec3]) -> bool {
     let p = pos.as_vec3() + Vec3::splat(0.5);
-    if player.map(|x| x.distance(p) < 7.0).unwrap_or(false) {
+    if player
+        .map(|x| x.distance(p) < BOT_PLAYER_EDIT_RADIUS)
+        .unwrap_or(false)
+    {
         return true;
     }
-    ships.iter().any(|s| s.distance(p) < 10.0)
+    ships.iter().any(|s| s.distance(p) < BOT_SHIP_EDIT_RADIUS)
+}
+
+fn xz_distance_to_project(origin: [i32; 3], size: [i32; 3], point: Vec3) -> f32 {
+    let min_x = origin[0] as f32;
+    let max_x = (origin[0] + size[0].max(1)) as f32;
+    let min_z = origin[2] as f32;
+    let max_z = (origin[2] + size[2].max(1)) as f32;
+    let dx = if point.x < min_x {
+        min_x - point.x
+    } else if point.x > max_x {
+        point.x - max_x
+    } else {
+        0.0
+    };
+    let dz = if point.z < min_z {
+        min_z - point.z
+    } else if point.z > max_z {
+        point.z - max_z
+    } else {
+        0.0
+    };
+    (dx * dx + dz * dz).sqrt()
+}
+
+fn protected_project_area(
+    origin: [i32; 3],
+    size: [i32; 3],
+    player: Option<Vec3>,
+    ships: &[Vec3],
+) -> bool {
+    if player
+        .map(|p| xz_distance_to_project(origin, size, p) < BOT_PLAYER_PROJECT_MARGIN)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    ships
+        .iter()
+        .any(|s| xz_distance_to_project(origin, size, *s) < BOT_SHIP_PROJECT_MARGIN)
 }
 
 fn move_bot_memories(save: &mut BotWorldSave, world: &VoxelWorld, dt: f32) {
@@ -6125,15 +7078,16 @@ fn process_companion_command(
         CompanionCommand::BuildCityAutonomy => {
             brain.save.autonomy.enabled = true;
             brain.save.autonomy.bots_active = true;
-            brain.save.autonomy.intensity = 10;
+            brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(8);
             if let Some(settlement) = brain.save.settlements.first_mut() {
-                settlement.bounds.max_active_projects = MAX_ACTIVE_PROJECTS_LIMIT;
+                settlement.bounds.max_active_projects = AUTONOMY_BURST_ACTIVE_PROJECTS;
             }
             let queued_now = queue_mega_city_starter_projects(
                 &mut brain.save,
                 &world,
                 player_pos,
                 &ship_positions,
+                DEFAULT_MAX_ACTIVE_PROJECTS.min(3),
             );
             brain.force_city_idea = true;
             brain.plan_timer = 0.0;
@@ -6145,7 +7099,7 @@ fn process_companion_command(
                     "Team autonomy online. Surveying terrain and queuing city builds.".into();
             }
             brain.hud_message = if queued_now > 0 {
-                format!("Mega city started: {queued_now} visible starter build(s) queued near you.")
+                format!("Mega city started: {queued_now} starter build(s) queued on the city grid.")
             } else {
                 "Mega city autonomy online, but no loaded safe starter site was found yet.".into()
             };
@@ -7395,11 +8349,23 @@ fn draw_companion_quick_dock(
         .anchor(anchor, offset)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
+            let colors = theme.semantic();
             let frame = egui::Frame::none()
-                .fill(egui::Color32::from_rgba_premultiplied(3, 8, 13, 218))
-                .stroke(egui::Stroke::new(1.0, theme.color.primary()))
+                .fill(egui::Color32::from_rgba_unmultiplied(
+                    colors.surface_strong.r(),
+                    colors.surface_strong.g(),
+                    colors.surface_strong.b(),
+                    188,
+                ))
+                .stroke(egui::Stroke::new(1.15, colors.info))
                 .inner_margin(egui::Margin::symmetric(8.0, 8.0))
-                .rounding(egui::Rounding::same(8.0));
+                .rounding(egui::Rounding::same(10.0))
+                .shadow(egui::epaint::Shadow {
+                    offset: egui::vec2(0.0, 10.0),
+                    blur: 24.0,
+                    spread: 0.0,
+                    color: egui::Color32::from_black_alpha(126),
+                });
             frame.show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
                 let horizontal = matches!(
@@ -7467,9 +8433,14 @@ fn draw_editor_dock_icon(
     let fill = if editor.open {
         egui::Color32::from_rgb(0, 210, 235)
     } else {
-        egui::Color32::from_rgba_unmultiplied(15, 26, 34, 235)
+        egui::Color32::from_rgba_unmultiplied(16, 36, 48, 202)
     };
     painter.rect_filled(rect, egui::Rounding::same(8.0), fill);
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.center().y)),
+        egui::Rounding::same(8.0),
+        egui::Color32::from_rgba_unmultiplied(230, 250, 255, 30),
+    );
     painter.rect_stroke(
         rect,
         egui::Rounding::same(8.0),
@@ -7519,7 +8490,12 @@ fn companion_dock_icon(
     painter.rect_filled(
         rect,
         egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(12, 20, 28, 238),
+        egui::Color32::from_rgba_unmultiplied(16, 36, 48, 202),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.center().y)),
+        egui::Rounding::same(8.0),
+        egui::Color32::from_rgba_unmultiplied(230, 250, 255, 28),
     );
     painter.rect_stroke(
         rect,
@@ -9085,10 +10061,308 @@ mod tests {
 
     #[test]
     fn connected_city_slots_score_above_isolated_slots() {
-        let connected = score_city_slot(0.8, true, true, 0.7, true);
-        let isolated = score_city_slot(0.8, false, true, 0.7, true);
+        let connected = score_city_slot(0.8, 1.0, true, 0.7, true);
+        let isolated = score_city_slot(0.8, 0.0, true, 0.7, true);
         assert!(connected > isolated);
-        assert!(score_city_slot(1.0, true, false, 1.0, true) < 0.0);
+        assert!(score_city_slot(1.0, 1.0, false, 1.0, true) < 0.0);
+    }
+
+    #[test]
+    fn districts_require_road_access_before_major_builds() {
+        let mut save = BotWorldSave::default();
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Test Habitat".into(),
+            center: [64.0, 90.0, 0.0],
+            radius: 80,
+            road_anchors: vec![[0, 90, 0], [64, 90, 0]],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        assert!(!district_has_road_access(&save, &district));
+        assert_eq!(
+            choose_district_project(&save, &district, 0, false),
+            BotTaskKind::ExpandRoadGrid
+        );
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Access Grid".into(),
+            origin: [32, 90, -32],
+            size: autonomous_project_size(BotTaskKind::ExpandRoadGrid),
+            theme: BotTheme::AmberStreet,
+            assigned_bot: Some(1),
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            blocked_reason: String::new(),
+            priority: 5,
+            district_id: Some(7),
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        });
+        assert!(district_has_road_access(&save, &district));
+    }
+
+    #[test]
+    fn street_details_do_not_grant_road_access() {
+        let mut save = BotWorldSave::default();
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Test Habitat".into(),
+            center: [64.0, 90.0, 0.0],
+            radius: 80,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::DecorateStreet,
+            label: "Decor Only".into(),
+            origin: [32, 90, -32],
+            size: autonomous_project_size(BotTaskKind::DecorateStreet),
+            theme: BotTheme::AmberStreet,
+            assigned_bot: Some(1),
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            blocked_reason: String::new(),
+            priority: 5,
+            district_id: Some(7),
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        });
+        assert!(!district_has_road_access(&save, &district));
+        save.projects[0].kind = BotTaskKind::ExpandRoadGrid;
+        assert!(district_has_road_access(&save, &district));
+    }
+
+    #[test]
+    fn districts_mix_buildings_after_first_real_access_road() {
+        let mut save = BotWorldSave::default();
+        save.settlements.push(BotSettlement {
+            id: 1,
+            name: "Mixed City".into(),
+            hub: [0.0, 90.0, 0.0],
+            radius: MEGA_CITY_RADIUS,
+            bounds: BotCityBounds {
+                center: [0.0, 90.0, 0.0],
+                radius: MEGA_CITY_RADIUS,
+                used_radius: 0.0,
+                max_active_projects: DEFAULT_MAX_ACTIVE_PROJECTS,
+            },
+            theme: BotTheme::CyanAlloy,
+            road_count: 0,
+            building_count: 0,
+            park_count: 0,
+        });
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Habitat".into(),
+            center: [64.0, 90.0, 0.0],
+            radius: 80,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "First Access Grid".into(),
+            origin: [32, 90, -32],
+            size: autonomous_project_size(BotTaskKind::ExpandRoadGrid),
+            theme: BotTheme::AmberStreet,
+            assigned_bot: Some(1),
+            status: BotProjectStatus::Active,
+            cursor: 128,
+            total_steps: 1_000,
+            blocked_reason: String::new(),
+            priority: 5,
+            district_id: Some(7),
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        });
+        assert!(district_has_road_access(&save, &district));
+        assert!(settlement_has_access_roads(&save));
+        let mut pressured_budget = RuntimeBudget::default();
+        pressured_budget.target_render_distance = 50;
+        pressured_budget.render_distance = 10;
+        pressured_budget.queue_pressure = 1.0;
+        assert_eq!(active_project_limit_for_budget(&save, &pressured_budget), 2);
+        assert_eq!(
+            choose_district_project(&save, &district, 0, false),
+            BotTaskKind::BuildResidentialBlock
+        );
+        assert_eq!(
+            choose_district_project(&save, &district, 1, false),
+            BotTaskKind::ExpandRoadGrid
+        );
+    }
+
+    #[test]
+    fn planner_prefers_road_ready_district_for_infill() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 1,
+            kind: BotDistrictKind::HubCore,
+            name: "Hub".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 80,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Habitat".into(),
+            center: [64.0, 90.0, 0.0],
+            radius: 80,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "First Access Grid".into(),
+            origin: [32, 90, -32],
+            size: autonomous_project_size(BotTaskKind::ExpandRoadGrid),
+            theme: BotTheme::AmberStreet,
+            assigned_bot: Some(1),
+            status: BotProjectStatus::Active,
+            cursor: 128,
+            total_steps: 1_000,
+            blocked_reason: String::new(),
+            priority: 5,
+            district_id: Some(7),
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        });
+        let picked = choose_planning_district(&save, 2).unwrap();
+        assert_eq!(picked.id, 7);
+    }
+
+    #[test]
+    fn city_counters_ignore_prep_and_street_detail_projects() {
+        let mut save = BotWorldSave::default();
+        save.settlements.push(BotSettlement {
+            id: 1,
+            name: "Counter City".into(),
+            hub: [0.0, 90.0, 0.0],
+            radius: MEGA_CITY_RADIUS,
+            bounds: BotCityBounds {
+                center: [0.0, 90.0, 0.0],
+                radius: MEGA_CITY_RADIUS,
+                used_radius: 0.0,
+                max_active_projects: DEFAULT_MAX_ACTIVE_PROJECTS,
+            },
+            theme: BotTheme::CyanAlloy,
+            road_count: 0,
+            building_count: 0,
+            park_count: 0,
+        });
+        for kind in [
+            BotTaskKind::ClearFlatten,
+            BotTaskKind::DecorateStreet,
+            BotTaskKind::ExpandRoadGrid,
+            BotTaskKind::BuildGlassTower,
+        ] {
+            let idx = save.projects.len();
+            save.projects.push(BotProject {
+                id: idx as u64 + 1,
+                kind,
+                label: kind.label().into(),
+                origin: [idx as i32 * 8, 90, 0],
+                size: autonomous_project_size(kind),
+                theme: BotTheme::CyanAlloy,
+                assigned_bot: None,
+                status: BotProjectStatus::Complete,
+                cursor: 0,
+                total_steps: 1,
+                blocked_reason: String::new(),
+                priority: 5,
+                district_id: None,
+                idea_id: None,
+                crew_id: None,
+                concept: BotProjectConcept::default(),
+            });
+            complete_project_at(&mut save, idx);
+        }
+        assert_eq!(save.settlements[0].road_count, 1);
+        assert_eq!(save.settlements[0].building_count, 1);
+        assert_eq!(save.settlements[0].park_count, 0);
+    }
+
+    #[test]
+    fn waiting_projects_still_count_against_planner_capacity() {
+        let mut save = BotWorldSave::default();
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Waiting Grid".into(),
+            origin: [32, 90, -32],
+            size: autonomous_project_size(BotTaskKind::ExpandRoadGrid),
+            theme: BotTheme::AmberStreet,
+            assigned_bot: Some(1),
+            status: BotProjectStatus::WaitingForChunks,
+            cursor: 0,
+            total_steps: 1,
+            blocked_reason: String::new(),
+            priority: 5,
+            district_id: Some(7),
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        });
+        assert_eq!(planner_project_count(&save), 1);
+        save.projects[0].status = BotProjectStatus::WaitingForPlayer;
+        assert_eq!(planner_project_count(&save), 1);
+        save.projects[0].status = BotProjectStatus::Complete;
+        assert_eq!(planner_project_count(&save), 0);
+    }
+
+    #[test]
+    fn project_footprints_respect_player_clearance() {
+        assert!(protected_project_area(
+            [0, 90, 0],
+            [40, 8, 40],
+            Some(Vec3::new(10.0, 100.0, 10.0)),
+            &[]
+        ));
+        assert!(protected_project_area(
+            [0, 90, 0],
+            [40, 8, 40],
+            Some(Vec3::new(70.0, 100.0, 70.0)),
+            &[]
+        ));
+        assert!(!protected_project_area(
+            [0, 90, 0],
+            [40, 8, 40],
+            Some(Vec3::new(180.0, 100.0, 180.0)),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn bot_edits_pause_while_max_distance_horizon_recovers() {
+        let mut budget = RuntimeBudget::default();
+        budget.target_render_distance = 50;
+        budget.render_distance = 11;
+        budget.queue_pressure = 0.0;
+        budget.frame_pressure = 0.0;
+        assert_eq!(bot_frame_edit_budget(&budget, 2), 0);
+
+        budget.render_distance = 41;
+        assert!(bot_frame_edit_budget(&budget, 2) > 0);
     }
 
     #[test]
