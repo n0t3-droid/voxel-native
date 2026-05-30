@@ -1428,6 +1428,19 @@ impl BuildingStreetFace {
             Self::East => lx == 8 && (2..=5).contains(&lz),
         }
     }
+
+    fn residential_corner_bay_cell(self, cell_x: i32, cell_z: i32, lx: i32, lz: i32) -> bool {
+        let north_corner = cell_z == 0 && lz <= 2;
+        let south_corner = cell_z == 2 && lz >= 5;
+        let west_corner = cell_x == 0 && lx <= 2;
+        let east_corner = cell_x == 2 && lx >= 6;
+        match self {
+            Self::North => lz == 0 && (west_corner || east_corner),
+            Self::South => lz == 7 && (west_corner || east_corner),
+            Self::West => lx == 0 && (north_corner || south_corner),
+            Self::East => lx == 8 && (north_corner || south_corner),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6335,6 +6348,10 @@ fn build_project_concept(
                 detail.push_str(
                     " Corner landmark towers get a signal crown and lit vertical spine on the street-facing corner.",
                 );
+            } else if matches!(role, CityBlockRole::ResidentialCorner) {
+                detail.push_str(
+                    " Residential corners get a glass corner bay, side-street visibility, and a lit awning so homes read as part of an intersection.",
+                );
             }
         }
         rows.insert(
@@ -7677,6 +7694,22 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             }
             let building_h =
                 (7 + (cell_x * 2 + cell_z + style).rem_euclid(5)).min(project.size[1] - 2);
+            let residential_corner = matches!(
+                project.concept.block_role,
+                Some(CityBlockRole::ResidentialCorner)
+            );
+            let corner_bay = residential_corner
+                && street_face.residential_corner_bay_cell(cell_x, cell_z, lx, lz);
+            if corner_bay && (1..=3).contains(&local.y) {
+                return Some((
+                    IVec3::new(x, lot_base + local.y, z),
+                    if local.y == 3 {
+                        project.theme.signal()
+                    } else {
+                        Voxel::from(BlockType::CockpitGlass)
+                    },
+                ));
+            }
             let stoop = local.y == 1 && street_face.residential_stoop_cell(lx, lz, style);
             let balcony = matches!(style, 2 | 4)
                 && street_face.residential_balcony_cell(lx, lz, style)
@@ -11661,6 +11694,42 @@ mod tests {
     }
 
     #[test]
+    fn project_concept_records_residential_corner_bay() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Corner Homes".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![[-40, 90, 0], [40, 90, 0], [0, 90, -40], [0, 90, 40]],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::BuildResidentialBlock,
+            BotTheme::WhiteAlloy,
+            [8, 90, 8],
+            [44, 16, 38],
+            "Corner Homes",
+            false,
+            None,
+            None,
+        );
+        let city_sheet = concept
+            .rows
+            .iter()
+            .find(|row| row.phase == "City Sheet")
+            .expect("residential block should expose its city planning sheet");
+
+        assert_eq!(concept.block_role, Some(CityBlockRole::ResidentialCorner));
+        assert!(city_sheet.detail.contains("corner bay"));
+        assert!(city_sheet.detail.contains("side-street"));
+    }
+
+    #[test]
     fn tower_podium_entrance_faces_planned_street() {
         let world = VoxelWorld::new();
         let base_y = world.surface_height_at(20, 10) + 1;
@@ -11842,6 +11911,44 @@ mod tests {
 
         assert_eq!(east_entry, Some(Voxel::from(BlockType::Wood)));
         assert_ne!(old_north_entry, Some(Voxel::from(BlockType::Wood)));
+    }
+
+    #[test]
+    fn residential_corner_block_adds_glass_corner_bay() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(8, 1) + 1;
+        let mut corner = residential_test_project(BuildingStreetFace::East, base_y);
+        corner.concept.block_role = Some(CityBlockRole::ResidentialCorner);
+        let mut midblock = corner.clone();
+        midblock.concept.block_role = Some(CityBlockRole::MidblockStreetWall);
+
+        let corner_bay =
+            project_voxel(&corner, IVec3::new(8, 2, 1), &world).map(|(_, voxel)| voxel);
+        let midblock_same_cell =
+            project_voxel(&midblock, IVec3::new(8, 2, 1), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(corner_bay, Some(Voxel::from(BlockType::CockpitGlass)));
+        assert_ne!(
+            midblock_same_cell,
+            Some(Voxel::from(BlockType::CockpitGlass))
+        );
+    }
+
+    #[test]
+    fn residential_corner_block_adds_lit_corner_awning() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(8, 1) + 1;
+        let mut corner = residential_test_project(BuildingStreetFace::East, base_y);
+        corner.concept.block_role = Some(CityBlockRole::ResidentialCorner);
+        let mut midblock = corner.clone();
+        midblock.concept.block_role = Some(CityBlockRole::MidblockStreetWall);
+
+        let awning = project_voxel(&corner, IVec3::new(8, 3, 1), &world).map(|(_, voxel)| voxel);
+        let midblock_same_cell =
+            project_voxel(&midblock, IVec3::new(8, 3, 1), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(awning, Some(corner.theme.signal()));
+        assert_ne!(midblock_same_cell, Some(corner.theme.signal()));
     }
 
     #[test]
