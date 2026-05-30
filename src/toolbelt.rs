@@ -108,7 +108,7 @@ impl ToolbeltTool {
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
             ToolbeltTool::BrushCut => "LMB or RMB starts a cut point, drag to an endpoint, release to remove exact snapped blocks.",
-            ToolbeltTool::CityRoad => "LMB sets road start and end points.",
+            ToolbeltTool::CityRoad => "LMB draws roads: auto-snaps to endpoints/branches, continues from the last point, and inherits width, texture, and bridge height.",
             ToolbeltTool::CityDistrict => "LMB places a district/zone circle.",
             ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
             ToolbeltTool::CityFacade => "LMB stamps the active facade onto the targeted wall.",
@@ -1005,7 +1005,9 @@ impl ToolbeltTool {
             ToolbeltTool::SmartTower => "Left mouse chooses tower corners",
             ToolbeltTool::BrushPlace => "Left mouse starts a snapped build endpoint",
             ToolbeltTool::BrushCut => "Left mouse starts a snapped cut endpoint",
-            ToolbeltTool::CityRoad => "Left mouse places road points",
+            ToolbeltTool::CityRoad => {
+                "Left mouse auto-snap road points and branch from existing roads"
+            }
             ToolbeltTool::CityDistrict => "Left mouse places a district",
             ToolbeltTool::CityBuilding => "Left mouse chooses building corners",
             ToolbeltTool::CityFacade => "Left mouse stamps the active facade",
@@ -1024,7 +1026,9 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "Right mouse cancels Fill; G swaps to Push",
             ToolbeltTool::SmartTower => "Right mouse cancels the tower preview",
             ToolbeltTool::BrushCut => "Right mouse starts a snapped cut endpoint",
-            ToolbeltTool::CityRoad => "Right mouse removes or cancels the current road",
+            ToolbeltTool::CityRoad => {
+                "Right mouse deletes the selected road component or cancels the current road"
+            }
             ToolbeltTool::CityDistrict => "Right mouse removes the last district",
             ToolbeltTool::CityBuilding => "Right mouse removes or cancels the current building",
             ToolbeltTool::CityFacade => "Right mouse removes the last facade stamp",
@@ -1085,4 +1089,30 @@ fn live_chip(ui: &mut egui::Ui, live: bool, expanded: bool, primary: egui::Color
 fn active_tool_bg(tool: ToolbeltTool) -> egui::Color32 {
     let c = tool.category_color();
     egui::Color32::from_rgba_premultiplied(c.r() / 2, c.g() / 3, c.b() / 3, 230)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn city_road_hint_exposes_smart_road_workflow() {
+        let hint = ToolbeltTool::CityRoad.hint();
+
+        assert!(hint.contains("auto-snaps"));
+        assert!(hint.contains("continues"));
+        assert!(hint.contains("inherits"));
+        assert!(hint.contains("bridge height"));
+    }
+
+    #[test]
+    fn city_road_mouse_hints_explain_fast_branching_and_component_delete() {
+        let left = ToolbeltTool::CityRoad.left_hint();
+        let right = ToolbeltTool::CityRoad.right_hint();
+
+        assert!(left.contains("auto-snap"));
+        assert!(left.contains("branch"));
+        assert!(right.contains("selected road component"));
+        assert!(right.contains("cancel"));
+    }
 }
