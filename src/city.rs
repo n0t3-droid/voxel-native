@@ -975,7 +975,11 @@ fn city_input(
             let mut next = before;
             let mut label = None;
 
-            if ctrl && !shift && !alt {
+            if bare && city.pending_road_a.is_none() {
+                let (edited, kind) = road_plain_wheel_component_edit(before, snapped, steps);
+                next = edited;
+                label = Some(road_component_edit_label(next, kind));
+            } else if ctrl && !shift && !alt {
                 next = road_with_size_delta(before, steps * 2);
                 label = Some(if next.shape == RoadShape::Roundabout {
                     format!("Radius {}", next.roundabout_radius)
@@ -1589,10 +1593,13 @@ fn road_corner_via(road: RoadSegment) -> IVec3 {
 }
 
 fn road_with_endpoint_height_delta(road: RoadSegment, cursor: IVec3, delta: i16) -> RoadSegment {
+    let shifted = |height: i16| -> i16 { (height as i32 + delta as i32).clamp(-12, 48) as i16 };
+    if road.shape == RoadShape::Roundabout {
+        return road.with_endpoint_heights(shifted(road.elevation_a), shifted(road.elevation_b));
+    }
     let p = Vec2::new(cursor.x as f32 + 0.5, cursor.z as f32 + 0.5);
     let a = Vec2::new(road.a.x as f32 + 0.5, road.a.z as f32 + 0.5);
     let b = Vec2::new(road.b.x as f32 + 0.5, road.b.z as f32 + 0.5);
-    let shifted = |height: i16| -> i16 { (height as i32 + delta as i32).clamp(-12, 48) as i16 };
     if road.shape == RoadShape::Corner {
         let via = road_corner_via(road);
         let via = Vec2::new(via.x as f32 + 0.5, via.z as f32 + 0.5);
@@ -1607,6 +1614,66 @@ fn road_with_endpoint_height_delta(road: RoadSegment, cursor: IVec3, delta: i16)
         road.with_endpoint_heights(road.elevation_a, shifted(road.elevation_b))
     } else {
         road.with_endpoint_heights(shifted(road.elevation_a), road.elevation_b)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoadComponentEditKind {
+    Size,
+    Height,
+}
+
+fn road_plain_wheel_component_edit(
+    road: RoadSegment,
+    cursor: IVec3,
+    steps: i32,
+) -> (RoadSegment, RoadComponentEditKind) {
+    if road_cursor_near_edit_handle(road, cursor, 4.5) {
+        (
+            road_with_endpoint_height_delta(road, cursor, (steps * 2) as i16),
+            RoadComponentEditKind::Height,
+        )
+    } else {
+        (
+            road_with_size_delta(road, steps * 2),
+            RoadComponentEditKind::Size,
+        )
+    }
+}
+
+fn road_cursor_near_edit_handle(road: RoadSegment, cursor: IVec3, max_distance: f32) -> bool {
+    let point = road_point_xz(cursor);
+    let max_d2 = max_distance * max_distance;
+    let mut near = false;
+    visit_road_snap_handles(road, |handle| {
+        if point.distance_squared(road_point_xz(handle)) <= max_d2 {
+            near = true;
+        }
+    });
+    near
+}
+
+fn road_component_edit_label(road: RoadSegment, kind: RoadComponentEditKind) -> String {
+    match kind {
+        RoadComponentEditKind::Size => {
+            if road.shape == RoadShape::Roundabout {
+                format!("Radius {}", road.roundabout_radius)
+            } else {
+                format!("Breite {}", road.width)
+            }
+        }
+        RoadComponentEditKind::Height => {
+            if road.shape == RoadShape::Corner {
+                format!(
+                    "Hoehe A/T/B {}:{}:{}",
+                    road.elevation_a, road.elevation_via, road.elevation_b
+                )
+            } else if road.shape == RoadShape::Roundabout {
+                format!("Hoehe Ring {}", road.elevation_a)
+            } else {
+                format!("Hoehe A/B {}:{}", road.elevation_a, road.elevation_b)
+            }
+        }
     }
 }
 
@@ -2545,6 +2612,10 @@ fn draw_hint_hud(
                         format!("Komponente {}", idx + 1),
                         "direkt editierbar".into(),
                     ));
+                    lines.push((
+                        "Wheel".into(),
+                        "Koerper=Breite/Radius, Griff=Brueckenhoehe".into(),
+                    ));
                     lines.push(("Ctrl+Wheel".into(), "Breite / Kreisradius".into()));
                     lines.push((
                         "Shift+Wheel".into(),
@@ -3209,6 +3280,62 @@ mod tests {
         let lowered_a = road_with_endpoint_height_delta(raised_b, IVec3::new(1, 72, 1), -4);
         assert_eq!(lowered_a.elevation_a, -4);
         assert_eq!(lowered_a.elevation_b, 6);
+    }
+
+    #[test]
+    fn plain_wheel_near_road_handle_edits_bridge_height_without_modifier_keys() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+
+        let (edited, kind) = road_plain_wheel_component_edit(road, IVec3::new(31, 72, 1), 2);
+
+        assert_eq!(kind, RoadComponentEditKind::Height);
+        assert_eq!(edited.width, 5);
+        assert_eq!(edited.elevation_a, 0);
+        assert_eq!(
+            edited.elevation_b, 4,
+            "aiming at the endpoint handle should raise a smooth bridge endpoint without Ctrl/Shift/Alt"
+        );
+    }
+
+    #[test]
+    fn plain_wheel_on_road_body_edits_width_without_modifier_keys() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+
+        let (edited, kind) = road_plain_wheel_component_edit(road, IVec3::new(14, 72, 0), 1);
+
+        assert_eq!(kind, RoadComponentEditKind::Size);
+        assert_eq!(
+            edited.width, 7,
+            "wheel on the road body should resize the component directly instead of needing a panel knob"
+        );
+        assert_eq!(edited.elevation_a, 0);
+        assert_eq!(edited.elevation_b, 0);
+    }
+
+    #[test]
+    fn roundabout_plain_wheel_handle_lifts_whole_component_as_bridge_plateau() {
+        let roundabout = RoadSegment::roundabout(IVec3::new(16, 72, 16), 10, 5, RoadStyle::Neon);
+
+        let (edited, kind) = road_plain_wheel_component_edit(roundabout, IVec3::new(26, 72, 16), 3);
+
+        assert_eq!(kind, RoadComponentEditKind::Height);
+        assert_eq!(edited.shape, RoadShape::Roundabout);
+        assert_eq!(edited.roundabout_radius, 10);
+        assert_eq!(edited.elevation_a, 6);
+        assert_eq!(
+            edited.elevation_b, 6,
+            "roundabout height edits should lift the full editable component, not twist the ring"
+        );
     }
 
     #[test]

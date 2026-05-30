@@ -108,7 +108,7 @@ impl ToolbeltTool {
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
             ToolbeltTool::BrushCut => "LMB or RMB starts a cut point, drag to an endpoint, release to remove exact snapped blocks.",
-            ToolbeltTool::CityRoad => "LMB draws roads: auto-snaps to endpoints/branches, continues from the last point, and inherits width, texture, and bridge height.",
+            ToolbeltTool::CityRoad => "LMB draws roads: auto-snaps to endpoints/branches, continues from the last point, and inherits width, texture, and bridge height. Wheel edits selected roads: body width/radius, handle bridge height.",
             ToolbeltTool::CityDistrict => "LMB places a district/zone circle.",
             ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
             ToolbeltTool::CityFacade => "LMB stamps the active facade onto the targeted wall.",
@@ -1103,6 +1103,7 @@ mod tests {
         assert!(hint.contains("continues"));
         assert!(hint.contains("inherits"));
         assert!(hint.contains("bridge height"));
+        assert!(hint.contains("Wheel edits"));
     }
 
     #[test]

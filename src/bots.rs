@@ -6717,6 +6717,11 @@ fn build_project_concept(
         },
     ];
     let semantic_anchor_row = semantic_road_anchor_plan_row(save, kind, origin, size, &team);
+    let player_frontage_row = if semantic_anchor_row.is_none() {
+        player_road_frontage_plan_row(save, kind, origin, size, &team)
+    } else {
+        None
+    };
     if is_road_project(kind) {
         rows.insert(
             2,
@@ -6780,6 +6785,8 @@ fn build_project_concept(
         );
     }
     if let Some(row) = semantic_anchor_row {
+        rows.insert(2, row);
+    } else if let Some(row) = player_frontage_row {
         rows.insert(2, row);
     }
     BotProjectConcept {
@@ -6856,6 +6863,49 @@ fn semantic_road_anchor_plan_row(
         owner: role_owner_label(save, BotRole::Planner, team),
         material: format!("{} road component", guide.theme.label()),
         detail,
+        status: "queued".into(),
+    })
+}
+
+fn player_road_frontage_plan_row(
+    save: &BotWorldSave,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    team: &str,
+) -> Option<BotPlanRow> {
+    if is_road_project(kind) || !project_uses_street_face(kind) {
+        return None;
+    }
+    let center = project_center(origin, size);
+    let project_xz = Vec2::new(center.x, center.z);
+    let mut best: Option<(f32, &BotRoadGuide, &BotDistrict)> = None;
+    for district in &save.districts {
+        for guide in &save.user_roads {
+            if !road_guide_matches_district(guide, district) {
+                continue;
+            }
+            let distance = road_guide_segments(guide)
+                .into_iter()
+                .map(|(a, b)| point_to_segment_distance(project_xz, a, b))
+                .fold(f32::INFINITY, f32::min);
+            let reach = 48.0 + guide.width.max(1) as f32 * 4.0;
+            if distance <= reach
+                && best.map_or(true, |(best_distance, _, _)| distance < best_distance)
+            {
+                best = Some((distance, guide, district));
+            }
+        }
+    }
+    let (_, guide, district) = best?;
+    Some(BotPlanRow {
+        phase: "Player Road Frontage".into(),
+        owner: role_owner_label(save, BotRole::Planner, team),
+        material: format!("{} road component", guide.theme.label()),
+        detail: format!(
+            "Use the player road in {} as frontage; keep entries, doors, height rhythm, setbacks, and later retexture choices tied to this width {} editable road component.",
+            district.name, guide.width
+        ),
         status: "queued".into(),
     })
 }
@@ -11915,6 +11965,57 @@ mod tests {
         sync_user_city_roads(&mut save, &[road]);
 
         assert_eq!(district_theme(&save, 7), Some(BotTheme::MagentaGlass));
+    }
+
+    #[test]
+    fn straight_player_road_project_concept_records_frontage_intent() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Player Frontage".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district);
+        let road = crate::city::RoadSegment::new(
+            IVec3::new(-48, 90, 0),
+            IVec3::new(48, 90, 0),
+            7,
+            crate::city::RoadStyle::Neon,
+        );
+        sync_user_city_roads(&mut save, &[road]);
+        let size = autonomous_project_size(BotTaskKind::BuildResidentialBlock);
+
+        add_project_unchecked(
+            &mut save,
+            BotTaskKind::BuildResidentialBlock,
+            [-22, 90, 14],
+            size,
+            BotTheme::MagentaGlass,
+            None,
+            Some(7),
+            None,
+            8,
+            false,
+        )
+        .unwrap();
+
+        let project = save.projects.last().unwrap();
+        assert!(
+            project
+                .concept
+                .rows
+                .iter()
+                .any(|row| row.phase == "Player Road Frontage"
+                    && row.detail.contains("player road")
+                    && row.detail.contains("width 7")),
+            "bot spreadsheet should expose the straight player road frontage: {:?}",
+            project.concept.rows
+        );
     }
 
     #[test]
