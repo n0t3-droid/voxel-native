@@ -2,6 +2,7 @@
 //! Successor to R93G (https://github.com/n0t3-droid/N5).
 
 pub mod agent_control;
+mod ambient;
 mod animation;
 mod blocks;
 pub mod bots;
@@ -108,6 +109,7 @@ fn main() {
         // back can set Msaa::Sample2 in High graphics mode.
         .insert_resource(Msaa::Off)
         .add_plugins(agent_control::AgentControlPlugin)
+        .add_plugins(ambient::AmbientPlugin)
         .add_plugins((
             settings::SettingsPlugin,
             world::WorldPlugin,

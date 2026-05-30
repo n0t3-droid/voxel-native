@@ -441,6 +441,29 @@ fn default_hud_panel_opacity() -> f32 {
     0.72
 }
 
+pub(crate) const SAFE_MIN_RENDER_DISTANCE: u32 = 8;
+pub(crate) const SAFE_MAX_RENDER_DISTANCE: u32 = 64;
+pub(crate) const SAFE_MIN_VERTICAL_CHUNKS: u32 = 4;
+pub(crate) const SAFE_MAX_VERTICAL_CHUNKS: u32 = 12;
+pub(crate) const SAFE_MIN_CHUNKS_PER_FRAME: u32 = 2;
+pub(crate) const SAFE_MAX_CHUNKS_PER_FRAME: u32 = 18;
+pub(crate) const SAFE_MIN_MESHES_PER_FRAME: u32 = 2;
+pub(crate) const SAFE_MAX_MESHES_PER_FRAME: u32 = 16;
+pub(crate) const SAFE_MIN_MESH_APPLIES_PER_FRAME: u32 = 2;
+pub(crate) const SAFE_MAX_MESH_APPLIES_PER_FRAME: u32 = 10;
+pub(crate) const SAFE_MIN_IN_FLIGHT_TERRAIN: u32 = 24;
+pub(crate) const SAFE_MAX_IN_FLIGHT_TERRAIN: u32 = 224;
+pub(crate) const SAFE_MIN_IN_FLIGHT_MESHES: u32 = 20;
+pub(crate) const SAFE_MAX_IN_FLIGHT_MESHES: u32 = 168;
+
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
+}
+
 fn num_threads() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -505,11 +528,55 @@ impl WorldSettings {
         }
     }
 
+    /// Keep persisted settings inside a startup-safe envelope. Save files
+    /// can outlive engine internals, and a huge old render/streaming budget
+    /// should degrade into a cinematic preset instead of hanging the app.
+    pub fn normalize_runtime_safety(&mut self) {
+        self.render_distance = self
+            .render_distance
+            .clamp(SAFE_MIN_RENDER_DISTANCE, SAFE_MAX_RENDER_DISTANCE);
+        self.vertical_chunks = self
+            .vertical_chunks
+            .clamp(SAFE_MIN_VERTICAL_CHUNKS, SAFE_MAX_VERTICAL_CHUNKS);
+        self.chunks_per_frame = self
+            .chunks_per_frame
+            .clamp(SAFE_MIN_CHUNKS_PER_FRAME, SAFE_MAX_CHUNKS_PER_FRAME);
+        self.meshes_per_frame = self
+            .meshes_per_frame
+            .clamp(SAFE_MIN_MESHES_PER_FRAME, SAFE_MAX_MESHES_PER_FRAME);
+        self.mesh_applies_per_frame = self.mesh_applies_per_frame.clamp(
+            SAFE_MIN_MESH_APPLIES_PER_FRAME,
+            SAFE_MAX_MESH_APPLIES_PER_FRAME,
+        );
+        self.max_in_flight_terrain = self
+            .max_in_flight_terrain
+            .clamp(SAFE_MIN_IN_FLIGHT_TERRAIN, SAFE_MAX_IN_FLIGHT_TERRAIN);
+        self.max_in_flight_meshes = self
+            .max_in_flight_meshes
+            .clamp(SAFE_MIN_IN_FLIGHT_MESHES, SAFE_MAX_IN_FLIGHT_MESHES);
+
+        self.target_fps = finite_or(self.target_fps, default_target_fps()).clamp(30.0, 144.0);
+        self.fov_deg = finite_or(self.fov_deg, 78.0).clamp(55.0, 100.0);
+        self.time_of_day = finite_or(self.time_of_day, 21.35).rem_euclid(24.0);
+        self.cycle_speed = finite_or(self.cycle_speed, 0.01).clamp(0.0, 2.0);
+        self.hud_panel_opacity =
+            finite_or(self.hud_panel_opacity, default_hud_panel_opacity()).clamp(0.35, 0.92);
+        self.theme.style = crate::theme::ThemeStyle::LiquidGlass;
+        self.theme.scanlines = false;
+
+        self.weather.rain_intensity = finite_or(self.weather.rain_intensity, 0.0).clamp(0.0, 1.0);
+        self.weather.snow_intensity = finite_or(self.weather.snow_intensity, 0.0).clamp(0.0, 1.0);
+        self.weather.fog_density = finite_or(self.weather.fog_density, 0.0).clamp(0.0, 1.0);
+        self.weather.wind_x = finite_or(self.weather.wind_x, 0.0).clamp(-12.0, 12.0);
+        self.weather.wind_z = finite_or(self.weather.wind_z, 0.0).clamp(-12.0, 12.0);
+    }
+
     pub fn load_or_default() -> Self {
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(text) = crate::platform::browser_storage_get(WEB_SETTINGS_KEY) {
-                if let Ok(settings) = ron::from_str::<WorldSettings>(&text) {
+                if let Ok(mut settings) = ron::from_str::<WorldSettings>(&text) {
+                    settings.normalize_runtime_safety();
                     info!("Loaded browser settings from localStorage");
                     return settings;
                 }
@@ -521,7 +588,8 @@ impl WorldSettings {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if let Ok(text) = fs::read_to_string(save_path()) {
-                if let Ok(settings) = ron::from_str::<WorldSettings>(&text) {
+                if let Ok(mut settings) = ron::from_str::<WorldSettings>(&text) {
+                    settings.normalize_runtime_safety();
                     info!("Loaded settings from {}", save_path().display());
                     return settings;
                 }
@@ -535,7 +603,9 @@ impl WorldSettings {
     }
 
     pub fn save(&self) {
-        match ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default()) {
+        let mut safe = self.clone();
+        safe.normalize_runtime_safety();
+        match ron::ser::to_string_pretty(&safe, ron::ser::PrettyConfig::default()) {
             Ok(text) => {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -781,6 +851,9 @@ pub fn save_player_pose_checkpoint(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn atomic_write_text(final_path: &std::path::Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let tmp_path = final_path.with_extension("ron.tmp");
     {
         let mut f = fs::File::create(&tmp_path)?;
@@ -973,11 +1046,57 @@ mod tests {
         assert!(!settings.show_advanced_settings);
         assert!(!settings.reduce_motion);
         assert!((settings.hud_panel_opacity - 0.72).abs() < f32::EPSILON);
-        assert_eq!(
-            settings.theme.style,
-            crate::theme::ThemeStyle::NeonToolbench
-        );
+        assert_eq!(settings.theme.style, crate::theme::ThemeStyle::LiquidGlass);
         assert_eq!(settings.theme.density, crate::theme::UiDensity::Comfortable);
+    }
+
+    #[test]
+    fn runtime_safety_clamps_overdriven_saved_settings() {
+        let mut settings = WorldSettings::default();
+        settings.render_distance = 96;
+        settings.vertical_chunks = 16;
+        settings.chunks_per_frame = 64;
+        settings.meshes_per_frame = 64;
+        settings.mesh_applies_per_frame = 64;
+        settings.max_in_flight_terrain = 512;
+        settings.max_in_flight_meshes = 384;
+        settings.target_fps = 500.0;
+        settings.fov_deg = 150.0;
+        settings.time_of_day = 49.5;
+        settings.cycle_speed = 9.0;
+        settings.hud_panel_opacity = 1.0;
+        settings.weather.rain_intensity = 2.0;
+        settings.weather.snow_intensity = 2.0;
+        settings.weather.fog_density = 2.0;
+        settings.weather.wind_x = 80.0;
+        settings.weather.wind_z = -80.0;
+        settings.theme.style = crate::theme::ThemeStyle::ClassicCrt;
+        settings.theme.scanlines = true;
+
+        settings.normalize_runtime_safety();
+
+        assert_eq!(settings.render_distance, SAFE_MAX_RENDER_DISTANCE);
+        assert_eq!(settings.vertical_chunks, SAFE_MAX_VERTICAL_CHUNKS);
+        assert_eq!(settings.chunks_per_frame, SAFE_MAX_CHUNKS_PER_FRAME);
+        assert_eq!(settings.meshes_per_frame, SAFE_MAX_MESHES_PER_FRAME);
+        assert_eq!(
+            settings.mesh_applies_per_frame,
+            SAFE_MAX_MESH_APPLIES_PER_FRAME
+        );
+        assert_eq!(settings.max_in_flight_terrain, SAFE_MAX_IN_FLIGHT_TERRAIN);
+        assert_eq!(settings.max_in_flight_meshes, SAFE_MAX_IN_FLIGHT_MESHES);
+        assert_eq!(settings.target_fps, 144.0);
+        assert_eq!(settings.fov_deg, 100.0);
+        assert!((0.0..24.0).contains(&settings.time_of_day));
+        assert_eq!(settings.cycle_speed, 2.0);
+        assert_eq!(settings.hud_panel_opacity, 0.92);
+        assert_eq!(settings.weather.rain_intensity, 1.0);
+        assert_eq!(settings.weather.snow_intensity, 1.0);
+        assert_eq!(settings.weather.fog_density, 1.0);
+        assert_eq!(settings.weather.wind_x, 12.0);
+        assert_eq!(settings.weather.wind_z, -12.0);
+        assert_eq!(settings.theme.style, crate::theme::ThemeStyle::LiquidGlass);
+        assert!(!settings.theme.scanlines);
     }
 
     #[test]

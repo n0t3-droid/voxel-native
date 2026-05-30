@@ -76,13 +76,14 @@ impl ThemeColor {
 /// this selector controls the shared surface system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeStyle {
+    LiquidGlass,
     NeonToolbench,
     ClassicCrt,
 }
 
 impl Default for ThemeStyle {
     fn default() -> Self {
-        Self::NeonToolbench
+        Self::LiquidGlass
     }
 }
 
@@ -182,6 +183,31 @@ impl ThemeSettings {
         let dim = self.color.dim();
         let deep = self.color.deep();
         match self.style {
+            ThemeStyle::LiquidGlass => SemanticColors {
+                background: egui::Color32::from_rgba_premultiplied(3, 8, 13, 238),
+                surface: egui::Color32::from_rgba_premultiplied(14, 26, 34, 208),
+                surface_strong: egui::Color32::from_rgba_premultiplied(24, 42, 54, 226),
+                text: egui::Color32::from_rgb(232, 250, 255),
+                text_muted: egui::Color32::from_rgb(150, 196, 210),
+                success: egui::Color32::from_rgb(88, 242, 158),
+                warning: egui::Color32::from_rgb(0xFF, 0xC2, 0x4A),
+                danger: egui::Color32::from_rgb(0xFF, 0x48, 0x58),
+                info: egui::Color32::from_rgb(0x52, 0xE6, 0xFF),
+                accent,
+                stroke: egui::Color32::from_rgba_unmultiplied(
+                    accent.r(),
+                    accent.g(),
+                    accent.b(),
+                    150,
+                ),
+                selected: egui::Color32::from_rgba_premultiplied(
+                    (accent.r() / 2).saturating_add(10),
+                    (accent.g() / 2).saturating_add(14),
+                    (accent.b() / 2).saturating_add(18),
+                    218,
+                ),
+                disabled: egui::Color32::from_rgb(70, 86, 92),
+            },
             ThemeStyle::NeonToolbench => SemanticColors {
                 background: egui::Color32::from_rgba_premultiplied(2, 7, 10, 245),
                 surface: egui::Color32::from_rgba_premultiplied(8, 17, 22, 224),
@@ -260,59 +286,53 @@ pub const ALERT: egui::Color32 = egui::Color32::from_rgb(0xFF, 0x30, 0x30);
 pub const TEXT: egui::Color32 = egui::Color32::from_rgb(0xC8, 0xE8, 0xC8);
 /// Cool secondary accent for navigation / links.
 pub const CYAN: egui::Color32 = egui::Color32::from_rgb(0x32, 0xD7, 0xFF);
-/// Pure black background.
-pub const BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 245);
-/// Panel fill — near-black with a hint of green so the look feels lit.
-pub const PANEL: egui::Color32 = egui::Color32::from_rgba_premultiplied(5, 10, 5, 242);
-
 /// Install the hacker theme on the given egui context. Idempotent —
 /// safe to call once at startup or on every theme-color change.
 pub fn apply_hacker_theme(ctx: &egui::Context, settings: ThemeSettings) {
     let primary = settings.color.primary();
-    let dim = settings.color.dim();
-    let deep = settings.color.deep();
+    let colors = settings.semantic();
 
     let mut visuals = egui::Visuals::dark();
-    visuals.window_fill = BG;
-    visuals.panel_fill = PANEL;
-    visuals.window_stroke = egui::Stroke::new(1.0, primary);
-    visuals.window_rounding = egui::Rounding::same(6.0);
-    visuals.menu_rounding = egui::Rounding::same(4.0);
+    visuals.window_fill = colors.background;
+    visuals.panel_fill = colors.surface;
+    visuals.window_stroke = egui::Stroke::new(1.0, colors.stroke);
+    visuals.window_rounding = egui::Rounding::same(8.0);
+    visuals.menu_rounding = egui::Rounding::same(6.0);
 
-    visuals.widgets.noninteractive.bg_fill = PANEL;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, deep);
-    visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+    visuals.widgets.noninteractive.bg_fill = colors.surface;
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, colors.text);
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, colors.stroke);
+    visuals.widgets.noninteractive.rounding = egui::Rounding::same(6.0);
 
-    visuals.widgets.inactive.bg_fill = deep;
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT);
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, dim);
-    visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
-    visuals.widgets.inactive.weak_bg_fill = deep;
+    visuals.widgets.inactive.bg_fill = colors.surface;
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, colors.text);
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, colors.stroke);
+    visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
+    visuals.widgets.inactive.weak_bg_fill = colors.surface;
 
-    visuals.widgets.hovered.bg_fill = deep;
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, primary);
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, primary);
-    visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
-    visuals.widgets.hovered.weak_bg_fill = deep;
+    visuals.widgets.hovered.bg_fill = colors.surface_strong;
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, colors.accent);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, colors.accent);
+    visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+    visuals.widgets.hovered.weak_bg_fill = colors.surface_strong;
 
-    visuals.widgets.active.bg_fill = dim;
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, primary);
-    visuals.widgets.active.rounding = egui::Rounding::same(4.0);
-    visuals.widgets.active.weak_bg_fill = dim;
+    visuals.widgets.active.bg_fill = colors.selected;
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, settings.text_on(colors.selected));
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, colors.accent);
+    visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+    visuals.widgets.active.weak_bg_fill = colors.selected;
 
-    visuals.widgets.open.bg_fill = deep;
-    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, primary);
-    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, primary);
-    visuals.widgets.open.rounding = egui::Rounding::same(4.0);
+    visuals.widgets.open.bg_fill = colors.surface_strong;
+    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, colors.accent);
+    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, colors.accent);
+    visuals.widgets.open.rounding = egui::Rounding::same(6.0);
 
-    visuals.selection.bg_fill = dim.linear_multiply(0.55);
-    visuals.selection.stroke = egui::Stroke::new(1.0, primary);
+    visuals.selection.bg_fill = colors.selected;
+    visuals.selection.stroke = egui::Stroke::new(1.0, colors.accent);
     visuals.hyperlink_color = primary;
-    visuals.override_text_color = Some(TEXT);
+    visuals.override_text_color = Some(colors.text);
     visuals.extreme_bg_color = egui::Color32::BLACK;
-    visuals.faint_bg_color = deep;
+    visuals.faint_bg_color = colors.surface;
 
     ctx.set_visuals(visuals);
 
@@ -341,14 +361,12 @@ pub fn apply_hacker_theme(ctx: &egui::Context, settings: ThemeSettings) {
 
 /// Premium command-deck frame shared by menus, editor and modal panels.
 pub fn command_frame(theme: ThemeSettings) -> egui::Frame {
+    let colors = theme.semantic();
     egui::Frame::none()
-        .fill(egui::Color32::from_rgba_premultiplied(4, 8, 7, 242))
-        .stroke(egui::Stroke::new(
-            1.0,
-            theme.color.primary().linear_multiply(0.82),
-        ))
+        .fill(colors.surface_strong)
+        .stroke(egui::Stroke::new(1.0, colors.stroke.linear_multiply(0.88)))
         .inner_margin(egui::Margin::symmetric(18.0, 16.0))
-        .rounding(egui::Rounding::same(6.0))
+        .rounding(egui::Rounding::same(8.0))
         .shadow(egui::epaint::Shadow {
             offset: egui::vec2(0.0, 10.0),
             blur: 30.0,
@@ -483,6 +501,34 @@ pub fn metric_pill(ui: &mut egui::Ui, theme: ThemeSettings, label: &str, value: 
 /// Hacker-style header banner with blinking block cursor:
 ///   `▓▓▓ [ ROOT@VOXEL-NATIVE:~$ EDITOR ] █ ▓▓▓`.
 pub fn draw_banner(ui: &mut egui::Ui, theme: ThemeSettings, label: &str) {
+    if matches!(theme.style, ThemeStyle::LiquidGlass) {
+        let colors = theme.semantic();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("LIQUID GLASS // {label}"))
+                    .color(colors.info)
+                    .strong()
+                    .monospace(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new("F3 // ESC")
+                        .color(colors.text_muted)
+                        .small()
+                        .monospace(),
+                );
+            });
+        });
+        let rect = ui.max_rect();
+        let y = ui.cursor().min.y + 2.0;
+        ui.painter().line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(1.0, colors.stroke),
+        );
+        ui.add_space(6.0);
+        return;
+    }
+
     let primary = theme.color.primary();
     let dim = theme.color.dim();
     // ~2 Hz blink driven directly off egui's input time so we don't

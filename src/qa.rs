@@ -140,7 +140,9 @@ fn qa_enter_game(
     }
 
     let seed = env_u32("VOXEL_NATIVE_QA_SEED").unwrap_or(settings.seed);
-    let mut meta = WorldMeta::new("qa_autopilot".into(), seed);
+    let world_name =
+        std::env::var("VOXEL_NATIVE_QA_WORLD").unwrap_or_else(|_| "qa_autopilot".into());
+    let mut meta = WorldMeta::new(world_name, seed);
     meta.time_mode = TimeMode::Fixed;
     meta.time_of_day = env_f32("VOXEL_NATIVE_QA_HOUR")
         .unwrap_or(10.8)

@@ -668,6 +668,107 @@ impl TerrainGenerator {
         }
     }
 
+    fn surface_detail_block(
+        &self,
+        biome: Biome,
+        current: BlockType,
+        slope: i32,
+        wx: i32,
+        wz: i32,
+    ) -> BlockType {
+        let r = column_rand(self.seed ^ 0xA17E_577, wx, wz);
+        let grain = self
+            .hills_b
+            .get([wx as f64 * 0.033 + 19.0, wz as f64 * 0.033 - 31.0]);
+
+        match biome {
+            Biome::Plains | Biome::Forest => {
+                if slope <= 1 && r < 0.045 {
+                    BlockType::Dirt
+                } else if grain > 0.46 && r < 0.080 {
+                    BlockType::MossStone
+                } else {
+                    current
+                }
+            }
+            Biome::Jungle => {
+                if slope <= 1 && r < 0.090 {
+                    BlockType::MossStone
+                } else {
+                    current
+                }
+            }
+            Biome::Beach | Biome::Desert | Biome::Savanna => current,
+            Biome::Tundra => {
+                if r < 0.10 {
+                    BlockType::Snow
+                } else if r < 0.16 {
+                    BlockType::Gravel
+                } else {
+                    current
+                }
+            }
+            Biome::Mountains | Biome::SnowyMountains => {
+                if r < 0.18 {
+                    BlockType::Gravel
+                } else if matches!(biome, Biome::SnowyMountains) && r < 0.34 {
+                    BlockType::Snow
+                } else {
+                    current
+                }
+            }
+            Biome::Mesa => {
+                if r < 0.10 {
+                    BlockType::MesaClay
+                } else if grain > 0.50 && r < 0.20 {
+                    BlockType::RedStone
+                } else {
+                    current
+                }
+            }
+            Biome::Karst => {
+                if grain > 0.36 && r < 0.18 {
+                    BlockType::Limestone
+                } else {
+                    current
+                }
+            }
+            Biome::CrystalSpires => {
+                if r < 0.16 {
+                    BlockType::LuminiteCrystal
+                } else if r < 0.26 {
+                    BlockType::Crystal
+                } else {
+                    current
+                }
+            }
+            Biome::VolcanicWaste => {
+                if grain > 0.58 && r < 0.18 {
+                    BlockType::Lava
+                } else {
+                    current
+                }
+            }
+            Biome::GlacierShards => {
+                if r < 0.20 {
+                    BlockType::Ice
+                } else {
+                    current
+                }
+            }
+            Biome::AlienReef => {
+                if r < 0.14 {
+                    BlockType::IridiumVein
+                } else if r < 0.24 {
+                    BlockType::BoneRock
+                } else {
+                    current
+                }
+            }
+            Biome::Ocean => current,
+        }
+    }
+
     /// Fill a chunk with terrain. Deterministic for a given (seed, pos).
     pub fn generate(&self, chunk: &mut Chunk) {
         let ChunkPos {
@@ -765,6 +866,7 @@ impl TerrainGenerator {
                 } else {
                     (top, sub)
                 };
+                let top = self.surface_detail_block(biome, top, slope, wx, wz);
 
                 for ly in 0..CHUNK_SIZE {
                     let wy = cy * CHUNK_SIZE_I + ly as i32;
@@ -1176,13 +1278,11 @@ impl TerrainGenerator {
             // Density gate per biome. Alien biomes get lots of props;
             // forests/jungles get very few (preserve wilderness).
             let density: f64 = match biome {
-                Biome::CrystalSpires => 0.96,
-                Biome::AlienReef => 0.96,
-                Biome::VolcanicWaste => 0.35,
-                Biome::GlacierShards => 0.25,
-                Biome::Plains | Biome::Savanna | Biome::Desert | Biome::Tundra => 0.30,
-                Biome::Mesa => 0.12,
-                Biome::Forest | Biome::Jungle => 0.12,
+                Biome::CrystalSpires => 0.18,
+                Biome::AlienReef => 0.16,
+                Biome::VolcanicWaste => 0.09,
+                Biome::GlacierShards => 0.08,
+                Biome::Mesa | Biome::Karst => 0.025,
                 _ => 0.0,
             };
             if r_gate > density {
@@ -1251,7 +1351,14 @@ impl TerrainGenerator {
                     );
                     set_safe(chunk, lx, base_y + 2, lz, BlockType::Crystal, origin_y);
                     set_safe(chunk, lx, base_y + 3, lz, BlockType::IridiumVein, origin_y);
-                    set_safe(chunk, lx, base_y + 4, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(
+                        chunk,
+                        lx,
+                        base_y + 4,
+                        lz,
+                        BlockType::LuminiteCrystal,
+                        origin_y,
+                    );
                 }
                 (Biome::CrystalSpires, 1 | 2) => {
                     // Crystal cluster: 5-block asymmetric sparkle.
@@ -1259,7 +1366,14 @@ impl TerrainGenerator {
                     set_safe(chunk, lx, base_y + 1, lz, BlockType::Crystal, origin_y);
                     set_safe(chunk, lx + 1, base_y, lz, BlockType::MagnetiteOre, origin_y);
                     set_safe(chunk, lx, base_y, lz + 1, BlockType::Crystal, origin_y);
-                    set_safe(chunk, lx, base_y + 2, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(
+                        chunk,
+                        lx,
+                        base_y + 2,
+                        lz,
+                        BlockType::LuminiteCrystal,
+                        origin_y,
+                    );
                 }
                 (Biome::CrystalSpires, 4 | 5) => {
                     // Resource garden: saturated crystal cluster with
@@ -1277,7 +1391,7 @@ impl TerrainGenerator {
                                     0 => BlockType::LuminiteCrystal,
                                     1 => BlockType::MagnetiteOre,
                                     2 => BlockType::IridiumVein,
-                                    3 => BlockType::NeonMagenta,
+                                    3 => BlockType::Crystal,
                                     _ => BlockType::Crystal,
                                 };
                                 set_safe(
@@ -1294,7 +1408,7 @@ impl TerrainGenerator {
                                 nx as usize,
                                 base_y + h,
                                 nz as usize,
-                                BlockType::NeonCyan,
+                                BlockType::LuminiteCrystal,
                                 origin_y,
                             );
                         }
@@ -1330,42 +1444,42 @@ impl TerrainGenerator {
                                     cap_y - 1,
                                     nz as usize,
                                     if (dx + dz).rem_euclid(2) == 0 {
-                                        BlockType::NeonCyan
+                                        BlockType::LuminiteCrystal
                                     } else {
-                                        BlockType::NeonMagenta
+                                        BlockType::Crystal
                                     },
                                     origin_y,
                                 );
                             }
                         }
                     }
-                    set_safe(chunk, lx, cap_y + 1, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(
+                        chunk,
+                        lx,
+                        cap_y + 1,
+                        lz,
+                        BlockType::LuminiteCrystal,
+                        origin_y,
+                    );
                 }
                 (Biome::CrystalSpires, 3) | (Biome::AlienReef, 3) => {
                     // Holo-antenna: 4-block thin mast with cyan tip.
                     for dy in 0..3 {
                         set_safe(chunk, lx, base_y + dy, lz, BlockType::BoneRock, origin_y);
                     }
-                    set_safe(chunk, lx, base_y + 3, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(
+                        chunk,
+                        lx,
+                        base_y + 3,
+                        lz,
+                        BlockType::LuminiteCrystal,
+                        origin_y,
+                    );
                     if lx + 1 < CHUNK_SIZE {
-                        set_safe(
-                            chunk,
-                            lx + 1,
-                            base_y + 2,
-                            lz,
-                            BlockType::NeonMagenta,
-                            origin_y,
-                        );
+                        set_safe(chunk, lx + 1, base_y + 2, lz, BlockType::Crystal, origin_y);
                     }
                     if lx >= 1 {
-                        set_safe(
-                            chunk,
-                            lx - 1,
-                            base_y + 2,
-                            lz,
-                            BlockType::NeonMagenta,
-                            origin_y,
-                        );
+                        set_safe(chunk, lx - 1, base_y + 2, lz, BlockType::Crystal, origin_y);
                     }
                 }
 
@@ -1394,7 +1508,7 @@ impl TerrainGenerator {
                             origin_y,
                         );
                     }
-                    set_safe(chunk, lx, base_y + 2, lz, BlockType::NeonMagenta, origin_y);
+                    set_safe(chunk, lx, base_y + 2, lz, BlockType::Crystal, origin_y);
                 }
                 (Biome::AlienReef, 4 | 5) => {
                     // Large neon mushroom: dark organic stem, broad cap,
@@ -1414,7 +1528,7 @@ impl TerrainGenerator {
                             let dist = dx.abs().max(dz.abs());
                             if dist <= 2 {
                                 let block = if dist == 2 {
-                                    BlockType::NeonMagenta
+                                    BlockType::Crystal
                                 } else {
                                     BlockType::AlienMoss
                                 };
@@ -1427,16 +1541,23 @@ impl TerrainGenerator {
                                     cap_y - 1,
                                     nz as usize,
                                     if (dx + dz).rem_euclid(2) == 0 {
-                                        BlockType::NeonAmber
+                                        BlockType::MagnetiteOre
                                     } else {
-                                        BlockType::NeonMagenta
+                                        BlockType::Crystal
                                     },
                                     origin_y,
                                 );
                             }
                         }
                     }
-                    set_safe(chunk, lx, cap_y + 1, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(
+                        chunk,
+                        lx,
+                        cap_y + 1,
+                        lz,
+                        BlockType::LuminiteCrystal,
+                        origin_y,
+                    );
                 }
                 (Biome::AlienReef, 6 | 7) => {
                     // Short bone-and-neon arch. This creates flight
@@ -1453,14 +1574,14 @@ impl TerrainGenerator {
                             let block = if edge {
                                 BlockType::BoneRock
                             } else {
-                                BlockType::NeonMagenta
+                                BlockType::Crystal
                             };
                             set_safe(chunk, nx as usize, base_y + dy, lz, block, origin_y);
                         }
                         let cap = if edge {
-                            BlockType::NeonAmber
+                            BlockType::MagnetiteOre
                         } else {
-                            BlockType::NeonCyan
+                            BlockType::LuminiteCrystal
                         };
                         set_safe(chunk, nx as usize, base_y + h, lz, cap, origin_y);
                     }
@@ -1478,15 +1599,15 @@ impl TerrainGenerator {
                             let edge = dx.abs() == 2 || dz.abs() == 2;
                             let corner = dx.abs() == 2 && dz.abs() == 2;
                             let block = if corner {
-                                BlockType::NeonAmber
+                                BlockType::MagnetiteOre
                             } else if edge {
                                 if (dx + dz).rem_euclid(2) == 0 {
-                                    BlockType::NeonCyan
+                                    BlockType::LuminiteCrystal
                                 } else {
-                                    BlockType::NeonMagenta
+                                    BlockType::Crystal
                                 }
                             } else {
-                                BlockType::ShipHullDark
+                                BlockType::Basalt
                             };
                             set_safe(chunk, nx as usize, base_y, nz as usize, block, origin_y);
                         }
@@ -1499,7 +1620,7 @@ impl TerrainGenerator {
                     // a lava core glowing inside.
                     set_safe(chunk, lx, base_y, lz, BlockType::Basalt, origin_y);
                     set_safe(chunk, lx, base_y + 1, lz, BlockType::Basalt, origin_y);
-                    set_safe(chunk, lx, base_y + 2, lz, BlockType::EngineCore, origin_y);
+                    set_safe(chunk, lx, base_y + 2, lz, BlockType::Lava, origin_y);
                     if lx + 1 < CHUNK_SIZE {
                         set_safe(chunk, lx + 1, base_y, lz, BlockType::Basalt, origin_y);
                         set_safe(chunk, lx + 1, base_y + 1, lz, BlockType::Basalt, origin_y);
@@ -1512,7 +1633,14 @@ impl TerrainGenerator {
                     for dy in 0..3 {
                         set_safe(chunk, lx, base_y + dy, lz, BlockType::Ice, origin_y);
                     }
-                    set_safe(chunk, lx, base_y + 3, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(
+                        chunk,
+                        lx,
+                        base_y + 3,
+                        lz,
+                        BlockType::LuminiteCrystal,
+                        origin_y,
+                    );
                 }
 
                 // --- PLAINS / SAVANNA / DESERT -------------------------
@@ -1528,7 +1656,7 @@ impl TerrainGenerator {
                                     continue;
                                 }
                                 let block = if dy == 1 && (dx + dz) % 2 == 0 {
-                                    BlockType::NeonCyan // glowing label strip
+                                    BlockType::LuminiteCrystal // glowing label strip
                                 } else {
                                     BlockType::Stone
                                 };
@@ -1541,14 +1669,28 @@ impl TerrainGenerator {
                     // Holo-console: 1x2 stone block with a glowing
                     // crystal top â€” like a sci-fi signpost / terminal.
                     set_safe(chunk, lx, base_y, lz, BlockType::Stone, origin_y);
-                    set_safe(chunk, lx, base_y + 1, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(
+                        chunk,
+                        lx,
+                        base_y + 1,
+                        lz,
+                        BlockType::LuminiteCrystal,
+                        origin_y,
+                    );
                 }
                 (Biome::Plains | Biome::Savanna | Biome::Tundra | Biome::Desert, 4) => {
                     // Landing-pad strip: 3x1 glow-sand tile with
                     // stone markers at each end.
                     set_safe(chunk, lx, base_y, lz, BlockType::Stone, origin_y);
                     if lx + 1 < CHUNK_SIZE {
-                        set_safe(chunk, lx + 1, base_y, lz, BlockType::NeonCyan, origin_y);
+                        set_safe(
+                            chunk,
+                            lx + 1,
+                            base_y,
+                            lz,
+                            BlockType::LuminiteCrystal,
+                            origin_y,
+                        );
                     }
                     if lx + 2 < CHUNK_SIZE {
                         set_safe(chunk, lx + 2, base_y, lz, BlockType::Stone, origin_y);
@@ -1558,15 +1700,15 @@ impl TerrainGenerator {
                     // Warning pylon: 4-tall stone with alternating
                     // crystal stripes â€” reads as a striped hazard post.
                     set_safe(chunk, lx, base_y, lz, BlockType::Stone, origin_y);
-                    set_safe(chunk, lx, base_y + 1, lz, BlockType::NeonAmber, origin_y);
+                    set_safe(chunk, lx, base_y + 1, lz, BlockType::MagnetiteOre, origin_y);
                     set_safe(chunk, lx, base_y + 2, lz, BlockType::Stone, origin_y);
-                    set_safe(chunk, lx, base_y + 3, lz, BlockType::NeonAmber, origin_y);
+                    set_safe(chunk, lx, base_y + 3, lz, BlockType::MagnetiteOre, origin_y);
                 }
                 (Biome::Plains | Biome::Savanna | Biome::Tundra | Biome::Desert, _) => {
                     // Fuel barrel: single-block glow-sand on stone
                     // pedestal â€” the catch-all cheap prop.
                     set_safe(chunk, lx, base_y, lz, BlockType::Stone, origin_y);
-                    set_safe(chunk, lx, base_y + 1, lz, BlockType::EngineCore, origin_y);
+                    set_safe(chunk, lx, base_y + 1, lz, BlockType::Lava, origin_y);
                 }
 
                 // --- MESA ---------------------------------------------
@@ -1574,20 +1716,27 @@ impl TerrainGenerator {
                     // Rust-red ruin post with a glow crown.
                     set_safe(chunk, lx, base_y, lz, BlockType::RedStone, origin_y);
                     set_safe(chunk, lx, base_y + 1, lz, BlockType::RedStone, origin_y);
-                    set_safe(chunk, lx, base_y + 2, lz, BlockType::NeonAmber, origin_y);
+                    set_safe(chunk, lx, base_y + 2, lz, BlockType::MagnetiteOre, origin_y);
                 }
 
                 // --- FOREST / JUNGLE (rare) ---------------------------
                 (Biome::Forest | Biome::Jungle, _) => {
                     // Abandoned alien survey beacon so normal terrain
                     // still carries the neon sci-fi language.
-                    set_safe(chunk, lx, base_y, lz, BlockType::ShipHullDark, origin_y);
-                    set_safe(chunk, lx, base_y + 1, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(chunk, lx, base_y, lz, BlockType::Basalt, origin_y);
+                    set_safe(
+                        chunk,
+                        lx,
+                        base_y + 1,
+                        lz,
+                        BlockType::LuminiteCrystal,
+                        origin_y,
+                    );
                     if lx + 1 < CHUNK_SIZE {
-                        set_safe(chunk, lx + 1, base_y, lz, BlockType::NeonMagenta, origin_y);
+                        set_safe(chunk, lx + 1, base_y, lz, BlockType::Crystal, origin_y);
                     }
                     if lz + 1 < CHUNK_SIZE {
-                        set_safe(chunk, lx, base_y, lz + 1, BlockType::NeonAmber, origin_y);
+                        set_safe(chunk, lx, base_y, lz + 1, BlockType::MagnetiteOre, origin_y);
                     }
                 }
 
@@ -1619,10 +1768,14 @@ impl TerrainGenerator {
             let biome = self.biome(wx as f64, wz as f64, surface, _cont);
 
             let keep = match biome {
-                Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.72,
-                Biome::GlacierShards => r_gate < 0.20,
-                Biome::VolcanicWaste => r_gate < 0.14,
-                _ => r_gate < 0.04,
+                Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.18,
+                Biome::GlacierShards => r_gate < 0.065,
+                Biome::VolcanicWaste => r_gate < 0.045,
+                Biome::Forest | Biome::Jungle | Biome::Karst => r_gate < 0.008,
+                Biome::Mesa => r_gate < 0.006,
+                Biome::Desert | Biome::Savanna | Biome::Beach | Biome::Ocean => false,
+                Biome::Mountains | Biome::SnowyMountains | Biome::Tundra => r_gate < 0.006,
+                _ => r_gate < 0.003,
             };
             if !keep {
                 continue;
@@ -1633,14 +1786,77 @@ impl TerrainGenerator {
                 continue;
             }
 
-            let bt = match ((r_mat * 100.0) as u32) % 7 {
-                0 => BlockType::LuminiteCrystal,
-                1 => BlockType::MagnetiteOre,
-                2 => BlockType::IridiumVein,
-                3 => BlockType::NeonCyan,
-                4 => BlockType::NeonMagenta,
-                5 => BlockType::Crystal,
-                _ => BlockType::GlowSand,
+            let roll = ((r_mat * 100.0) as u32) % 6;
+            let bt = match biome {
+                Biome::CrystalSpires => match roll {
+                    0 | 1 => BlockType::Crystal,
+                    2 => BlockType::LuminiteCrystal,
+                    3 => BlockType::GlowSand,
+                    4 => BlockType::Limestone,
+                    _ => BlockType::MossStone,
+                },
+                Biome::AlienReef => match roll {
+                    0 | 1 => BlockType::AlienMoss,
+                    2 => BlockType::BoneRock,
+                    3 => BlockType::Crystal,
+                    4 => BlockType::MossStone,
+                    _ => BlockType::Limestone,
+                },
+                Biome::GlacierShards => match roll {
+                    0 | 1 => BlockType::Ice,
+                    2 => BlockType::Crystal,
+                    3 => BlockType::Snow,
+                    _ => BlockType::Gravel,
+                },
+                Biome::VolcanicWaste => match roll {
+                    0 | 1 => BlockType::Basalt,
+                    2 => BlockType::Lava,
+                    3 => BlockType::RedStone,
+                    _ => BlockType::Gravel,
+                },
+                Biome::Mesa => match roll {
+                    0 | 1 => BlockType::MesaClay,
+                    2 => BlockType::RedSand,
+                    3 => BlockType::RedStone,
+                    _ => BlockType::Gravel,
+                },
+                Biome::Desert | Biome::Savanna => match roll {
+                    0 | 1 => BlockType::Sand,
+                    2 => BlockType::RedSand,
+                    3 => BlockType::SavannaGrass,
+                    _ => BlockType::Gravel,
+                },
+                Biome::Forest => match roll {
+                    0 | 1 => BlockType::MossStone,
+                    2 => BlockType::Leaves,
+                    3 => BlockType::Wood,
+                    _ => BlockType::Gravel,
+                },
+                Biome::Jungle => match roll {
+                    0 | 1 => BlockType::JungleLeaves,
+                    2 => BlockType::MossStone,
+                    3 => BlockType::Wood,
+                    _ => BlockType::Gravel,
+                },
+                Biome::Karst => match roll {
+                    0 | 1 => BlockType::Limestone,
+                    2 => BlockType::MossStone,
+                    _ => BlockType::Gravel,
+                },
+                Biome::SnowyMountains | Biome::Tundra => match roll {
+                    0 | 1 => BlockType::Snow,
+                    2 => BlockType::Ice,
+                    _ => BlockType::Gravel,
+                },
+                Biome::Beach | Biome::Ocean => match roll {
+                    0 | 1 => BlockType::Sand,
+                    _ => BlockType::Gravel,
+                },
+                _ => match roll {
+                    0 | 1 => BlockType::MossStone,
+                    2 => BlockType::Grass,
+                    _ => BlockType::Gravel,
+                },
             };
             set_safe(chunk, lx, base_y, lz, bt, origin_y);
         }
@@ -1875,7 +2091,7 @@ impl TerrainGenerator {
     ) {
         let h = 16 + ((column_rand(self.seed ^ 0x51A1_9001, ax, az) * 9.0) as i32);
         let block = if biome == Biome::AlienReef {
-            BlockType::NeonCyan
+            BlockType::LuminiteCrystal
         } else {
             BlockType::Crystal
         };
@@ -1927,7 +2143,7 @@ impl TerrainGenerator {
         let core_block = if biome == Biome::VolcanicWaste {
             BlockType::Lava
         } else {
-            BlockType::NeonAmber
+            BlockType::MagnetiteOre
         };
         for dz in -4..=4 {
             for dx in -4..=4 {

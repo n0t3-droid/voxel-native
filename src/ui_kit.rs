@@ -9,11 +9,19 @@ use bevy_egui::egui;
 use crate::icons::{paint_icon, Icon};
 use crate::theme::ThemeSettings;
 
+fn alpha_u8(alpha: f32) -> u8 {
+    (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn with_alpha(color: egui::Color32, alpha: f32) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha_u8(alpha))
+}
+
 pub fn toolbench_frame(theme: ThemeSettings) -> egui::Frame {
     let colors = theme.semantic();
     egui::Frame::none()
-        .fill(colors.surface_strong)
-        .stroke(egui::Stroke::new(1.0, colors.stroke))
+        .fill(with_alpha(colors.surface_strong, 0.88))
+        .stroke(egui::Stroke::new(1.0, with_alpha(colors.stroke, 0.72)))
         .inner_margin(egui::Margin::symmetric(18.0, 16.0))
         .rounding(egui::Rounding::same(8.0))
         .shadow(egui::epaint::Shadow {
@@ -31,8 +39,8 @@ pub fn surface_panel<R>(
 ) -> egui::InnerResponse<R> {
     let colors = theme.semantic();
     egui::Frame::none()
-        .fill(colors.surface)
-        .stroke(egui::Stroke::new(1.0, colors.stroke.linear_multiply(0.72)))
+        .fill(with_alpha(colors.surface, 0.78))
+        .stroke(egui::Stroke::new(1.0, with_alpha(colors.stroke, 0.58)))
         .inner_margin(egui::Margin::symmetric(12.0, 10.0))
         .rounding(egui::Rounding::same(8.0))
         .show(ui, add_contents)
@@ -45,12 +53,64 @@ pub fn hud_panel(
     opacity: f32,
     accent: egui::Color32,
 ) {
-    painter.rect_filled(rect, egui::Rounding::same(8.0), theme.panel_fill(opacity));
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.0, accent.linear_multiply(0.72)),
+    let colors = theme.semantic();
+    let opacity = opacity.clamp(0.28, 0.94);
+    let rounding = egui::Rounding::same(9.0);
+    let base = egui::Color32::from_rgba_unmultiplied(5, 14, 20, alpha_u8(opacity * 0.78));
+    let deep = egui::Color32::from_rgba_unmultiplied(1, 4, 8, alpha_u8(opacity * 0.46));
+    let top_sheen = egui::Color32::from_rgba_unmultiplied(210, 246, 255, alpha_u8(opacity * 0.15));
+    let inner_sheen = egui::Color32::from_white_alpha(alpha_u8(opacity * 0.18));
+
+    painter.rect_filled(rect, rounding, base);
+    painter.rect_filled(rect.shrink(1.0), egui::Rounding::same(7.5), deep);
+
+    let top = egui::Rect::from_min_max(
+        rect.left_top() + egui::vec2(1.0, 1.0),
+        egui::pos2(rect.right() - 1.0, rect.top() + rect.height() * 0.42),
     );
+    painter.rect_filled(top, rounding, top_sheen);
+
+    let rim = with_alpha(accent, opacity * 0.78);
+    let cool_rim = with_alpha(colors.info, opacity * 0.44);
+    painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0, rim));
+    painter.rect_stroke(
+        rect.shrink(1.5),
+        egui::Rounding::same(7.0),
+        egui::Stroke::new(1.0, inner_sheen),
+    );
+
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + 12.0, rect.top() + 2.0),
+            egui::pos2(rect.right() - 12.0, rect.top() + 2.0),
+        ],
+        egui::Stroke::new(1.0, inner_sheen),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + 14.0, rect.bottom() - 2.0),
+            egui::pos2(rect.right() - 14.0, rect.bottom() - 2.0),
+        ],
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_black_alpha(alpha_u8(opacity * 0.32)),
+        ),
+    );
+
+    let tick = rect.width().min(rect.height()).min(24.0) * 0.42;
+    let stroke = egui::Stroke::new(1.35, cool_rim);
+    let l = rect.left() + 5.0;
+    let r = rect.right() - 5.0;
+    let t = rect.top() + 5.0;
+    let b = rect.bottom() - 5.0;
+    painter.line_segment([egui::pos2(l, t), egui::pos2(l + tick, t)], stroke);
+    painter.line_segment([egui::pos2(l, t), egui::pos2(l, t + tick)], stroke);
+    painter.line_segment([egui::pos2(r, t), egui::pos2(r - tick, t)], stroke);
+    painter.line_segment([egui::pos2(r, t), egui::pos2(r, t + tick)], stroke);
+    painter.line_segment([egui::pos2(l, b), egui::pos2(l + tick, b)], stroke);
+    painter.line_segment([egui::pos2(l, b), egui::pos2(l, b - tick)], stroke);
+    painter.line_segment([egui::pos2(r, b), egui::pos2(r - tick, b)], stroke);
+    painter.line_segment([egui::pos2(r, b), egui::pos2(r, b - tick)], stroke);
 }
 
 pub fn icon_action(

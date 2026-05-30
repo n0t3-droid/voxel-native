@@ -277,14 +277,14 @@ fn draw_main_menu(
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
-                        egui::RichText::new("NEON TOOLBENCH")
+                        egui::RichText::new("LIQUID GLASS ENGINE")
                             .size(23.0)
                             .color(primary)
                             .strong()
                             .monospace(),
                     );
                     ui.label(
-                        egui::RichText::new("Starten, fortsetzen, konfigurieren - ohne Umwege.")
+                        egui::RichText::new("Starten, fliegen, bauen - mit smarter Konfiguration.")
                             .size(11.0)
                             .color(dim)
                             .monospace(),

@@ -17,6 +17,11 @@ use crate::neurocore::RuntimeProfile;
 use crate::player::Player;
 use crate::settings::{
     GraphicsMode, HudProfile, TimeMode, WeatherPreset, WorldModeCard, WorldSettings,
+    SAFE_MAX_CHUNKS_PER_FRAME, SAFE_MAX_IN_FLIGHT_MESHES, SAFE_MAX_IN_FLIGHT_TERRAIN,
+    SAFE_MAX_MESHES_PER_FRAME, SAFE_MAX_MESH_APPLIES_PER_FRAME, SAFE_MAX_RENDER_DISTANCE,
+    SAFE_MAX_VERTICAL_CHUNKS, SAFE_MIN_CHUNKS_PER_FRAME, SAFE_MIN_IN_FLIGHT_MESHES,
+    SAFE_MIN_IN_FLIGHT_TERRAIN, SAFE_MIN_MESHES_PER_FRAME, SAFE_MIN_MESH_APPLIES_PER_FRAME,
+    SAFE_MIN_RENDER_DISTANCE, SAFE_MIN_VERTICAL_CHUNKS,
 };
 use crate::textures::{bake_all_block_swatches, BlockSwatch, TEX_DIR};
 use crate::theme::{
@@ -546,10 +551,10 @@ fn draw_editor_hologram_backplate(
 }
 
 fn draw_header(ui: &mut egui::Ui, state: &mut EditorState, theme: crate::theme::ThemeSettings) {
-    draw_banner(ui, theme, "TOOLBENCH");
+    draw_banner(ui, theme, "LIQUID TOOLBENCH");
     ui.horizontal(|ui| {
         crate::ui_kit::status_chip(ui, state.tab.icon(), "TAB", state.tab.label(), theme);
-        crate::ui_kit::status_chip(ui, Icon::Hud, "STYLE", "Neon Toolbench", theme);
+        crate::ui_kit::status_chip(ui, Icon::Hud, "STYLE", "Liquid Glass", theme);
         crate::ui_kit::status_chip(ui, Icon::Help, "KEYS", "Alt+1-0 / PgUp PgDn", theme);
     });
     // Tiny inline close "x" so the panel still has a visible close.
@@ -745,25 +750,53 @@ fn draw_world_tab(
         });
         ui.add(egui::Slider::new(&mut settings.target_fps, 30.0..=144.0).text("Target FPS"));
         ui.add(
-            egui::Slider::new(&mut settings.render_distance, 2..=96)
-                .text("Render-Distanz (Chunks)"),
-        );
-        ui.add(egui::Slider::new(&mut settings.vertical_chunks, 4..=16).text("Vertikale Chunks"));
-        ui.add(
-            egui::Slider::new(&mut settings.chunks_per_frame, 1..=64).text("Terrain-Jobs / Frame"),
-        );
-        ui.add(egui::Slider::new(&mut settings.meshes_per_frame, 1..=64).text("Mesh-Jobs / Frame"));
-        ui.add(
-            egui::Slider::new(&mut settings.mesh_applies_per_frame, 1..=64)
-                .text("GPU-Mesh Uploads / Frame"),
+            egui::Slider::new(
+                &mut settings.render_distance,
+                SAFE_MIN_RENDER_DISTANCE..=SAFE_MAX_RENDER_DISTANCE,
+            )
+            .text("Render-Distanz (Chunks)"),
         );
         ui.add(
-            egui::Slider::new(&mut settings.max_in_flight_terrain, 16..=512)
-                .text("Max Terrain-Jobs aktiv"),
+            egui::Slider::new(
+                &mut settings.vertical_chunks,
+                SAFE_MIN_VERTICAL_CHUNKS..=SAFE_MAX_VERTICAL_CHUNKS,
+            )
+            .text("Vertikale Chunks"),
         );
         ui.add(
-            egui::Slider::new(&mut settings.max_in_flight_meshes, 16..=384)
-                .text("Max Mesh-Jobs aktiv"),
+            egui::Slider::new(
+                &mut settings.chunks_per_frame,
+                SAFE_MIN_CHUNKS_PER_FRAME..=SAFE_MAX_CHUNKS_PER_FRAME,
+            )
+            .text("Terrain-Jobs / Frame"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut settings.meshes_per_frame,
+                SAFE_MIN_MESHES_PER_FRAME..=SAFE_MAX_MESHES_PER_FRAME,
+            )
+            .text("Mesh-Jobs / Frame"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut settings.mesh_applies_per_frame,
+                SAFE_MIN_MESH_APPLIES_PER_FRAME..=SAFE_MAX_MESH_APPLIES_PER_FRAME,
+            )
+            .text("GPU-Mesh Uploads / Frame"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut settings.max_in_flight_terrain,
+                SAFE_MIN_IN_FLIGHT_TERRAIN..=SAFE_MAX_IN_FLIGHT_TERRAIN,
+            )
+            .text("Max Terrain-Jobs aktiv"),
+        );
+        ui.add(
+            egui::Slider::new(
+                &mut settings.max_in_flight_meshes,
+                SAFE_MIN_IN_FLIGHT_MESHES..=SAFE_MAX_IN_FLIGHT_MESHES,
+            )
+            .text("Max Mesh-Jobs aktiv"),
         );
         ui.label(
             egui::RichText::new(format!(
@@ -796,9 +829,9 @@ fn draw_world_tab(
             .clicked()
             {
                 settings.render_distance = 50;
-                settings.chunks_per_frame = 20;
-                settings.meshes_per_frame = 18;
-                settings.mesh_applies_per_frame = 18;
+                settings.chunks_per_frame = 14;
+                settings.meshes_per_frame = 12;
+                settings.mesh_applies_per_frame = 8;
                 settings.max_in_flight_terrain = 192;
                 settings.max_in_flight_meshes = 144;
             }
@@ -813,11 +846,11 @@ fn draw_world_tab(
             .clicked()
             {
                 settings.render_distance = 32;
-                settings.chunks_per_frame = 24;
-                settings.meshes_per_frame = 24;
-                settings.mesh_applies_per_frame = 24;
-                settings.max_in_flight_terrain = 224;
-                settings.max_in_flight_meshes = 168;
+                settings.chunks_per_frame = 16;
+                settings.meshes_per_frame = 14;
+                settings.mesh_applies_per_frame = 8;
+                settings.max_in_flight_terrain = 168;
+                settings.max_in_flight_meshes = 128;
             }
             if crate::ui_kit::mode_card(
                 ui,
@@ -830,11 +863,11 @@ fn draw_world_tab(
             .clicked()
             {
                 settings.render_distance = 18;
-                settings.chunks_per_frame = 28;
-                settings.meshes_per_frame = 28;
-                settings.mesh_applies_per_frame = 24;
-                settings.max_in_flight_terrain = 160;
-                settings.max_in_flight_meshes = 128;
+                settings.chunks_per_frame = 18;
+                settings.meshes_per_frame = 16;
+                settings.mesh_applies_per_frame = 8;
+                settings.max_in_flight_terrain = 128;
+                settings.max_in_flight_meshes = 96;
             }
         });
     });
@@ -1342,6 +1375,7 @@ fn draw_system_tab(
         }
         ui.label("Style:");
         for (style, label) in [
+            (ThemeStyle::LiquidGlass, "Glass"),
             (ThemeStyle::NeonToolbench, "Neon"),
             (ThemeStyle::ClassicCrt, "CRT"),
         ] {

@@ -617,6 +617,7 @@ fn scout_blueprint() -> ShipBlueprint {
             BlockType::ShipHullAlloy,
         );
     }
+    add_scout_realism(&mut voxels);
     ShipBlueprint {
         voxels,
         cockpit_offset: Vec3::new(0.0, 2.6, -3.8),
@@ -632,7 +633,7 @@ fn scout_blueprint() -> ShipBlueprint {
 fn strike_blueprint() -> ShipBlueprint {
     let mut voxels = Vec::new();
 
-    // -- Star Wars TIE Interceptor inspired Strike Fighter --
+    // -- Original space-opera interceptor silhouette --
 
     // Central spherical-ish pod
     push_box(
@@ -697,7 +698,7 @@ fn strike_blueprint() -> ShipBlueprint {
         // Bottom chevron
         push_box(
             &mut voxels,
-            IVec3::new(sx, -5, -1),
+            IVec3::new(sx, -4, -1),
             IVec3::new(sx, -1, 5),
             BlockType::ShipHullDark,
         );
@@ -717,17 +718,18 @@ fn strike_blueprint() -> ShipBlueprint {
         ); // Green lasers firing
         push_box(
             &mut voxels,
-            IVec3::new(sx, -5, -5),
-            IVec3::new(sx, -5, -3),
+            IVec3::new(sx, -4, -5),
+            IVec3::new(sx, -4, -3),
             BlockType::NeonCyan,
         );
     }
 
+    add_strike_realism(&mut voxels);
     ShipBlueprint {
         voxels,
         cockpit_offset: Vec3::new(0.0, 0.0, -3.5),
         exit_offset: Vec3::new(0.0, -3.5, 0.0),
-        hardpoints: [Vec3::new(-7.0, 5.0, -5.0), Vec3::new(7.0, -5.0, -5.0)],
+        hardpoints: [Vec3::new(-7.0, 5.0, -5.0), Vec3::new(7.0, -4.0, -5.0)],
         hull_radius: 8.0,
         max_speed: 105.0,
         accel: 58.0,
@@ -738,7 +740,7 @@ fn strike_blueprint() -> ShipBlueprint {
 fn dropship_blueprint() -> ShipBlueprint {
     let mut voxels = Vec::new();
 
-    // -- Star Wars LAAT (Republic Gunship) inspired Dropship --
+    // -- Original space-opera gunship silhouette --
 
     // Troop Bay / Main Fuselage
     push_box(
@@ -888,6 +890,7 @@ fn dropship_blueprint() -> ShipBlueprint {
         BlockType::NeonCyan,
     );
 
+    add_dropship_realism(&mut voxels);
     ShipBlueprint {
         voxels,
         cockpit_offset: Vec3::new(0.0, 4.0, -5.5),
@@ -898,6 +901,217 @@ fn dropship_blueprint() -> ShipBlueprint {
         accel: 34.0,
         shield: 170.0,
     }
+}
+
+fn add_scout_realism(voxels: &mut Vec<ShipVoxel>) {
+    // Opaque canopy ribs, pilot shell, landing gear and panel breaks.
+    for sx in [-1, 1] {
+        push_box(
+            voxels,
+            IVec3::new(sx * 2, 1, -6),
+            IVec3::new(sx * 2, 3, -3),
+            BlockType::ShipHullDark,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 2, 0, -9),
+            IVec3::new(sx * 2, 1, -7),
+            BlockType::ShipHullAlloy,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 5, 1, -1),
+            IVec3::new(sx * 8, 1, -1),
+            BlockType::NeonCyan,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 8, 0, -4),
+            IVec3::new(sx * 8, 0, -3),
+            BlockType::NeonAmber,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 3, -3, 2),
+            IVec3::new(sx * 4, -3, 5),
+            BlockType::ShipHullDark,
+        );
+    }
+    push_box(
+        voxels,
+        IVec3::new(-1, 3, -6),
+        IVec3::new(1, 3, -5),
+        BlockType::ShipHullDark,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, 3, -3),
+        IVec3::new(1, 3, -2),
+        BlockType::ShipHullDark,
+    );
+    push_box(
+        voxels,
+        IVec3::new(0, 1, -5),
+        IVec3::new(0, 1, -4),
+        BlockType::ShipHullDark,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, 1, -6),
+        IVec3::new(1, 1, -6),
+        BlockType::NeonAmber,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, 0, -10),
+        IVec3::new(1, 0, -9),
+        BlockType::ShipHullAlloy,
+    );
+    push_box(
+        voxels,
+        IVec3::new(0, 1, -10),
+        IVec3::new(0, 1, -10),
+        BlockType::NeonCyan,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-2, 2, 6),
+        IVec3::new(2, 2, 7),
+        BlockType::EngineCore,
+    );
+}
+
+fn add_strike_realism(voxels: &mut Vec<ShipVoxel>) {
+    // Faceted armored cockpit, visible instrument well and wing heat-striping.
+    push_box(
+        voxels,
+        IVec3::new(-2, -2, -4),
+        IVec3::new(2, 2, -4),
+        BlockType::ShipHullDark,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, -1, -4),
+        IVec3::new(1, 1, -4),
+        BlockType::CockpitGlass,
+    );
+    push_box(
+        voxels,
+        IVec3::new(0, -1, -4),
+        IVec3::new(0, 1, -4),
+        BlockType::ShipHullDark,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, -2, -3),
+        IVec3::new(1, -2, -2),
+        BlockType::NeonAmber,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-3, -1, -2),
+        IVec3::new(3, 1, -2),
+        BlockType::ShipHullAlloy,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-2, -2, 5),
+        IVec3::new(2, 2, 5),
+        BlockType::EngineCore,
+    );
+    for sx in [-1, 1] {
+        let x = sx * 7;
+        push_box(
+            voxels,
+            IVec3::new(x, 4, -4),
+            IVec3::new(x, 5, 5),
+            BlockType::NeonCyan,
+        );
+        push_box(
+            voxels,
+            IVec3::new(x, -4, -4),
+            IVec3::new(x, -3, 5),
+            BlockType::NeonMagenta,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 5, 1, -3),
+            IVec3::new(sx * 6, 1, -1),
+            BlockType::ShipHullAlloy,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 8, 0, 3),
+            IVec3::new(sx * 8, 0, 5),
+            BlockType::NeonAmber,
+        );
+    }
+}
+
+fn add_dropship_realism(voxels: &mut Vec<ShipVoxel>) {
+    // Heavy armored glazing, troop-bay doors, landing gear and engine detail.
+    for sx in [-1, 1] {
+        push_box(
+            voxels,
+            IVec3::new(sx * 2, 3, -6),
+            IVec3::new(sx * 2, 5, -1),
+            BlockType::ShipHullDark,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 4, 1, -1),
+            IVec3::new(sx * 4, 2, 3),
+            BlockType::NeonCyan,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 5, -2, -1),
+            IVec3::new(sx * 5, -2, 4),
+            BlockType::ShipHullDark,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 6, 2, 5),
+            IVec3::new(sx * 6, 3, 8),
+            BlockType::ShipHullDark,
+        );
+        push_box(
+            voxels,
+            IVec3::new(sx * 6, 2, 9),
+            IVec3::new(sx * 6, 3, 9),
+            BlockType::EngineCore,
+        );
+    }
+    push_box(
+        voxels,
+        IVec3::new(-2, 5, -6),
+        IVec3::new(2, 5, -5),
+        BlockType::ShipHullDark,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, 3, -7),
+        IVec3::new(1, 3, -7),
+        BlockType::CockpitGlass,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-1, 4, -4),
+        IVec3::new(1, 4, -4),
+        BlockType::NeonAmber,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-2, -2, -7),
+        IVec3::new(2, -2, -6),
+        BlockType::ShipHullDark,
+    );
+    push_box(
+        voxels,
+        IVec3::new(-3, 0, 7),
+        IVec3::new(3, 3, 7),
+        BlockType::EngineCore,
+    );
 }
 
 fn push_box(out: &mut Vec<ShipVoxel>, min: IVec3, max: IVec3, block: BlockType) {
@@ -984,6 +1198,19 @@ fn spawn_ship_entity(
             spawn_cockpit_holograms(p, materials, fx, &cube, &bp);
             p.spawn(PointLightBundle {
                 point_light: PointLight {
+                    color: Color::srgb(0.64, 0.92, 1.0),
+                    intensity: 130_000.0,
+                    range: 18.0,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                transform: Transform::from_translation(
+                    bp.cockpit_offset + Vec3::new(0.0, 1.0, 0.6),
+                ),
+                ..default()
+            });
+            p.spawn(PointLightBundle {
+                point_light: PointLight {
                     color: Color::srgb(0.25, 0.90, 1.0),
                     intensity: 450_000.0,
                     range: 22.0,
@@ -1010,13 +1237,7 @@ fn material_for_block(
         return mat.clone();
     }
     let rgba = voxel_color(Voxel::from(block));
-    let alpha = if preview {
-        0.34
-    } else if block == BlockType::CockpitGlass {
-        0.48
-    } else {
-        1.0
-    };
+    let alpha = if preview { 0.34 } else { 1.0 };
     let base = Color::srgba(rgba[0].min(1.0), rgba[1].min(1.0), rgba[2].min(1.0), alpha);
     let texture = ship_texture_for_block(fx, images, block, preview);
     let mat = materials.add(StandardMaterial {
@@ -1032,10 +1253,14 @@ fn material_for_block(
             LinearRgba::rgb(rgba[0] * 5.4, rgba[1] * 5.4, rgba[2] * 5.4)
         } else if block == BlockType::CockpitGlass {
             LinearRgba::rgb(0.18, 0.75, 0.95)
+        } else if block == BlockType::ShipHullDark {
+            LinearRgba::rgb(0.035, 0.060, 0.080)
+        } else if block == BlockType::ShipHullAlloy {
+            LinearRgba::rgb(0.030, 0.040, 0.045)
         } else {
             LinearRgba::BLACK
         },
-        alpha_mode: if preview || block == BlockType::CockpitGlass {
+        alpha_mode: if preview {
             AlphaMode::Blend
         } else {
             AlphaMode::Opaque
@@ -1092,19 +1317,31 @@ fn ship_texture_image(block: BlockType, preview: bool) -> Image {
             let seam = x % 16 == 0 || y % 16 == 0 || x % 16 == 15 || y % 16 == 15;
             let diag = ((x as i32 - y as i32).rem_euclid(13)) == 0;
             let hash = (((x * 37 + y * 91 + Voxel::from(block) as u32 * 17) & 31) as f32) / 31.0;
+            let rivet = (x % 16 == 3 || x % 16 == 12) && (y % 16 == 3 || y % 16 == 12);
+            let scratch = (x * 11 + y * 7 + Voxel::from(block) as u32 * 5) % 47 == 0;
 
             let (mut r, mut g, mut b, mut a): (f32, f32, f32, f32) =
                 (base[0], base[1], base[2], 1.0);
             match block {
                 BlockType::ShipHullDark => {
-                    let shade = 0.58 + hash * 0.20 + panel as f32 * 0.06;
-                    r = (0.035 + shade * 0.035).min(0.11);
-                    g = (0.045 + shade * 0.040).min(0.12);
-                    b = (0.070 + shade * 0.075).min(0.20);
+                    let shade = 0.70 + hash * 0.26 + panel as f32 * 0.08;
+                    r = (0.060 + shade * 0.075).min(0.22);
+                    g = (0.075 + shade * 0.088).min(0.25);
+                    b = (0.105 + shade * 0.125).min(0.34);
                     if seam {
-                        r += 0.05;
-                        g += 0.14;
-                        b += 0.18;
+                        r += 0.08;
+                        g += 0.15;
+                        b += 0.19;
+                    }
+                    if rivet {
+                        r += 0.16;
+                        g += 0.18;
+                        b += 0.23;
+                    }
+                    if scratch {
+                        r += 0.07;
+                        g += 0.08;
+                        b += 0.10;
                     }
                 }
                 BlockType::ShipHullAlloy => {
@@ -1117,18 +1354,29 @@ fn ship_texture_image(block: BlockType, preview: bool) -> Image {
                         g += 0.12;
                         b += 0.15;
                     }
+                    if rivet {
+                        r += 0.16;
+                        g += 0.17;
+                        b += 0.17;
+                    }
+                    if scratch {
+                        r -= 0.06;
+                        g -= 0.05;
+                        b -= 0.04;
+                    }
                 }
                 BlockType::CockpitGlass => {
-                    let glare = if diag || (x + y) % 29 == 0 { 0.38 } else { 0.0 };
+                    let glare = if diag || (x + y) % 29 == 0 { 0.30 } else { 0.0 };
                     let grid = if x % 12 == 0 || y % 12 == 0 {
-                        0.20
+                        0.16
                     } else {
                         0.0
                     };
-                    r = 0.03 + glare * 0.16;
-                    g = 0.28 + grid + glare * 0.48;
-                    b = 0.38 + grid + glare * 0.58;
-                    a = if preview { 0.34 } else { 0.62 };
+                    let laminate = if (x + y * 3) % 17 == 0 { 0.08 } else { 0.0 };
+                    r = 0.008 + glare * 0.09 + laminate;
+                    g = 0.11 + grid + glare * 0.28 + laminate;
+                    b = 0.17 + grid + glare * 0.36 + laminate;
+                    a = if preview { 0.34 } else { 1.0 };
                 }
                 BlockType::NeonCyan
                 | BlockType::NeonMagenta
@@ -1199,6 +1447,8 @@ fn spawn_cockpit_holograms(
         1,
         Color::srgba(0.04, 0.95, 1.0, 0.52),
         LinearRgba::rgb(0.25, 4.5, 5.5),
+        AlphaMode::Add,
+        true,
     );
     let magenta = cockpit_material(
         fx,
@@ -1206,6 +1456,8 @@ fn spawn_cockpit_holograms(
         2,
         Color::srgba(1.0, 0.10, 0.78, 0.46),
         LinearRgba::rgb(4.5, 0.25, 3.2),
+        AlphaMode::Add,
+        true,
     );
     let amber = cockpit_material(
         fx,
@@ -1213,20 +1465,84 @@ fn spawn_cockpit_holograms(
         3,
         Color::srgba(1.0, 0.48, 0.08, 0.72),
         LinearRgba::rgb(4.8, 1.7, 0.18),
+        AlphaMode::Add,
+        true,
     );
-    let dark_glass = cockpit_material(
+    let console_shell = cockpit_material(
         fx,
         materials,
         4,
-        Color::srgba(0.0, 0.04, 0.07, 0.58),
+        Color::srgb(0.010, 0.020, 0.030),
         LinearRgba::rgb(0.0, 0.18, 0.25),
+        AlphaMode::Opaque,
+        false,
+    );
+    let seat = cockpit_material(
+        fx,
+        materials,
+        5,
+        Color::srgb(0.018, 0.019, 0.024),
+        LinearRgba::BLACK,
+        AlphaMode::Opaque,
+        false,
+    );
+    let frame = cockpit_material(
+        fx,
+        materials,
+        6,
+        Color::srgb(0.23, 0.28, 0.32),
+        LinearRgba::rgb(0.02, 0.05, 0.06),
+        AlphaMode::Opaque,
+        false,
     );
 
     let c = bp.cockpit_offset;
     spawn_panel(
         parent,
         cube,
-        dark_glass.clone(),
+        seat.clone(),
+        c + Vec3::new(0.0, -1.35, 0.72),
+        Vec3::new(1.10, 0.26, 1.18),
+        Quat::IDENTITY,
+    );
+    spawn_panel(
+        parent,
+        cube,
+        seat,
+        c + Vec3::new(0.0, -0.70, 1.08),
+        Vec3::new(1.12, 1.05, 0.18),
+        Quat::from_rotation_x(0.28),
+    );
+    spawn_panel(
+        parent,
+        cube,
+        frame.clone(),
+        c + Vec3::new(0.0, 0.64, -0.96),
+        Vec3::new(3.20, 0.16, 0.22),
+        Quat::IDENTITY,
+    );
+    for side in [-1.0, 1.0] {
+        spawn_panel(
+            parent,
+            cube,
+            frame.clone(),
+            c + Vec3::new(side * 1.62, -0.08, -0.74),
+            Vec3::new(0.15, 1.48, 0.20),
+            Quat::from_rotation_z(side * 0.10),
+        );
+        spawn_panel(
+            parent,
+            cube,
+            frame.clone(),
+            c + Vec3::new(side * 0.48, -0.50, -0.92),
+            Vec3::new(0.12, 0.12, 0.58),
+            Quat::from_rotation_x(-0.24) * Quat::from_rotation_z(side * 0.30),
+        );
+    }
+    spawn_panel(
+        parent,
+        cube,
+        console_shell.clone(),
         c + Vec3::new(0.0, -0.82, -1.10),
         Vec3::new(3.1, 0.08, 1.35),
         Quat::from_rotation_x(-0.46),
@@ -1242,7 +1558,7 @@ fn spawn_cockpit_holograms(
     spawn_panel(
         parent,
         cube,
-        dark_glass,
+        console_shell,
         c + Vec3::new(-2.15, -0.88, -0.55),
         Vec3::new(1.10, 0.08, 1.05),
         Quat::from_rotation_x(-0.35) * Quat::from_rotation_z(0.10),
@@ -1319,6 +1635,8 @@ fn cockpit_material(
     key: u8,
     base_color: Color,
     emissive: LinearRgba,
+    alpha_mode: AlphaMode,
+    unlit: bool,
 ) -> Handle<StandardMaterial> {
     if let Some(mat) = fx.cockpit_mats.get(&key) {
         return mat.clone();
@@ -1326,8 +1644,8 @@ fn cockpit_material(
     let mat = materials.add(StandardMaterial {
         base_color,
         emissive,
-        alpha_mode: AlphaMode::Add,
-        unlit: true,
+        alpha_mode,
+        unlit,
         metallic: 0.0,
         perceptual_roughness: 0.12,
         ..default()
@@ -2606,11 +2924,11 @@ fn draw_ship_cockpit_hud(
         egui::Order::Foreground,
         egui::Id::new("ship_cockpit_hud"),
     ));
-    let cyan = egui::Color32::from_rgb(0, 235, 255);
+    let colors = settings.theme.semantic();
+    let cyan = colors.info;
     let magenta = egui::Color32::from_rgb(255, 40, 220);
-    let amber = egui::Color32::from_rgb(255, 160, 35);
-    let glass = egui::Color32::from_rgba_unmultiplied(0, 20, 34, 95);
-    let dark = egui::Color32::from_rgba_unmultiplied(0, 4, 10, 190);
+    let amber = colors.warning;
+    let glass = egui::Color32::from_rgba_unmultiplied(10, 36, 48, 108);
     if pilot.shield_flash > 0.01 {
         painter.rect_filled(
             screen,
@@ -2634,14 +2952,27 @@ fn draw_ship_cockpit_hud(
         egui::pos2(screen.left() + 132.0, screen.bottom() - 142.0),
         egui::pos2(screen.right() - 132.0, screen.bottom()),
     );
-    painter.rect_filled(left, egui::Rounding::ZERO, dark);
-    painter.rect_filled(right, egui::Rounding::ZERO, dark);
-    painter.rect_filled(
-        bottom,
-        egui::Rounding::same(7.0),
-        egui::Color32::from_rgba_unmultiplied(0, 8, 18, 216),
+    draw_liquid_cockpit_visor(
+        &painter,
+        screen,
+        settings.theme,
+        time.elapsed_seconds_wrapped(),
+        cyan,
+        magenta,
+        amber,
     );
-    draw_cockpit_dashboard(&painter, screen, cyan, magenta, amber, glass);
+    crate::ui_kit::hud_panel(&painter, left.shrink(8.0), settings.theme, 0.62, cyan);
+    crate::ui_kit::hud_panel(&painter, right.shrink(8.0), settings.theme, 0.62, magenta);
+    crate::ui_kit::hud_panel(&painter, bottom.shrink(4.0), settings.theme, 0.72, cyan);
+    draw_cockpit_dashboard(
+        &painter,
+        screen,
+        settings.theme,
+        cyan,
+        magenta,
+        amber,
+        glass,
+    );
 
     let cam_pos = camera_q
         .get_single()
@@ -2857,9 +3188,94 @@ fn draw_hud_text(
     );
 }
 
+fn draw_liquid_cockpit_visor(
+    painter: &egui::Painter,
+    screen: egui::Rect,
+    theme: crate::theme::ThemeSettings,
+    time: f32,
+    cyan: egui::Color32,
+    magenta: egui::Color32,
+    amber: egui::Color32,
+) {
+    let colors = theme.semantic();
+    let top = egui::Rect::from_min_max(
+        screen.left_top(),
+        egui::pos2(screen.right(), screen.top() + 96.0),
+    );
+    painter.rect_filled(
+        top,
+        egui::Rounding::ZERO,
+        egui::Color32::from_rgba_unmultiplied(218, 246, 255, 22),
+    );
+
+    let horizon_y = screen.center().y + (time * 0.7).sin() * 2.0;
+    painter.line_segment(
+        [
+            egui::pos2(screen.left() + 210.0, horizon_y),
+            egui::pos2(screen.right() - 210.0, horizon_y),
+        ],
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(210, 250, 255, 96),
+        ),
+    );
+    for i in 0..9 {
+        let t = i as f32 / 8.0;
+        let x = screen.left() + 250.0 + t * (screen.width() - 500.0);
+        let alpha = if i == 4 { 165 } else { 82 };
+        let height = if i == 4 { 18.0 } else { 9.0 };
+        painter.line_segment(
+            [
+                egui::pos2(x, horizon_y - height),
+                egui::pos2(x, horizon_y + height),
+            ],
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(cyan.r(), cyan.g(), cyan.b(), alpha),
+            ),
+        );
+    }
+
+    let capsule = egui::Rect::from_center_size(
+        egui::pos2(screen.center().x, screen.top() + 84.0),
+        egui::vec2(360.0, 42.0),
+    );
+    crate::ui_kit::hud_panel(painter, capsule, theme, 0.48, amber);
+    draw_hud_text(
+        painter,
+        capsule.left_top() + egui::vec2(18.0, 10.0),
+        "LIQUID FLIGHT CORE   AUTO STREAM / SMART TARGET / CREW LINK",
+        colors.text,
+        11.0,
+    );
+
+    for side in [-1.0_f32, 1.0] {
+        let x0 = if side < 0.0 {
+            screen.left() + 156.0
+        } else {
+            screen.right() - 156.0
+        };
+        let stroke = egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(magenta.r(), magenta.g(), magenta.b(), 100),
+        );
+        for row in 0..6 {
+            let y = screen.top() + 126.0 + row as f32 * 48.0;
+            painter.line_segment(
+                [
+                    egui::pos2(x0, y),
+                    egui::pos2(x0 + side * (28.0 + row as f32 * 3.0), y + 22.0),
+                ],
+                stroke,
+            );
+        }
+    }
+}
+
 fn draw_cockpit_dashboard(
     painter: &egui::Painter,
     screen: egui::Rect,
+    theme: crate::theme::ThemeSettings,
     cyan: egui::Color32,
     magenta: egui::Color32,
     amber: egui::Color32,
@@ -2871,23 +3287,14 @@ fn draw_cockpit_dashboard(
         egui::pos2(center_x - 250.0, bottom - 128.0),
         egui::pos2(center_x + 250.0, bottom - 10.0),
     );
-    painter.rect_filled(main, egui::Rounding::same(6.0), glass);
-    painter.rect_stroke(
-        main,
-        egui::Rounding::same(6.0),
-        egui::Stroke::new(1.0, cyan),
-    );
+    crate::ui_kit::hud_panel(painter, main, theme, 0.76, cyan);
+    painter.rect_filled(main.shrink(10.0), egui::Rounding::same(6.0), glass);
 
     let map = egui::Rect::from_min_max(
         egui::pos2(center_x - 150.0, bottom - 114.0),
         egui::pos2(center_x + 150.0, bottom - 36.0),
     );
-    painter.rect_filled(
-        map,
-        egui::Rounding::same(4.0),
-        egui::Color32::from_rgba_unmultiplied(0, 24, 42, 160),
-    );
-    painter.rect_stroke(map, egui::Rounding::same(4.0), egui::Stroke::new(1.0, cyan));
+    crate::ui_kit::hud_panel(painter, map, theme, 0.54, magenta);
     for i in 0..8 {
         let x = map.left() + i as f32 * map.width() / 7.0;
         painter.line_segment(
@@ -2914,15 +3321,12 @@ fn draw_cockpit_dashboard(
                 bottom - 22.0,
             ),
         );
-        painter.rect_filled(
+        crate::ui_kit::hud_panel(
+            painter,
             panel,
-            egui::Rounding::same(5.0),
-            egui::Color32::from_rgba_unmultiplied(0, 10, 18, 184),
-        );
-        painter.rect_stroke(
-            panel,
-            egui::Rounding::same(5.0),
-            egui::Stroke::new(1.0, if side > 0.0 { magenta } else { cyan }),
+            theme,
+            0.62,
+            if side > 0.0 { magenta } else { cyan },
         );
         for row in 0..3 {
             for col in 0..4 {

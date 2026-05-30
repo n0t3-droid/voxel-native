@@ -1271,7 +1271,7 @@ fn switch_weapon(
         if blocks_weapons {
             if requested_slot {
                 let status =
-                    "Weapon slots are disabled in Build Studio. Press F3 to return to combat.";
+                    "Weapon slots are holstered in Creative Build. Press F8 to arm weapons.";
                 toolbelt.status = status.into();
                 if let Some(mode) = mode.as_deref_mut() {
                     mode.status = status.into();

@@ -861,6 +861,62 @@ fn rebuild_load_offsets(streamer: &mut ChunkStreamer, rd: i32) {
     streamer.frontier_complete = false;
 }
 
+#[inline]
+fn chunk_slot_known_air(world: &mut VoxelWorld, pos: ChunkPos, vertical_chunks: i32) -> bool {
+    if pos.y < 0 || pos.y >= vertical_chunks {
+        return true;
+    }
+    pos.y > world.column_top_cy_cached(pos.x, pos.z)
+}
+
+#[inline]
+fn chunk_slot_loaded_or_known_air(
+    world: &mut VoxelWorld,
+    pos: ChunkPos,
+    vertical_chunks: i32,
+) -> bool {
+    world.chunks.contains_key(&pos) || chunk_slot_known_air(world, pos, vertical_chunks)
+}
+
+#[inline]
+fn uniform_chunk_slot_matches(
+    world: &mut VoxelWorld,
+    pos: ChunkPos,
+    vertical_chunks: i32,
+    expected: Voxel,
+) -> bool {
+    if let Some(chunk) = world.chunks.get(&pos) {
+        return (chunk.is_empty || chunk.is_uniform_solid) && chunk.uniform_voxel == expected;
+    }
+    chunk_slot_known_air(world, pos, vertical_chunks) && expected == AIR
+}
+
+fn uniform_chunk_is_trivially_invisible(
+    world: &mut VoxelWorld,
+    pos: ChunkPos,
+    vertical_chunks: i32,
+) -> bool {
+    let expected = {
+        let Some(center) = world.chunks.get(&pos) else {
+            return false;
+        };
+        if !(center.is_empty || center.is_uniform_solid) {
+            return false;
+        }
+        center.uniform_voxel
+    };
+    [
+        ChunkPos::new(pos.x + 1, pos.y, pos.z),
+        ChunkPos::new(pos.x - 1, pos.y, pos.z),
+        ChunkPos::new(pos.x, pos.y, pos.z + 1),
+        ChunkPos::new(pos.x, pos.y, pos.z - 1),
+        ChunkPos::new(pos.x, pos.y + 1, pos.z),
+        ChunkPos::new(pos.x, pos.y - 1, pos.z),
+    ]
+    .into_iter()
+    .all(|n| uniform_chunk_slot_matches(world, n, vertical_chunks, expected))
+}
+
 fn sync_streaming_governor(
     governor: &mut StreamingGovernor,
     budget: &RuntimeBudget,
@@ -1059,9 +1115,6 @@ fn stream_chunks(
                     continue;
                 }
                 if cy > col_top {
-                    let mut air_chunk = Chunk::new(cp);
-                    air_chunk.dirty = false;
-                    world.insert_chunk(cp, air_chunk);
                     continue;
                 }
                 if streamer.pending_terrain.len() >= max_in_flight || spawned >= spawn_budget {
@@ -1312,18 +1365,17 @@ fn mesh_dirty_chunks(
             streamer.dirty_queue.insert(pos);
             continue;
         }
-        // Seam avoidance: require all 6 cardinal neighbours loaded before
-        // meshing. Horizontal neighbours prevent XZ seams; vertical
+        // Seam avoidance: require all 6 cardinal neighbours to be loaded
+        // or proven-air before meshing. Horizontal neighbours prevent XZ seams; vertical
         // neighbours close a nasty streaming race where a chunk meshed
         // with its top neighbour missing would sample AIR above, cache
         // the top faces, and then — if the newly-loaded top chunk's
         // dirty re-queue happened while this chunk was already in
         // pending_meshes — never get re-meshed, leaving visible holes /
         // dark patches scattered across the terrain at high altitudes.
-        // Chunks at the world's vertical boundary (cy==0 or cy==vmax)
-        // have no neighbour in that direction, so we treat "out of
-        // range" as permanently loaded-and-empty.
-        let vmax = settings.vertical_chunks as i32 - 1;
+        // Terrain slots above the cached column ceiling are treated as
+        // implicit AIR, so the streamer does not need placeholder chunks.
+        let vertical_chunks = settings.vertical_chunks as i32;
         let neighbours_needed = [
             ChunkPos::new(pos.x + 1, pos.y, pos.z),
             ChunkPos::new(pos.x - 1, pos.y, pos.z),
@@ -1332,55 +1384,19 @@ fn mesh_dirty_chunks(
             ChunkPos::new(pos.x, pos.y + 1, pos.z),
             ChunkPos::new(pos.x, pos.y - 1, pos.z),
         ];
-        let all_neighbours_ready = neighbours_needed.iter().enumerate().all(|(i, n)| {
-            // i==4 is +Y, i==5 is -Y. Skip the check if the neighbour
-            // would lie outside the vertical world.
-            if i == 4 && pos.y >= vmax {
-                return true;
-            }
-            if i == 5 && pos.y <= 0 {
-                return true;
-            }
-            world.chunks.contains_key(n)
-        });
+        let all_neighbours_ready = neighbours_needed
+            .into_iter()
+            .all(|n| chunk_slot_loaded_or_known_air(&mut world, n, vertical_chunks));
         if !all_neighbours_ready {
             // Neighbours haven't streamed in yet; try again next frame.
             streamer.dirty_queue.insert(pos);
             continue;
         }
 
-        // Safe fast-skip: chunk is trivially invisible iff it's uniform
-        // AND every one of its 6 neighbours is uniform of the SAME voxel
-        // type. Comparing voxel types (not just flags) closes the race
-        // the original `is_uniform_solid` skip had, because the test
-        // runs against actual voxel data instead of a flag that might
-        // disagree across frames.
-        let neighbours_all = [
-            ChunkPos::new(pos.x + 1, pos.y, pos.z),
-            ChunkPos::new(pos.x - 1, pos.y, pos.z),
-            ChunkPos::new(pos.x, pos.y, pos.z + 1),
-            ChunkPos::new(pos.x, pos.y, pos.z - 1),
-            ChunkPos::new(pos.x, pos.y + 1, pos.z),
-            ChunkPos::new(pos.x, pos.y - 1, pos.z),
-        ];
-        // Defensive lookup: although the streamer retains the chunk
-        // during this pass, a future change (async completion racing,
-        // cross-system insert) could still evict it. Any missing chunk
-        // simply disables the fast-skip for this candidate.
-        let fast_skip = if let Some(center) = world.chunks.get(&pos) {
-            (center.is_empty || center.is_uniform_solid) && {
-                let cv = center.uniform_voxel;
-                neighbours_all.iter().all(|n| {
-                    world
-                        .chunks
-                        .get(n)
-                        .map(|c| (c.is_empty || c.is_uniform_solid) && c.uniform_voxel == cv)
-                        .unwrap_or(false)
-                })
-            }
-        } else {
-            false
-        };
+        // Safe fast-skip: a uniform chunk is invisible iff every one of
+        // its 6 neighbours is the same uniform voxel, or the neighbour
+        // slot is known implicit AIR and this chunk is AIR too.
+        let fast_skip = uniform_chunk_is_trivially_invisible(&mut world, pos, vertical_chunks);
         if fast_skip {
             if let Some(previous) = streamer.entities.remove(&pos) {
                 for entry in previous {
@@ -1689,5 +1705,74 @@ impl ChunkSnapshot {
             .map(|m| m[idx])
             .unwrap_or(DEFAULT_MATERIAL);
         (voxel, material)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::BlockType;
+
+    fn cache_air_columns(world: &mut VoxelWorld, top_cy: i32) {
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                world.column_top_cy.insert((cx, cz), top_cy);
+            }
+        }
+    }
+
+    fn solid_chunk(pos: ChunkPos, voxel: Voxel) -> Chunk {
+        let mut chunk = Chunk::new(pos);
+        for y in 0..crate::chunk::CHUNK_SIZE {
+            for z in 0..crate::chunk::CHUNK_SIZE {
+                for x in 0..crate::chunk::CHUNK_SIZE {
+                    chunk.set(x, y, z, voxel);
+                }
+            }
+        }
+        chunk.finalize_uniform_flags();
+        chunk
+    }
+
+    #[test]
+    fn known_air_slots_do_not_need_placeholder_chunks() {
+        let mut world = VoxelWorld::new();
+        let pos = ChunkPos::new(4, 5, -3);
+        world.column_top_cy.insert((4, -3), 2);
+
+        assert!(chunk_slot_known_air(&mut world, pos, 8));
+        assert!(chunk_slot_loaded_or_known_air(&mut world, pos, 8));
+        assert!(!world.chunks.contains_key(&pos));
+    }
+
+    #[test]
+    fn chunk_slots_below_column_ceiling_still_wait_for_real_chunks() {
+        let mut world = VoxelWorld::new();
+        let pos = ChunkPos::new(2, 2, 2);
+        world.column_top_cy.insert((2, 2), 2);
+
+        assert!(!chunk_slot_known_air(&mut world, pos, 8));
+        assert!(!chunk_slot_loaded_or_known_air(&mut world, pos, 8));
+    }
+
+    #[test]
+    fn uniform_air_chunk_fast_skip_accepts_implicit_air_neighbours() {
+        let mut world = VoxelWorld::new();
+        cache_air_columns(&mut world, 0);
+        let center = ChunkPos::new(0, 2, 0);
+        world.insert_chunk(center, Chunk::new(center));
+
+        assert!(uniform_chunk_is_trivially_invisible(&mut world, center, 4));
+        assert_eq!(world.chunks.len(), 1);
+    }
+
+    #[test]
+    fn uniform_solid_chunk_does_not_treat_implicit_air_as_hidden() {
+        let mut world = VoxelWorld::new();
+        cache_air_columns(&mut world, 0);
+        let center = ChunkPos::new(0, 2, 0);
+        world.insert_chunk(center, solid_chunk(center, BlockType::Stone.into()));
+
+        assert!(!uniform_chunk_is_trivially_invisible(&mut world, center, 4));
     }
 }
