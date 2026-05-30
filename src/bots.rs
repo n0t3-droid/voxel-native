@@ -5080,33 +5080,47 @@ fn roadside_lot_origins(
         Vec2::new(0.0, -1.0),
     ];
     let mut out = Vec::new();
-    for (segment_idx, (a, b)) in road_network_segments(save, district)
+    let road_segments: Vec<(usize, Vec2, Vec2, f32)> = road_network_segments(save, district)
         .into_iter()
-        .take(20)
         .enumerate()
-    {
-        let span = b - a;
-        let length = span.length();
-        if length < 4.0 {
+        .filter_map(|(segment_idx, (a, b))| {
+            let length = (b - a).length();
+            (length >= 4.0).then_some((segment_idx, a, b, length))
+        })
+        .collect();
+    let total_arc_length: f32 = road_segments.iter().map(|(_, _, _, length)| *length).sum();
+    let total_samples = ((total_arc_length / lot_spacing).floor() as usize).min(48);
+    for sample_idx in 0..total_samples {
+        let target_distance =
+            total_arc_length * (sample_idx + 1) as f32 / (total_samples + 1) as f32;
+        let mut distance_before = 0.0;
+        let Some((segment_idx, a, b, length, local_t)) =
+            road_segments
+                .iter()
+                .find_map(|(segment_idx, a, b, length)| {
+                    let next_distance = distance_before + *length;
+                    let hit = target_distance <= next_distance;
+                    let local_t = ((target_distance - distance_before) / *length).clamp(0.0, 1.0);
+                    distance_before = next_distance;
+                    hit.then_some((*segment_idx, *a, *b, *length, local_t))
+                })
+        else {
             continue;
-        }
+        };
+        let span = b - a;
         let dir = span / length;
         let normal = Vec2::new(-dir.y, dir.x);
-        let sample_count = ((length / lot_spacing).floor() as usize).clamp(1, 6);
-        for sample_idx in 0..sample_count {
-            let t = (sample_idx + 1) as f32 / (sample_count + 1) as f32;
-            let base = a + span * t;
-            for (side_idx, side) in [-1.0_f32, 1.0].into_iter().enumerate() {
-                let stagger_seed = seq + segment_idx * 7 + sample_idx * 3 + side_idx;
-                let stagger = (stagger_seed % 5) as f32 * 4.0 - 8.0;
-                let center = base + normal * side * lot_spacing + dir * stagger;
-                out.push(project_origin_from_center(
-                    world,
-                    bounds,
-                    Vec3::new(center.x, 0.0, center.y),
-                    size,
-                ));
-            }
+        let base = a + span * local_t;
+        for (side_idx, side) in [-1.0_f32, 1.0].into_iter().enumerate() {
+            let stagger_seed = seq + segment_idx * 7 + sample_idx * 3 + side_idx;
+            let stagger = (stagger_seed % 5) as f32 * 4.0 - 8.0;
+            let center = base + normal * side * lot_spacing + dir * stagger;
+            out.push(project_origin_from_center(
+                world,
+                bounds,
+                Vec3::new(center.x, 0.0, center.y),
+                size,
+            ));
         }
     }
     for (idx, point) in road_network_points(save, district)
@@ -5150,7 +5164,10 @@ fn road_network_points(save: &BotWorldSave, district: &BotDistrict) -> Vec<Vec2>
         .map(|a| Vec2::new(a[0] as f32, a[2] as f32))
         .collect();
     for project in &save.projects {
-        if project.district_id != Some(district.id) || !is_access_road_project(project.kind) {
+        if project.district_id != Some(district.id)
+            || !is_access_road_project(project.kind)
+            || matches!(project.status, BotProjectStatus::Blocked)
+        {
             continue;
         }
         let mut had_segment = false;
@@ -5177,23 +5194,118 @@ fn project_road_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
         BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad => {
             build_road_centerline_segments(project)
         }
-        BotTaskKind::ExpandRoadGrid => {
-            let center = project_center(project.origin, project.size);
-            let half_x = project.size[0] as f32 * 0.5;
-            let half_z = project.size[2] as f32 * 0.5;
-            vec![
-                (
-                    Vec2::new(center.x - half_x, center.z),
-                    Vec2::new(center.x + half_x, center.z),
-                ),
-                (
-                    Vec2::new(center.x, center.z - half_z),
-                    Vec2::new(center.x, center.z + half_z),
-                ),
-            ]
-        }
+        BotTaskKind::ExpandRoadGrid => expand_road_grid_segments(project),
         _ => Vec::new(),
     }
+}
+
+fn expand_road_grid_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
+    let mut segments = Vec::new();
+    let width = project.size[0].max(1);
+    let depth = project.size[2].max(1);
+    for target_plan_x in road_grid_targets(width, width / 2) {
+        add_grid_road_segments_along_z(project, target_plan_x, &mut segments);
+    }
+    for target_plan_z in road_grid_targets(depth, depth / 2) {
+        add_grid_road_segments_along_x(project, target_plan_z, &mut segments);
+    }
+    segments
+}
+
+fn road_grid_targets(size: i32, mid: i32) -> Vec<i32> {
+    let mut targets = Vec::new();
+    let mut target = 2;
+    while target < size {
+        targets.push(target);
+        target += 28;
+    }
+    targets.push(mid);
+    targets.sort_unstable();
+    targets.dedup();
+    targets
+}
+
+fn add_grid_road_segments_along_z(
+    project: &BotProject,
+    target_plan_x: i32,
+    segments: &mut Vec<(Vec2, Vec2)>,
+) {
+    let depth = project.size[2].max(1);
+    let width = project.size[0].max(1);
+    let mut prev: Option<Vec2> = None;
+    for local_z in road_grid_sample_axis(depth) {
+        let local_x = target_plan_x - road_grid_bend_x(project, local_z);
+        let point = if (0..width).contains(&local_x) {
+            Some(Vec2::new(
+                project.origin[0] as f32 + local_x as f32,
+                project.origin[2] as f32 + local_z as f32,
+            ))
+        } else {
+            None
+        };
+        push_optional_road_segment(&mut prev, point, segments);
+    }
+}
+
+fn add_grid_road_segments_along_x(
+    project: &BotProject,
+    target_plan_z: i32,
+    segments: &mut Vec<(Vec2, Vec2)>,
+) {
+    let width = project.size[0].max(1);
+    let depth = project.size[2].max(1);
+    let mut prev: Option<Vec2> = None;
+    for local_x in road_grid_sample_axis(width) {
+        let local_z = target_plan_z - road_grid_bend_z(project, local_x);
+        let point = if (0..depth).contains(&local_z) {
+            Some(Vec2::new(
+                project.origin[0] as f32 + local_x as f32,
+                project.origin[2] as f32 + local_z as f32,
+            ))
+        } else {
+            None
+        };
+        push_optional_road_segment(&mut prev, point, segments);
+    }
+}
+
+fn road_grid_sample_axis(size: i32) -> Vec<i32> {
+    let last = (size - 1).max(0);
+    let mut samples = Vec::new();
+    let mut pos = 0;
+    while pos < last {
+        samples.push(pos);
+        pos = (pos + 12).min(last);
+    }
+    samples.push(last);
+    samples.sort_unstable();
+    samples.dedup();
+    samples
+}
+
+fn push_optional_road_segment(
+    prev: &mut Option<Vec2>,
+    point: Option<Vec2>,
+    segments: &mut Vec<(Vec2, Vec2)>,
+) {
+    if let Some(point) = point {
+        if let Some(previous) = *prev {
+            if previous.distance_squared(point) > 1.0 {
+                segments.push((previous, point));
+            }
+        }
+        *prev = Some(point);
+    } else {
+        *prev = None;
+    }
+}
+
+fn road_grid_bend_x(project: &BotProject, local_z: i32) -> i32 {
+    ((local_z as f32 * 0.095 + project.origin[0] as f32 * 0.017).sin() * 4.0).round() as i32
+}
+
+fn road_grid_bend_z(project: &BotProject, local_x: i32) -> i32 {
+    ((local_x as f32 * 0.083 + project.origin[2] as f32 * 0.013).sin() * 4.0).round() as i32
 }
 
 fn build_road_centerline_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
@@ -5234,7 +5346,10 @@ fn road_network_segments(save: &BotWorldSave, district: &BotDistrict) -> Vec<(Ve
         }
     }
     for project in &save.projects {
-        if project.district_id != Some(district.id) || !is_access_road_project(project.kind) {
+        if project.district_id != Some(district.id)
+            || !is_access_road_project(project.kind)
+            || matches!(project.status, BotProjectStatus::Blocked)
+        {
             continue;
         }
         segments.extend(project_road_segments(project));
@@ -6572,10 +6687,8 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let z = origin.z + local.z;
             let mid_x = project.size[0] / 2;
             let mid_z = project.size[2] / 2;
-            let bend_x =
-                ((local.z as f32 * 0.095 + origin.x as f32 * 0.017).sin() * 4.0).round() as i32;
-            let bend_z =
-                ((local.x as f32 * 0.083 + origin.z as f32 * 0.013).sin() * 4.0).round() as i32;
+            let bend_x = road_grid_bend_x(project, local.z);
+            let bend_z = road_grid_bend_z(project, local.x);
             let plan_x = local.x + bend_x;
             let plan_z = local.z + bend_z;
             let cell_x = plan_x.rem_euclid(28);
@@ -10597,14 +10710,52 @@ mod tests {
         });
 
         let grid_segments = road_network_segments(&save, &district);
+        let horizontalish = grid_segments
+            .iter()
+            .filter(|(a, b)| (a.x - b.x).abs() > (a.y - b.y).abs())
+            .count();
+        let verticalish = grid_segments
+            .iter()
+            .filter(|(a, b)| (a.y - b.y).abs() > (a.x - b.x).abs())
+            .count();
+        let min_x = grid_segments
+            .iter()
+            .flat_map(|(a, b)| [a.x, b.x])
+            .fold(f32::INFINITY, f32::min);
+        let max_x = grid_segments
+            .iter()
+            .flat_map(|(a, b)| [a.x, b.x])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_z = grid_segments
+            .iter()
+            .flat_map(|(a, b)| [a.y, b.y])
+            .fold(f32::INFINITY, f32::min);
+        let max_z = grid_segments
+            .iter()
+            .flat_map(|(a, b)| [a.y, b.y])
+            .fold(f32::NEG_INFINITY, f32::max);
 
-        assert_eq!(grid_segments.len(), 2);
-        assert!(grid_segments
-            .iter()
-            .any(|(a, b)| (a.y - b.y).abs() < 0.1 && (a.x - b.x).abs() > 90.0));
-        assert!(grid_segments
-            .iter()
-            .any(|(a, b)| (a.x - b.x).abs() < 0.1 && (a.y - b.y).abs() > 90.0));
+        assert!(
+            grid_segments.len() >= 50,
+            "road grid graph should expose every street line, got {} segments",
+            grid_segments.len()
+        );
+        assert!(
+            horizontalish >= 20,
+            "missing east-west streets: {grid_segments:?}"
+        );
+        assert!(
+            verticalish >= 20,
+            "missing north-south streets: {grid_segments:?}"
+        );
+        assert!(
+            min_x <= -44.0 && max_x >= 44.0,
+            "grid x coverage was {min_x}..{max_x}"
+        );
+        assert!(
+            min_z <= -44.0 && max_z >= 44.0,
+            "grid z coverage was {min_z}..{max_z}"
+        );
 
         save.projects[0].kind = BotTaskKind::BuildRoad;
         save.projects[0].size = [96, 7, 12];
@@ -10614,6 +10765,48 @@ mod tests {
         assert!(single_axis_segments
             .iter()
             .all(|(a, b)| (a.x - b.x).abs() > (a.y - b.y).abs()));
+    }
+
+    #[test]
+    fn blocked_road_projects_do_not_contribute_to_frontage_graph() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Blocked Road Test".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildRoad,
+            label: "Blocked Access".into(),
+            origin: [900, 90, 900],
+            size: [96, 7, 12],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Blocked,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+
+        let points = road_network_points(&save, &district);
+        let segments = road_network_segments(&save, &district);
+
+        assert!(points.iter().all(|point| point.length() < 10.0));
+        assert!(segments
+            .iter()
+            .flat_map(|(a, b)| [a, b])
+            .all(|point| point.length() < 10.0));
     }
 
     #[test]

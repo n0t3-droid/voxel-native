@@ -552,9 +552,14 @@ fn draw_editor_hologram_backplate(
 
 fn draw_header(ui: &mut egui::Ui, state: &mut EditorState, theme: crate::theme::ThemeSettings) {
     draw_banner(ui, theme, "LIQUID TOOLBENCH");
+    let style_label = match theme.style {
+        ThemeStyle::LiquidGlass => "Liquid Glass",
+        ThemeStyle::NeonToolbench => "Neon Toolbench",
+        ThemeStyle::ClassicCrt => "Classic CRT",
+    };
     ui.horizontal(|ui| {
         crate::ui_kit::status_chip(ui, state.tab.icon(), "TAB", state.tab.label(), theme);
-        crate::ui_kit::status_chip(ui, Icon::Hud, "STYLE", "Liquid Glass", theme);
+        crate::ui_kit::status_chip(ui, Icon::Hud, "STYLE", style_label, theme);
         crate::ui_kit::status_chip(ui, Icon::Help, "KEYS", "Alt+1-0 / PgUp PgDn", theme);
     });
     // Tiny inline close "x" so the panel still has a visible close.
