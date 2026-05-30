@@ -5408,11 +5408,19 @@ fn push_optional_road_segment(
 }
 
 fn road_grid_bend_x(project: &BotProject, local_z: i32) -> i32 {
-    ((local_z as f32 * 0.095 + project.origin[0] as f32 * 0.017).sin() * 4.0).round() as i32
+    road_grid_bend_x_from_origin(project.origin[0], local_z)
 }
 
 fn road_grid_bend_z(project: &BotProject, local_x: i32) -> i32 {
-    ((local_x as f32 * 0.083 + project.origin[2] as f32 * 0.013).sin() * 4.0).round() as i32
+    road_grid_bend_z_from_origin(project.origin[2], local_x)
+}
+
+fn road_grid_bend_x_from_origin(origin_x: i32, local_z: i32) -> i32 {
+    ((local_z as f32 * 0.095 + origin_x as f32 * 0.017).sin() * 4.0).round() as i32
+}
+
+fn road_grid_bend_z_from_origin(origin_z: i32, local_x: i32) -> i32 {
+    ((local_x as f32 * 0.083 + origin_z as f32 * 0.013).sin() * 4.0).round() as i32
 }
 
 fn build_road_centerline_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
@@ -5436,11 +5444,14 @@ fn build_road_centerline_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
 
 fn build_road_centerline_point(project: &BotProject, local_x: i32) -> Vec2 {
     let width = project.size[2].max(1);
-    let curve = ((local_x as f32 * 0.16).sin() * 2.0).round();
     Vec2::new(
         project.origin[0] as f32 + local_x as f32,
-        project.origin[2] as f32 + width as f32 * 0.5 + curve,
+        build_road_center_z(project.origin[2], width, local_x) as f32,
     )
+}
+
+fn build_road_center_z(origin_z: i32, width: i32, local_x: i32) -> i32 {
+    origin_z + width.max(1) / 2 + ((local_x as f32 * 0.16).sin() * 2.0).round() as i32
 }
 
 fn road_network_segments(save: &BotWorldSave, district: &BotDistrict) -> Vec<(Vec2, Vec2)> {
@@ -5812,6 +5823,11 @@ fn score_planned_site(
     } else {
         city_block_fit_score(&road_segments, origin, size, kind)
     };
+    let route_fit = if is_access_road_project(kind) {
+        road_route_fit_score(world, origin, size, kind)
+    } else {
+        0.0
+    };
     let balance = match (district.kind, kind) {
         (BotDistrictKind::Park, BotTaskKind::BuildPark | BotTaskKind::BuildPlaza) => 1.0,
         (BotDistrictKind::Skyline, BotTaskKind::BuildGlassTower | BotTaskKind::BuildTower) => 1.0,
@@ -5824,7 +5840,8 @@ fn score_planned_site(
         _ => 0.65,
     };
     let inside = bounds.contains_box(origin, size);
-    score_city_slot(flatness, road_access, inside, balance, true) + block_fit.clamp(0.0, 1.0) * 0.55
+    score_city_slot_with_route_fit(flatness, road_access, inside, balance, true, route_fit)
+        + block_fit.clamp(0.0, 1.0) * 0.55
         - bounds.distance_from_center(center_x as f32, center_z as f32) * 0.0005
 }
 
@@ -5839,6 +5856,27 @@ fn score_city_slot(
         return -10_000.0;
     }
     flatness * 2.5 + road_access.clamp(0.0, 1.0) * 2.4 + district_balance.clamp(0.0, 1.0) * 1.8
+}
+
+fn score_city_slot_with_route_fit(
+    flatness: f32,
+    road_access: f32,
+    inside_bounds: bool,
+    district_balance: f32,
+    player_clearance: bool,
+    road_route_fit: f32,
+) -> f32 {
+    let base = score_city_slot(
+        flatness,
+        road_access,
+        inside_bounds,
+        district_balance,
+        player_clearance,
+    );
+    if base < 0.0 {
+        return base;
+    }
+    base + road_route_fit.clamp(0.0, 1.0) * 1.35
 }
 
 fn terrain_flatness(world: &VoxelWorld, x: i32, z: i32, radius: i32) -> f32 {
@@ -6182,7 +6220,7 @@ fn build_project_concept(
                 phase: "Road Grade".into(),
                 owner: role_owner_label(save, BotRole::Surveyor, &team),
                 material: "terrain-aware grade sheet".into(),
-                detail: "Roads sample nearby terrain, lift shallow valleys, keep hilltops intact, and score buildings by real street-edge frontage.".into(),
+                detail: "Roads score the full planned route, follow continuous terrain grades, bend through corners, lift shallow valleys, keep hilltops intact, and give later buildings real street-edge frontage.".into(),
                 status: "queued".into(),
             },
         );
@@ -6944,6 +6982,102 @@ fn road_support_depth(surface_y: i32, road_y: i32, slope: i32, structural_edge: 
     slope_depth.max(lift_depth).clamp(0, max_depth)
 }
 
+fn road_route_fit_score(
+    world: &VoxelWorld,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> f32 {
+    let heights: Vec<i32> = road_route_sample_points(origin, size, kind)
+        .into_iter()
+        .map(|(x, z)| world.surface_height_at(x, z) + 1)
+        .collect();
+    road_route_profile_score(&heights)
+}
+
+fn road_route_profile_score(heights: &[i32]) -> f32 {
+    if heights.len() < 2 {
+        return 0.5;
+    }
+    let min = heights.iter().min().copied().unwrap_or(0);
+    let max = heights.iter().max().copied().unwrap_or(0);
+    let mut max_step = 0;
+    let mut step_total = 0;
+    let mut step_count = 0;
+    for pair in heights.windows(2) {
+        let step = (pair[1] - pair[0]).abs();
+        max_step = max_step.max(step);
+        step_total += step;
+        step_count += 1;
+    }
+    let average_step = if step_count > 0 {
+        step_total as f32 / step_count as f32
+    } else {
+        0.0
+    };
+    let average_penalty = (average_step / 5.0).clamp(0.0, 1.0);
+    let peak_penalty = (max_step as f32 / 9.0).clamp(0.0, 1.0);
+    let range_penalty = (((max - min) - 18).max(0) as f32 / 34.0).clamp(0.0, 1.0);
+    (1.0 - average_penalty * 0.55 - peak_penalty * 0.30 - range_penalty * 0.15).clamp(0.0, 1.0)
+}
+
+fn road_route_sample_points(
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> Vec<(i32, i32)> {
+    match kind {
+        BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad => {
+            build_road_route_sample_points(origin, size)
+        }
+        BotTaskKind::ExpandRoadGrid => expand_road_grid_route_sample_points(origin, size),
+        _ => Vec::new(),
+    }
+}
+
+fn build_road_route_sample_points(origin: [i32; 3], size: [i32; 3]) -> Vec<(i32, i32)> {
+    let length = size[0].max(1);
+    let last_x = (length - 1).max(0);
+    let width = size[2].max(1);
+    let mut points = Vec::new();
+    let mut local_x = 0;
+    while local_x < last_x {
+        points.push((
+            origin[0] + local_x,
+            build_road_center_z(origin[2], width, local_x),
+        ));
+        local_x = (local_x + 8).min(last_x);
+    }
+    points.push((
+        origin[0] + last_x,
+        build_road_center_z(origin[2], width, last_x),
+    ));
+    points
+}
+
+fn expand_road_grid_route_sample_points(origin: [i32; 3], size: [i32; 3]) -> Vec<(i32, i32)> {
+    let width = size[0].max(1);
+    let depth = size[2].max(1);
+    let mut points = Vec::new();
+    for target_plan_x in road_grid_targets(width, width / 2) {
+        for local_z in road_grid_sample_axis(depth) {
+            let local_x = target_plan_x - road_grid_bend_x_from_origin(origin[0], local_z);
+            if (0..width).contains(&local_x) {
+                points.push((origin[0] + local_x, origin[2] + local_z));
+            }
+        }
+    }
+    for target_plan_z in road_grid_targets(depth, depth / 2) {
+        for local_x in road_grid_sample_axis(width) {
+            let local_z = target_plan_z - road_grid_bend_z_from_origin(origin[2], local_x);
+            if (0..depth).contains(&local_z) {
+                points.push((origin[0] + local_x, origin[2] + local_z));
+            }
+        }
+    }
+    points
+}
+
 fn road_support_voxel(
     world: &VoxelWorld,
     x: i32,
@@ -7000,9 +7134,9 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
     match project.kind {
         BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad => {
             let x = origin.x + local.x;
-            let curve = ((local.x as f32 * 0.16).sin() * 2.0).round() as i32;
-            let z = origin.z + local.z + curve;
             let width = project.size[2].max(1);
+            let z = origin.z + local.z + build_road_center_z(origin.z, width, local.x)
+                - (origin.z + width / 2);
             let sidewalk = local.z <= 1 || local.z >= width - 2;
             let curb = local.z == 2 || local.z == width - 3;
             let y = road_grade_y(world, x, z, sidewalk || curb);
@@ -10881,6 +11015,39 @@ mod tests {
         assert_eq!(road_support_depth(72, 77, 1, false), 3);
         assert_eq!(road_support_depth(72, 73, 0, false), 0);
         assert_eq!(road_support_depth(72, 73, 4, false), 2);
+    }
+
+    #[test]
+    fn road_route_profile_prefers_continuous_grades_over_jagged_hill_cuts() {
+        let rolling_contour = [72, 73, 74, 74, 75, 76, 76, 77, 78];
+        let jagged_cut = [72, 86, 71, 90, 69, 88, 70, 91, 73];
+
+        let contour_score = road_route_profile_score(&rolling_contour);
+        let jagged_score = road_route_profile_score(&jagged_cut);
+
+        assert!(
+            contour_score > 0.80,
+            "rolling contour route should stay high, got {contour_score}"
+        );
+        assert!(
+            jagged_score < 0.35,
+            "jagged route should be rejected, got {jagged_score}"
+        );
+        assert!(
+            contour_score > jagged_score + 0.50,
+            "road planner should strongly prefer continuous grades: {contour_score} vs {jagged_score}"
+        );
+    }
+
+    #[test]
+    fn access_road_site_score_includes_route_grade_fit() {
+        let smooth = score_city_slot_with_route_fit(0.7, 1.0, true, 0.8, true, 0.95);
+        let jagged = score_city_slot_with_route_fit(0.7, 1.0, true, 0.8, true, 0.10);
+
+        assert!(
+            smooth > jagged + 1.0,
+            "access road scoring should reward terrain-following routes: smooth {smooth}, jagged {jagged}"
+        );
     }
 
     #[test]
