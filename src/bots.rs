@@ -1404,6 +1404,27 @@ impl BuildingStreetFace {
         }
     }
 
+    fn raised_access_deck_cell(self, local: IVec3, sx: i32, sz: i32, setback: i32) -> bool {
+        match self {
+            Self::North => {
+                local.z >= setback && local.z <= setback + 4 && (local.x - sx / 2).abs() <= 2
+            }
+            Self::South => {
+                local.z <= sz - setback
+                    && local.z >= sz - setback - 4
+                    && (local.x - sx / 2).abs() <= 2
+            }
+            Self::West => {
+                local.x >= setback && local.x <= setback + 4 && (local.z - sz / 2).abs() <= 2
+            }
+            Self::East => {
+                local.x <= sx - setback
+                    && local.x >= sx - setback - 4
+                    && (local.z - sz / 2).abs() <= 2
+            }
+        }
+    }
+
     fn skyline_corner_marker_cell(self, local: IVec3, sx: i32, sz: i32, setback: i32) -> bool {
         let near_min_x = (local.x - (setback + 1)).abs() <= 1;
         let near_max_x = (local.x - (sx - setback - 1)).abs() <= 1;
@@ -8370,8 +8391,17 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 && podium
                 && local.y == 2
                 && street_face.lobby_detail_cell(local, sx, sz, setback);
+            let raised_from_terrain = origin.y - (world.surface_height_at(p.x, p.z) + 1) >= 4;
+            let raised_access_deck = tower_kind
+                && raised_from_terrain
+                && local.y == 0
+                && street_face.raised_access_deck_cell(local, sx, sz, setback);
             let voxel = if local.y == 0 {
-                Voxel::from(BlockType::Limestone)
+                if raised_access_deck {
+                    project.theme.accent()
+                } else {
+                    Voxel::from(BlockType::Limestone)
+                }
             } else if local.y == sy {
                 let hvac = match variant {
                     1 => (local.x - sx / 2).abs() <= 1 && (local.z - sz / 2).abs() <= 3,
@@ -13752,6 +13782,46 @@ mod tests {
             )),
             "raised foundations should continue downward instead of leaving a floating tower"
         );
+    }
+
+    #[test]
+    fn raised_tower_deck_marks_road_facing_entry_lane() {
+        let world = VoxelWorld::new();
+        let terrain_base = world.surface_height_at(18, 10) + 1;
+        let road_grade_base = terrain_base + 28;
+        let project = BotProject {
+            id: 4,
+            kind: BotTaskKind::BuildGlassTower,
+            label: "Raised Access Tower".into(),
+            origin: [0, road_grade_base, 0],
+            size: [21, 58, 21],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                ..default()
+            },
+        };
+
+        let entry_lane =
+            project_voxel(&project, IVec3::new(18, 0, 10), &world).map(|(_, voxel)| voxel);
+        let quiet_deck =
+            project_voxel(&project, IVec3::new(4, 0, 10), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(
+            entry_lane,
+            Some(project.theme.accent()),
+            "raised towers should visibly mark the road-facing deck lane into the entrance"
+        );
+        assert_eq!(quiet_deck, Some(Voxel::from(BlockType::Limestone)));
     }
 
     #[test]
