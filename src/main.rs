@@ -198,12 +198,12 @@ fn print_controls() {
     info!("  Ctrl         : sprint");
     info!("  W W (double) : sprint (empfohlen, da Windows Ctrl abfangen kann)");
     info!("  Shift        : fly down / sneak");
-    info!("  1-9          : hotbar");
+    info!("  1-0          : Creative Build tools (default mode)");
     info!("  E            : open inventory");
-    info!("  F3           : build tools / editor mode (weapons holstered)");
-    info!("  F8           : toggle build mode / weapons mode");
+    info!("  F3           : Creative Build / terrain editing (weapons holstered)");
+    info!("  F7           : enter Build Live instantly");
+    info!("  F8           : arm or holster weapons explicitly");
     info!("  Tab          : show/hide Build Studio picker");
-    info!("  F7           : Build Studio picker alias");
     info!("  Q / E        : cycle Build Studio tools while building");
     info!("  F1 / Ctrl+P  : command deck / searchable controls");
     info!("  H            : enter nearby shuttle cockpit (or LMB)");

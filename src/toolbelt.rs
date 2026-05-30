@@ -213,7 +213,7 @@ impl Default for ToolbeltState {
             live: false,
             palette_open: false,
             tool: ToolbeltTool::DrawRect,
-            status: "F3 enters Build Live. 1-0 tools, Q/E cycle, Tab picker.".into(),
+            status: "F7 enters Build Live. 1-0 tools, Q/E cycle, Tab picker.".into(),
         }
     }
 }
@@ -256,7 +256,8 @@ fn toolbelt_hotkeys(
         if toolbelt.palette_open || toolbelt.live {
             toolbelt.palette_open = false;
             toolbelt.live = false;
-            toolbelt.status = "Build Studio closed. Combat controls restored.".into();
+            toolbelt.status =
+                "Weapons armed explicitly. F8 holsters back to Creative Build.".into();
         } else {
             if toolbelt.tool == ToolbeltTool::Navigate {
                 toolbelt.tool = ToolbeltTool::DrawRect;
@@ -282,7 +283,7 @@ fn toolbelt_hotkeys(
             toolbelt.tool = ToolbeltTool::DrawRect;
         }
         toolbelt.status = if toolbelt.palette_open {
-            "Build Studio picker: click a tool, Q/E cycles tools, F3 exits.".into()
+            "Build Studio picker: click a tool, Q/E cycles tools, F8 arms weapons.".into()
         } else {
             format!(
                 "Build Live: {}. {}",
@@ -293,15 +294,16 @@ fn toolbelt_hotkeys(
     }
 
     if keys.just_pressed(KeyCode::F7) {
-        if !toolbelt.live {
-            toolbelt.live = true;
-            toolbelt.palette_open = true;
-        } else {
-            toolbelt.palette_open = !toolbelt.palette_open;
-        }
+        toolbelt.live = true;
+        toolbelt.palette_open = false;
         changed = true;
-        toolbelt.status = if toolbelt.palette_open {
-            "Build Studio picker visible. Pick a tool or press Tab/F7 to hide it.".into()
+        toolbelt.status = if toolbelt.tool == ToolbeltTool::Navigate {
+            toolbelt.tool = ToolbeltTool::DrawRect;
+            format!(
+                "Build Live: {}. {}",
+                toolbelt.tool.label(),
+                toolbelt.tool.hint()
+            )
         } else {
             format!(
                 "Build Live: {}. {}",
@@ -328,11 +330,12 @@ fn toolbelt_hotkeys(
             toolbelt.status = format!("Picker hidden. Build Live: {}.", toolbelt.tool.label());
         } else if toolbelt.live && toolbelt.tool == ToolbeltTool::DrawRect {
             toolbelt.status =
-                "Rectangle Fill: active drag cancelled. F3 exits Build Studio.".into();
+                "Rectangle Fill: active drag cancelled. F8 arms weapons only if needed.".into();
         } else if toolbelt.live {
             toolbelt.live = false;
             changed = true;
-            toolbelt.status = "Build Studio closed. Combat controls restored.".into();
+            toolbelt.status =
+                "Weapons armed explicitly. F8 holsters back to Creative Build.".into();
         }
     }
 
@@ -419,13 +422,13 @@ fn draw_toolbelt(
         } else if mode.is_build_live() {
             mode.set(
                 ActiveMode::BuildPicker { tool },
-                "Build Studio picker visible. Pick a tool or press Tab/F7 to hide it.",
+                "Build Studio picker visible. Pick a tool or press Tab to hide it.",
             );
             toolbelt.status = mode.status.clone();
         } else {
             mode.set(
                 ActiveMode::BuildPicker { tool },
-                "Build Studio picker visible. Pick a tool or press Tab/F7 to hide it.",
+                "Build Studio picker visible. Pick a tool or press Tab to hide it.",
             );
             toolbelt.status = mode.status.clone();
         }
@@ -474,7 +477,10 @@ fn sync_tool_selection(
             )
         }
     } else {
-        format!("{} selected. F3 opens Build Studio.", toolbelt.tool.label())
+        format!(
+            "{} selected. F3 keeps Creative Build active.",
+            toolbelt.tool.label()
+        )
     };
 }
 
@@ -531,16 +537,23 @@ fn draw_build_dock(
     ctx: &egui::Context,
 ) -> BuildDockResult {
     let mut result = BuildDockResult::default();
+    let colors = theme.semantic();
     let frame = egui::Frame::none()
-        .fill(egui::Color32::from_rgba_premultiplied(
-            0,
-            4,
-            3,
-            if picker_open { 238 } else { 216 },
+        .fill(egui::Color32::from_rgba_unmultiplied(
+            colors.surface_strong.r(),
+            colors.surface_strong.g(),
+            colors.surface_strong.b(),
+            if picker_open { 218 } else { 186 },
         ))
-        .stroke(egui::Stroke::new(1.0, active_tool.category_color()))
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
-        .rounding(egui::Rounding::same(6.0));
+        .stroke(egui::Stroke::new(1.15, colors.info))
+        .inner_margin(egui::Margin::symmetric(12.0, 9.0))
+        .rounding(egui::Rounding::same(10.0))
+        .shadow(egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 10.0),
+            blur: 24.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(132),
+        });
 
     egui::Area::new(egui::Id::new("voxel_native_build_dock"))
         .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -18.0))
@@ -641,11 +654,18 @@ fn selected_tool_badge(
 ) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(154.0, 34.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
+    let glass = egui::Color32::from_rgba_unmultiplied(12, 34, 45, 188);
+    let sheen = egui::Color32::from_rgba_unmultiplied(220, 250, 255, 34);
     painter.rect(
         rect,
-        egui::Rounding::same(4.0),
-        egui::Color32::from_rgba_premultiplied(0, 12, 8, 205),
+        egui::Rounding::same(8.0),
+        glass,
         egui::Stroke::new(1.0, tool.category_color()),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.center().y)),
+        egui::Rounding::same(8.0),
+        sheen,
     );
     let icon_rect =
         egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 7.0), egui::vec2(20.0, 20.0));
@@ -741,14 +761,14 @@ fn mouse_action_badge(
     let (rect, response) = ui.allocate_exact_size(egui::vec2(64.0, 34.0), egui::Sense::hover());
     let hovered = response.hovered();
     let bg = if hovered {
-        egui::Color32::from_rgba_premultiplied(color.r() / 5, color.g() / 5, color.b() / 5, 230)
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 70)
     } else {
-        egui::Color32::from_rgba_premultiplied(0, 10, 7, 190)
+        egui::Color32::from_rgba_unmultiplied(12, 28, 38, 168)
     };
     let painter = ui.painter_at(rect);
     painter.rect(
         rect,
-        egui::Rounding::same(4.0),
+        egui::Rounding::same(8.0),
         bg,
         egui::Stroke::new(
             1.0,
@@ -1051,7 +1071,7 @@ fn live_chip(ui: &mut egui::Ui, live: bool, expanded: bool, primary: egui::Color
         );
     }
     let clicked = response.clicked();
-    response.on_hover_text("Show/hide Build Studio picker. F3 exits Build Studio.");
+    response.on_hover_text("Show/hide Build Studio picker. F8 arms weapons explicitly.");
     clicked
 }
 

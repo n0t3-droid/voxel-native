@@ -32,7 +32,7 @@ pub enum ActiveMode {
 
 impl Default for ActiveMode {
     fn default() -> Self {
-        Self::Combat
+        default_creative_mode()
     }
 }
 
@@ -127,10 +127,11 @@ impl BuildGestureLock {
 
 impl Default for ModeContext {
     fn default() -> Self {
+        let mode = default_creative_mode();
         Self {
-            mode: ActiveMode::Combat,
-            last_mode: ActiveMode::Combat,
-            status: "Combat controls active.".into(),
+            mode,
+            last_mode: mode,
+            status: default_creative_status().into(),
             transition_hint_t: 0.0,
         }
     }
@@ -239,14 +240,28 @@ fn reconcile_external_mode(
             }
         }
         GameState::InGame => {
-            if !mode.mode.is_build() && !mode.mode.is_ship() {
-                set_external_mode(&mut mode, ActiveMode::Combat, "Combat controls active.");
+            if matches!(
+                mode.mode,
+                ActiveMode::Paused
+                    | ActiveMode::Inventory
+                    | ActiveMode::Editor { .. }
+                    | ActiveMode::CommandPalette
+            ) {
+                let next = resume_mode_after_overlay(mode.last_mode);
+                let status = resume_status(next);
+                set_external_mode_owned(&mut mode, next, status);
             }
         }
     }
 }
 
 fn set_external_mode(mode: &mut ModeContext, next: ActiveMode, status: &'static str) {
+    if mode.mode != next {
+        mode.set(next, status);
+    }
+}
+
+fn set_external_mode_owned(mode: &mut ModeContext, next: ActiveMode, status: String) {
     if mode.mode != next {
         mode.set(next, status);
     }
@@ -265,46 +280,51 @@ fn mode_hotkeys(
         return;
     }
 
-    if keys.just_pressed(KeyCode::F3) || keys.just_pressed(KeyCode::F8) {
-        capture_player_continuity(&player_q, &mut continuity);
-        if mode.is_build() {
-            mode.set(
-                ActiveMode::Combat,
-                "Weapons ready. Same position, same view.",
-            );
-        } else {
-            let tool = normalized_build_tool(toolbelt.tool);
-            toolbelt.tool = tool;
-            mode.set(
-                ActiveMode::BuildLive { tool },
-                format!(
-                    "Build Live: {}. F8 returns to weapons without moving you.",
-                    tool.label()
-                ),
-            );
-        }
+    if mode.is_ship() {
         return;
     }
 
-    if keys.just_pressed(KeyCode::Tab) || keys.just_pressed(KeyCode::F7) {
+    if keys.just_pressed(KeyCode::F3) {
+        capture_player_continuity(&player_q, &mut continuity);
         let tool = normalized_build_tool(mode.build_tool().unwrap_or(toolbelt.tool));
         toolbelt.tool = tool;
-        if mode.is_build_picker() {
-            mode.set(
-                ActiveMode::BuildLive { tool },
-                format!("Build Live: {}. {}", tool.label(), tool.hint()),
-            );
-        } else if mode.is_build_live() {
-            mode.set(
-                ActiveMode::BuildPicker { tool },
-                "Build Studio picker visible. Pick a tool or press Tab/F7 to hide it.",
-            );
-        } else {
-            mode.set(
-                ActiveMode::BuildPicker { tool },
-                "Build Studio picker: choose a named tool, then build with LMB.",
-            );
+        mode.set(
+            ActiveMode::BuildLive { tool },
+            format!(
+                "Creative Build: {}. LMB edits terrain; F8 arms weapons only when you ask.",
+                tool.label()
+            ),
+        );
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::F8) {
+        capture_player_continuity(&player_q, &mut continuity);
+        let (next, status) = next_mode_for_f8(mode.mode, toolbelt.tool);
+        if let Some(tool) = next.build_tool() {
+            toolbelt.tool = tool;
         }
+        mode.set(next, status);
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::F7) {
+        capture_player_continuity(&player_q, &mut continuity);
+        let (next, status) = next_mode_for_f7(mode.mode, toolbelt.tool);
+        if let Some(tool) = next.build_tool() {
+            toolbelt.tool = tool;
+        }
+        mode.set(next, status);
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Tab) {
+        capture_player_continuity(&player_q, &mut continuity);
+        let (next, status) = next_mode_for_tab(mode.mode, toolbelt.tool);
+        if let Some(tool) = next.build_tool() {
+            toolbelt.tool = tool;
+        }
+        mode.set(next, status);
         return;
     }
 
@@ -381,7 +401,7 @@ fn mode_hotkeys(
             } else {
                 mode.set(
                     ActiveMode::BuildLive { tool },
-                    "No active build gesture to cancel. Press F3 to exit Build Studio.",
+                    "No active build gesture to cancel. Press F8 only if you want weapons.",
                 );
             }
         }
@@ -452,6 +472,95 @@ fn normalized_build_tool(tool: ToolbeltTool) -> ToolbeltTool {
     }
 }
 
+fn active_or_fallback_build_tool(mode: ActiveMode, fallback_tool: ToolbeltTool) -> ToolbeltTool {
+    normalized_build_tool(mode.build_tool().unwrap_or(fallback_tool))
+}
+
+fn next_mode_for_f8(current_mode: ActiveMode, fallback_tool: ToolbeltTool) -> (ActiveMode, String) {
+    if current_mode.allows_weapons() {
+        let tool = active_or_fallback_build_tool(current_mode, fallback_tool);
+        (
+            ActiveMode::BuildLive { tool },
+            format!("Weapons holstered. Creative Build: {}.", tool.label()),
+        )
+    } else {
+        (
+            ActiveMode::Combat,
+            "Weapons armed explicitly. F8 holsters them back to Creative Build.".into(),
+        )
+    }
+}
+
+fn next_mode_for_f7(current_mode: ActiveMode, fallback_tool: ToolbeltTool) -> (ActiveMode, String) {
+    let tool = active_or_fallback_build_tool(current_mode, fallback_tool);
+    (
+        ActiveMode::BuildLive { tool },
+        format!("Build Live: {}. {}", tool.label(), tool.hint()),
+    )
+}
+
+fn next_mode_for_tab(
+    current_mode: ActiveMode,
+    fallback_tool: ToolbeltTool,
+) -> (ActiveMode, String) {
+    let tool = active_or_fallback_build_tool(current_mode, fallback_tool);
+    if current_mode.is_build_picker() {
+        (
+            ActiveMode::BuildLive { tool },
+            format!("Build Live: {}. {}", tool.label(), tool.hint()),
+        )
+    } else {
+        (
+            ActiveMode::BuildPicker { tool },
+            "Build Studio picker visible. Pick a tool or press Tab to hide it.".into(),
+        )
+    }
+}
+
+fn default_creative_mode() -> ActiveMode {
+    ActiveMode::BuildLive {
+        tool: ToolbeltTool::DrawRect,
+    }
+}
+
+fn default_creative_status() -> &'static str {
+    "Creative Build active. LMB edits terrain; F8 arms weapons explicitly."
+}
+
+fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {
+    match last_mode {
+        ActiveMode::Combat
+        | ActiveMode::BuildPicker { .. }
+        | ActiveMode::BuildLive { .. }
+        | ActiveMode::ShipPlacement { .. }
+        | ActiveMode::ShipFlight { .. } => last_mode,
+        ActiveMode::Editor { .. }
+        | ActiveMode::Inventory
+        | ActiveMode::Paused
+        | ActiveMode::CommandPalette => default_creative_mode(),
+    }
+}
+
+fn resume_status(mode: ActiveMode) -> String {
+    match mode {
+        ActiveMode::Combat => {
+            "Weapons still armed from before pause. F8 holsters to Creative Build.".into()
+        }
+        ActiveMode::BuildPicker { tool } => {
+            format!("Build picker restored: {}. Tab hides picker.", tool.label())
+        }
+        ActiveMode::BuildLive { tool } => {
+            format!("Creative Build restored: {}. {}", tool.label(), tool.hint())
+        }
+        ActiveMode::ShipPlacement { kind } => format!("Ship placement restored: {}.", kind.label()),
+        ActiveMode::ShipFlight { .. } => "Ship cockpit restored.".into(),
+        ActiveMode::Editor { .. }
+        | ActiveMode::Inventory
+        | ActiveMode::Paused
+        | ActiveMode::CommandPalette => default_creative_status().into(),
+    }
+}
+
 fn sync_legacy_toolbelt(mut toolbelt: ResMut<ToolbeltState>, mode: Res<ModeContext>) {
     if let Some(tool) = mode.build_tool() {
         toolbelt.tool = tool;
@@ -509,10 +618,113 @@ fn mode_cursor_guard(mode: Res<ModeContext>, mut windows: Query<&mut Window, Wit
             window.cursor.grab_mode = CursorGrabMode::Locked;
             window.cursor.visible = false;
         }
+        ActiveMode::Combat => {
+            window.cursor.grab_mode = CursorGrabMode::Locked;
+            window.cursor.visible = false;
+        }
         ActiveMode::ShipPlacement { .. } | ActiveMode::ShipFlight { .. } => {
             window.cursor.grab_mode = CursorGrabMode::Locked;
             window.cursor.visible = false;
         }
-        ActiveMode::Combat => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_mode_is_creative_build_not_combat() {
+        assert_eq!(
+            ActiveMode::default(),
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::DrawRect
+            }
+        );
+        let mode = ModeContext::default();
+        assert!(!mode.allows_weapons());
+        assert!(mode.is_build_live());
+    }
+
+    #[test]
+    fn resume_after_menu_defaults_to_creative_build() {
+        assert_eq!(
+            resume_mode_after_overlay(ActiveMode::Paused),
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::DrawRect
+            }
+        );
+        assert_eq!(
+            resume_mode_after_overlay(ActiveMode::Combat),
+            ActiveMode::Combat
+        );
+    }
+
+    #[test]
+    fn f7_enters_build_live_without_opening_picker() {
+        let (next, _) = next_mode_for_f7(ActiveMode::Combat, ToolbeltTool::CityRoad);
+        assert_eq!(
+            next,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::CityRoad
+            }
+        );
+
+        let (next, _) = next_mode_for_f7(
+            ActiveMode::BuildPicker {
+                tool: ToolbeltTool::CityBuilding,
+            },
+            ToolbeltTool::DrawRect,
+        );
+        assert_eq!(
+            next,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::CityBuilding
+            }
+        );
+    }
+
+    #[test]
+    fn tab_remains_the_picker_toggle() {
+        let (next, status) = next_mode_for_tab(ActiveMode::Combat, ToolbeltTool::CityRoad);
+        assert_eq!(
+            next,
+            ActiveMode::BuildPicker {
+                tool: ToolbeltTool::CityRoad
+            }
+        );
+        assert!(status.contains("Tab"));
+
+        let (next, _) = next_mode_for_tab(
+            ActiveMode::BuildPicker {
+                tool: ToolbeltTool::CityRoad,
+            },
+            ToolbeltTool::DrawRect,
+        );
+        assert_eq!(
+            next,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::CityRoad
+            }
+        );
+    }
+
+    #[test]
+    fn f8_only_toggles_combat_and_build_modes() {
+        let (next, _) = next_mode_for_f8(
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::Sculpt,
+            },
+            ToolbeltTool::DrawRect,
+        );
+        assert_eq!(next, ActiveMode::Combat);
+
+        let (next, _) = next_mode_for_f8(ActiveMode::Combat, ToolbeltTool::CityBuilding);
+        assert_eq!(
+            next,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::CityBuilding
+            }
+        );
     }
 }

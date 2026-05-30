@@ -1030,7 +1030,7 @@ fn neon_showcase_warp_input(
     if settings.visual_preset != crate::settings::VisualPreset::NeonShuttle {
         return;
     }
-    if !keys.just_pressed(KeyCode::F8) {
+    if !wants_neon_showcase_warp(&keys) {
         return;
     }
     let Ok((mut transform, mut player)) = query.get_single_mut() else {
@@ -1042,7 +1042,9 @@ fn neon_showcase_warp_input(
         .generator
         .find_neon_showcase_spawn(origin_x, origin_z, 16_000)
     else {
-        warn!("F8 neon warp: no AlienReef/CrystalSpires showcase found near current position");
+        warn!(
+            "Shift+F9 neon warp: no AlienReef/CrystalSpires showcase found near current position"
+        );
         return;
     };
 
@@ -1055,7 +1057,34 @@ fn neon_showcase_warp_input(
     transform.rotation =
         Quat::from_axis_angle(Vec3::Y, player.yaw) * Quat::from_axis_angle(Vec3::X, player.pitch);
     info!(
-        "F8 neon warp: {:?} at {}, {}, {}",
+        "Shift+F9 neon warp: {:?} at {}, {}, {}",
         spawn.biome, spawn.x, spawn.y, spawn.z
     );
+}
+
+fn wants_neon_showcase_warp(keys: &ButtonInput<KeyCode>) -> bool {
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    shift && keys.just_pressed(KeyCode::F9)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f8_is_reserved_for_mode_switch_not_showcase_warp() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::F8);
+
+        assert!(!wants_neon_showcase_warp(&keys));
+    }
+
+    #[test]
+    fn shift_f9_is_the_explicit_showcase_warp_shortcut() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+        keys.press(KeyCode::F9);
+
+        assert!(wants_neon_showcase_warp(&keys));
+    }
 }

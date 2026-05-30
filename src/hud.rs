@@ -353,7 +353,7 @@ fn update_stats_text(
     buf.clear();
     let _ = write!(
         buf,
-        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nKEYS F8 build/weapons  F3 build studio  Tab picker  Q/E cycle  F1 deck  ESC pause  F5 save",
+        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nKEYS F7 build live  1-0 tools  Tab picker  F8 arm/holster weapons  F1 deck  ESC pause",
         governor.profile.label(),
         governor.intent.label(),
         governor.quality.label(),
@@ -385,6 +385,7 @@ fn draw_neon_combat_hud(
     mode: Option<Res<crate::mode::ModeContext>>,
     settings: Res<WorldSettings>,
     world: Res<VoxelWorld>,
+    governor: Res<StreamingGovernor>,
     player_q: Query<(&Transform, &Player)>,
     director: Option<Res<SimulationDirector>>,
     brain: Option<Res<crate::bots::FriendlyWorldBrain>>,
@@ -727,6 +728,48 @@ fn draw_neon_combat_hud(
             ),
             egui::Color32::from_gray(200),
             11.0,
+        );
+    }
+
+    if profile != HudProfile::Focused {
+        let config = egui::Rect::from_min_size(
+            egui::pos2(screen.right() - 304.0, screen.bottom() - 246.0),
+            egui::vec2(282.0, 64.0),
+        );
+        crate::ui_kit::hud_panel(&painter, config, settings.theme, hud_opacity * 0.78, green);
+        hud_text(
+            &painter,
+            config.left_top() + egui::vec2(14.0, 9.0),
+            "LIQUID CORE CONFIG",
+            green,
+            13.0,
+        );
+        hud_text(
+            &painter,
+            config.left_top() + egui::vec2(14.0, 30.0),
+            &format!(
+                "{} {}  RD {}/{}",
+                governor.profile.label(),
+                governor.quality.label(),
+                governor.active_render_distance(settings.render_distance),
+                settings.render_distance
+            ),
+            colors.text,
+            11.0,
+        );
+        hud_text(
+            &painter,
+            config.left_top() + egui::vec2(14.0, 46.0),
+            &format!(
+                "TERR {}/{}  MESH {}/{}  UP {}",
+                governor.chunks_per_frame,
+                governor.max_in_flight_terrain,
+                governor.meshes_per_frame,
+                governor.max_in_flight_meshes,
+                governor.mesh_applies_per_frame
+            ),
+            colors.text_muted,
+            10.0,
         );
     }
 

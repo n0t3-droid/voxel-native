@@ -50,6 +50,7 @@ enum CommandAction {
     OpenInventory,
     OpenEditor(EditorTab),
     SetBuildTool(ToolbeltTool),
+    ArmWeapons,
     BuilderUndo,
     BuilderRedo,
     ToggleAnimationPicker,
@@ -208,7 +209,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Build Live oeffnen",
         detail: "Direkt bauen ohne Picker-Zwang; Waffen werden geparkt",
-        key: "F3 / F8",
+        key: "F7",
         context: CommandContext::Builder,
         icon: Icon::ModeBuild,
         essential: true,
@@ -351,15 +352,23 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         label: "Waffe wechseln",
-        detail: "Neun Waffen direkt anwaehlen",
+        detail: "Nur wenn Waffen per F8 bewusst scharf sind",
         key: "1-9",
         context: CommandContext::Combat,
         icon: Icon::ModeBuild,
         essential: true,
     },
     CommandSpec {
+        label: "Waffen scharf schalten",
+        detail: "Explizit in Combat wechseln; F8 holstert wieder",
+        key: "F8",
+        context: CommandContext::Combat,
+        icon: Icon::ModeBuild,
+        essential: true,
+    },
+    CommandSpec {
         label: "Feuern",
-        detail: "Hitscan/Projectile Waffen, Destruction und Combo-FX",
+        detail: "Nur im Combat-Modus nach F8; Creative Build nutzt LMB zum Editieren",
         key: "LMB",
         context: CommandContext::Combat,
         icon: Icon::LightBulb,
@@ -918,6 +927,7 @@ fn command_action(command: &CommandSpec) -> Option<CommandAction> {
         "Editor oeffnen" => Some(CommandAction::OpenEditor(EditorTab::World)),
         "Simulation einfrieren" => Some(CommandAction::ToggleSimPause),
         "Inventar oeffnen" => Some(CommandAction::OpenInventory),
+        "Waffen scharf schalten" => Some(CommandAction::ArmWeapons),
         "Build Live oeffnen" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
         "Tool 1 Rectangle Fill" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
         "Tool 2 Sculpt Push Pull" => Some(CommandAction::SetBuildTool(ToolbeltTool::Sculpt)),
@@ -1043,6 +1053,19 @@ fn execute_command_action(
                 );
                 mode.set(crate::mode::ActiveMode::BuildLive { tool }, status.clone());
                 toolbelt.status = status;
+                editor.open = false;
+                *pause_screen = PauseScreen::Menu;
+                next_state.set(GameState::InGame);
+                None
+            }
+        }
+        CommandAction::ArmWeapons => {
+            if *state.get() == GameState::MainMenu {
+                Some("Waffen brauchen eine geladene Welt.".into())
+            } else {
+                let status = "Weapons armed explicitly. F8 holsters back to Creative Build.";
+                mode.set(crate::mode::ActiveMode::Combat, status);
+                toolbelt.status = status.into();
                 editor.open = false;
                 *pause_screen = PauseScreen::Menu;
                 next_state.set(GameState::InGame);
