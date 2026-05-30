@@ -656,6 +656,7 @@ pub struct CityState {
     /// First click of a building footprint in progress.
     pub pending_building_a: Option<IVec3>,
     pub roads: Vec<RoadSegment>,
+    pub roads_loaded_world: String,
     pub selected_road: Option<usize>,
     pub districts: Vec<District>,
     pub buildings: Vec<Building>,
@@ -678,6 +679,7 @@ impl Default for CityState {
             pending_road_a: None,
             pending_building_a: None,
             roads: Vec::new(),
+            roads_loaded_world: String::new(),
             selected_road: None,
             districts: Vec::new(),
             buildings: Vec::new(),
@@ -755,6 +757,7 @@ fn load_city_roads_for_pending_world(
     let roads = load_city_roads_for_world(&active.meta.name).unwrap_or_default();
     let count = roads.len();
     city.roads = roads;
+    city.roads_loaded_world = active.meta.name.clone();
     city.selected_road = None;
     city.pending_road_a = None;
     city.pending_building_a = None;
@@ -1383,6 +1386,10 @@ fn road_path_xz(seg: &RoadSegment) -> Vec<IVec2> {
         }
         RoadShape::Roundabout => roundabout_path_xz(seg.a, seg.roundabout_radius),
     }
+}
+
+pub(crate) fn road_component_centerline_xz(seg: &RoadSegment) -> Vec<IVec2> {
+    road_path_xz(seg)
 }
 
 fn smooth_corner_path_xz(a: IVec3, via: IVec3, b: IVec3) -> Vec<IVec2> {

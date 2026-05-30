@@ -425,6 +425,8 @@ pub struct BotWorldSave {
     #[serde(default)]
     pub districts: Vec<BotDistrict>,
     #[serde(default)]
+    pub user_roads: Vec<BotRoadGuide>,
+    #[serde(default)]
     pub ideas: Vec<BotIdea>,
     #[serde(default)]
     pub conversations: Vec<BotConversation>,
@@ -456,6 +458,7 @@ impl Default for BotWorldSave {
             agents: Vec::new(),
             projects: Vec::new(),
             districts: Vec::new(),
+            user_roads: Vec::new(),
             ideas: Vec::new(),
             conversations: Vec::new(),
             crews: Vec::new(),
@@ -466,6 +469,16 @@ impl Default for BotWorldSave {
             companion_preview: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotRoadGuide {
+    #[serde(default)]
+    pub district_id: Option<u64>,
+    #[serde(default)]
+    pub points: Vec<[i32; 3]>,
+    #[serde(default)]
+    pub width: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -544,6 +557,7 @@ impl BotWorldSave {
         }
         restore_project_assignments(self);
         normalize_relationships(self);
+        self.user_roads.retain(|road| road.points.len() >= 2);
 
         self.next_bot_id = self
             .next_bot_id
@@ -3901,6 +3915,8 @@ fn tick_friendly_world(
     mut world: ResMut<VoxelWorld>,
     mut history: ResMut<BuilderHistory>,
     budget: Res<RuntimeBudget>,
+    active: Option<Res<ActiveWorld>>,
+    city: Option<Res<crate::city::CityState>>,
     player_q: Query<&Transform, With<Player>>,
     ship_q: Query<&Transform, With<ShipInstance>>,
 ) {
@@ -3916,6 +3932,15 @@ fn tick_friendly_world(
 
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
     let ship_positions: Vec<Vec3> = ship_q.iter().map(|t| t.translation).collect();
+
+    if let (Some(active), Some(city)) = (active.as_deref(), city.as_deref()) {
+        if city.roads_loaded_world == active.meta.name
+            && sync_user_city_roads(&mut brain.save, &city.roads)
+        {
+            brain.force_city_idea = true;
+            brain.dirty = true;
+        }
+    }
 
     keep_bots_visible_and_busy(&mut brain, &world, player_pos);
     if !brain.save.autonomy.bots_active {
@@ -5126,6 +5151,7 @@ fn is_access_road_project(kind: BotTaskKind) -> bool {
 
 fn settlement_has_access_roads(save: &BotWorldSave) -> bool {
     save.settlements.first().map(|s| s.road_count).unwrap_or(0) > 0
+        || !save.user_roads.is_empty()
         || save.projects.iter().any(|project| {
             is_access_road_project(project.kind)
                 && !matches!(project.status, BotProjectStatus::Blocked)
@@ -5134,6 +5160,13 @@ fn settlement_has_access_roads(save: &BotWorldSave) -> bool {
 
 fn district_has_road_access(save: &BotWorldSave, district: &BotDistrict) -> bool {
     if matches!(district.kind, BotDistrictKind::HubCore) {
+        return true;
+    }
+    if save
+        .user_roads
+        .iter()
+        .any(|road| road_guide_matches_district(road, district))
+    {
         return true;
     }
     save.projects.iter().any(|project| {
@@ -5323,12 +5356,112 @@ fn project_origin_from_center(
     project_origin(world, target)
 }
 
+fn sync_user_city_roads(save: &mut BotWorldSave, roads: &[crate::city::RoadSegment]) -> bool {
+    let guides: Vec<BotRoadGuide> = roads
+        .iter()
+        .filter_map(|road| bot_road_guide_from_city_component(save, road))
+        .collect();
+    if save.user_roads == guides {
+        false
+    } else {
+        save.user_roads = guides;
+        true
+    }
+}
+
+fn bot_road_guide_from_city_component(
+    save: &BotWorldSave,
+    road: &crate::city::RoadSegment,
+) -> Option<BotRoadGuide> {
+    let points = sampled_city_road_points(road);
+    if points.len() < 2 {
+        return None;
+    }
+    let center = road_guide_center(&points);
+    Some(BotRoadGuide {
+        district_id: nearest_district(save, center).map(|district| district.id),
+        points,
+        width: road.width,
+    })
+}
+
+fn sampled_city_road_points(road: &crate::city::RoadSegment) -> Vec<[i32; 3]> {
+    let cells = crate::city::road_component_centerline_xz(road);
+    let sample_step = if road.shape == crate::city::RoadShape::Roundabout {
+        6
+    } else {
+        12
+    };
+    let last = cells.len().saturating_sub(1);
+    let mut points = Vec::new();
+    for (idx, cell) in cells.into_iter().enumerate() {
+        if idx == 0 || idx == last || idx % sample_step == 0 {
+            push_road_guide_point(&mut points, [cell.x, road.a.y, cell.y]);
+        }
+    }
+    points
+}
+
+fn push_road_guide_point(points: &mut Vec<[i32; 3]>, point: [i32; 3]) {
+    if points.last().copied() != Some(point) {
+        points.push(point);
+    }
+}
+
+fn road_guide_center(points: &[[i32; 3]]) -> Vec3 {
+    if points.is_empty() {
+        return Vec3::ZERO;
+    }
+    let inv = 1.0 / points.len() as f32;
+    let mut sum = Vec3::ZERO;
+    for point in points {
+        sum += Vec3::new(point[0] as f32, point[1] as f32, point[2] as f32);
+    }
+    sum * inv
+}
+
+fn road_guide_matches_district(guide: &BotRoadGuide, district: &BotDistrict) -> bool {
+    if guide.district_id == Some(district.id) {
+        return true;
+    }
+    let center = Vec2::new(district.center[0], district.center[2]);
+    let reach = district.radius as f32 + 96.0;
+    guide
+        .points
+        .iter()
+        .any(|point| Vec2::new(point[0] as f32, point[2] as f32).distance(center) <= reach)
+}
+
+fn road_guide_segments(guide: &BotRoadGuide) -> Vec<(Vec2, Vec2)> {
+    guide
+        .points
+        .windows(2)
+        .filter_map(|pair| {
+            let a = Vec2::new(pair[0][0] as f32, pair[0][2] as f32);
+            let b = Vec2::new(pair[1][0] as f32, pair[1][2] as f32);
+            (a.distance_squared(b) > 1.0).then_some((a, b))
+        })
+        .collect()
+}
+
 fn road_network_points(save: &BotWorldSave, district: &BotDistrict) -> Vec<Vec2> {
     let mut points: Vec<Vec2> = district
         .road_anchors
         .iter()
         .map(|a| Vec2::new(a[0] as f32, a[2] as f32))
         .collect();
+    for guide in save
+        .user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+    {
+        points.extend(
+            guide
+                .points
+                .iter()
+                .map(|point| Vec2::new(point[0] as f32, point[2] as f32)),
+        );
+    }
     for project in &save.projects {
         if project.district_id != Some(district.id)
             || !is_access_road_project(project.kind)
@@ -5596,6 +5729,13 @@ fn build_road_center_z(origin_z: i32, width: i32, local_x: i32) -> i32 {
 
 fn road_network_segments(save: &BotWorldSave, district: &BotDistrict) -> Vec<(Vec2, Vec2)> {
     let mut segments = Vec::new();
+    for guide in save
+        .user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+    {
+        segments.extend(road_guide_segments(guide));
+    }
     for pair in district.road_anchors.windows(2) {
         let a = Vec2::new(pair[0][0] as f32, pair[0][2] as f32);
         let b = Vec2::new(pair[1][0] as f32, pair[1][2] as f32);
@@ -11400,6 +11540,37 @@ mod tests {
         let score = road_frontage_score(&save, &district, [30, 90, 14], [20, 36, 20]);
 
         assert!(score > 0.90, "long-road frontage score was {score}");
+    }
+
+    #[test]
+    fn user_drawn_road_components_become_bot_frontage_guides() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Player Boulevard".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let road = crate::city::RoadSegment::new(
+            IVec3::new(-48, 90, 0),
+            IVec3::new(48, 90, 0),
+            7,
+            crate::city::RoadStyle::Neon,
+        );
+
+        assert!(sync_user_city_roads(&mut save, &[road]));
+
+        assert!(district_has_road_access(&save, &district));
+        let score = road_frontage_score(&save, &district, [-12, 90, 14], [24, 36, 24]);
+        assert!(
+            score > 0.85,
+            "bot planner should treat player road components as real build frontage, got {score}"
+        );
     }
 
     #[test]
