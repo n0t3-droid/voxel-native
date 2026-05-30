@@ -186,6 +186,7 @@ pub struct RoadSegment {
     pub width: u8,
     pub style: RoadStyle,
     pub elevation_a: i16,
+    pub elevation_via: i16,
     pub elevation_b: i16,
 }
 
@@ -205,6 +206,7 @@ impl RoadSegment {
             width: 1,
             style: RoadStyle::Asphalt,
             elevation_a: 0,
+            elevation_via: 0,
             elevation_b: 0,
         }
         .with_width(width)
@@ -224,6 +226,7 @@ impl RoadSegment {
             width: 1,
             style: RoadStyle::Asphalt,
             elevation_a: 0,
+            elevation_via: 0,
             elevation_b: 0,
         }
         .with_width(width)
@@ -244,6 +247,11 @@ impl RoadSegment {
     pub fn with_endpoint_heights(mut self, a: i16, b: i16) -> Self {
         self.elevation_a = a.clamp(-12, 48);
         self.elevation_b = b.clamp(-12, 48);
+        self
+    }
+
+    pub fn with_turn_height(mut self, via: i16) -> Self {
+        self.elevation_via = via.clamp(-12, 48);
         self
     }
 
@@ -720,10 +728,14 @@ fn city_input(
                 });
             } else if shift && !ctrl && !alt {
                 next = road_with_endpoint_height_delta(before, snapped, (steps * 2) as i16);
-                label = Some(format!(
-                    "Hoehe A/B {}:{}",
-                    next.elevation_a, next.elevation_b
-                ));
+                label = Some(if next.shape == RoadShape::Corner {
+                    format!(
+                        "Hoehe A/T/B {}:{}:{}",
+                        next.elevation_a, next.elevation_via, next.elevation_b
+                    )
+                } else {
+                    format!("Hoehe A/B {}:{}", next.elevation_a, next.elevation_b)
+                });
             } else if alt && !ctrl && !shift {
                 next = before.retextured(next_road_style(before.style, steps));
                 city.road_style = next.style;
@@ -992,6 +1004,16 @@ fn road_with_endpoint_height_delta(road: RoadSegment, cursor: IVec3, delta: i16)
     let a = Vec2::new(road.a.x as f32 + 0.5, road.a.z as f32 + 0.5);
     let b = Vec2::new(road.b.x as f32 + 0.5, road.b.z as f32 + 0.5);
     let shifted = |height: i16| -> i16 { (height as i32 + delta as i32).clamp(-12, 48) as i16 };
+    if road.shape == RoadShape::Corner {
+        let via = road_corner_via(road);
+        let via = Vec2::new(via.x as f32 + 0.5, via.z as f32 + 0.5);
+        let da = p.distance_squared(a);
+        let db = p.distance_squared(b);
+        let dv = p.distance_squared(via);
+        if dv <= da && dv <= db {
+            return road.with_turn_height(shifted(road.elevation_via));
+        }
+    }
     if p.distance_squared(b) <= p.distance_squared(a) {
         road.with_endpoint_heights(road.elevation_a, shifted(road.elevation_b))
     } else {
@@ -1211,6 +1233,19 @@ fn road_elevation_at_sample(seg: &RoadSegment, index: usize, last_index: usize) 
         return seg.elevation_a as i32;
     }
     let t = (index as f32 / last_index as f32).clamp(0.0, 1.0);
+    if seg.shape == RoadShape::Corner {
+        let (start, end, local_t) = if t <= 0.5 {
+            (seg.elevation_a as f32, seg.elevation_via as f32, t * 2.0)
+        } else {
+            (
+                seg.elevation_via as f32,
+                seg.elevation_b as f32,
+                (t - 0.5) * 2.0,
+            )
+        };
+        let eased = local_t * local_t * (3.0 - 2.0 * local_t);
+        return (start + (end - start) * eased).round() as i32;
+    }
     let eased = t * t * (3.0 - 2.0 * t);
     let start = seg.elevation_a as f32;
     let end = seg.elevation_b as f32;
@@ -2132,6 +2167,48 @@ mod tests {
         let lowered_a = road_with_endpoint_height_delta(raised_b, IVec3::new(1, 72, 1), -4);
         assert_eq!(lowered_a.elevation_a, -4);
         assert_eq!(lowered_a.elevation_b, 6);
+    }
+
+    #[test]
+    fn corner_road_height_delta_targets_turn_control_point() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 16),
+            5,
+            RoadStyle::Asphalt,
+        );
+
+        let raised_turn = road_with_endpoint_height_delta(road, IVec3::new(21, 72, 3), 10);
+
+        assert_eq!(raised_turn.elevation_a, 0);
+        assert_eq!(raised_turn.elevation_via, 10);
+        assert_eq!(raised_turn.elevation_b, 0);
+    }
+
+    #[test]
+    fn corner_road_uses_turn_height_for_smooth_bridge_grade() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 16),
+            5,
+            RoadStyle::Asphalt,
+        );
+        let raised_turn = road_with_endpoint_height_delta(road, IVec3::new(21, 72, 3), 12);
+        let path = road_path_xz(&raised_turn);
+        let last_index = path.len().saturating_sub(1);
+        let heights: Vec<i32> = (0..=last_index)
+            .map(|idx| road_elevation_at_sample(&raised_turn, idx, last_index))
+            .collect();
+
+        assert_eq!(heights.first().copied(), Some(0));
+        assert_eq!(heights.last().copied(), Some(0));
+        assert_eq!(heights.iter().copied().max(), Some(12));
+        assert!(
+            heights
+                .windows(2)
+                .all(|pair| (pair[1] - pair[0]).abs() <= 2),
+            "corner bridge grade should ease smoothly through the turn, got {heights:?}"
+        );
     }
 
     #[test]
