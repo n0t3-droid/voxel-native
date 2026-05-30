@@ -950,7 +950,11 @@ fn city_input(
     // land on terrain regardless of where the reticle was.
     let surface_y = world.surface_height_at(hit_cell.x, hit_cell.z);
     let ground = IVec3::new(hit_cell.x, surface_y, hit_cell.z);
-    let snapped = snap_cell(ground, city.snap, &city.roads);
+    let snapped = if city.tool == CityTool::Road {
+        road_tool_snap_cell(ground, city.snap, &city.roads)
+    } else {
+        snap_cell(ground, city.snap, &city.roads)
+    };
 
     city.selected_road = if city.tool == CityTool::Road {
         nearest_road_component(&city.roads, snapped, 5.0)
@@ -1209,6 +1213,33 @@ fn snap_cell(p: IVec3, mode: SnapMode, roads: &[RoadSegment]) -> IVec3 {
             }
         }
     }
+}
+
+fn road_tool_snap_cell(p: IVec3, mode: SnapMode, roads: &[RoadSegment]) -> IVec3 {
+    let base = snap_cell(p, mode, roads);
+    contextual_road_snap_cell(base, roads).unwrap_or(base)
+}
+
+fn contextual_road_snap_cell(p: IVec3, roads: &[RoadSegment]) -> Option<IVec3> {
+    let point = Vec2::new(p.x as f32 + 0.5, p.z as f32 + 0.5);
+    if let Some(handle) = nearest_road_snap_handle(roads, point, 4.0) {
+        return Some(IVec3::new(handle.x, p.y, handle.z));
+    }
+    nearest_road_path_cell(roads, point, 4.5).map(|cell| IVec3::new(cell.x, p.y, cell.y))
+}
+
+fn nearest_road_path_cell(roads: &[RoadSegment], point: Vec2, max_distance: f32) -> Option<IVec2> {
+    let max_d2 = max_distance * max_distance;
+    let mut best: Option<(f32, Vec2)> = None;
+    for road in roads {
+        let Some((q, d2)) = road_nearest_point_xz(*road, point) else {
+            continue;
+        };
+        if d2 <= max_d2 && best.map_or(true, |(best_d2, _)| d2 < best_d2) {
+            best = Some((d2, q));
+        }
+    }
+    best.map(|(_, q)| IVec2::new(q.x.floor() as i32, q.y.floor() as i32))
 }
 
 const SMART_ROAD_AXIS_JITTER: i32 = 3;
@@ -2211,7 +2242,7 @@ fn city_draw_gizmos(
             });
             let (hit_cell, _) = picked;
             let sy = world.surface_height_at(hit_cell.x, hit_cell.z);
-            let mut cursor = snap_cell(
+            let mut cursor = road_tool_snap_cell(
                 IVec3::new(hit_cell.x, sy, hit_cell.z),
                 city.snap,
                 &city.roads,
@@ -2848,6 +2879,54 @@ mod tests {
             snap_cell(IVec3::new(24, 72, 2), SnapMode::Road, &[road]),
             IVec3::new(24, 72, 0),
             "road snap should expose the editable turn handle even when the visible curve is smoothed"
+        );
+    }
+
+    #[test]
+    fn road_tool_snap_finds_existing_endpoints_without_snap_mode() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+
+        assert_eq!(
+            road_tool_snap_cell(IVec3::new(31, 72, 2), SnapMode::Off, &[road]),
+            IVec3::new(32, 72, 0),
+            "Road tool should snap to nearby endpoints without asking the player to cycle snap modes"
+        );
+    }
+
+    #[test]
+    fn road_tool_snap_finds_mid_road_branch_points_without_snap_mode() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Neon,
+        );
+
+        assert_eq!(
+            road_tool_snap_cell(IVec3::new(15, 72, 3), SnapMode::Off, &[road]),
+            IVec3::new(15, 72, 0),
+            "Road tool should snap to the road path for fast branch drawing"
+        );
+    }
+
+    #[test]
+    fn road_tool_snap_respects_explicit_grid_before_contextual_road_snap() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(32, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+
+        assert_eq!(
+            road_tool_snap_cell(IVec3::new(18, 72, 10), SnapMode::Grid16, &[road]),
+            IVec3::new(16, 72, 16),
+            "explicit grid snapping should still win when it is not close enough to a road"
         );
     }
 
