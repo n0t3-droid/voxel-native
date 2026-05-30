@@ -2,14 +2,15 @@
 //!
 //! This is the "I draw a square and it becomes blocks" tool the builder
 //! needs before the heavier transform-gizmo phases are worth anything:
-//! select RECT in the live toolbelt, hold LMB on a face, drag a rectangle
-//! over the locked plane, release to fill it with the active builder block.
-//! Esc cancels the active preview. Undo/redo uses the shared builder history.
+//! hold LMB on a face, drag the crosshair to a block endpoint on the locked
+//! plane, release to fill it with the active builder block. In the default
+//! smart builder, RMB does the same gesture as a cut. Esc cancels the active
+//! preview. Undo/redo uses the shared builder history.
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
-use crate::blocks::Voxel;
+use crate::blocks::{Voxel, AIR};
 use crate::builder::{BuilderHistory, BuilderState};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::player::Player;
@@ -19,7 +20,6 @@ use crate::world::{VoxelWorld, WorldEditBatch};
 
 const DRAW_REACH: f32 = 128.0;
 const DRAW_CELL_CAP: usize = 16_384;
-const MIN_SCREEN_AXIS_PX: f32 = 10.0;
 const RECT_FILL_OWNER: &str = "Rectangle Fill";
 
 #[derive(Resource, Default)]
@@ -31,12 +31,58 @@ pub struct RectDrawState {
     normal: IVec3,
     axis_u: IVec3,
     axis_v: IVec3,
-    screen_u: Vec2,
-    screen_v: Vec2,
-    motion_accum: Vec2,
     motion_len: f32,
+    action: RectDrawAction,
+    button: RectDragButton,
+    smart_gesture: bool,
     voxel: Voxel,
     status_cells: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RectDrawAction {
+    #[default]
+    Fill,
+    Cut,
+}
+
+impl RectDrawAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fill => "Smart Build",
+            Self::Cut => "Smart Cut",
+        }
+    }
+
+    fn history_label(self) -> &'static str {
+        match self {
+            Self::Fill => "Smart endpoint build",
+            Self::Cut => "Smart endpoint cut",
+        }
+    }
+
+    fn preview_verb(self) -> &'static str {
+        match self {
+            Self::Fill => "build",
+            Self::Cut => "cut",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RectDragButton {
+    #[default]
+    Left,
+    Right,
+}
+
+impl RectDragButton {
+    fn just_released(self, mouse: &ButtonInput<MouseButton>) -> bool {
+        match self {
+            Self::Left => mouse.just_released(MouseButton::Left),
+            Self::Right => mouse.just_released(MouseButton::Right),
+        }
+    }
 }
 
 fn shape_alt_pressed(keys: &ButtonInput<KeyCode>) -> bool {
@@ -50,6 +96,7 @@ fn draw_rect_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, draw: &Rect
     match mode.build_tool() {
         Some(ToolbeltTool::DrawRect) => draw.active || !shape_alt_pressed(keys),
         Some(ToolbeltTool::Sculpt) => draw.active || shape_alt_pressed(keys),
+        Some(ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut) => true,
         _ => false,
     }
 }
@@ -65,7 +112,8 @@ pub fn rect_draw_input(
     mut world: ResMut<VoxelWorld>,
     mut history: ResMut<BuilderHistory>,
     builder: Res<BuilderState>,
-    cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
+    windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+    cam_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
 ) {
     if !draw_rect_active(&mode, &keys, &draw) {
         if draw.active {
@@ -77,19 +125,42 @@ pub fn rect_draw_input(
         return;
     }
 
-    if (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right)) && draw.active
+    let active_tool = mode.build_tool().unwrap_or(toolbelt.tool);
+    let smart_tool = matches!(
+        active_tool,
+        ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
+    );
+
+    if (keys.just_pressed(KeyCode::Escape)
+        || (mouse.just_pressed(MouseButton::Right)
+            && draw.active
+            && draw.action == RectDrawAction::Fill))
+        && draw.active
     {
         draw.active = false;
         draw.click_finish = false;
         gesture_lock.release(RECT_FILL_OWNER);
-        toolbelt.status = "Rectangle Fill cancelled. LMB starts a new start point.".into();
+        toolbelt.status = "Smart Build cancelled. LMB starts a new snapped build point.".into();
         motion_evr.clear();
         return;
     }
 
-    let Ok((camera, cam_tf)) = cam_q.get_single() else {
+    let cursor_locked = windows
+        .get_single()
+        .map(|w| w.cursor.grab_mode == bevy::window::CursorGrabMode::Locked)
+        .unwrap_or(false);
+    if smart_tool && !cursor_locked {
+        if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {
+            toolbelt.status =
+                "Smart Builder needs mouse capture. Click the game view once, then build.".into();
+        }
+        motion_evr.clear();
+        return;
+    }
+
+    let Ok(cam_tf) = cam_q.get_single() else {
         if mouse.just_pressed(MouseButton::Left) {
-            toolbelt.status = "Rectangle Fill could not find the player camera this frame.".into();
+            toolbelt.status = "Smart Build could not find the player camera this frame.".into();
         }
         motion_evr.clear();
         return;
@@ -104,10 +175,15 @@ pub fn rect_draw_input(
         return;
     }
 
-    if mouse.just_pressed(MouseButton::Left) && !draw.active {
+    let start_cut = smart_tool
+        && (mouse.just_pressed(MouseButton::Right)
+            || (active_tool == ToolbeltTool::BrushCut && mouse.just_pressed(MouseButton::Left)));
+    let start_fill = mouse.just_pressed(MouseButton::Left) && active_tool != ToolbeltTool::BrushCut;
+
+    if (start_fill || start_cut) && !draw.active {
         let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) else {
             toolbelt.status =
-                "Rectangle Fill needs a target face. Aim at a visible block face.".into();
+                "Smart Build needs a target face. Aim at a visible block face.".into();
             motion_evr.clear();
             return;
         };
@@ -117,34 +193,41 @@ pub fn rect_draw_input(
             motion_evr.clear();
             return;
         };
-        let anchor = prev.as_vec3() + Vec3::splat(0.5);
-        let Some(screen_u) = project_axis(camera, cam_tf, anchor, axis_u.as_vec3()) else {
-            toolbelt.status =
-                "Rectangle Fill could not lock the screen axis. Move the camera slightly.".into();
-            motion_evr.clear();
-            return;
-        };
-        let Some(screen_v) = project_axis(camera, cam_tf, anchor, axis_v.as_vec3()) else {
-            toolbelt.status =
-                "Rectangle Fill could not lock the screen axis. Move the camera slightly.".into();
-            motion_evr.clear();
-            return;
+        let action = if start_cut {
+            RectDrawAction::Cut
+        } else {
+            RectDrawAction::Fill
         };
         draw.active = true;
-        draw.start = prev;
-        draw.current = prev;
+        let start = rect_start_cell(action, hit, prev);
+        draw.start = start;
+        draw.current = start;
         draw.normal = normal;
         draw.axis_u = axis_u;
         draw.axis_v = axis_v;
-        draw.screen_u = stable_screen_axis(screen_u);
-        draw.screen_v = stable_screen_axis(screen_v);
-        draw.motion_accum = Vec2::ZERO;
         draw.motion_len = 0.0;
-        draw.voxel = builder.block.into();
+        draw.action = action;
+        draw.button = if start_cut && mouse.just_pressed(MouseButton::Right) {
+            RectDragButton::Right
+        } else {
+            RectDragButton::Left
+        };
+        draw.smart_gesture = smart_tool;
+        draw.voxel = if action == RectDrawAction::Cut {
+            AIR
+        } else {
+            builder.block.into()
+        };
         draw.status_cells = 1;
         draw.click_finish = false;
         gesture_lock.lock(RECT_FILL_OWNER);
-        toolbelt.status = if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
+        toolbelt.status = if smart_tool {
+            format!(
+                "{} start set. Drag to any block endpoint; release to {} the exact snapped length.",
+                action.label(),
+                action.preview_verb()
+            )
+        } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
             "Quick Fill start set. Keep Alt held while starting; drag to fill, LMB commits.".into()
         } else {
             "Rectangle Fill start set. Drag to fill now, or tap-release then move and LMB to finish.".into()
@@ -154,22 +237,31 @@ pub fn rect_draw_input(
     if draw.active {
         gesture_lock.lock(RECT_FILL_OWNER);
         for ev in motion_evr.read() {
-            draw.motion_accum += ev.delta;
             draw.motion_len += ev.delta.length();
         }
-        let u = grid_steps_for_axis(draw.motion_accum, draw.screen_u);
-        let v = grid_steps_for_axis(draw.motion_accum, draw.screen_v);
-        draw.current = draw.start + draw.axis_u * u + draw.axis_v * v;
+        if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
+            draw.current = snap_rect_endpoint_to_locked_plane(
+                draw.start,
+                draw.normal,
+                draw.axis_u,
+                draw.axis_v,
+                hit,
+                prev,
+            );
+        }
         let raw_cells = rect_cell_count(draw.start, draw.current, draw.normal);
         draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
         toolbelt.status = if raw_cells > DRAW_CELL_CAP {
             format!(
-                "Rectangle Fill preview capped: {} of {} cells. LMB finishes, RMB/Esc cancels.",
-                DRAW_CELL_CAP, raw_cells
+                "{} preview capped: {} of {} cells. Release commits, Esc cancels.",
+                draw.action.label(),
+                DRAW_CELL_CAP,
+                raw_cells
             )
         } else {
             format!(
-                "Rectangle Fill preview: {} cells. LMB finishes, RMB/Esc cancels.",
+                "{} preview: {} cells snapped to endpoint. Release commits, Esc cancels.",
+                draw.action.label(),
                 draw.status_cells
             )
         };
@@ -177,8 +269,8 @@ pub fn rect_draw_input(
         motion_evr.clear();
     }
 
-    if mouse.just_released(MouseButton::Left) && draw.active && !draw.click_finish {
-        if draw.motion_len < 4.0 && draw.status_cells <= 1 {
+    if draw.button.just_released(&mouse) && draw.active && !draw.click_finish {
+        if !draw.smart_gesture && draw.motion_len < 4.0 && draw.status_cells <= 1 {
             draw.click_finish = true;
             toolbelt.status =
                 "Rectangle Fill anchor set. Move to grow line/face, LMB commits, RMB/Esc cancels."
@@ -216,15 +308,18 @@ fn commit_rect_fill(
     world.finish_edit_batch(batch);
     let changed = changes.len();
     if changed > 0 {
-        let label = format!("DrawRect {} cells", changed);
+        let label = format!("{} {} cells", draw.action.history_label(), changed);
         history.record_external(label, changes);
         toolbelt.status = format!(
-            "Rectangle Fill committed: {} selected, {} changed cells. Ctrl+Z undo, Ctrl+R redo.",
-            selected, changed
+            "{} committed: {} selected, {} changed cells. Ctrl+Z undo, Ctrl+R redo.",
+            draw.action.label(),
+            selected,
+            changed
         );
     } else {
         toolbelt.status = format!(
-            "Rectangle Fill selected {} cells but made no changes because the area already matched the block.",
+            "{} selected {} cells but made no changes because the area already matched.",
+            draw.action.label(),
             selected
         );
     }
@@ -257,35 +352,82 @@ fn plane_axes(normal: IVec3) -> Option<(IVec3, IVec3)> {
     }
 }
 
-fn project_axis(
-    camera: &Camera,
-    cam_tf: &GlobalTransform,
-    anchor: Vec3,
-    world_axis: Vec3,
-) -> Option<Vec2> {
-    let p0 = camera.world_to_viewport(cam_tf, anchor)?;
-    let p1 = camera.world_to_viewport(cam_tf, anchor + world_axis)?;
-    Some(p1 - p0)
+fn rect_start_cell(action: RectDrawAction, hit: IVec3, adjacent: IVec3) -> IVec3 {
+    match action {
+        RectDrawAction::Fill => adjacent,
+        RectDrawAction::Cut => hit,
+    }
 }
 
-fn stable_screen_axis(axis: Vec2) -> Vec2 {
-    let len = axis.length();
-    if len < 1e-4 {
-        return Vec2::X * MIN_SCREEN_AXIS_PX;
+fn snap_rect_endpoint_to_locked_plane(
+    start: IVec3,
+    normal: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    hit: IVec3,
+    adjacent: IVec3,
+) -> IVec3 {
+    let Some(plane_axis) = normal_axis(normal) else {
+        return start;
+    };
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return start;
     }
-    if len < MIN_SCREEN_AXIS_PX {
-        axis / len * MIN_SCREEN_AXIS_PX
+
+    let start_plane = component_by_index(start, plane_axis);
+    let hit_plane_delta = (component_by_index(hit, plane_axis) - start_plane).abs();
+    let adjacent_plane_delta = (component_by_index(adjacent, plane_axis) - start_plane).abs();
+    let hovered = if adjacent_plane_delta <= hit_plane_delta {
+        adjacent
     } else {
-        axis
+        hit
+    };
+
+    let mut snapped = start;
+    set_component_by_axis(&mut snapped, axis_u, component_by_axis(hovered, axis_u));
+    set_component_by_axis(&mut snapped, axis_v, component_by_axis(hovered, axis_v));
+    set_component_by_index(&mut snapped, plane_axis, start_plane);
+    snapped
+}
+
+fn is_cardinal_axis(axis: IVec3) -> bool {
+    axis.x.abs() + axis.y.abs() + axis.z.abs() == 1
+}
+
+fn component_by_axis(v: IVec3, axis: IVec3) -> i32 {
+    if axis.x != 0 {
+        v.x
+    } else if axis.y != 0 {
+        v.y
+    } else {
+        v.z
     }
 }
 
-fn grid_steps_for_axis(motion: Vec2, axis: Vec2) -> i32 {
-    let len2 = axis.length_squared();
-    if len2 < 1e-4 {
-        return 0;
+fn component_by_index(v: IVec3, index: usize) -> i32 {
+    match index {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
     }
-    (motion.dot(axis) / len2).round() as i32
+}
+
+fn set_component_by_axis(v: &mut IVec3, axis: IVec3, value: i32) {
+    if axis.x != 0 {
+        v.x = value;
+    } else if axis.y != 0 {
+        v.y = value;
+    } else {
+        v.z = value;
+    }
+}
+
+fn set_component_by_index(v: &mut IVec3, index: usize, value: i32) {
+    match index {
+        0 => v.x = value,
+        1 => v.y = value,
+        _ => v.z = value,
+    }
 }
 
 fn rect_cell_count(a: IVec3, b: IVec3, normal: IVec3) -> usize {
@@ -386,9 +528,47 @@ mod tests {
     }
 
     #[test]
-    fn grid_steps_use_locked_screen_axis() {
-        let axis = Vec2::new(12.0, 0.0);
-        assert_eq!(grid_steps_for_axis(Vec2::new(25.0, 4.0), axis), 2);
-        assert_eq!(grid_steps_for_axis(Vec2::new(-18.0, 0.0), axis), -2);
+    fn default_build_tool_accepts_smart_endpoint_fill() {
+        let mode = ModeContext::default();
+        let keys = ButtonInput::<KeyCode>::default();
+        let draw = RectDrawState::default();
+
+        assert!(draw_rect_active(&mode, &keys, &draw));
+    }
+
+    #[test]
+    fn rect_endpoint_snaps_hovered_block_to_locked_floor_plane() {
+        let start = IVec3::new(10, 64, 10);
+        let hit = IVec3::new(18, 70, 14);
+        let adjacent = IVec3::new(18, 71, 14);
+
+        let snapped =
+            snap_rect_endpoint_to_locked_plane(start, IVec3::Y, IVec3::X, IVec3::Z, hit, adjacent);
+
+        assert_eq!(snapped, IVec3::new(18, 64, 14));
+    }
+
+    #[test]
+    fn rect_endpoint_snaps_hovered_block_to_locked_wall_plane() {
+        let start = IVec3::new(4, 10, 6);
+        let hit = IVec3::new(20, 17, 15);
+        let adjacent = IVec3::new(21, 17, 15);
+
+        let snapped =
+            snap_rect_endpoint_to_locked_plane(start, IVec3::X, IVec3::Y, IVec3::Z, hit, adjacent);
+
+        assert_eq!(snapped, IVec3::new(4, 17, 15));
+    }
+
+    #[test]
+    fn cut_gesture_starts_on_hit_block_not_adjacent_air() {
+        let hit = IVec3::new(8, 32, -4);
+        let adjacent = IVec3::new(8, 33, -4);
+
+        assert_eq!(
+            rect_start_cell(RectDrawAction::Fill, hit, adjacent),
+            adjacent
+        );
+        assert_eq!(rect_start_cell(RectDrawAction::Cut, hit, adjacent), hit);
     }
 }

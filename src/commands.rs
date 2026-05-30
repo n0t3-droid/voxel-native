@@ -208,7 +208,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         label: "Build Live oeffnen",
-        detail: "Power Brush direkt nutzen: LMB halten baut, RMB halten schneidet",
+        detail: "Smart Builder direkt nutzen: LMB Startpunkt, zum Endpunkt ziehen, loslassen baut; RMB schneidet",
         key: "LMB/RMB",
         context: CommandContext::Builder,
         icon: Icon::ModeBuild,
@@ -247,8 +247,8 @@ const COMMANDS: &[CommandSpec] = &[
         essential: false,
     },
     CommandSpec {
-        label: "Tool 4 Power Brush",
-        detail: "Brush-Volumen kontinuierlich setzen; RMB schneidet ohne Toolwechsel",
+        label: "Tool 4 Smart Builder",
+        detail: "Startpunkt setzen, auf Block-Endpunkt ziehen, exakt bauen; RMB schneidet ohne Toolwechsel",
         key: "4",
         context: CommandContext::Builder,
         icon: Icon::Brush,
@@ -932,7 +932,7 @@ fn command_action(command: &CommandSpec) -> Option<CommandAction> {
         "Tool 1 Rectangle Fill" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
         "Tool 2 Sculpt Push Pull" => Some(CommandAction::SetBuildTool(ToolbeltTool::Sculpt)),
         "Tool 3 Smart Tower" => Some(CommandAction::SetBuildTool(ToolbeltTool::SmartTower)),
-        "Tool 4 Power Brush" | "Tool 4 Brush Place" => {
+        "Tool 4 Smart Builder" | "Tool 4 Power Brush" | "Tool 4 Brush Place" => {
             Some(CommandAction::SetBuildTool(ToolbeltTool::BrushPlace))
         }
         "Tool 5 Brush Cut" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushCut)),

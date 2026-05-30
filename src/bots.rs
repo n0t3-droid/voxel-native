@@ -1298,6 +1298,8 @@ pub struct BotProjectConcept {
     pub rows: Vec<BotPlanRow>,
     #[serde(default)]
     pub street_face: Option<BuildingStreetFace>,
+    #[serde(default)]
+    pub block_role: Option<CityBlockRole>,
 }
 
 impl Default for BotProjectConcept {
@@ -1309,6 +1311,28 @@ impl Default for BotProjectConcept {
             visual_goal: String::new(),
             rows: Vec::new(),
             street_face: None,
+            block_role: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CityBlockRole {
+    CornerLandmark,
+    MidblockStreetWall,
+    ResidentialCorner,
+    CivicEdge,
+    ServiceEdge,
+}
+
+impl CityBlockRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CornerLandmark => "corner landmark at a road intersection",
+            Self::MidblockStreetWall => "midblock street wall with calmer frontage",
+            Self::ResidentialCorner => "residential corner with visible side entry",
+            Self::CivicEdge => "civic edge that opens to intersecting streets",
+            Self::ServiceEdge => "service edge with clear utility access",
         }
     }
 }
@@ -5506,6 +5530,47 @@ fn segment_to_segment_distance(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> f32 {
         .min(point_to_segment_distance(d, a, b))
 }
 
+fn segment_intersection_point(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Option<Vec2> {
+    let ab = b - a;
+    let cd = d - c;
+    let denom = cross_2d(ab, cd);
+    if denom.abs() <= 0.001 {
+        return None;
+    }
+    let ca = c - a;
+    let t = cross_2d(ca, cd) / denom;
+    let u = cross_2d(ca, ab) / denom;
+    let eps = 0.001;
+    if t >= -eps && t <= 1.0 + eps && u >= -eps && u <= 1.0 + eps {
+        Some(a + ab * t.clamp(0.0, 1.0))
+    } else {
+        None
+    }
+}
+
+fn road_intersection_points(segments: &[(Vec2, Vec2)]) -> Vec<Vec2> {
+    let mut points = Vec::new();
+    for (idx, (a, b)) in segments.iter().enumerate() {
+        if a.distance_squared(*b) <= 1.0 {
+            continue;
+        }
+        for (c, d) in segments.iter().skip(idx + 1) {
+            if c.distance_squared(*d) <= 1.0 {
+                continue;
+            }
+            if let Some(point) = segment_intersection_point(*a, *b, *c, *d) {
+                if points
+                    .iter()
+                    .all(|existing: &Vec2| existing.distance_squared(point) > 9.0)
+                {
+                    points.push(point);
+                }
+            }
+        }
+    }
+    points
+}
+
 fn building_edge_segments(
     origin: [i32; 3],
     size: [i32; 3],
@@ -5538,6 +5603,13 @@ fn building_edge_segments(
     ]
 }
 
+fn building_edge_distance_to_point(point: Vec2, origin: [i32; 3], size: [i32; 3]) -> f32 {
+    building_edge_segments(origin, size)
+        .iter()
+        .map(|(_, a, b)| point_to_segment_distance(point, *a, *b))
+        .fold(f32::INFINITY, f32::min)
+}
+
 fn nearest_road_building_edge(
     road_segments: &[(Vec2, Vec2)],
     origin: [i32; 3],
@@ -5557,6 +5629,76 @@ fn nearest_road_building_edge(
         .min_by(|(_, a), (_, b)| a.total_cmp(b))
 }
 
+fn road_intersection_score_from_segments(
+    road_segments: &[(Vec2, Vec2)],
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> f32 {
+    let best = road_intersection_points(road_segments)
+        .into_iter()
+        .map(|point| building_edge_distance_to_point(point, origin, size))
+        .fold(f32::INFINITY, f32::min);
+    if !best.is_finite() {
+        return 0.0;
+    }
+    if best <= 18.0 {
+        1.0
+    } else {
+        (1.0 - (best - 18.0) / 42.0).clamp(0.0, 1.0)
+    }
+}
+
+fn city_block_fit_score(
+    road_segments: &[(Vec2, Vec2)],
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> f32 {
+    let intersection = road_intersection_score_from_segments(road_segments, origin, size);
+    match kind {
+        BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower | BotTaskKind::MakeTaller => {
+            intersection
+        }
+        BotTaskKind::BuildResidentialBlock | BotTaskKind::BuildHome => 1.0 - intersection,
+        BotTaskKind::BuildPlaza | BotTaskKind::UpgradeDistrict => 0.45 + intersection * 0.55,
+        BotTaskKind::BuildPark => 0.65 - intersection * 0.25,
+        BotTaskKind::LandingPad | BotTaskKind::BuildServicePad | BotTaskKind::TargetRange => 0.45,
+        _ => 0.0,
+    }
+}
+
+fn city_block_role_from_segments(
+    road_segments: &[(Vec2, Vec2)],
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> CityBlockRole {
+    let intersection = road_intersection_score_from_segments(road_segments, origin, size);
+    match kind {
+        BotTaskKind::BuildTower | BotTaskKind::BuildGlassTower | BotTaskKind::MakeTaller => {
+            if intersection >= 0.55 {
+                CityBlockRole::CornerLandmark
+            } else {
+                CityBlockRole::MidblockStreetWall
+            }
+        }
+        BotTaskKind::BuildResidentialBlock | BotTaskKind::BuildHome => {
+            if intersection >= 0.55 {
+                CityBlockRole::ResidentialCorner
+            } else {
+                CityBlockRole::MidblockStreetWall
+            }
+        }
+        BotTaskKind::BuildPlaza | BotTaskKind::UpgradeDistrict | BotTaskKind::BuildPark => {
+            CityBlockRole::CivicEdge
+        }
+        BotTaskKind::LandingPad | BotTaskKind::BuildServicePad | BotTaskKind::TargetRange => {
+            CityBlockRole::ServiceEdge
+        }
+        _ => CityBlockRole::MidblockStreetWall,
+    }
+}
+
 #[cfg(test)]
 fn road_facing_building_edge(
     save: &BotWorldSave,
@@ -5569,6 +5711,14 @@ fn road_facing_building_edge(
         return None;
     }
     nearest_road_building_edge(&segments, origin, size).map(|(face, _)| face)
+}
+
+fn road_segments_any_district(save: &BotWorldSave) -> Vec<(Vec2, Vec2)> {
+    save.districts
+        .iter()
+        .flat_map(|district| road_network_segments(save, district))
+        .filter(|(a, b)| a.distance_squared(*b) > 1.0)
+        .collect()
 }
 
 fn road_facing_building_edge_any_district(
@@ -5589,6 +5739,21 @@ fn road_facing_building_edge_any_district(
         .map(|(face, _)| face)
 }
 
+fn city_block_role_any_district(
+    save: &BotWorldSave,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> Option<CityBlockRole> {
+    let segments = road_segments_any_district(save);
+    if segments.is_empty() {
+        None
+    } else {
+        Some(city_block_role_from_segments(&segments, origin, size, kind))
+    }
+}
+
+#[cfg(test)]
 fn road_frontage_score(
     save: &BotWorldSave,
     district: &BotDistrict,
@@ -5621,12 +5786,31 @@ fn score_planned_site(
     let center_x = origin[0] + size[0] / 2;
     let center_z = origin[2] + size[2] / 2;
     let flatness = terrain_flatness(world, center_x, center_z, size[0].max(size[2]).min(36));
+    let road_segments = if is_road_project(kind) {
+        Vec::new()
+    } else {
+        road_network_segments(save, district)
+    };
     let road_access = if is_road_project(kind) {
         1.0
     } else {
         let proximity = road_access_score(save, district, center_x, center_z);
-        let frontage = road_frontage_score(save, district, origin, size);
+        let frontage = nearest_road_building_edge(&road_segments, origin, size)
+            .map(|(_, distance)| distance)
+            .map(|best| {
+                if best <= 18.0 {
+                    1.0
+                } else {
+                    (1.0 - (best - 18.0) / 44.0).clamp(0.0, 1.0)
+                }
+            })
+            .unwrap_or(0.0);
         (proximity * 0.35 + frontage * 0.65).clamp(0.0, 1.0)
+    };
+    let block_fit = if is_road_project(kind) {
+        0.0
+    } else {
+        city_block_fit_score(&road_segments, origin, size, kind)
     };
     let balance = match (district.kind, kind) {
         (BotDistrictKind::Park, BotTaskKind::BuildPark | BotTaskKind::BuildPlaza) => 1.0,
@@ -5640,7 +5824,7 @@ fn score_planned_site(
         _ => 0.65,
     };
     let inside = bounds.contains_box(origin, size);
-    score_city_slot(flatness, road_access, inside, balance, true)
+    score_city_slot(flatness, road_access, inside, balance, true) + block_fit.clamp(0.0, 1.0) * 0.55
         - bounds.distance_from_center(center_x as f32, center_z as f32) * 0.0005
 }
 
@@ -5925,6 +6109,9 @@ fn build_project_concept(
     let street_face = project_uses_street_face(kind)
         .then(|| road_facing_building_edge_any_district(save, origin, size))
         .flatten();
+    let block_role = project_uses_city_block_role(kind)
+        .then(|| city_block_role_any_district(save, origin, size, kind))
+        .flatten();
     let source = if manual {
         "player request"
     } else {
@@ -6006,6 +6193,13 @@ fn build_project_concept(
             detail.push_str(face.label());
             detail.push_str(" so doors, podiums, and service edges meet the road graph.");
         }
+        if let Some(role) = block_role {
+            detail.push_str(" Block role: ");
+            detail.push_str(role.label());
+            detail.push_str(
+                " so massing, entries, and public edges fit the intersection or midblock condition.",
+            );
+        }
         rows.insert(
             2,
             BotPlanRow {
@@ -6024,6 +6218,7 @@ fn build_project_concept(
         visual_goal: visual_goal.into(),
         rows,
         street_face,
+        block_role,
     }
 }
 
@@ -6035,6 +6230,23 @@ fn project_uses_street_face(kind: BotTaskKind) -> bool {
             | BotTaskKind::BuildGlassTower
             | BotTaskKind::MakeTaller
             | BotTaskKind::BuildResidentialBlock
+    )
+}
+
+fn project_uses_city_block_role(kind: BotTaskKind) -> bool {
+    matches!(
+        kind,
+        BotTaskKind::BuildHome
+            | BotTaskKind::BuildResidentialBlock
+            | BotTaskKind::BuildTower
+            | BotTaskKind::BuildGlassTower
+            | BotTaskKind::MakeTaller
+            | BotTaskKind::BuildPark
+            | BotTaskKind::BuildPlaza
+            | BotTaskKind::UpgradeDistrict
+            | BotTaskKind::LandingPad
+            | BotTaskKind::BuildServicePad
+            | BotTaskKind::TargetRange
     )
 }
 
@@ -11105,6 +11317,84 @@ mod tests {
         assert!(city_sheet.detail.contains("east/max-x street face"));
         assert!(city_sheet.detail.contains("doors"));
         assert!(city_sheet.detail.contains("road graph"));
+    }
+
+    #[test]
+    fn city_block_fit_prefers_tower_corners_and_residential_midblocks() {
+        let roads = [
+            (Vec2::new(-40.0, 0.0), Vec2::new(40.0, 0.0)),
+            (Vec2::new(0.0, -40.0), Vec2::new(0.0, 40.0)),
+        ];
+        let corner_lot = [8, 90, 8];
+        let midblock_lot = [36, 90, 8];
+        let tower_size = [21, 58, 21];
+        let home_size = [44, 16, 38];
+
+        let corner_tower =
+            city_block_fit_score(&roads, corner_lot, tower_size, BotTaskKind::BuildGlassTower);
+        let midblock_tower = city_block_fit_score(
+            &roads,
+            midblock_lot,
+            tower_size,
+            BotTaskKind::BuildGlassTower,
+        );
+        let corner_homes = city_block_fit_score(
+            &roads,
+            corner_lot,
+            home_size,
+            BotTaskKind::BuildResidentialBlock,
+        );
+        let midblock_homes = city_block_fit_score(
+            &roads,
+            midblock_lot,
+            home_size,
+            BotTaskKind::BuildResidentialBlock,
+        );
+
+        assert!(
+            corner_tower > midblock_tower + 0.25,
+            "corner tower {corner_tower} should beat midblock {midblock_tower}"
+        );
+        assert!(
+            midblock_homes > corner_homes + 0.15,
+            "midblock homes {midblock_homes} should beat corner {corner_homes}"
+        );
+    }
+
+    #[test]
+    fn project_concept_records_city_block_role() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Corner District".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![[-40, 90, 0], [40, 90, 0], [0, 90, -40], [0, 90, 40]],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::BuildGlassTower,
+            BotTheme::CyanAlloy,
+            [8, 90, 8],
+            [21, 58, 21],
+            "Corner Tower",
+            false,
+            None,
+            None,
+        );
+        let city_sheet = concept
+            .rows
+            .iter()
+            .find(|row| row.phase == "City Sheet")
+            .expect("tower should expose its city planning sheet");
+
+        assert_eq!(concept.block_role, Some(CityBlockRole::CornerLandmark));
+        assert!(city_sheet.detail.contains("corner landmark"));
+        assert!(city_sheet.detail.contains("intersection"));
     }
 
     #[test]

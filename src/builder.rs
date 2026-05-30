@@ -674,6 +674,13 @@ fn live_builder_input(
         return;
     }
     let active_tool = mode.build_tool().unwrap_or(toolbelt.tool);
+    if matches!(
+        active_tool,
+        ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
+    ) {
+        live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
+        return;
+    }
     let place_tool = active_tool == ToolbeltTool::BrushPlace;
     let cut_tool = active_tool == ToolbeltTool::BrushCut;
     if !place_tool && !cut_tool {
@@ -761,7 +768,7 @@ fn live_builder_input(
                 *mirror,
             );
             state.status = format!(
-                "POWER BRUSH {:?} {}x{}x{} ({} Bloecke). Hold LMB to keep painting; RMB cuts. {}",
+                "SMART BUILD {:?} {}x{}x{} ({} Bloecke). LMB endpoint builds; RMB cuts. {}",
                 state.block, brush.x, brush.y, brush.z, n, note
             );
             toolbelt.status = state.status.clone();
@@ -777,7 +784,7 @@ fn live_builder_input(
                 *mirror,
             );
             state.status = format!(
-                "POWER CUT {}x{}x{} ({} Bloecke). Hold RMB to keep cutting; LMB paints. {}",
+                "SMART CUT {}x{}x{} ({} Bloecke). RMB endpoint cuts; LMB builds. {}",
                 brush.x, brush.y, brush.z, n, note
             );
             toolbelt.status = state.status.clone();

@@ -58,8 +58,8 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "Rectangle Fill",
             ToolbeltTool::Sculpt => "Push Pull Face",
             ToolbeltTool::SmartTower => "Smart Tower",
-            ToolbeltTool::BrushPlace => "Power Brush",
-            ToolbeltTool::BrushCut => "Cut Brush",
+            ToolbeltTool::BrushPlace => "Smart Builder",
+            ToolbeltTool::BrushCut => "Smart Cut",
             ToolbeltTool::CityRoad => "Road Tool",
             ToolbeltTool::CityDistrict => "District Zone",
             ToolbeltTool::CityBuilding => "Building Shell",
@@ -74,7 +74,7 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "FILL",
             ToolbeltTool::Sculpt => "PUSH",
             ToolbeltTool::SmartTower => "TOWER",
-            ToolbeltTool::BrushPlace => "BRUSH",
+            ToolbeltTool::BrushPlace => "BUILD",
             ToolbeltTool::BrushCut => "CUT",
             ToolbeltTool::CityRoad => "ROAD",
             ToolbeltTool::CityDistrict => "ZONE",
@@ -106,8 +106,8 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "LMB fills rectangles. Alt+LMB temporarily Push/Pulls. G swaps Fill/Push.",
             ToolbeltTool::Sculpt => "LMB Push/Pulls faces. Alt+LMB temporarily fills rectangles. G swaps Fill/Push.",
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
-            ToolbeltTool::BrushPlace => "Hold LMB paints continuously; hold RMB cuts. Mouse wheel sizes the brush.",
-            ToolbeltTool::BrushCut => "Hold LMB or RMB cuts continuously with the current brush.",
+            ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
+            ToolbeltTool::BrushCut => "LMB or RMB starts a cut point, drag to an endpoint, release to remove exact snapped blocks.",
             ToolbeltTool::CityRoad => "LMB sets road start and end points.",
             ToolbeltTool::CityDistrict => "LMB places a district/zone circle.",
             ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
@@ -121,7 +121,7 @@ impl ToolbeltTool {
             ToolbeltTool::Navigate => "NAV",
             ToolbeltTool::DrawRect | ToolbeltTool::Sculpt => "SHAPE",
             ToolbeltTool::SmartTower => "SMART",
-            ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut => "BRUSH",
+            ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut => "SMART",
             ToolbeltTool::CityRoad
             | ToolbeltTool::CityDistrict
             | ToolbeltTool::CityBuilding
@@ -213,8 +213,9 @@ impl Default for ToolbeltState {
             live: false,
             palette_open: false,
             tool: ToolbeltTool::BrushPlace,
-            status: "Creative Power Brush: hold LMB to build, RMB to cut, wheel sizes brush."
-                .into(),
+            status:
+                "Creative Smart Builder: LMB start -> drag to endpoint -> release builds; RMB cuts."
+                    .into(),
         }
     }
 }
@@ -330,7 +331,7 @@ fn toolbelt_hotkeys(
             toolbelt.status = format!("Picker hidden. Build Live: {}.", toolbelt.tool.label());
         } else if toolbelt.live && toolbelt.tool == ToolbeltTool::DrawRect {
             toolbelt.status =
-                "Rectangle Fill: active drag cancelled. Hold LMB/RMB for Power Brush.".into();
+                "Rectangle Fill: active drag cancelled. Smart Builder is one click away.".into();
         } else if toolbelt.live {
             toolbelt.live = false;
             changed = true;
@@ -485,7 +486,7 @@ fn sync_tool_selection(
 
 impl ToolbeltTool {
     fn uses_live_brush(self) -> bool {
-        matches!(self, ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut)
+        false
     }
 }
 
@@ -512,7 +513,7 @@ fn compact_status(status: &str, tool: ToolbeltTool) -> String {
         status.to_owned()
     } else {
         format!(
-            "{} ready. Hold LMB/RMB, wheel size, Tab tools.",
+            "{} ready. LMB endpoint build, RMB cut, Tab tools.",
             tool.label()
         )
     }
@@ -585,13 +586,17 @@ fn draw_build_dock(
                         mouse_action_badge(ui, MouseGlyph::Wheel, icon, primary, hint);
                     }
                     ui.separator();
-                    metric_chip(
-                        ui,
-                        Icon::Brush,
-                        &format!("{}x{}x{}", brush.x, brush.y, brush.z),
-                        primary,
-                        "Active brush size",
-                    );
+                    if active_tool.uses_live_brush() {
+                        metric_chip(
+                            ui,
+                            Icon::Brush,
+                            &format!("{}x{}x{}", brush.x, brush.y, brush.z),
+                            primary,
+                            "Active brush size",
+                        );
+                    } else {
+                        metric_chip(ui, Icon::Snap, "SNAP", primary, "Endpoint snap is active");
+                    }
                     metric_chip(
                         ui,
                         Icon::Undo,
@@ -998,8 +1003,8 @@ impl ToolbeltTool {
             ToolbeltTool::DrawRect => "Left mouse fills; hold Alt for temporary Push/Pull",
             ToolbeltTool::Sculpt => "Left mouse Push/Pulls; hold Alt for temporary Fill",
             ToolbeltTool::SmartTower => "Left mouse chooses tower corners",
-            ToolbeltTool::BrushPlace => "Hold left mouse to paint continuously",
-            ToolbeltTool::BrushCut => "Hold left mouse to cut continuously",
+            ToolbeltTool::BrushPlace => "Left mouse starts a snapped build endpoint",
+            ToolbeltTool::BrushCut => "Left mouse starts a snapped cut endpoint",
             ToolbeltTool::CityRoad => "Left mouse places road points",
             ToolbeltTool::CityDistrict => "Left mouse places a district",
             ToolbeltTool::CityBuilding => "Left mouse chooses building corners",
@@ -1011,14 +1016,14 @@ impl ToolbeltTool {
     fn right_hint(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Right mouse is reserved for inspect mode",
-            ToolbeltTool::BrushPlace => "Hold right mouse to cut continuously",
+            ToolbeltTool::BrushPlace => "Right mouse starts a snapped cut endpoint",
             ToolbeltTool::Sculpt => "Right mouse sets Push/Pull reference points",
             ToolbeltTool::AnimationPick => {
                 "Right mouse removes a voxel from the animation selection"
             }
             ToolbeltTool::DrawRect => "Right mouse cancels Fill; G swaps to Push",
             ToolbeltTool::SmartTower => "Right mouse cancels the tower preview",
-            ToolbeltTool::BrushCut => "Hold right mouse to cut continuously",
+            ToolbeltTool::BrushCut => "Right mouse starts a snapped cut endpoint",
             ToolbeltTool::CityRoad => "Right mouse removes or cancels the current road",
             ToolbeltTool::CityDistrict => "Right mouse removes the last district",
             ToolbeltTool::CityBuilding => "Right mouse removes or cancels the current building",

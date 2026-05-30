@@ -356,7 +356,7 @@ fn update_stats_text(
     buf.clear();
     let _ = write!(
         buf,
-        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nBUILD Hold LMB/RMB  Wheel brush  Tab tools  1-0 quick tools  F1 deck  ESC pause",
+        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nBUILD LMB start->endpoint  RMB cut  Tab tools  1-0 quick tools  F1 deck  ESC pause",
         governor.profile.label(),
         governor.intent.label(),
         governor.quality.label(),
@@ -1076,7 +1076,7 @@ pub struct HintBanner;
 fn spawn_hint(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
-            "HOLD LMB: BUILD  //  RMB: CUT  //  WHEEL: BRUSH SIZE  //  TAB: TOOLS",
+            "LMB START -> ENDPOINT: BUILD  //  RMB: CUT  //  TAB: TOOLS",
             TextStyle {
                 font_size: 16.0,
                 color: Color::srgba(0.72, 1.0, 0.80, 0.98),

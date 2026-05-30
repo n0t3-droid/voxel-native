@@ -291,7 +291,7 @@ fn mode_hotkeys(
         mode.set(
             ActiveMode::BuildLive { tool },
             format!(
-                "Creative Build: {}. Hold LMB builds, RMB cuts; Tab opens tools.",
+                "Creative Build: {}. LMB start -> endpoint builds; RMB cuts; Tab opens tools.",
                 tool.label()
             ),
         );
@@ -401,7 +401,7 @@ fn mode_hotkeys(
             } else {
                 mode.set(
                     ActiveMode::BuildLive { tool },
-                    "Build Live stays active. Hold LMB/RMB or Tab for tools.",
+                    "Build Live stays active. LMB start -> endpoint, RMB cuts, Tab opens tools.",
                 );
             }
         }
@@ -524,7 +524,7 @@ fn default_creative_mode() -> ActiveMode {
 }
 
 fn default_creative_status() -> &'static str {
-    "Creative Power Brush active. Hold LMB to build, RMB to cut; wheel sizes brush, Tab opens tools."
+    "Creative Smart Builder active. LMB start -> endpoint builds; RMB cuts; Tab opens tools."
 }
 
 fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {
@@ -644,7 +644,7 @@ mod tests {
         let mode = ModeContext::default();
         assert!(!mode.allows_weapons());
         assert!(mode.is_build_live());
-        assert!(mode.status.contains("Hold LMB"));
+        assert!(mode.status.contains("endpoint"));
         assert!(mode.status.contains("RMB"));
     }
 
