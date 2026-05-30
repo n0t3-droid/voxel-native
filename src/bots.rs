@@ -6397,6 +6397,10 @@ fn build_project_concept(
                     detail.push_str(
                         " Landing pads reserve a shuttle approach stripe from the road-facing edge into the pad center.",
                     );
+                } else if matches!(kind, BotTaskKind::TargetRange) {
+                    detail.push_str(
+                        " Target ranges reserve a range gate and safe entry lane from the road-facing edge before the firing lanes begin.",
+                    );
                 }
             }
         }
@@ -8033,11 +8037,28 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let x = origin.x + local.x;
             let z = origin.z + local.z;
             let base = world.surface_height_at(x, z) + 1;
+            let sx = project.size[0] - 1;
+            let sz = project.size[2] - 1;
+            let street_face = project
+                .concept
+                .street_face
+                .unwrap_or(BuildingStreetFace::North);
+            let service_edge =
+                matches!(project.concept.block_role, Some(CityBlockRole::ServiceEdge));
+            let gate_surface =
+                service_edge && street_face.civic_gateway_surface_cell(local, sx, sz);
+            let gate_marker = service_edge
+                && street_face.civic_gateway_marker_cell(local, sx, sz)
+                && local.y <= 4;
+            let safe_lane =
+                service_edge && street_face.shuttle_approach_surface_cell(local, sx, sz);
             if local.y == 0 {
                 let lane = local.x % 6 == 0;
                 return Some((
                     IVec3::new(x, base, z),
-                    if lane {
+                    if gate_surface || safe_lane {
+                        Voxel::from(BlockType::Limestone)
+                    } else if lane {
                         project.theme.accent()
                     } else {
                         Voxel::from(BlockType::Stone)
@@ -8046,7 +8067,14 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             }
             let target_wall = local.z == project.size[2] - 2 && local.y <= 5 && local.x % 5 <= 2;
             let cover = local.z == project.size[2] / 2 && local.y <= 2 && local.x % 7 <= 2;
-            if target_wall {
+            if gate_marker {
+                let voxel = if local.y == 4 {
+                    project.theme.signal()
+                } else {
+                    Voxel::from(BlockType::ShipHullDark)
+                };
+                Some((IVec3::new(x, base + local.y, z), voxel))
+            } else if target_wall {
                 let voxel = if local.y == 3 {
                     Voxel::from(BlockType::NeonMagenta)
                 } else {
@@ -12148,6 +12176,85 @@ mod tests {
         assert_eq!(edge_gate, Some(Voxel::from(BlockType::Limestone)));
         assert_eq!(inner_approach, Some(Voxel::from(BlockType::Limestone)));
         assert_ne!(side_deck, Some(Voxel::from(BlockType::Limestone)));
+    }
+
+    #[test]
+    fn project_concept_records_target_range_road_gate() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Training,
+            name: "Training Yard".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![[46, 90, 2], [46, 90, 4]],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::TargetRange,
+            BotTheme::AmberStreet,
+            [0, 90, -10],
+            [40, 9, 24],
+            "Road-Facing Target Range",
+            false,
+            None,
+            None,
+        );
+        let city_sheet = concept
+            .rows
+            .iter()
+            .find(|row| row.phase == "City Sheet")
+            .expect("target range should expose its city planning sheet");
+
+        assert_eq!(concept.street_face, Some(BuildingStreetFace::East));
+        assert_eq!(concept.block_role, Some(CityBlockRole::ServiceEdge));
+        assert!(city_sheet.detail.contains("range gate"));
+        assert!(city_sheet.detail.contains("safe entry lane"));
+    }
+
+    #[test]
+    fn road_facing_target_range_paints_safe_entry_lane() {
+        let world = VoxelWorld::new();
+        let base_y = world.surface_height_at(39, 12) + 1;
+        let project = BotProject {
+            id: 9,
+            kind: BotTaskKind::TargetRange,
+            label: "Road-Facing Target Range".into(),
+            origin: [0, base_y, 0],
+            size: [40, 9, 24],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::ServiceEdge),
+                ..default()
+            },
+        };
+
+        let edge_gate =
+            project_voxel(&project, IVec3::new(39, 0, 12), &world).map(|(_, voxel)| voxel);
+        let inner_safe_lane =
+            project_voxel(&project, IVec3::new(35, 0, 10), &world).map(|(_, voxel)| voxel);
+        let side_lane =
+            project_voxel(&project, IVec3::new(35, 0, 4), &world).map(|(_, voxel)| voxel);
+        let gate_marker =
+            project_voxel(&project, IVec3::new(39, 4, 9), &world).map(|(_, voxel)| voxel);
+
+        assert_eq!(edge_gate, Some(Voxel::from(BlockType::Limestone)));
+        assert_eq!(inner_safe_lane, Some(Voxel::from(BlockType::Limestone)));
+        assert_ne!(side_lane, Some(Voxel::from(BlockType::Limestone)));
+        assert_eq!(gate_marker, Some(project.theme.signal()));
     }
 
     #[test]
