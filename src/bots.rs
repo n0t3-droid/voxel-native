@@ -5467,12 +5467,9 @@ fn roadside_lot_origins(
             let stagger_seed = seq + segment_idx * 7 + sample_idx * 3 + side_idx;
             let stagger = (stagger_seed % 5) as f32 * 4.0 - 8.0;
             let center = base + normal * side * lot_spacing + dir * stagger;
-            out.push(project_origin_from_center(
-                world,
-                bounds,
-                Vec3::new(center.x, 0.0, center.y),
-                size,
-            ));
+            let origin =
+                project_origin_from_center(world, bounds, Vec3::new(center.x, 0.0, center.y), size);
+            out.push(align_lot_origin_to_road_grade(save, district, origin, size));
         }
     }
     for (idx, point) in road_network_points(save, district)
@@ -5488,10 +5485,63 @@ fn roadside_lot_origins(
                 0.0,
                 point.y + dir.y * lot_spacing + dir.x * stagger,
             );
-            out.push(project_origin_from_center(world, bounds, center, size));
+            let origin = project_origin_from_center(world, bounds, center, size);
+            out.push(align_lot_origin_to_road_grade(save, district, origin, size));
         }
     }
     reserve_roundabout_interiors_for_lots(save, district, size, out)
+}
+
+fn align_lot_origin_to_road_grade(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> [i32; 3] {
+    let Some(deck_y) = nearest_user_road_grade_y(save, district, origin, size) else {
+        return origin;
+    };
+    let mut aligned = origin;
+    aligned[1] = aligned[1].max(deck_y);
+    aligned
+}
+
+fn nearest_user_road_grade_y(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<i32> {
+    let center = project_center(origin, size);
+    let point = Vec2::new(center.x, center.z);
+    let mut best: Option<(f32, f32)> = None;
+    for guide in save
+        .user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+    {
+        let reach = 34.0 + guide.width.max(1) as f32 * 3.0;
+        for pair in guide.points.windows(2) {
+            let a = Vec2::new(pair[0][0] as f32, pair[0][2] as f32);
+            let b = Vec2::new(pair[1][0] as f32, pair[1][2] as f32);
+            let ab = b - a;
+            let len_sq = ab.length_squared();
+            if len_sq <= f32::EPSILON {
+                continue;
+            }
+            let t = ((point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+            let nearest = a + ab * t;
+            let distance = point.distance(nearest);
+            if distance > reach {
+                continue;
+            }
+            let y = pair[0][1] as f32 + (pair[1][1] - pair[0][1]) as f32 * t;
+            if best.map_or(true, |(best_distance, _)| distance < best_distance) {
+                best = Some((distance, y));
+            }
+        }
+    }
+    best.map(|(_, y)| y.round() as i32)
 }
 
 fn reserve_roundabout_interiors_for_lots(
@@ -12266,6 +12316,56 @@ mod tests {
             }),
             "bot concept should tell builders how the road bridge grade blends into architecture: {:?}",
             project.concept.rows
+        );
+    }
+
+    #[test]
+    fn roadside_lot_origins_align_to_nearby_raised_road_grade() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Bridge Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 140,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let road = crate::city::RoadSegment::new(
+            IVec3::new(-48, 90, 0),
+            IVec3::new(48, 90, 0),
+            7,
+            crate::city::RoadStyle::Neon,
+        )
+        .with_endpoint_heights(0, 18);
+        sync_user_city_roads(&mut save, &[road]);
+        let world = VoxelWorld::new();
+        let size = autonomous_project_size(BotTaskKind::BuildGlassTower);
+
+        let lots = roadside_lot_origins(
+            &save,
+            &world,
+            &district,
+            BotTaskKind::BuildGlassTower,
+            size,
+            0,
+        );
+        let raised_lot = lots
+            .iter()
+            .filter(|origin| {
+                let center_x = origin[0] as f32 + size[0] as f32 * 0.5;
+                let center_z = origin[2] as f32 + size[2] as f32 * 0.5;
+                center_x > 28.0 && center_z.abs() <= 44.0
+            })
+            .max_by_key(|origin| origin[1])
+            .copied()
+            .expect("raised bridge should create a road-front skyline lot");
+
+        assert!(
+            raised_lot[1] >= 104,
+            "road-front lot should inherit the nearby raised bridge deck instead of terrain height, got {raised_lot:?}"
         );
     }
 
