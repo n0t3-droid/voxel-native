@@ -5491,7 +5491,64 @@ fn roadside_lot_origins(
             out.push(project_origin_from_center(world, bounds, center, size));
         }
     }
-    out
+    reserve_roundabout_interiors_for_lots(save, district, size, out)
+}
+
+fn reserve_roundabout_interiors_for_lots(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    size: [i32; 3],
+    candidates: Vec<[i32; 3]>,
+) -> Vec<[i32; 3]> {
+    let reservations = roundabout_lot_reservations(save, district, size);
+    if reservations.is_empty() {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .filter(|origin| {
+            let center = Vec2::new(
+                origin[0] as f32 + size[0].max(1) as f32 * 0.5,
+                origin[2] as f32 + size[2].max(1) as f32 * 0.5,
+            );
+            reservations
+                .iter()
+                .all(|(anchor, min_distance)| center.distance(*anchor) >= *min_distance)
+        })
+        .collect()
+}
+
+fn roundabout_lot_reservations(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    size: [i32; 3],
+) -> Vec<(Vec2, f32)> {
+    save.user_roads
+        .iter()
+        .filter(|guide| guide.shape == BotRoadGuideShape::Roundabout)
+        .filter(|guide| road_guide_matches_district(guide, district))
+        .map(|guide| {
+            let anchor = road_guide_anchor(guide);
+            let footprint_half = size[0].max(size[2]).max(1) as f32 * 0.5;
+            let min_distance = roundabout_guide_radius(guide)
+                + guide.width.max(1) as f32 * 0.5
+                + footprint_half
+                + 4.0;
+            (Vec2::new(anchor.x, anchor.z), min_distance)
+        })
+        .collect()
+}
+
+fn roundabout_guide_radius(guide: &BotRoadGuide) -> f32 {
+    let anchor = road_guide_anchor(guide);
+    guide
+        .points
+        .iter()
+        .map(|point| {
+            Vec2::new(point[0] as f32, point[2] as f32).distance(Vec2::new(anchor.x, anchor.z))
+        })
+        .fold(0.0, f32::max)
+        .max(4.0)
 }
 
 fn project_origin_from_center(
@@ -12660,6 +12717,61 @@ mod tests {
                 && (center.y - 5.0).abs() >= 12.0
                 && (center.y - 5.0).abs() <= 32.0),
             "long roads need buildable midblock frontage, got {centers:?}"
+        );
+    }
+
+    #[test]
+    fn roadside_lot_origins_keep_roundabout_interiors_reserved() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Roundabout Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 140,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let roundabout = crate::city::RoadSegment::roundabout(
+            IVec3::new(0, 90, 0),
+            16,
+            7,
+            crate::city::RoadStyle::Cobble,
+        );
+        sync_user_city_roads(&mut save, &[roundabout]);
+        let world = VoxelWorld::new();
+        let size = autonomous_project_size(BotTaskKind::BuildGlassTower);
+
+        let lots = roadside_lot_origins(
+            &save,
+            &world,
+            &district,
+            BotTaskKind::BuildGlassTower,
+            size,
+            2,
+        );
+        let centers: Vec<Vec2> = lots
+            .iter()
+            .map(|origin| {
+                Vec2::new(
+                    origin[0] as f32 + size[0] as f32 * 0.5,
+                    origin[2] as f32 + size[2] as f32 * 0.5,
+                )
+            })
+            .collect();
+        let protected_radius = 16.0 + 7.0 * 0.5 + size[0].max(size[2]) as f32 * 0.5 + 4.0;
+
+        assert!(
+            centers.len() >= 6,
+            "roundabout should create a useful outer frontage ring, got {centers:?}"
+        );
+        assert!(
+            centers
+                .iter()
+                .all(|center| center.distance(Vec2::ZERO) >= protected_radius),
+            "roundabout lots must stay outside the protected civic/traffic circle radius {protected_radius}, got {centers:?}"
         );
     }
 
