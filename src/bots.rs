@@ -5709,7 +5709,8 @@ fn district_road_origins(
         };
         let dx = (b[0] - a[0]).abs();
         let dz = (b[2] - a[2]).abs();
-        if dx < 8 || dz > dx {
+        let square_grid = (size[0] - size[2]).abs() <= 2;
+        if !anchor_pair_supports_road_candidate(dx, dz, square_grid) {
             continue;
         }
         let center = Vec3::new(
@@ -5735,6 +5736,14 @@ fn district_road_origins(
         );
     }
     origins
+}
+
+fn anchor_pair_supports_road_candidate(dx: i32, dz: i32, square_grid: bool) -> bool {
+    if square_grid {
+        dx.max(dz) >= 8
+    } else {
+        dx >= 8 && dx >= dz
+    }
 }
 
 fn push_unique_origin(origins: &mut Vec<[i32; 3]>, origin: [i32; 3]) {
@@ -13632,6 +13641,34 @@ mod tests {
                     && end.distance(Vec2::new(44.0, 16.0)) <= 4.5
             }),
             "autonomous road candidates should include the district's planned anchor street, got {origins:?}"
+        );
+    }
+
+    #[test]
+    fn district_road_grid_origins_follow_vertical_anchor_spines() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "North South Skyline Spine".into(),
+            center: [90.0, 90.0, 0.0],
+            radius: 180,
+            road_anchors: vec![[24, 90, -44], [24, 90, 44]],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let save = BotWorldSave::default();
+        let world = VoxelWorld::new();
+        let size = autonomous_project_size(BotTaskKind::ExpandRoadGrid);
+
+        let origins = district_road_origins(&save, &world, &district, size);
+
+        assert!(
+            origins.iter().any(|origin| {
+                let center_x = origin[0] + size[0] / 2;
+                let center_z = origin[2] + size[2] / 2;
+                (center_x - 24).abs() <= 2 && center_z.abs() <= 2
+            }),
+            "road-grid candidates should center on the vertical anchor spine instead of only the district center, got {origins:?}"
         );
     }
 
