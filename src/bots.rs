@@ -8911,13 +8911,30 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let x = origin.x + local.x;
             let z = origin.z + local.z;
             let surface = world.surface_height_at(x, z) + 1;
-            let terrain_delta = (surface - origin.y).clamp(-4, 4);
-            let pad_y = origin.y + terrain_delta;
-            let y = pad_y + local.y;
             let edge = local.x == 0
                 || local.z == 0
                 || local.x == project.size[0] - 1
                 || local.z == project.size[2] - 1;
+            let raised_from_terrain = origin.y - surface >= 4;
+            if raised_from_terrain {
+                if local.y == 0 {
+                    return Some((IVec3::new(x, origin.y, z), project.theme.floor()));
+                }
+                if let Some(foundation) = building_foundation_voxel(
+                    world,
+                    x,
+                    z,
+                    origin.y,
+                    local.y,
+                    edge || local.x == project.size[0] / 2 || local.z == project.size[2] / 2,
+                ) {
+                    return Some(foundation);
+                }
+                return Some((IVec3::new(x, origin.y + local.y, z), AIR));
+            }
+            let terrain_delta = (surface - origin.y).clamp(-4, 4);
+            let pad_y = origin.y + terrain_delta;
+            let y = pad_y + local.y;
             let voxel = if local.y == 0 {
                 project.theme.floor()
             } else if edge && local.y <= terrain_delta.unsigned_abs() as i32 + 1 {
@@ -14037,6 +14054,46 @@ mod tests {
             Some(IVec3::new(16, road_grade_base - 1, 4))
         );
         assert_ne!(underdeck_support.map(|(_, voxel)| voxel), Some(AIR));
+    }
+
+    #[test]
+    fn raised_clear_flatten_pad_uses_road_grade_deck() {
+        let world = VoxelWorld::new();
+        let terrain_base = world.surface_height_at(0, 0) + 1;
+        let road_grade_base = terrain_base + 22;
+        let project = BotProject {
+            id: 16,
+            kind: BotTaskKind::ClearFlatten,
+            label: "Raised Prep Pad".into(),
+            origin: [0, road_grade_base, 0],
+            size: [28, 8, 28],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        };
+
+        let pad_floor = project_voxel(&project, IVec3::new(0, 0, 0), &world);
+        let underdeck_support = project_voxel(&project, IVec3::new(0, 1, 0), &world);
+
+        assert_eq!(
+            pad_floor,
+            Some((IVec3::new(0, road_grade_base, 0), project.theme.floor()))
+        );
+        assert_eq!(
+            underdeck_support,
+            Some((
+                IVec3::new(0, road_grade_base - 1, 0),
+                Voxel::from(BlockType::Basalt)
+            ))
+        );
     }
 
     #[test]
