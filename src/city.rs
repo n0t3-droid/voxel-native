@@ -1125,7 +1125,11 @@ fn city_input(
                     city.pending_district_a = None;
                     let queued = bots
                         .as_deref_mut()
-                        .map(|brain| crate::bots::queue_city_area_masterplan(brain, min, max))
+                        .map(|brain| {
+                            crate::bots::queue_city_area_masterplan_with_world(
+                                brain, &*world, min, max,
+                            )
+                        })
                         .unwrap_or(0);
                     city.status = if queued > 0 {
                         format!(

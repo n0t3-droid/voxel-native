@@ -11761,7 +11761,7 @@ fn queue_selected_area_masterplan(
         brain.hud_message = "No A/B area selected. Use the editor selection first.".into();
         return 0;
     };
-    queue_area_masterplan(brain, lo, hi, "A/B selection")
+    queue_area_masterplan(brain, lo, hi, "A/B selection", None)
 }
 
 pub fn queue_city_area_masterplan(
@@ -11769,7 +11769,16 @@ pub fn queue_city_area_masterplan(
     corner_a: IVec3,
     corner_b: IVec3,
 ) -> usize {
-    queue_area_masterplan(brain, corner_a, corner_b, "placed city area")
+    queue_area_masterplan(brain, corner_a, corner_b, "placed city area", None)
+}
+
+pub fn queue_city_area_masterplan_with_world(
+    brain: &mut FriendlyWorldBrain,
+    world: &VoxelWorld,
+    corner_a: IVec3,
+    corner_b: IVec3,
+) -> usize {
+    queue_area_masterplan(brain, corner_a, corner_b, "placed city area", Some(world))
 }
 
 fn queue_area_masterplan(
@@ -11777,6 +11786,7 @@ fn queue_area_masterplan(
     lo: IVec3,
     hi: IVec3,
     source_label: &str,
+    world: Option<&VoxelWorld>,
 ) -> usize {
     let min = IVec3::new(lo.x.min(hi.x), lo.y.min(hi.y), lo.z.min(hi.z));
     let max = IVec3::new(lo.x.max(hi.x), lo.y.max(hi.y), lo.z.max(hi.z));
@@ -11792,7 +11802,7 @@ fn queue_area_masterplan(
     brain.save.autonomy.enabled = false;
     brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(5);
     set_companions_to_area_command(&mut brain.save);
-    let district_id = install_player_city_area(&mut brain.save, min, max);
+    let district_id = install_player_city_area(&mut brain.save, min, max, world);
     let bounds = brain.save.primary_bounds();
     let mut queued = 0usize;
     let mut push_project = |save: &mut BotWorldSave,
@@ -11823,7 +11833,7 @@ fn queue_area_masterplan(
         }
     };
 
-    for spec in city_area_masterplan_specs(min, max) {
+    for spec in city_area_masterplan_specs(min, max, world) {
         push_project(
             &mut brain.save,
             spec.kind,
@@ -11891,7 +11901,11 @@ struct CityAreaProjectSpec {
     priority: u8,
 }
 
-fn city_area_masterplan_specs(min: IVec3, max: IVec3) -> Vec<CityAreaProjectSpec> {
+fn city_area_masterplan_specs(
+    min: IVec3,
+    max: IVec3,
+    world: Option<&VoxelWorld>,
+) -> Vec<CityAreaProjectSpec> {
     let street_width = city_area_street_width(min, max);
     let street_half = street_width / 2;
     let center_x = (min.x + max.x) / 2;
@@ -11903,6 +11917,7 @@ fn city_area_masterplan_specs(min: IVec3, max: IVec3) -> Vec<CityAreaProjectSpec
     for &z in &z_lines {
         let priority = if z == center_z { 10 } else { 8 };
         specs.push(city_area_road_strip(
+            world,
             [min.x, min.y + 1, z - street_half],
             [(max.x - min.x + 1).max(1), 7, street_width],
             priority,
@@ -11912,6 +11927,7 @@ fn city_area_masterplan_specs(min: IVec3, max: IVec3) -> Vec<CityAreaProjectSpec
     for &x in &x_lines {
         let priority = if x == center_x { 10 } else { 8 };
         specs.push(city_area_road_strip(
+            world,
             [x - street_half, min.y + 1, min.z],
             [street_width, 7, (max.z - min.z + 1).max(1)],
             priority,
@@ -11921,6 +11937,7 @@ fn city_area_masterplan_specs(min: IVec3, max: IVec3) -> Vec<CityAreaProjectSpec
     let junction_span = city_area_junction_span(min, max);
     if junction_span >= 25 {
         specs.push(city_area_road_strip(
+            world,
             [
                 center_x - junction_span / 2,
                 min.y + 1,
@@ -11935,16 +11952,17 @@ fn city_area_masterplan_specs(min: IVec3, max: IVec3) -> Vec<CityAreaProjectSpec
         .into_iter()
         .enumerate()
     {
+        let lot_y = city_area_lot_grade_y(world, origin, size, min.y + 1);
         specs.push(CityAreaProjectSpec {
             kind: BotTaskKind::ClearFlatten,
-            origin: [origin[0], min.y, origin[2]],
+            origin: [origin[0], lot_y - 1, origin[2]],
             size: [size[0], 8, size[2]],
             theme: BotTheme::WhiteAlloy,
             priority: 6,
         });
 
         let (kind, theme, height) = city_area_lot_program(min, max, origin, size, idx);
-        let build_origin = [origin[0] + 3, min.y + 1, origin[2] + 3];
+        let build_origin = [origin[0] + 3, lot_y, origin[2] + 3];
         let build_size = [size[0] - 6, height, size[2] - 6];
         if build_size[0] >= 11 && build_size[2] >= 11 {
             specs.push(CityAreaProjectSpec {
@@ -11959,7 +11977,11 @@ fn city_area_masterplan_specs(min: IVec3, max: IVec3) -> Vec<CityAreaProjectSpec
 
     specs.push(CityAreaProjectSpec {
         kind: BotTaskKind::DecorateStreet,
-        origin: [center_x - street_half, min.y + 1, center_z - street_half],
+        origin: [
+            center_x - street_half,
+            city_area_road_point_y(world, center_x, center_z, min.y + 1),
+            center_z - street_half,
+        ],
         size: [street_width.max(11), 7, street_width.max(11)],
         theme: BotTheme::AmberStreet,
         priority: 4,
@@ -11968,7 +11990,14 @@ fn city_area_masterplan_specs(min: IVec3, max: IVec3) -> Vec<CityAreaProjectSpec
     specs
 }
 
-fn city_area_road_strip(origin: [i32; 3], size: [i32; 3], priority: u8) -> CityAreaProjectSpec {
+fn city_area_road_strip(
+    world: Option<&VoxelWorld>,
+    mut origin: [i32; 3],
+    size: [i32; 3],
+    priority: u8,
+) -> CityAreaProjectSpec {
+    origin[1] =
+        city_area_route_grade_y(world, origin, size, BotTaskKind::ExpandRoadGrid, origin[1]);
     CityAreaProjectSpec {
         kind: BotTaskKind::ExpandRoadGrid,
         origin,
@@ -11980,18 +12009,20 @@ fn city_area_road_strip(origin: [i32; 3], size: [i32; 3], priority: u8) -> CityA
 
 fn city_area_street_width(min: IVec3, max: IVec3) -> i32 {
     let shortest = (max.x - min.x + 1).min(max.z - min.z + 1);
-    if shortest >= 96 {
-        17
+    if shortest >= 128 {
+        21
+    } else if shortest >= 96 {
+        19
     } else if shortest >= 64 {
-        13
+        15
     } else {
-        9
+        11
     }
 }
 
 fn city_area_junction_span(min: IVec3, max: IVec3) -> i32 {
     let shortest = (max.x - min.x + 1).min(max.z - min.z + 1);
-    (shortest / 2).clamp(0, 41)
+    (shortest * 3 / 5).clamp(0, 57)
 }
 
 fn city_area_axis_lines(min: i32, max: i32, center: i32) -> Vec<i32> {
@@ -12096,26 +12127,88 @@ fn city_area_lot_program(
     }
 }
 
-fn city_area_cross_road_anchors(min: IVec3, max: IVec3) -> Vec<[i32; 3]> {
+fn city_area_route_grade_y(
+    world: Option<&VoxelWorld>,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+    fallback_y: i32,
+) -> i32 {
+    let Some(world) = world else {
+        return fallback_y;
+    };
+    let mut grades: Vec<i32> = road_route_sample_points(origin, size, kind)
+        .into_iter()
+        .map(|(x, z)| road_grade_y(world, x, z, true))
+        .collect();
+    if grades.is_empty() {
+        return city_area_road_point_y(Some(world), origin[0], origin[2], fallback_y);
+    }
+    grades.sort_unstable();
+    grades[grades.len() / 2]
+}
+
+fn city_area_road_point_y(world: Option<&VoxelWorld>, x: i32, z: i32, fallback_y: i32) -> i32 {
+    world
+        .map(|world| road_grade_y(world, x, z, true))
+        .unwrap_or(fallback_y)
+}
+
+fn city_area_lot_grade_y(
+    world: Option<&VoxelWorld>,
+    origin: [i32; 3],
+    size: [i32; 3],
+    fallback_y: i32,
+) -> i32 {
+    let Some(world) = world else {
+        return fallback_y;
+    };
+    let x0 = origin[0];
+    let z0 = origin[2];
+    let x1 = origin[0] + size[0].max(1) - 1;
+    let z1 = origin[2] + size[2].max(1) - 1;
+    let cx = origin[0] + size[0].max(1) / 2;
+    let cz = origin[2] + size[2].max(1) / 2;
+    let inset = 3;
+    let mut grades = [
+        (cx, cz),
+        ((x0 + inset).min(x1), (z0 + inset).min(z1)),
+        ((x1 - inset).max(x0), (z0 + inset).min(z1)),
+        ((x0 + inset).min(x1), (z1 - inset).max(z0)),
+        ((x1 - inset).max(x0), (z1 - inset).max(z0)),
+    ]
+    .into_iter()
+    .map(|(x, z)| world.surface_height_at(x, z) + 1)
+    .collect::<Vec<_>>();
+    grades.sort_unstable();
+    grades[grades.len() / 2]
+}
+
+fn city_area_cross_road_anchors(
+    min: IVec3,
+    max: IVec3,
+    world: Option<&VoxelWorld>,
+) -> Vec<[i32; 3]> {
     let center_x = (min.x + max.x) / 2;
     let center_z = (min.z + max.z) / 2;
-    let y = min.y + 1;
+    let fallback_y = min.y + 1;
     let west = min.x + 4;
     let east = max.x - 4;
     let north = min.z + 4;
     let south = max.z - 4;
+    let anchor = |x, z| [x, city_area_road_point_y(world, x, z, fallback_y), z];
     vec![
-        [west, y, center_z],
-        [center_x, y, center_z],
-        [east, y, center_z],
-        [center_x, y, center_z],
-        [center_x, y, north],
-        [center_x, y, center_z],
-        [center_x, y, south],
+        anchor(west, center_z),
+        anchor(center_x, center_z),
+        anchor(east, center_z),
+        anchor(center_x, center_z),
+        anchor(center_x, north),
+        anchor(center_x, center_z),
+        anchor(center_x, south),
     ]
 }
 
-fn city_area_build_slots(min: IVec3, max: IVec3) -> Vec<[i32; 3]> {
+fn city_area_build_slots(min: IVec3, max: IVec3, world: Option<&VoxelWorld>) -> Vec<[i32; 3]> {
     let street_width = city_area_street_width(min, max);
     let center_x = (min.x + max.x) / 2;
     let center_z = (min.z + max.z) / 2;
@@ -12123,15 +12216,27 @@ fn city_area_build_slots(min: IVec3, max: IVec3) -> Vec<[i32; 3]> {
     let z_lines = city_area_axis_lines(min.z, max.z, center_z);
     city_area_frontage_lots(min, max, &x_lines, &z_lines, street_width / 2)
         .into_iter()
-        .map(|(origin, size)| [origin[0] + size[0] / 2, min.y + 1, origin[2] + size[2] / 2])
+        .map(|(origin, size)| {
+            let x = origin[0] + size[0] / 2;
+            let z = origin[2] + size[2] / 2;
+            [x, city_area_lot_grade_y(world, origin, size, min.y + 1), z]
+        })
         .collect()
 }
 
-fn install_player_city_area(save: &mut BotWorldSave, min: IVec3, max: IVec3) -> Option<u64> {
+fn install_player_city_area(
+    save: &mut BotWorldSave,
+    min: IVec3,
+    max: IVec3,
+    world: Option<&VoxelWorld>,
+) -> Option<u64> {
     let size = max - min + IVec3::ONE;
+    let center_x = (min.x + max.x) / 2;
+    let center_z = (min.z + max.z) / 2;
+    let center_y = city_area_road_point_y(world, center_x, center_z, min.y + 1);
     let center = [
         (min.x + max.x) as f32 * 0.5 + 0.5,
-        min.y as f32,
+        center_y as f32,
         (min.z + max.z) as f32 * 0.5 + 0.5,
     ];
     let radius = (((size.x as f32 * 0.5).powi(2) + (size.z as f32 * 0.5).powi(2))
@@ -12190,8 +12295,8 @@ fn install_player_city_area(save: &mut BotWorldSave, min: IVec3, max: IVec3) -> 
         name: "Placed City Area".into(),
         center,
         radius,
-        road_anchors: city_area_cross_road_anchors(min, max),
-        build_slots: city_area_build_slots(min, max),
+        road_anchors: city_area_cross_road_anchors(min, max, world),
+        build_slots: city_area_build_slots(min, max, world),
         completed_projects: 0,
     });
     Some(id)
@@ -13272,6 +13377,58 @@ mod tests {
             .build_slots
             .iter()
             .all(|slot| { bounds.contains_block(IVec3::new(slot[0], slot[1], slot[2])) }));
+    }
+
+    #[test]
+    fn placed_city_area_with_world_uses_terrain_grades_for_roads_and_lots() {
+        let world = VoxelWorld::new();
+        let mut brain = FriendlyWorldBrain::default();
+        brain.save = BotWorldSave::seed("Area", Vec3::new(0.0, 90.0, 0.0), &world);
+        let min = IVec3::new(-72, 20, -56);
+        let max = IVec3::new(72, 20, 56);
+        let flat_selection_y = min.y + 1;
+
+        let queued = queue_city_area_masterplan_with_world(&mut brain, &world, min, max);
+
+        assert!(queued > 0);
+        let first_road = brain
+            .save
+            .projects
+            .iter()
+            .find(|project| project.kind == BotTaskKind::ExpandRoadGrid)
+            .expect("placed city area should queue terrain-aware road skeletons");
+        assert_eq!(
+            first_road.origin[1],
+            city_area_route_grade_y(
+                Some(&world),
+                first_road.origin,
+                first_road.size,
+                first_road.kind,
+                flat_selection_y,
+            )
+        );
+        assert_ne!(
+            first_road.origin[1], flat_selection_y,
+            "manual city areas should not inherit a stale flat click height"
+        );
+
+        let district = brain
+            .save
+            .districts
+            .iter()
+            .find(|district| district.name == "Placed City Area")
+            .expect("player-placed area should install a city district");
+        assert!(district
+            .road_anchors
+            .iter()
+            .all(|anchor| { anchor[1] == road_grade_y(&world, anchor[0], anchor[2], true) }));
+        assert!(district
+            .build_slots
+            .iter()
+            .all(|slot| slot[1] > flat_selection_y));
+        assert!(brain.save.projects.iter().any(|project| {
+            project.kind == BotTaskKind::ClearFlatten && project.origin[1] >= flat_selection_y
+        }));
     }
 
     #[test]
