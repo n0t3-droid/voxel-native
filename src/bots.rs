@@ -8884,7 +8884,8 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             let x = origin.x + local.x;
             let z = origin.z + local.z;
             let edge = local.z == 0 || local.z == project.size[2] - 1;
-            let base = world.surface_height_at(x, z) + 1;
+            let base = civic_deck_base_y(world, origin, x, z);
+            let center_lane = local.z == project.size[2] / 2;
             let lamp = edge && local.x % 16 == 0;
             let bench = matches!(project.kind, BotTaskKind::DecorateStreet)
                 && local.y == 1
@@ -8903,7 +8904,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                     Voxel::from(BlockType::Wood),
                 ))
             } else {
-                None
+                building_foundation_voxel(world, x, z, base, local.y, edge || center_lane)
             }
         }
         BotTaskKind::ClearFlatten => {
@@ -8929,7 +8930,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
         BotTaskKind::TargetRange => {
             let x = origin.x + local.x;
             let z = origin.z + local.z;
-            let base = world.surface_height_at(x, z) + 1;
+            let base = civic_deck_base_y(world, origin, x, z);
             let sx = project.size[0] - 1;
             let sz = project.size[2] - 1;
             let street_face = project
@@ -8980,7 +8981,14 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                     Voxel::from(BlockType::Basalt),
                 ))
             } else {
-                None
+                building_foundation_voxel(
+                    world,
+                    x,
+                    z,
+                    base,
+                    local.y,
+                    gate_surface || safe_lane || target_wall || cover,
+                )
             }
         }
     }
@@ -13991,6 +13999,47 @@ mod tests {
     }
 
     #[test]
+    fn raised_street_lights_use_road_grade_deck() {
+        let world = VoxelWorld::new();
+        let terrain_base = world.surface_height_at(16, 0) + 1;
+        let road_grade_base = terrain_base + 16;
+        let project = BotProject {
+            id: 14,
+            kind: BotTaskKind::AddLights,
+            label: "Raised Street Lights".into(),
+            origin: [0, road_grade_base, 0],
+            size: [64, 7, 9],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        };
+
+        let lamp_base = project_voxel(&project, IVec3::new(16, 0, 0), &world);
+        let underdeck_support = project_voxel(&project, IVec3::new(16, 1, 4), &world);
+
+        assert_eq!(
+            lamp_base,
+            Some((
+                IVec3::new(16, road_grade_base, 0),
+                Voxel::from(BlockType::ShipHullDark)
+            ))
+        );
+        assert_eq!(
+            underdeck_support.map(|(pos, _)| pos),
+            Some(IVec3::new(16, road_grade_base - 1, 4))
+        );
+        assert_ne!(underdeck_support.map(|(_, voxel)| voxel), Some(AIR));
+    }
+
+    #[test]
     fn project_concept_records_target_range_road_gate() {
         let mut save = BotWorldSave::default();
         save.districts.push(BotDistrict {
@@ -14067,6 +14116,51 @@ mod tests {
         assert_eq!(inner_safe_lane, Some(Voxel::from(BlockType::Limestone)));
         assert_ne!(side_lane, Some(Voxel::from(BlockType::Limestone)));
         assert_eq!(gate_marker, Some(project.theme.signal()));
+    }
+
+    #[test]
+    fn raised_target_range_safe_lane_uses_road_grade_deck() {
+        let world = VoxelWorld::new();
+        let terrain_base = world.surface_height_at(39, 12) + 1;
+        let road_grade_base = terrain_base + 18;
+        let project = BotProject {
+            id: 15,
+            kind: BotTaskKind::TargetRange,
+            label: "Raised Road-Facing Target Range".into(),
+            origin: [0, road_grade_base, 0],
+            size: [40, 9, 24],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::ServiceEdge),
+                ..default()
+            },
+        };
+
+        let edge_gate = project_voxel(&project, IVec3::new(39, 0, 12), &world);
+        let underdeck_support = project_voxel(&project, IVec3::new(35, 1, 10), &world);
+
+        assert_eq!(
+            edge_gate,
+            Some((
+                IVec3::new(39, road_grade_base, 12),
+                Voxel::from(BlockType::Limestone)
+            ))
+        );
+        assert_eq!(
+            underdeck_support.map(|(pos, _)| pos),
+            Some(IVec3::new(35, road_grade_base - 1, 10))
+        );
+        assert_ne!(underdeck_support.map(|(_, voxel)| voxel), Some(AIR));
     }
 
     #[test]
