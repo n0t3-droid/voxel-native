@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::animation::AnimationStudio;
+use crate::blocks::{block_label, block_palette_catalog, BlockPaletteEntry, BlockType};
 use crate::builder::{BuilderHistory, BuilderState};
 use crate::city::{CityState, CityTool};
 use crate::icons::{paint_icon, Icon};
@@ -394,6 +395,7 @@ fn draw_toolbelt(
         active_tool,
         expanded,
         &status,
+        builder.block,
         brush,
         history.undo_len(),
         history.redo_len(),
@@ -418,8 +420,18 @@ fn draw_toolbelt(
             builder.brush = brush;
             builder.status = format!("Live Brush {}x{}x{}", brush.x, brush.y, brush.z);
         }
+        if let Some(block) = preset.block() {
+            builder.block = block;
+            builder.status = format!("Material: {}", block_label(block));
+        }
         mode.set(ActiveMode::BuildLive { tool }, preset.status());
         toolbelt.status = mode.status.clone();
+    }
+    if let Some(block) = dock.block_choice {
+        builder.block = block;
+        builder.status = format!("Material: {}", block_label(block));
+        toolbelt.status = builder.status.clone();
+        mode.status = builder.status.clone();
     }
     if dock.toggle_picker {
         let tool = mode.build_tool().unwrap_or(toolbelt.tool);
@@ -535,33 +547,43 @@ struct BuildDockResult {
     toggle_picker: bool,
     brush_preset: Option<IVec3>,
     workflow_preset: Option<BuildWorkflowPreset>,
+    block_choice: Option<BlockType>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuildWorkflowPreset {
     Sketch,
     PushPull,
+    ModernHouse,
     Roads,
+    Landscape,
     CityShell,
     Skyline,
+    Spacecraft,
 }
 
 impl BuildWorkflowPreset {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 8] = [
         Self::Sketch,
         Self::PushPull,
+        Self::ModernHouse,
         Self::Roads,
+        Self::Landscape,
         Self::CityShell,
         Self::Skyline,
+        Self::Spacecraft,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Sketch => "SKETCH",
             Self::PushPull => "PUSH",
+            Self::ModernHouse => "HOUSE",
             Self::Roads => "ROADS",
+            Self::Landscape => "GARDEN",
             Self::CityShell => "CITY",
             Self::Skyline => "TOWER",
+            Self::Spacecraft => "SHIP",
         }
     }
 
@@ -569,9 +591,12 @@ impl BuildWorkflowPreset {
         match self {
             Self::Sketch => Icon::Grid,
             Self::PushPull => Icon::Move,
+            Self::ModernHouse => Icon::Builder,
             Self::Roads => Icon::Road,
+            Self::Landscape => Icon::Brush,
             Self::CityShell => Icon::City,
             Self::Skyline => Icon::Wand,
+            Self::Spacecraft => Icon::Cube,
         }
     }
 
@@ -579,9 +604,12 @@ impl BuildWorkflowPreset {
         match self {
             Self::Sketch => ToolbeltTool::DrawRect,
             Self::PushPull => ToolbeltTool::Sculpt,
+            Self::ModernHouse => ToolbeltTool::DrawRect,
             Self::Roads => ToolbeltTool::CityRoad,
+            Self::Landscape => ToolbeltTool::DrawRect,
             Self::CityShell => ToolbeltTool::CityBuilding,
             Self::Skyline => ToolbeltTool::SmartTower,
+            Self::Spacecraft => ToolbeltTool::DrawRect,
         }
     }
 
@@ -589,7 +617,23 @@ impl BuildWorkflowPreset {
         match self {
             Self::Sketch => Some(IVec3::new(4, 1, 1)),
             Self::PushPull => Some(IVec3::ONE),
+            Self::ModernHouse => Some(IVec3::new(8, 1, 1)),
+            Self::Landscape => Some(IVec3::new(8, 1, 8)),
+            Self::Spacecraft => Some(IVec3::new(6, 1, 1)),
             Self::Roads | Self::CityShell | Self::Skyline => None,
+        }
+    }
+
+    fn block(self) -> Option<BlockType> {
+        match self {
+            Self::Sketch => Some(BlockType::Stone),
+            Self::PushPull => Some(BlockType::Limestone),
+            Self::ModernHouse => Some(BlockType::Limestone),
+            Self::Roads => Some(BlockType::Stone),
+            Self::Landscape => Some(BlockType::Grass),
+            Self::CityShell => Some(BlockType::Limestone),
+            Self::Skyline => Some(BlockType::CockpitGlass),
+            Self::Spacecraft => Some(BlockType::ShipHullAlloy),
         }
     }
 
@@ -597,9 +641,12 @@ impl BuildWorkflowPreset {
         match self {
             Self::Sketch => "Sketch workflow: LMB drag a snapped rectangle, release to fill; Alt turns it into Push/Pull.".into(),
             Self::PushPull => "Push workflow: hover a face, LMB drag depth, release to commit; Alt gives temporary Fill.".into(),
-            Self::Roads => "Road workflow: LMB draw components with endpoint snap; wheel edits width/bridge height; middle mouse retextures.".into(),
+            Self::ModernHouse => "Modern house workflow: white wall material, wide wall brush, locked-plane sketching, then Push/Pull details.".into(),
+            Self::Roads => "Road and traffic workflow: draw road components with endpoint snap; wheel edits width/bridge height; middle mouse retextures.".into(),
+            Self::Landscape => "Garden workflow: large ground brush for lawns, paths, pools, and planted courtyards.".into(),
             Self::CityShell => "City workflow: LMB two corners for a building shell; roads and frontage stay component-aware.".into(),
             Self::Skyline => "Tower workflow: two clicks create a varied skyscraper shell with floors, crown, and undo.".into(),
+            Self::Spacecraft => "Spacecraft workflow: alloy material and long hull brush for shuttles, fins, and cockpit follow-up.".into(),
         }
     }
 
@@ -607,13 +654,20 @@ impl BuildWorkflowPreset {
         match self {
             Self::Sketch => "One click switches to rectangle sketching and a flat 4x1 brush.",
             Self::PushPull => "One click switches to SketchUp-style face push/pull.",
+            Self::ModernHouse => "White plaster, broad wall brush, fast modern-house massing.",
             Self::Roads => {
                 "One click switches to road components: draw, branch, adjust, retexture."
+            }
+            Self::Landscape => {
+                "Grass material and ground brush for gardens, lawns, and terrain detail."
             }
             Self::CityShell => {
                 "One click switches to component building shells for fast city blocks."
             }
             Self::Skyline => "One click switches to smart tower generation.",
+            Self::Spacecraft => {
+                "Alloy material and hull brush for shuttle bodies and sci-fi details."
+            }
         }
     }
 
@@ -621,9 +675,12 @@ impl BuildWorkflowPreset {
         match self {
             Self::Sketch => egui::Color32::from_rgb(80, 170, 255),
             Self::PushPull => egui::Color32::from_rgb(110, 210, 255),
+            Self::ModernHouse => egui::Color32::from_rgb(240, 245, 230),
             Self::Roads => egui::Color32::from_rgb(80, 235, 225),
+            Self::Landscape => egui::Color32::from_rgb(130, 235, 95),
             Self::CityShell => egui::Color32::from_rgb(130, 255, 125),
             Self::Skyline => egui::Color32::from_rgb(255, 184, 70),
+            Self::Spacecraft => egui::Color32::from_rgb(150, 205, 230),
         }
     }
 }
@@ -633,6 +690,7 @@ fn draw_build_dock(
     active_tool: ToolbeltTool,
     picker_open: bool,
     status: &str,
+    active_block: BlockType,
     brush: IVec3,
     undo_count: usize,
     redo_count: usize,
@@ -688,6 +746,13 @@ fn draw_build_dock(
                         mouse_action_badge(ui, MouseGlyph::Wheel, icon, primary, hint);
                     }
                     ui.separator();
+                    metric_chip(
+                        ui,
+                        Icon::Cube,
+                        block_label(active_block),
+                        active_tool.category_color(),
+                        "Active build material",
+                    );
                     if active_tool.uses_live_brush() {
                         metric_chip(
                             ui,
@@ -737,6 +802,8 @@ fn draw_build_dock(
                             }
                         }
                     });
+                    crate::ui_kit::compact_separator(ui, theme);
+                    material_catalog_panel(ui, active_block, theme, &mut result);
                 }
 
                 if picker_open && active_tool.uses_live_brush() {
@@ -827,6 +894,117 @@ fn category_mark(ui: &mut egui::Ui, tool: ToolbeltTool) {
         color,
     );
     response.on_hover_text(tool.category());
+}
+
+fn block_egui_color(block: BlockType) -> egui::Color32 {
+    let c = block.color().to_srgba();
+    egui::Color32::from_rgba_unmultiplied(
+        (c.red.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.green.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.blue.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.alpha.clamp(0.35, 1.0) * 255.0).round() as u8,
+    )
+}
+
+fn material_catalog_panel(
+    ui: &mut egui::Ui,
+    active_block: BlockType,
+    theme: crate::theme::ThemeSettings,
+    result: &mut BuildDockResult,
+) {
+    let colors = theme.semantic();
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("MATERIALS")
+                .monospace()
+                .size(10.0)
+                .strong()
+                .color(colors.info),
+        );
+        ui.label(
+            egui::RichText::new(block_label(active_block))
+                .monospace()
+                .size(10.5)
+                .color(AMBER),
+        );
+    });
+    egui::ScrollArea::vertical()
+        .id_source("build_studio_material_catalog")
+        .max_height(176.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for category in block_palette_catalog() {
+                let selected_category = category
+                    .entries
+                    .iter()
+                    .any(|entry| entry.block == active_block);
+                egui::CollapsingHeader::new(format!("{} - {}", category.label, category.hint))
+                    .default_open(selected_category)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                            for entry in category.entries {
+                                if material_swatch_chip(ui, *entry, active_block, theme) {
+                                    result.block_choice = Some(entry.block);
+                                }
+                            }
+                        });
+                    });
+            }
+        });
+}
+
+fn material_swatch_chip(
+    ui: &mut egui::Ui,
+    entry: BlockPaletteEntry,
+    active_block: BlockType,
+    theme: crate::theme::ThemeSettings,
+) -> bool {
+    let selected = active_block == entry.block;
+    let colors = theme.semantic();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(128.0, 40.0), egui::Sense::click());
+    let fill = if selected {
+        egui::Color32::from_rgba_premultiplied(70, 45, 0, 226)
+    } else if response.hovered() {
+        colors.surface_strong
+    } else {
+        egui::Color32::from_rgba_premultiplied(0, 12, 8, 184)
+    };
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, egui::Rounding::same(5.0), fill);
+    painter.rect_stroke(
+        rect,
+        egui::Rounding::same(5.0),
+        egui::Stroke::new(1.0, if selected { AMBER } else { colors.stroke }),
+    );
+    let swatch = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 6.0), egui::vec2(28.0, 28.0));
+    painter.rect_filled(
+        swatch,
+        egui::Rounding::same(4.0),
+        block_egui_color(entry.block),
+    );
+    painter.rect_stroke(
+        swatch,
+        egui::Rounding::same(4.0),
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
+    );
+    painter.text(
+        rect.min + egui::vec2(40.0, 15.0),
+        egui::Align2::LEFT_CENTER,
+        entry.label,
+        egui::FontId::monospace(9.5),
+        if selected { AMBER } else { TEXT },
+    );
+    painter.text(
+        rect.min + egui::vec2(40.0, 29.0),
+        egui::Align2::LEFT_CENTER,
+        entry.role,
+        egui::FontId::monospace(7.5),
+        colors.text_muted,
+    );
+    response
+        .on_hover_text(format!("{}: {}", entry.label, entry.role))
+        .clicked()
 }
 
 fn brush_presets() -> [(&'static str, IVec3); 6] {
@@ -1282,6 +1460,30 @@ mod tests {
         assert_eq!(
             BuildWorkflowPreset::Skyline.tool(),
             ToolbeltTool::SmartTower
+        );
+    }
+
+    #[test]
+    fn workflow_presets_pick_architecture_materials() {
+        assert_eq!(
+            BuildWorkflowPreset::ModernHouse.tool(),
+            ToolbeltTool::DrawRect
+        );
+        assert_eq!(
+            BuildWorkflowPreset::ModernHouse.block(),
+            Some(crate::blocks::BlockType::Limestone)
+        );
+        assert_eq!(
+            BuildWorkflowPreset::Roads.block(),
+            Some(crate::blocks::BlockType::Stone)
+        );
+        assert_eq!(
+            BuildWorkflowPreset::Landscape.block(),
+            Some(crate::blocks::BlockType::Grass)
+        );
+        assert_eq!(
+            BuildWorkflowPreset::Spacecraft.block(),
+            Some(crate::blocks::BlockType::ShipHullAlloy)
         );
     }
 }

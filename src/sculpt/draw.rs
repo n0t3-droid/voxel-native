@@ -10,7 +10,7 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
-use crate::blocks::{Voxel, AIR};
+use crate::blocks::{voxel_is_solid, Voxel, AIR};
 use crate::builder::{BuilderHistory, BuilderState};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::player::Player;
@@ -20,6 +20,7 @@ use crate::world::{VoxelWorld, WorldEditBatch};
 
 const DRAW_REACH: f32 = 128.0;
 const DRAW_CELL_CAP: usize = 16_384;
+const RECT_CUT_DEPTH_CAP: i32 = 16;
 const RECT_FILL_OWNER: &str = "Rectangle Fill";
 
 #[derive(Resource, Default)]
@@ -248,6 +249,15 @@ pub fn rect_draw_input(
                 hit,
                 prev,
             );
+        } else if let Some(endpoint) = snap_rect_endpoint_from_locked_plane_ray(
+            draw.start,
+            draw.normal,
+            draw.axis_u,
+            draw.axis_v,
+            origin,
+            dir,
+        ) {
+            draw.current = endpoint;
         }
         let raw_cells = rect_cell_count(draw.start, draw.current, draw.normal);
         draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
@@ -288,7 +298,16 @@ fn commit_rect_fill(
     history: &mut BuilderHistory,
     toolbelt: &mut ToolbeltState,
 ) {
-    let cells = rect_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP);
+    let cells = match draw.action {
+        RectDrawAction::Fill => rect_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP),
+        RectDrawAction::Cut => rect_cut_cells_through_solid(
+            world,
+            draw.start,
+            draw.current,
+            draw.normal,
+            DRAW_CELL_CAP,
+        ),
+    };
     let selected = cells.len();
     if cells.is_empty() {
         draw.active = false;
@@ -390,6 +409,52 @@ fn snap_rect_endpoint_to_locked_plane(
     snapped
 }
 
+fn snap_rect_endpoint_from_locked_plane_ray(
+    start: IVec3,
+    normal: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+) -> Option<IVec3> {
+    let plane_axis = normal_axis(normal)?;
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return None;
+    }
+    let denom = vec_component_by_index(ray_dir, plane_axis);
+    if denom.abs() < 1e-5 {
+        return None;
+    }
+
+    let plane = component_by_index(start, plane_axis) as f32 + 0.5;
+    let t = (plane - vec_component_by_index(ray_origin, plane_axis)) / denom;
+    if !t.is_finite() || t < 0.0 {
+        return None;
+    }
+    let hit = ray_origin + ray_dir * t;
+    if !hit.is_finite() {
+        return None;
+    }
+
+    let mut snapped = start;
+    set_component_by_axis(
+        &mut snapped,
+        axis_u,
+        floor_to_i32_safe(vec_component_by_axis(hit, axis_u)),
+    );
+    set_component_by_axis(
+        &mut snapped,
+        axis_v,
+        floor_to_i32_safe(vec_component_by_axis(hit, axis_v)),
+    );
+    set_component_by_index(
+        &mut snapped,
+        plane_axis,
+        component_by_index(start, plane_axis),
+    );
+    Some(snapped)
+}
+
 fn is_cardinal_axis(axis: IVec3) -> bool {
     axis.x.abs() + axis.y.abs() + axis.z.abs() == 1
 }
@@ -402,6 +467,31 @@ fn component_by_axis(v: IVec3, axis: IVec3) -> i32 {
     } else {
         v.z
     }
+}
+
+fn vec_component_by_axis(v: Vec3, axis: IVec3) -> f32 {
+    if axis.x != 0 {
+        v.x
+    } else if axis.y != 0 {
+        v.y
+    } else {
+        v.z
+    }
+}
+
+fn vec_component_by_index(v: Vec3, index: usize) -> f32 {
+    match index {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+
+fn floor_to_i32_safe(value: f32) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value.floor().clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
 
 fn component_by_index(v: IVec3, index: usize) -> i32 {
@@ -484,6 +574,34 @@ fn rect_cells(a: IVec3, b: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3> {
     out
 }
 
+fn rect_cut_cells_through_solid(
+    world: &VoxelWorld,
+    a: IVec3,
+    b: IVec3,
+    normal: IVec3,
+    cap: usize,
+) -> Vec<IVec3> {
+    if normal_axis(normal).is_none() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let inward = -normal;
+    for surface in rect_cells(a, b, normal, cap) {
+        let mut pos = surface;
+        for _ in 0..RECT_CUT_DEPTH_CAP {
+            if out.len() >= cap {
+                return out;
+            }
+            if !voxel_is_solid(world.voxel_at(pos.x, pos.y, pos.z)) {
+                break;
+            }
+            out.push(pos);
+            pos += inward;
+        }
+    }
+    out
+}
+
 pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<Time>) {
     if !draw.active {
         return;
@@ -508,6 +626,7 @@ fn rect_bounds(a: IVec3, b: IVec3) -> (IVec3, IVec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::BlockType;
 
     #[test]
     fn rect_cells_counts_horizontal_plane() {
@@ -558,6 +677,85 @@ mod tests {
             snap_rect_endpoint_to_locked_plane(start, IVec3::X, IVec3::Y, IVec3::Z, hit, adjacent);
 
         assert_eq!(snapped, IVec3::new(4, 17, 15));
+    }
+
+    #[test]
+    fn rect_endpoint_infers_locked_wall_plane_when_ray_hits_empty_space() {
+        let start = IVec3::new(4, 10, 6);
+        let ray_origin = Vec3::new(12.2, 13.8, -8.0);
+        let ray_dir = Vec3::new(-1.0, 0.25, 2.0).normalize();
+
+        let snapped = snap_rect_endpoint_from_locked_plane_ray(
+            start,
+            IVec3::X,
+            IVec3::Y,
+            IVec3::Z,
+            ray_origin,
+            ray_dir,
+        )
+        .expect("ray should intersect the locked wall plane");
+
+        assert_eq!(snapped.x, start.x);
+        assert!(
+            snapped.y > start.y,
+            "vertical endpoint should follow the inferred plane hit, got {snapped:?}"
+        );
+        assert!(
+            snapped.z > start.z,
+            "depth endpoint should continue beyond existing voxels on the locked plane, got {snapped:?}"
+        );
+    }
+
+    #[test]
+    fn rect_endpoint_infers_locked_floor_plane_for_free_ground_sketches() {
+        let start = IVec3::new(10, 64, 10);
+        let ray_origin = Vec3::new(4.5, 80.0, 3.0);
+        let ray_dir = Vec3::new(0.42, -1.0, 0.55).normalize();
+
+        let snapped = snap_rect_endpoint_from_locked_plane_ray(
+            start,
+            IVec3::Y,
+            IVec3::X,
+            IVec3::Z,
+            ray_origin,
+            ray_dir,
+        )
+        .expect("ray should intersect the locked floor plane");
+
+        assert_eq!(snapped.y, start.y);
+        assert!(
+            snapped.x > start.x && snapped.z > start.z,
+            "floor endpoint should grow from the fixed plane without needing a voxel hit, got {snapped:?}"
+        );
+    }
+
+    #[test]
+    fn cut_rectangle_drills_through_wall_thickness_for_windows_and_doors() {
+        let mut world = VoxelWorld::new();
+        for x in 0..=2 {
+            for y in 0..=2 {
+                for z in 0..=2 {
+                    world.edit_set_voxel(x, y, z, Voxel::from(BlockType::Stone));
+                }
+            }
+        }
+
+        let cells = rect_cut_cells_through_solid(
+            &world,
+            IVec3::new(1, 1, 2),
+            IVec3::new(2, 2, 2),
+            IVec3::Z,
+            DRAW_CELL_CAP,
+        );
+
+        assert_eq!(
+            cells.len(),
+            12,
+            "2x2 opening should include all three solid wall layers"
+        );
+        assert!(cells.contains(&IVec3::new(1, 1, 2)));
+        assert!(cells.contains(&IVec3::new(1, 1, 1)));
+        assert!(cells.contains(&IVec3::new(1, 1, 0)));
     }
 
     #[test]

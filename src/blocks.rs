@@ -272,6 +272,344 @@ impl From<BlockType> for Voxel {
     }
 }
 
+pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
+    BlockType::Stone,
+    BlockType::Dirt,
+    BlockType::Grass,
+    BlockType::Sand,
+    BlockType::Water,
+    BlockType::Wood,
+    BlockType::Leaves,
+    BlockType::Snow,
+    BlockType::Ice,
+    BlockType::TundraGrass,
+    BlockType::JungleLeaves,
+    BlockType::SavannaGrass,
+    BlockType::Gravel,
+    BlockType::Bedrock,
+    BlockType::RedSand,
+    BlockType::RedStone,
+    BlockType::MesaClay,
+    BlockType::MossStone,
+    BlockType::Limestone,
+    BlockType::Crystal,
+    BlockType::Basalt,
+    BlockType::Lava,
+    BlockType::AlienMoss,
+    BlockType::BoneRock,
+    BlockType::GlowSand,
+    BlockType::ShipHullDark,
+    BlockType::ShipHullAlloy,
+    BlockType::CockpitGlass,
+    BlockType::NeonCyan,
+    BlockType::NeonMagenta,
+    BlockType::NeonAmber,
+    BlockType::EngineCore,
+    BlockType::LuminiteCrystal,
+    BlockType::MagnetiteOre,
+    BlockType::IridiumVein,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockPaletteEntry {
+    pub block: BlockType,
+    pub label: &'static str,
+    pub role: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockPaletteCategory {
+    pub label: &'static str,
+    pub hint: &'static str,
+    pub entries: &'static [BlockPaletteEntry],
+}
+
+const ASPHALT_CONCRETE: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::Stone,
+        label: "Stone",
+        role: "asphalt/concrete body",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Gravel,
+        label: "Gravel",
+        role: "aggregate edge",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Bedrock,
+        label: "Bedrock",
+        role: "dark foundation",
+    },
+];
+
+const BRICK_MASONRY: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::RedStone,
+        label: "Red Stone",
+        role: "brick wall",
+    },
+    BlockPaletteEntry {
+        block: BlockType::MesaClay,
+        label: "Mesa Clay",
+        role: "warm stucco stripe",
+    },
+    BlockPaletteEntry {
+        block: BlockType::RedSand,
+        label: "Red Sand",
+        role: "terracotta dust",
+    },
+];
+
+const GLASS: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::Ice,
+        label: "Ice Glass",
+        role: "clear window",
+    },
+    BlockPaletteEntry {
+        block: BlockType::CockpitGlass,
+        label: "Cockpit Glass",
+        role: "smoked sci-fi pane",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Crystal,
+        label: "Crystal",
+        role: "cyan translucent feature",
+    },
+    BlockPaletteEntry {
+        block: BlockType::LuminiteCrystal,
+        label: "Luminite",
+        role: "glowing glass accent",
+    },
+    BlockPaletteEntry {
+        block: BlockType::IridiumVein,
+        label: "Iridium",
+        role: "violet rare-glass vein",
+    },
+];
+
+const GROUND: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::Dirt,
+        label: "Dirt",
+        role: "soil base",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Grass,
+        label: "Grass",
+        role: "lawn",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Sand,
+        label: "Sand",
+        role: "beach/desert",
+    },
+    BlockPaletteEntry {
+        block: BlockType::TundraGrass,
+        label: "Tundra",
+        role: "cold ground",
+    },
+    BlockPaletteEntry {
+        block: BlockType::JungleLeaves,
+        label: "Jungle",
+        role: "dense planting",
+    },
+    BlockPaletteEntry {
+        block: BlockType::SavannaGrass,
+        label: "Savanna",
+        role: "dry planting",
+    },
+    BlockPaletteEntry {
+        block: BlockType::AlienMoss,
+        label: "Alien Moss",
+        role: "biolume ground",
+    },
+    BlockPaletteEntry {
+        block: BlockType::GlowSand,
+        label: "Glow Sand",
+        role: "lit path sand",
+    },
+];
+
+const METAL: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::ShipHullDark,
+        label: "Dark Hull",
+        role: "black metal panel",
+    },
+    BlockPaletteEntry {
+        block: BlockType::ShipHullAlloy,
+        label: "Alloy",
+        role: "brushed metal",
+    },
+    BlockPaletteEntry {
+        block: BlockType::MagnetiteOre,
+        label: "Magnetite",
+        role: "copper-orange ore",
+    },
+    BlockPaletteEntry {
+        block: BlockType::EngineCore,
+        label: "Engine Core",
+        role: "hot machinery",
+    },
+];
+
+const PLASTER_LIGHT: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::Limestone,
+        label: "Limestone",
+        role: "clean wall plaster",
+    },
+    BlockPaletteEntry {
+        block: BlockType::BoneRock,
+        label: "Bone Rock",
+        role: "organic ivory wall",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Snow,
+        label: "White",
+        role: "bright paint",
+    },
+];
+
+const PATTERN_TILE_ROOFING: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::Basalt,
+        label: "Basalt",
+        role: "dark roof tile",
+    },
+    BlockPaletteEntry {
+        block: BlockType::MossStone,
+        label: "Moss Stone",
+        role: "aged patterned tile",
+    },
+];
+
+const SOLID_COLORS: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::NeonCyan,
+        label: "Neon Cyan",
+        role: "cyan color/accent",
+    },
+    BlockPaletteEntry {
+        block: BlockType::NeonMagenta,
+        label: "Neon Magenta",
+        role: "magenta color/accent",
+    },
+    BlockPaletteEntry {
+        block: BlockType::NeonAmber,
+        label: "Neon Amber",
+        role: "amber color/accent",
+    },
+];
+
+const WOOD_NATURE: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::Wood,
+        label: "Wood",
+        role: "timber",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Leaves,
+        label: "Leaves",
+        role: "foliage",
+    },
+];
+
+const WATER_ENERGY: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::Water,
+        label: "Water",
+        role: "liquid surface",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Lava,
+        label: "Lava",
+        role: "hot emissive liquid",
+    },
+];
+
+const BLOCK_PALETTE_CATALOG: &[BlockPaletteCategory] = &[
+    BlockPaletteCategory {
+        label: "Asphalt & Concrete",
+        hint: "roads, foundations, parking decks",
+        entries: ASPHALT_CONCRETE,
+    },
+    BlockPaletteCategory {
+        label: "Brick & Masonry",
+        hint: "facades, walls, warm city detail",
+        entries: BRICK_MASONRY,
+    },
+    BlockPaletteCategory {
+        label: "Glass",
+        hint: "windows, cockpit glass, lit crystalline panels",
+        entries: GLASS,
+    },
+    BlockPaletteCategory {
+        label: "Ground",
+        hint: "terrain, lawns, gardens, paths",
+        entries: GROUND,
+    },
+    BlockPaletteCategory {
+        label: "Metal",
+        hint: "spacecraft, machines, sci-fi structure",
+        entries: METAL,
+    },
+    BlockPaletteCategory {
+        label: "Plaster & Light",
+        hint: "clean walls, white paint, bright interiors",
+        entries: PLASTER_LIGHT,
+    },
+    BlockPaletteCategory {
+        label: "Pattern / Tile / Roofing",
+        hint: "roofs, aged floors, repeated detail",
+        entries: PATTERN_TILE_ROOFING,
+    },
+    BlockPaletteCategory {
+        label: "Solid Colors",
+        hint: "signage, trims, workflow color coding",
+        entries: SOLID_COLORS,
+    },
+    BlockPaletteCategory {
+        label: "Wood & Nature",
+        hint: "houses, gardens, trees",
+        entries: WOOD_NATURE,
+    },
+    BlockPaletteCategory {
+        label: "Water & Energy",
+        hint: "pools, lava, sci-fi hazards",
+        entries: WATER_ENERGY,
+    },
+];
+
+fn block_palette_entry_count(categories: &[BlockPaletteCategory]) -> usize {
+    categories
+        .iter()
+        .map(|category| category.entries.len())
+        .sum()
+}
+
+pub fn block_palette_catalog() -> &'static [BlockPaletteCategory] {
+    debug_assert_eq!(
+        block_palette_entry_count(BLOCK_PALETTE_CATALOG),
+        BUILDABLE_BLOCKS.len()
+    );
+    BLOCK_PALETTE_CATALOG
+}
+
+pub fn block_palette_entry(block: BlockType) -> Option<BlockPaletteEntry> {
+    block_palette_catalog()
+        .iter()
+        .flat_map(|category| category.entries.iter().copied())
+        .find(|entry| entry.block == block)
+}
+
+pub fn block_label(block: BlockType) -> &'static str {
+    block_palette_entry(block)
+        .map(|entry| entry.label)
+        .unwrap_or("Air")
+}
+
 /// Fast voxel → solid? (without converting through the enum).
 /// AIR (0), Water (5) and Lava (22) are non-solid for collision.
 #[inline]
@@ -433,5 +771,38 @@ mod tests {
         assert!(!voxel_is_opaque(BlockType::LuminiteCrystal.into()));
         assert!(voxel_is_opaque(BlockType::MagnetiteOre.into()));
         assert!(ore_units_for_mined_voxel(VOXEL_LUMINITE) > 0);
+    }
+
+    #[test]
+    fn material_palette_catalog_covers_every_buildable_block_once() {
+        let mut seen = std::collections::BTreeSet::new();
+        for category in block_palette_catalog() {
+            assert!(
+                !category.entries.is_empty(),
+                "material category '{}' should expose swatches",
+                category.label
+            );
+            for entry in category.entries {
+                assert!(
+                    seen.insert(entry.block as Voxel),
+                    "block {:?} appears in more than one material category",
+                    entry.block
+                );
+                assert!(!entry.label.is_empty());
+                assert!(!entry.role.is_empty());
+            }
+        }
+
+        assert_eq!(seen.len(), BUILDABLE_BLOCKS.len());
+        for block in BUILDABLE_BLOCKS {
+            assert!(
+                seen.contains(&(block as Voxel)),
+                "missing material palette entry for {block:?}"
+            );
+            assert_eq!(
+                block_label(block),
+                block_palette_entry(block).unwrap().label
+            );
+        }
     }
 }

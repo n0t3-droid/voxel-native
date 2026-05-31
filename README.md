@@ -45,6 +45,14 @@ The latest engine work turns bot construction into a road-first city planner:
   the picker do not fight each other during mode switches;
 - the in-game Build Studio exposes one-click workflow icons for Sketch,
   Push/Pull, Roads, City Shells, and Towers;
+- Sketch-style rectangle drawing keeps its locked floor or wall plane even
+  when the cursor moves over empty space, so extensions, roofs, gardens, and
+  side wings can be sketched without hunting for another voxel target;
+- Smart Cut rectangles drill through continuous wall thickness for fast
+  window, door, and facade openings instead of only shaving the front face;
+- Build Studio now exposes categorized material swatches and architecture
+  presets for modern houses, road/traffic layouts, gardens, towers, and
+  spacecraft hulls directly in the live builder workflow;
 - max-distance streaming pauses bot edit slices when the visible horizon is
   still catching up, keeping low-end PCs responsive.
 
@@ -68,6 +76,10 @@ Verified update for this snapshot:
 - mode/cursor tests lock the rule that gameplay hides the OS cursor while
   menus and clickable picker overlays release it;
 - workflow presets collapse common multi-step builder setups into one icon;
+- Sketch-style builder tests cover locked-plane drawing into empty space and
+  through-wall rectangle cuts for reliable windows and doors;
+- the material catalog test keeps every buildable voxel block present exactly
+  once across the SketchUp-style swatch categories;
 - local engine captures remain ignored rather than becoming GitHub gallery
   clutter.
 

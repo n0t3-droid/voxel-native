@@ -10,7 +10,7 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use crate::animation::{AnimationStudio, Interp, KeyFrame};
-use crate::blocks::BlockType;
+use crate::blocks::{block_label, block_palette_catalog, BlockPaletteEntry, BlockType};
 use crate::builder::{BuildAction, BuilderClipboard, BuilderHistory, BuilderState};
 use crate::icons::Icon;
 use crate::neurocore::RuntimeProfile;
@@ -614,6 +614,72 @@ fn section_heading(ui: &mut egui::Ui, text: &str) {
         .data(|d| d.get_temp::<crate::theme::ThemeSettings>(egui::Id::new("hacker_theme")))
         .unwrap_or_default();
     section_box(ui, theme, text);
+}
+
+fn block_egui_color(block: BlockType) -> egui::Color32 {
+    let c = block.color().to_srgba();
+    egui::Color32::from_rgba_unmultiplied(
+        (c.red.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.green.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.blue.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c.alpha.clamp(0.35, 1.0) * 255.0).round() as u8,
+    )
+}
+
+fn material_swatch_chip(
+    ui: &mut egui::Ui,
+    entry: BlockPaletteEntry,
+    selected: bool,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Response {
+    let colors = theme.semantic();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(158.0, 50.0), egui::Sense::click());
+    let fill = if selected {
+        colors.selected
+    } else if response.hovered() {
+        colors.surface_strong
+    } else {
+        colors.surface
+    };
+    let stroke = if selected {
+        colors.accent
+    } else {
+        colors.stroke.linear_multiply(0.68)
+    };
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, egui::Rounding::same(7.0), fill);
+    painter.rect_stroke(
+        rect,
+        egui::Rounding::same(7.0),
+        egui::Stroke::new(1.0, stroke),
+    );
+
+    let swatch = egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 8.0), egui::vec2(34.0, 34.0));
+    painter.rect_filled(
+        swatch,
+        egui::Rounding::same(4.0),
+        block_egui_color(entry.block),
+    );
+    painter.rect_stroke(
+        swatch,
+        egui::Rounding::same(4.0),
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(80)),
+    );
+    painter.text(
+        rect.min + egui::vec2(50.0, 17.0),
+        egui::Align2::LEFT_CENTER,
+        entry.label,
+        egui::FontId::monospace(11.0),
+        colors.text,
+    );
+    painter.text(
+        rect.min + egui::vec2(50.0, 34.0),
+        egui::Align2::LEFT_CENTER,
+        entry.role,
+        egui::FontId::monospace(8.5),
+        colors.text_muted,
+    );
+    response.on_hover_text(format!("{}: {}", entry.label, entry.role))
 }
 
 fn world_mode_card_icon(mode: WorldModeCard) -> Icon {
@@ -1839,45 +1905,40 @@ fn draw_builder_tab(
             false,
             theme,
         );
-        crate::ui_kit::setting_card(ui, Icon::Cube, "Block", "choose material", false, theme);
+        crate::ui_kit::setting_card(
+            ui,
+            Icon::Cube,
+            "Material",
+            block_label(builder.block),
+            true,
+            theme,
+        );
     });
     ui.add_space(8.0);
 
-    section_heading(ui, "BLOCK WAEHLEN");
-    let blocks: [(BlockType, &str); 24] = [
-        (BlockType::Stone, "Stone"),
-        (BlockType::Dirt, "Dirt"),
-        (BlockType::Grass, "Grass"),
-        (BlockType::Sand, "Sand"),
-        (BlockType::Wood, "Wood"),
-        (BlockType::Leaves, "Leaves"),
-        (BlockType::Snow, "Snow"),
-        (BlockType::Ice, "Ice"),
-        (BlockType::TundraGrass, "TundraGrass"),
-        (BlockType::JungleLeaves, "JungleLeaves"),
-        (BlockType::SavannaGrass, "SavannaGrass"),
-        (BlockType::Gravel, "Gravel"),
-        (BlockType::Bedrock, "Bedrock"),
-        (BlockType::RedSand, "RedSand"),
-        (BlockType::RedStone, "RedStone"),
-        (BlockType::MesaClay, "MesaClay"),
-        (BlockType::MossStone, "MossStone"),
-        (BlockType::Limestone, "Limestone"),
-        (BlockType::Crystal, "Crystal"),
-        (BlockType::Basalt, "Basalt"),
-        (BlockType::Lava, "Lava"),
-        (BlockType::AlienMoss, "AlienMoss"),
-        (BlockType::BoneRock, "BoneRock"),
-        (BlockType::GlowSand, "GlowSand"),
-    ];
-    ui.horizontal_wrapped(|ui| {
-        for (b, label) in blocks {
-            let selected = builder.block == b;
-            if crate::ui_kit::tab_chip(ui, Icon::Cube, label, selected, theme).clicked() {
-                builder.block = b;
-            }
-        }
-    });
+    section_heading(ui, "MATERIALIEN / TEXTUREN");
+    crate::ui_kit::status_chip(ui, Icon::Cube, "Active", block_label(builder.block), theme);
+    ui.add_space(4.0);
+    for category in block_palette_catalog() {
+        let open = category
+            .entries
+            .iter()
+            .any(|entry| entry.block == builder.block);
+        egui::CollapsingHeader::new(format!("{} - {}", category.label, category.hint))
+            .default_open(open)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                    for entry in category.entries {
+                        let selected = builder.block == entry.block;
+                        if material_swatch_chip(ui, *entry, selected, theme).clicked() {
+                            builder.block = entry.block;
+                            builder.status = format!("Material: {} ({})", entry.label, entry.role);
+                        }
+                    }
+                });
+            });
+    }
     ui.add_space(6.0);
 
     section_heading(ui, "PINSEL (Cuboid, jede Achse frei)");
