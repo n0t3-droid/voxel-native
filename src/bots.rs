@@ -5757,7 +5757,9 @@ fn roadside_lot_origins(
             let center = base + normal * side * lot_spacing + dir * stagger;
             let origin =
                 project_origin_from_center(world, bounds, Vec3::new(center.x, 0.0, center.y), size);
-            out.push(align_lot_origin_to_road_grade(save, district, origin, size));
+            out.push(align_lot_origin_to_road_grade(
+                save, world, district, origin, size,
+            ));
         }
     }
     for (idx, point) in road_network_points(save, district)
@@ -5774,7 +5776,9 @@ fn roadside_lot_origins(
                 point.y + dir.y * lot_spacing + dir.x * stagger,
             );
             let origin = project_origin_from_center(world, bounds, center, size);
-            out.push(align_lot_origin_to_road_grade(save, district, origin, size));
+            out.push(align_lot_origin_to_road_grade(
+                save, world, district, origin, size,
+            ));
         }
     }
     reserve_roundabout_interiors_for_lots(save, district, size, out)
@@ -5782,11 +5786,12 @@ fn roadside_lot_origins(
 
 fn align_lot_origin_to_road_grade(
     save: &BotWorldSave,
+    world: &VoxelWorld,
     district: &BotDistrict,
     origin: [i32; 3],
     size: [i32; 3],
 ) -> [i32; 3] {
-    let Some(deck_y) = nearest_user_road_grade_y(save, district, origin, size) else {
+    let Some(deck_y) = nearest_road_grade_y(save, world, district, origin, size) else {
         return origin;
     };
     let mut aligned = origin;
@@ -5819,12 +5824,12 @@ fn semantic_road_guide_deck_y(guide: &BotRoadGuide) -> Option<i32> {
     }
 }
 
-fn nearest_user_road_grade_y(
+fn nearest_user_road_grade_sample(
     save: &BotWorldSave,
     district: &BotDistrict,
     origin: [i32; 3],
     size: [i32; 3],
-) -> Option<i32> {
+) -> Option<(f32, f32)> {
     let mut best: Option<(f32, f32)> = None;
     for guide in save
         .user_roads
@@ -5837,7 +5842,72 @@ fn nearest_user_road_grade_y(
             }
         }
     }
+    best
+}
+
+fn nearest_road_grade_y(
+    save: &BotWorldSave,
+    world: &VoxelWorld,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<i32> {
+    let mut best: Option<(f32, f32)> = nearest_user_road_grade_sample(save, district, origin, size);
+    for project in &save.projects {
+        if project.district_id != Some(district.id)
+            || !is_access_road_project(project.kind)
+            || matches!(project.status, BotProjectStatus::Blocked)
+        {
+            continue;
+        }
+        if let Some((distance, y)) = nearest_road_project_grade_sample(world, project, origin, size)
+        {
+            if best.map_or(true, |(best_distance, _)| distance < best_distance) {
+                best = Some((distance, y));
+            }
+        }
+    }
     best.map(|(_, y)| y.round() as i32)
+}
+
+fn nearest_road_project_grade_sample(
+    world: &VoxelWorld,
+    project: &BotProject,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<(f32, f32)> {
+    let probes = building_frontage_grade_probes(origin, size);
+    let reach = 34.0 + project_road_corridor_half_width(project) * 2.0;
+    let mut best: Option<(f32, f32)> = None;
+    for (a, b) in project_road_segments(project) {
+        let ab = b - a;
+        let len_sq = ab.length_squared();
+        if len_sq <= f32::EPSILON {
+            continue;
+        }
+        for point in &probes {
+            let t = ((*point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+            let nearest = a + ab * t;
+            let distance = point.distance(nearest);
+            if distance > reach {
+                continue;
+            }
+            let y = road_project_grade_y_at(world, project, nearest);
+            if best.map_or(true, |(best_distance, _)| distance < best_distance) {
+                best = Some((distance, y));
+            }
+        }
+    }
+    best
+}
+
+fn road_project_grade_y_at(world: &VoxelWorld, project: &BotProject, point: Vec2) -> f32 {
+    match project.kind {
+        BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad | BotTaskKind::ExpandRoadGrid => {
+            road_grade_y(world, point.x.round() as i32, point.y.round() as i32, true) as f32
+        }
+        _ => project.origin[1] as f32,
+    }
 }
 
 fn nearest_road_guide_grade_sample(
@@ -12842,11 +12912,60 @@ mod tests {
         let size = [42, 58, 42];
         let origin = [-21, 80, 44];
 
-        let aligned = align_lot_origin_to_road_grade(&save, &district, origin, size);
+        let world = VoxelWorld::new();
+        let aligned = align_lot_origin_to_road_grade(&save, &world, &district, origin, size);
 
         assert!(
             aligned[1] >= 108,
             "deep road-front lots should align from the building edge even when the center is far from the road, got {aligned:?}"
+        );
+    }
+
+    #[test]
+    fn road_grade_alignment_uses_bot_built_road_deck() {
+        let world = VoxelWorld::new();
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Bot Road Grade Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 140,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let road_size = [96, 7, 12];
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildRoad,
+            label: "Bot Road".into(),
+            origin: [-48, 90, 0],
+            size: road_size,
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+        let size = autonomous_project_size(BotTaskKind::BuildResidentialBlock);
+        let origin = [-18, 1, 20];
+        let road_x = 0;
+        let road_z = build_road_center_z(0, road_size[2], road_x - save.projects[0].origin[0]);
+        let expected_deck_y = road_grade_y(&world, road_x, road_z, true);
+
+        let aligned = align_lot_origin_to_road_grade(&save, &world, &district, origin, size);
+
+        assert!(
+            aligned[1] >= expected_deck_y,
+            "lots beside bot-built roads should inherit the road deck y={expected_deck_y}, got {aligned:?}"
         );
     }
 
