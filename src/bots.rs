@@ -5702,16 +5702,48 @@ fn district_road_origins(
     size: [i32; 3],
 ) -> Vec<[i32; 3]> {
     let bounds = save.primary_bounds();
+    let mut origins = Vec::new();
+    for pair in district.road_anchors.windows(2) {
+        let [a, b] = pair else {
+            continue;
+        };
+        let dx = (b[0] - a[0]).abs();
+        let dz = (b[2] - a[2]).abs();
+        if dx < 8 || dz > dx {
+            continue;
+        }
+        let center = Vec3::new(
+            (a[0] + b[0]) as f32 * 0.5,
+            ((a[1] + b[1]) as f32 * 0.5).max(0.0),
+            (a[2] + b[2]) as f32 * 0.5,
+        );
+        push_unique_origin(
+            &mut origins,
+            project_origin_from_center(world, bounds, center, size),
+        );
+    }
     let center = vec3_from_arr(district.center);
     let mut centers = vec![center];
     if let Some(hub) = save.settlements.first().map(|s| vec3_from_arr(s.hub)) {
         centers.push(hub.lerp(center, 0.50));
         centers.push(hub.lerp(center, 0.74));
     }
-    centers
-        .into_iter()
-        .map(|center| project_origin_from_center(world, bounds, center, size))
-        .collect()
+    for center in centers {
+        push_unique_origin(
+            &mut origins,
+            project_origin_from_center(world, bounds, center, size),
+        );
+    }
+    origins
+}
+
+fn push_unique_origin(origins: &mut Vec<[i32; 3]>, origin: [i32; 3]) {
+    if !origins
+        .iter()
+        .any(|existing| existing[0] == origin[0] && existing[2] == origin[2])
+    {
+        origins.push(origin);
+    }
 }
 
 fn roadside_lot_origins(
@@ -13565,6 +13597,41 @@ mod tests {
                 && (center.y - 5.0).abs() >= 12.0
                 && (center.y - 5.0).abs() <= 32.0),
             "long roads need buildable midblock frontage, got {centers:?}"
+        );
+    }
+
+    #[test]
+    fn district_road_origins_follow_anchor_lines_when_center_is_offset() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Offset Road Intent".into(),
+            center: [0.0, 90.0, 80.0],
+            radius: 160,
+            road_anchors: vec![[-44, 90, 16], [44, 90, 16]],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let save = BotWorldSave::default();
+        let world = VoxelWorld::new();
+        let size = [88, 7, 11];
+
+        let origins = district_road_origins(&save, &world, &district, size);
+
+        assert!(
+            origins.iter().any(|origin| {
+                let start = Vec2::new(
+                    origin[0] as f32,
+                    build_road_center_z(origin[2], size[2], 0) as f32,
+                );
+                let end = Vec2::new(
+                    (origin[0] + size[0] - 1) as f32,
+                    build_road_center_z(origin[2], size[2], size[0] - 1) as f32,
+                );
+                start.distance(Vec2::new(-44.0, 16.0)) <= 3.5
+                    && end.distance(Vec2::new(44.0, 16.0)) <= 4.5
+            }),
+            "autonomous road candidates should include the district's planned anchor street, got {origins:?}"
         );
     }
 
