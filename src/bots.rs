@@ -5327,6 +5327,9 @@ fn best_build_site_from_candidates(
         .filter(|origin| bounds.contains_box(*origin, size))
         .filter(|origin| project_anchor_loaded(world, *origin, size))
         .filter(|origin| !project_footprint_reserved(save, *origin, size, kind))
+        .filter(|origin| {
+            !project_footprint_blocks_road_corridor(save, district, *origin, size, kind)
+        })
         .max_by(|a, b| {
             let sa = score_planned_site(save, world, district, *a, size, kind);
             let sb = score_planned_site(save, world, district, *b, size, kind);
@@ -5378,6 +5381,128 @@ fn project_footprints_overlap(
     let b_min_z = b_origin[2];
     let b_max_z = b_origin[2] + b_size[2].max(1) - 1;
     a_min_x <= b_max_x && a_max_x >= b_min_x && a_min_z <= b_max_z && a_max_z >= b_min_z
+}
+
+fn project_footprint_blocks_road_corridor(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> bool {
+    if is_road_project(kind)
+        || project_is_semantic_roundabout_anchor(save, district, origin, size, kind)
+    {
+        return false;
+    }
+    road_corridor_segments(save, district)
+        .into_iter()
+        .any(|(a, b, half_width)| {
+            road_segment_intersects_project_footprint(a, b, origin, size, half_width + 2.0)
+        })
+}
+
+fn project_is_semantic_roundabout_anchor(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> bool {
+    save.user_roads
+        .iter()
+        .filter(|guide| guide.shape == BotRoadGuideShape::Roundabout)
+        .filter(|guide| road_guide_matches_district(guide, district))
+        .filter(|guide| semantic_project_kind_for_guide(district, guide) == Some(kind))
+        .map(road_guide_anchor)
+        .any(|anchor| project_footprint_contains_xz(origin, size, Vec2::new(anchor.x, anchor.z)))
+}
+
+fn road_corridor_segments(save: &BotWorldSave, district: &BotDistrict) -> Vec<(Vec2, Vec2, f32)> {
+    let mut segments = Vec::new();
+    for guide in save
+        .user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+    {
+        let half_width = guide.width.max(1) as f32 * 0.5;
+        segments.extend(
+            road_guide_segments(guide)
+                .into_iter()
+                .map(|(a, b)| (a, b, half_width)),
+        );
+    }
+    for pair in district.road_anchors.windows(2) {
+        let a = Vec2::new(pair[0][0] as f32, pair[0][2] as f32);
+        let b = Vec2::new(pair[1][0] as f32, pair[1][2] as f32);
+        if a.distance_squared(b) > 1.0 {
+            segments.push((a, b, 3.5));
+        }
+    }
+    for project in &save.projects {
+        if project.district_id != Some(district.id)
+            || !is_access_road_project(project.kind)
+            || matches!(project.status, BotProjectStatus::Blocked)
+        {
+            continue;
+        }
+        let half_width = project_road_corridor_half_width(project);
+        segments.extend(
+            project_road_segments(project)
+                .into_iter()
+                .map(|(a, b)| (a, b, half_width)),
+        );
+    }
+    segments
+}
+
+fn project_road_corridor_half_width(project: &BotProject) -> f32 {
+    match project.kind {
+        BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad => project.size[2].max(1) as f32 * 0.5,
+        BotTaskKind::ExpandRoadGrid => 5.5,
+        _ => 3.5,
+    }
+}
+
+fn road_segment_intersects_project_footprint(
+    a: Vec2,
+    b: Vec2,
+    origin: [i32; 3],
+    size: [i32; 3],
+    padding: f32,
+) -> bool {
+    if a.distance_squared(b) <= 1.0 {
+        return false;
+    }
+    let min_x = origin[0] as f32 - padding;
+    let max_x = (origin[0] + size[0].max(1)) as f32 + padding;
+    let min_z = origin[2] as f32 - padding;
+    let max_z = (origin[2] + size[2].max(1)) as f32 + padding;
+    if point_inside_project_rect(a, min_x, max_x, min_z, max_z)
+        || point_inside_project_rect(b, min_x, max_x, min_z, max_z)
+    {
+        return true;
+    }
+    let nw = Vec2::new(min_x, min_z);
+    let ne = Vec2::new(max_x, min_z);
+    let se = Vec2::new(max_x, max_z);
+    let sw = Vec2::new(min_x, max_z);
+    segments_intersect(a, b, nw, ne)
+        || segments_intersect(a, b, ne, se)
+        || segments_intersect(a, b, se, sw)
+        || segments_intersect(a, b, sw, nw)
+}
+
+fn point_inside_project_rect(point: Vec2, min_x: f32, max_x: f32, min_z: f32, max_z: f32) -> bool {
+    point.x >= min_x && point.x <= max_x && point.y >= min_z && point.y <= max_z
+}
+
+fn project_footprint_contains_xz(origin: [i32; 3], size: [i32; 3], point: Vec2) -> bool {
+    let min_x = origin[0] as f32;
+    let max_x = (origin[0] + size[0].max(1)) as f32;
+    let min_z = origin[2] as f32;
+    let max_z = (origin[2] + size[2].max(1)) as f32;
+    point_inside_project_rect(point, min_x, max_x, min_z, max_z)
 }
 
 fn semantic_road_site_origins(
@@ -13222,6 +13347,40 @@ mod tests {
             picked,
             Some([36, 90, 0]),
             "bot planner should reserve occupied project footprints instead of stacking new towers"
+        );
+    }
+
+    #[test]
+    fn build_site_selection_rejects_buildings_on_road_corridors() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -8, 8);
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Road Protected Skyline".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 160,
+            road_anchors: vec![[-48, 90, 0], [48, 90, 0]],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let size = autonomous_project_size(BotTaskKind::BuildGlassTower);
+
+        let picked = best_build_site_from_candidates(
+            &save,
+            &world,
+            &district,
+            BotTaskKind::BuildGlassTower,
+            size,
+            vec![[-10, 90, -10]],
+        );
+
+        assert_eq!(
+            picked,
+            None,
+            "bot planner should preserve road corridors instead of accepting a tower footprint on top of the road"
         );
     }
 
