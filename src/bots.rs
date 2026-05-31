@@ -5330,6 +5330,7 @@ fn best_build_site_from_candidates(
         .filter(|origin| {
             !project_footprint_blocks_road_corridor(save, district, *origin, size, kind)
         })
+        .filter(|origin| !road_project_blocks_city_footprint(save, *origin, size, kind))
         .max_by(|a, b| {
             let sa = score_planned_site(save, world, district, *a, size, kind);
             let sb = score_planned_site(save, world, district, *b, size, kind);
@@ -5503,6 +5504,52 @@ fn project_footprint_contains_xz(origin: [i32; 3], size: [i32; 3], point: Vec2) 
     let min_z = origin[2] as f32;
     let max_z = (origin[2] + size[2].max(1)) as f32;
     point_inside_project_rect(point, min_x, max_x, min_z, max_z)
+}
+
+fn road_project_blocks_city_footprint(
+    save: &BotWorldSave,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> bool {
+    if !is_access_road_project(kind) {
+        return false;
+    }
+    let segments = planned_road_corridor_segments(origin, size, kind);
+    if segments.is_empty() {
+        return false;
+    }
+    save.projects
+        .iter()
+        .filter(|project| project_reserves_city_footprint(project.kind))
+        .filter(|project| !matches!(project.status, BotProjectStatus::Blocked))
+        .any(|project| {
+            segments.iter().any(|(a, b, half_width)| {
+                road_segment_intersects_project_footprint(
+                    *a,
+                    *b,
+                    project.origin,
+                    project.size,
+                    half_width + 2.0,
+                )
+            })
+        })
+}
+
+fn planned_road_corridor_segments(
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> Vec<(Vec2, Vec2, f32)> {
+    let half_width = match kind {
+        BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad => size[2].max(1) as f32 * 0.5,
+        BotTaskKind::ExpandRoadGrid => 5.5,
+        _ => return Vec::new(),
+    };
+    planned_road_segments(origin, size, kind)
+        .into_iter()
+        .map(|(a, b)| (a, b, half_width))
+        .collect()
 }
 
 fn semantic_road_site_origins(
@@ -6116,24 +6163,28 @@ fn road_network_points(save: &BotWorldSave, district: &BotDistrict) -> Vec<Vec2>
 }
 
 fn project_road_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
-    match project.kind {
+    planned_road_segments(project.origin, project.size, project.kind)
+}
+
+fn planned_road_segments(origin: [i32; 3], size: [i32; 3], kind: BotTaskKind) -> Vec<(Vec2, Vec2)> {
+    match kind {
         BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad => {
-            build_road_centerline_segments(project)
+            build_road_centerline_segments(origin, size)
         }
-        BotTaskKind::ExpandRoadGrid => expand_road_grid_segments(project),
+        BotTaskKind::ExpandRoadGrid => expand_road_grid_segments(origin, size),
         _ => Vec::new(),
     }
 }
 
-fn expand_road_grid_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
+fn expand_road_grid_segments(origin: [i32; 3], size: [i32; 3]) -> Vec<(Vec2, Vec2)> {
     let mut segments = Vec::new();
-    let width = project.size[0].max(1);
-    let depth = project.size[2].max(1);
+    let width = size[0].max(1);
+    let depth = size[2].max(1);
     for target_plan_x in road_grid_targets(width, width / 2) {
-        add_grid_road_segments_along_z(project, target_plan_x, &mut segments);
+        add_grid_road_segments_along_z(origin, size, target_plan_x, &mut segments);
     }
     for target_plan_z in road_grid_targets(depth, depth / 2) {
-        add_grid_road_segments_along_x(project, target_plan_z, &mut segments);
+        add_grid_road_segments_along_x(origin, size, target_plan_z, &mut segments);
     }
     segments
 }
@@ -6152,19 +6203,20 @@ fn road_grid_targets(size: i32, mid: i32) -> Vec<i32> {
 }
 
 fn add_grid_road_segments_along_z(
-    project: &BotProject,
+    origin: [i32; 3],
+    size: [i32; 3],
     target_plan_x: i32,
     segments: &mut Vec<(Vec2, Vec2)>,
 ) {
-    let depth = project.size[2].max(1);
-    let width = project.size[0].max(1);
+    let depth = size[2].max(1);
+    let width = size[0].max(1);
     let mut prev: Option<Vec2> = None;
     for local_z in road_grid_sample_axis(depth) {
-        let local_x = target_plan_x - road_grid_bend_x(project, local_z);
+        let local_x = target_plan_x - road_grid_bend_x(origin, local_z);
         let point = if (0..width).contains(&local_x) {
             Some(Vec2::new(
-                project.origin[0] as f32 + local_x as f32,
-                project.origin[2] as f32 + local_z as f32,
+                origin[0] as f32 + local_x as f32,
+                origin[2] as f32 + local_z as f32,
             ))
         } else {
             None
@@ -6174,19 +6226,20 @@ fn add_grid_road_segments_along_z(
 }
 
 fn add_grid_road_segments_along_x(
-    project: &BotProject,
+    origin: [i32; 3],
+    size: [i32; 3],
     target_plan_z: i32,
     segments: &mut Vec<(Vec2, Vec2)>,
 ) {
-    let width = project.size[0].max(1);
-    let depth = project.size[2].max(1);
+    let width = size[0].max(1);
+    let depth = size[2].max(1);
     let mut prev: Option<Vec2> = None;
     for local_x in road_grid_sample_axis(width) {
-        let local_z = target_plan_z - road_grid_bend_z(project, local_x);
+        let local_z = target_plan_z - road_grid_bend_z(origin, local_x);
         let point = if (0..depth).contains(&local_z) {
             Some(Vec2::new(
-                project.origin[0] as f32 + local_x as f32,
-                project.origin[2] as f32 + local_z as f32,
+                origin[0] as f32 + local_x as f32,
+                origin[2] as f32 + local_z as f32,
             ))
         } else {
             None
@@ -6226,12 +6279,12 @@ fn push_optional_road_segment(
     }
 }
 
-fn road_grid_bend_x(project: &BotProject, local_z: i32) -> i32 {
-    road_grid_bend_x_from_origin(project.origin[0], local_z)
+fn road_grid_bend_x(origin: [i32; 3], local_z: i32) -> i32 {
+    road_grid_bend_x_from_origin(origin[0], local_z)
 }
 
-fn road_grid_bend_z(project: &BotProject, local_x: i32) -> i32 {
-    road_grid_bend_z_from_origin(project.origin[2], local_x)
+fn road_grid_bend_z(origin: [i32; 3], local_x: i32) -> i32 {
+    road_grid_bend_z_from_origin(origin[2], local_x)
 }
 
 fn road_grid_bend_x_from_origin(origin_x: i32, local_z: i32) -> i32 {
@@ -6323,16 +6376,16 @@ fn road_grid_profile(origin: [i32; 3], size: [i32; 3], local: IVec3) -> RoadGrid
     }
 }
 
-fn build_road_centerline_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
-    let length = project.size[0].max(1);
+fn build_road_centerline_segments(origin: [i32; 3], size: [i32; 3]) -> Vec<(Vec2, Vec2)> {
+    let length = size[0].max(1);
     let last_x = (length - 1).max(0);
     let step = 12;
     let mut segments = Vec::new();
     let mut prev_x = 0;
-    let mut prev = build_road_centerline_point(project, prev_x);
+    let mut prev = build_road_centerline_point(origin, size, prev_x);
     while prev_x < last_x {
         let next_x = (prev_x + step).min(last_x);
-        let next = build_road_centerline_point(project, next_x);
+        let next = build_road_centerline_point(origin, size, next_x);
         if prev.distance_squared(next) > 1.0 {
             segments.push((prev, next));
         }
@@ -6342,11 +6395,11 @@ fn build_road_centerline_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
     segments
 }
 
-fn build_road_centerline_point(project: &BotProject, local_x: i32) -> Vec2 {
-    let width = project.size[2].max(1);
+fn build_road_centerline_point(origin: [i32; 3], size: [i32; 3], local_x: i32) -> Vec2 {
+    let width = size[2].max(1);
     Vec2::new(
-        project.origin[0] as f32 + local_x as f32,
-        build_road_center_z(project.origin[2], width, local_x) as f32,
+        origin[0] as f32 + local_x as f32,
+        build_road_center_z(origin[2], width, local_x) as f32,
     )
 }
 
@@ -13381,6 +13434,57 @@ mod tests {
             picked,
             None,
             "bot planner should preserve road corridors instead of accepting a tower footprint on top of the road"
+        );
+    }
+
+    #[test]
+    fn road_site_selection_rejects_routes_through_existing_city_footprints() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -8, 8);
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Road Around Skyline".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 180,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildGlassTower,
+            label: "Existing Tower".into(),
+            origin: [24, 90, -10],
+            size: autonomous_project_size(BotTaskKind::BuildGlassTower),
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+        let road_size = autonomous_project_size(BotTaskKind::BuildRoad);
+
+        let picked = best_build_site_from_candidates(
+            &save,
+            &world,
+            &district,
+            BotTaskKind::BuildRoad,
+            road_size,
+            vec![[0, 90, -5]],
+        );
+
+        assert_eq!(
+            picked, None,
+            "road crews should reject routes that cut through completed building footprints"
         );
     }
 
