@@ -1039,9 +1039,17 @@ fn stream_chunks(
     }
 
     // 2. Poll finished terrain tasks and fold them back into the world.
+    // Cap installs too: terrain generation finishes on worker threads in
+    // waves, and installing every completed chunk in one frame causes the
+    // one-second hitch the player sees while flying at max distance.
+    let terrain_apply_cap = (budget.chunks_per_frame.max(1) as usize).min(6);
+    let mut applied_terrain = 0usize;
     let mut done: Vec<ChunkPos> = Vec::new();
     let mut newly_loaded: Vec<ChunkPos> = Vec::new();
     for (pos, task) in streamer.pending_terrain.iter_mut() {
+        if applied_terrain >= terrain_apply_cap {
+            break;
+        }
         if let Some((cp, voxels)) = future::block_on(future::poll_once(task)) {
             let mut chunk = Chunk::new(cp);
             chunk.install_voxels(voxels);
@@ -1053,6 +1061,7 @@ fn stream_chunks(
             world.insert_chunk(cp, chunk);
             done.push(*pos);
             newly_loaded.push(cp);
+            applied_terrain += 1;
         }
     }
     for p in done {

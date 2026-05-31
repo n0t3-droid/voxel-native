@@ -6,7 +6,7 @@
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, PrimaryWindow};
+use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::chunk::to_i32_safe;
@@ -1120,7 +1120,7 @@ fn update_hint(
     let Ok(window) = windows.get_single() else {
         return;
     };
-    *vis = if window.cursor.grab_mode == CursorGrabMode::Locked {
+    *vis = if crate::mode::cursor_is_captured(window) {
         Visibility::Hidden
     } else {
         Visibility::Visible

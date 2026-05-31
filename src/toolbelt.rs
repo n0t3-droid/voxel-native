@@ -62,7 +62,7 @@ impl ToolbeltTool {
             ToolbeltTool::BrushPlace => "Smart Builder",
             ToolbeltTool::BrushCut => "Smart Cut",
             ToolbeltTool::CityRoad => "Road Tool",
-            ToolbeltTool::CityDistrict => "District Zone",
+            ToolbeltTool::CityDistrict => "Bot City Area",
             ToolbeltTool::CityBuilding => "Building Shell",
             ToolbeltTool::CityFacade => "Facade Stamp",
             ToolbeltTool::AnimationPick => "Animation Picker",
@@ -78,7 +78,7 @@ impl ToolbeltTool {
             ToolbeltTool::BrushPlace => "BUILD",
             ToolbeltTool::BrushCut => "CUT",
             ToolbeltTool::CityRoad => "ROAD",
-            ToolbeltTool::CityDistrict => "ZONE",
+            ToolbeltTool::CityDistrict => "AREA",
             ToolbeltTool::CityBuilding => "SHELL",
             ToolbeltTool::CityFacade => "STAMP",
             ToolbeltTool::AnimationPick => "ANIM",
@@ -110,7 +110,7 @@ impl ToolbeltTool {
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
             ToolbeltTool::BrushCut => "LMB or RMB starts a cut point, drag to an endpoint, release to remove exact snapped blocks.",
             ToolbeltTool::CityRoad => "LMB draws roads: auto-snaps to endpoints/branches, continues from the last point, and inherits width, texture, and bridge height. Wheel edits selected roads: body width/radius, handle bridge height. Middle mouse retextures the selected component.",
-            ToolbeltTool::CityDistrict => "LMB places a district/zone circle.",
+            ToolbeltTool::CityDistrict => "Two LMB clicks mark the exact bot city footprint. Bots stay parked until an area or explicit task is placed, then plan roads and buildings inside that space.",
             ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
             ToolbeltTool::CityFacade => "LMB stamps the active facade onto the targeted wall.",
             ToolbeltTool::AnimationPick => "LMB/RMB pick voxels for animation authoring.",
@@ -1333,7 +1333,7 @@ impl ToolbeltTool {
             ToolbeltTool::CityRoad => {
                 "Left mouse auto-snap road points and branch from existing roads"
             }
-            ToolbeltTool::CityDistrict => "Left mouse places a district",
+            ToolbeltTool::CityDistrict => "Left mouse places a bot city area corner",
             ToolbeltTool::CityBuilding => "Left mouse chooses building corners",
             ToolbeltTool::CityFacade => "Left mouse stamps the active facade",
             ToolbeltTool::AnimationPick => "Left mouse adds a voxel to the animation selection",
@@ -1354,7 +1354,7 @@ impl ToolbeltTool {
             ToolbeltTool::CityRoad => {
                 "Right mouse deletes the selected road component or cancels the current road"
             }
-            ToolbeltTool::CityDistrict => "Right mouse removes the last district",
+            ToolbeltTool::CityDistrict => "Right mouse cancels or removes the last city area",
             ToolbeltTool::CityBuilding => "Right mouse removes or cancels the current building",
             ToolbeltTool::CityFacade => "Right mouse removes the last facade stamp",
         }

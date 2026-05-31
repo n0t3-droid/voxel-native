@@ -159,8 +159,8 @@ fn handle_keys(
     }
 }
 
-/// On entering InGame, make sure the cursor is released -- the first LMB
-/// click from grab_cursor will capture it.
+/// Menus release the cursor. In-game capture is owned centrally by
+/// `mode_cursor_guard`, so build/combat transitions are deterministic.
 fn on_game_start(
     state: Res<State<GameState>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,

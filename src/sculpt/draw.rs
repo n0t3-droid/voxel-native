@@ -148,7 +148,7 @@ pub fn rect_draw_input(
 
     let cursor_locked = windows
         .get_single()
-        .map(|w| w.cursor.grab_mode == bevy::window::CursorGrabMode::Locked)
+        .map(crate::mode::cursor_is_captured)
         .unwrap_or(false);
     if smart_tool && !cursor_locked {
         if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {

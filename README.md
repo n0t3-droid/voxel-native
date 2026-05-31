@@ -28,8 +28,16 @@ coherent sci-fi game.
 
 The latest engine work turns bot construction into a road-first city planner:
 
+- bot autonomy is command-gated by default: workers stay parked on load until
+  the player places a city area or explicitly queues a bot task;
+- the City Area tool now behaves like a road component workflow: two clicks
+  mark the exact bot city footprint, then bots adapt roads, clearing, plazas,
+  residential blocks, and towers inside that marked space instead of taking
+  over the whole world;
 - roads are editable components with smooth deck grades for bridges, ramps,
   corners, plazas, and future roundabout work;
+- manual roads now start at boulevard scale by default, with larger editable
+  roundabouts and a more forgiving straight-line intent lock while dragging;
 - bot projects reserve footprints before building, so roads and buildings do
   not cut through each other while the city grows;
 - duplicate road corridors are rejected before voxel edits are queued;
@@ -63,6 +71,8 @@ The latest engine work turns bot construction into a road-first city planner:
   skylines while preserving open flight corridors and safer close-up geometry;
 - max-distance streaming pauses bot edit slices when the visible horizon is
   still catching up, keeping low-end PCs responsive.
+- terrain installs are frame-capped so a wave of completed async chunks does
+  not all fold back into the world during the same flight frame.
 
 ## GitHub Snapshot
 
@@ -76,6 +86,9 @@ which math keeps the engine fast. Current bot-planning details live in
 
 Verified update for this snapshot:
 
+- bot load defaults keep workers parked until the player commands them;
+- placed bot city areas persist as the marked footprint and queue manual road,
+  clearing, civic, residential, and skyline projects inside that boundary;
 - road anchors are treated as planning intent, not completed road geometry;
 - road candidates receive a bounded alignment score when their centerline or
   grid segment follows an authored district street;

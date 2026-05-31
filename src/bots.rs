@@ -35,8 +35,8 @@ use crate::world::{
 };
 
 const MEGA_CITY_RADIUS: i32 = 1024;
-const DEFAULT_MAX_ACTIVE_PROJECTS: usize = 8;
-const AUTONOMY_BURST_ACTIVE_PROJECTS: usize = 12;
+const DEFAULT_MAX_ACTIVE_PROJECTS: usize = 3;
+const AUTONOMY_BURST_ACTIVE_PROJECTS: usize = 5;
 const MAX_ACTIVE_PROJECTS_LIMIT: usize = 48;
 const MAX_CREW_BOTS_PER_PROJECT: usize = 32;
 const COMPANION_WORKERS_PER_LEADER: u8 = 4;
@@ -50,8 +50,8 @@ const BOT_PLAYER_EDIT_RADIUS: f32 = 14.0;
 const BOT_PLAYER_PROJECT_MARGIN: f32 = 128.0;
 const BOT_SHIP_EDIT_RADIUS: f32 = 14.0;
 const BOT_SHIP_PROJECT_MARGIN: f32 = 32.0;
-const BOT_MAX_FRAME_EDITS: usize = 420;
-const BOT_MAX_PROJECT_SLICE_EDITS: usize = 160;
+const BOT_MAX_FRAME_EDITS: usize = 128;
+const BOT_MAX_PROJECT_SLICE_EDITS: usize = 48;
 const COMPANION_FOLLOW_DEFAULT: f32 = 3.2;
 const COMPANION_FOLLOW_MIN: f32 = 1.25;
 const COMPANION_FOLLOW_MAX: f32 = 22.0;
@@ -77,15 +77,15 @@ fn default_max_active_projects() -> usize {
 }
 
 fn default_autonomy_enabled() -> bool {
-    true
+    false
 }
 
 fn default_bots_active() -> bool {
-    true
+    false
 }
 
 fn default_autonomy_intensity() -> u8 {
-    9
+    4
 }
 
 fn default_trust() -> f32 {
@@ -549,9 +549,18 @@ impl BotWorldSave {
         }
 
         for settlement in &mut self.settlements {
-            settlement.radius = MEGA_CITY_RADIUS;
-            settlement.bounds.center = settlement.hub;
-            settlement.bounds.radius = MEGA_CITY_RADIUS;
+            if legacy_version < 2 {
+                settlement.radius = MEGA_CITY_RADIUS;
+                settlement.bounds.center = settlement.hub;
+                settlement.bounds.radius = MEGA_CITY_RADIUS;
+            } else {
+                settlement.radius = settlement.radius.clamp(24, MEGA_CITY_RADIUS);
+                settlement.bounds.radius = settlement.bounds.radius.clamp(24, MEGA_CITY_RADIUS);
+                if settlement.bounds.center == [0.0, 0.0, 0.0] && settlement.hub != [0.0, 0.0, 0.0]
+                {
+                    settlement.bounds.center = settlement.hub;
+                }
+            }
             settlement.bounds.max_active_projects = settlement
                 .bounds
                 .max_active_projects
@@ -2214,40 +2223,43 @@ fn load_or_seed_bot_world(
     brain.selected_bot = save.agents.first().map(|b| b.id).unwrap_or(0);
     brain.selected_district = save.districts.first().map(|d| d.id).unwrap_or(1);
     brain.command_draft.bot_id = brain.selected_bot;
-    brain.hud_message = save
-        .journal
-        .last()
-        .map(|j| j.text.clone())
-        .unwrap_or_else(|| "Friendly bots online.".into());
+    brain.hud_message = if save.autonomy.bots_active {
+        save.journal
+            .last()
+            .map(|j| j.text.clone())
+            .unwrap_or_else(|| "Friendly bots online.".into())
+    } else {
+        "Bots parked. Use BOTS -> Start City or a task button when you want them to build.".into()
+    };
     brain.save = save;
     brain.world_name = world_name;
     brain.autosave_timer = 30.0;
-    brain.plan_timer = 0.0;
+    brain.plan_timer = planner_interval(&brain.save);
     brain.conversation_timer = 4.0;
     brain.message_cooldown = 0.0;
     brain.greeter_timer = 0.5;
     brain.busy_timer = 0.5;
-    brain.force_city_idea = true;
+    brain.force_city_idea = false;
     brain.dirty = true;
 }
 
 fn prime_autonomous_city_defaults(save: &mut BotWorldSave) {
-    save.autonomy.enabled = true;
-    save.autonomy.bots_active = true;
-    save.autonomy.intensity = save.autonomy.intensity.max(default_autonomy_intensity());
+    save.autonomy.enabled = false;
+    save.autonomy.bots_active = false;
+    save.autonomy.intensity = save.autonomy.intensity.clamp(1, 6);
     if let Some(settlement) = save.settlements.first_mut() {
         settlement.bounds.max_active_projects = settlement
             .bounds
             .max_active_projects
-            .max(DEFAULT_MAX_ACTIVE_PROJECTS)
+            .min(DEFAULT_MAX_ACTIVE_PROJECTS)
+            .max(1)
             .min(MAX_ACTIVE_PROJECTS_LIMIT);
     }
     for bot in save.agents.iter_mut().filter(|bot| bot.companion) {
-        bot.memory.work_focus = bot.memory.work_focus.max(0.9);
-        bot.memory.curiosity = bot.memory.curiosity.max(0.8);
-        if matches!(bot.companion_mode, BotCompanionMode::AwaitingInstruction) {
-            bot.companion_mode = BotCompanionMode::SurveySweep;
-        }
+        bot.memory.work_focus = bot.memory.work_focus.min(0.75);
+        bot.memory.curiosity = bot.memory.curiosity.min(0.75);
+        bot.companion_mode = BotCompanionMode::AwaitingInstruction;
+        bot.current_task = None;
     }
 }
 
@@ -3981,6 +3993,12 @@ fn tick_friendly_world(
     }
 
     keep_bots_visible_and_busy(&mut brain, &world, player_pos);
+    if !brain.queued_commands.is_empty() {
+        brain.save.autonomy.bots_active = true;
+        brain.save.autonomy.enabled = false;
+        process_queued_commands(&mut brain, &world, player_pos, &ship_positions);
+        brain.dirty = true;
+    }
     if !brain.save.autonomy.bots_active {
         if brain.message_cooldown <= 0.0 {
             brain.hud_message = "Bot workers are OFF. Plans and progress are saved.".into();
@@ -3988,7 +4006,6 @@ fn tick_friendly_world(
         }
         return;
     }
-    process_queued_commands(&mut brain, &world, player_pos, &ship_positions);
     let open_projects_before_planning = planner_project_count(&brain.save);
     let allow_new_city_work = bot_allows_new_city_work(&budget);
     let allow_road_front_infill =
@@ -9833,7 +9850,7 @@ fn process_companion_command(
         CompanionCommand::BuildCityAutonomy => {
             brain.save.autonomy.enabled = true;
             brain.save.autonomy.bots_active = true;
-            brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(8);
+            brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(6);
             if let Some(settlement) = brain.save.settlements.first_mut() {
                 settlement.bounds.max_active_projects = AUTONOMY_BURST_ACTIVE_PROJECTS;
             }
@@ -9842,7 +9859,7 @@ fn process_companion_command(
                 &world,
                 player_pos,
                 &ship_positions,
-                DEFAULT_MAX_ACTIVE_PROJECTS.min(3),
+                DEFAULT_MAX_ACTIVE_PROJECTS.min(2),
             );
             brain.force_city_idea = true;
             brain.plan_timer = 0.0;
@@ -11657,8 +11674,10 @@ fn queue_smart_editor_task(
     };
     brain.command_draft = cmd;
     brain.queued_commands.push(cmd);
+    brain.save.autonomy.bots_active = true;
+    brain.save.autonomy.enabled = false;
     brain.hud_message = format!(
-        "{} queued for {}.",
+        "{} queued for {}. Manual mode: bots build only this command queue.",
         kind.label(),
         bot_label(&brain.save, bot_id)
     );
@@ -11742,23 +11761,35 @@ fn queue_selected_area_masterplan(
         brain.hud_message = "No A/B area selected. Use the editor selection first.".into();
         return 0;
     };
+    queue_area_masterplan(brain, lo, hi, "A/B selection")
+}
+
+pub fn queue_city_area_masterplan(
+    brain: &mut FriendlyWorldBrain,
+    corner_a: IVec3,
+    corner_b: IVec3,
+) -> usize {
+    queue_area_masterplan(brain, corner_a, corner_b, "placed city area")
+}
+
+fn queue_area_masterplan(
+    brain: &mut FriendlyWorldBrain,
+    lo: IVec3,
+    hi: IVec3,
+    source_label: &str,
+) -> usize {
     let min = IVec3::new(lo.x.min(hi.x), lo.y.min(hi.y), lo.z.min(hi.z));
     let max = IVec3::new(lo.x.max(hi.x), lo.y.max(hi.y), lo.z.max(hi.z));
     let size = max - min + IVec3::ONE;
-    if size.x <= 0 || size.z <= 0 {
-        brain.hud_message = "Selected area is too small for a bot masterplan.".into();
+    if size.x < 16 || size.z < 16 {
+        brain.hud_message = "Bot city area is too small. Drag at least 16 x 16 blocks.".into();
         return 0;
     }
 
     brain.save.autonomy.bots_active = true;
-    brain.save.autonomy.enabled = true;
-    brain.save.autonomy.intensity = 10;
-    let center = Vec3::new(
-        (min.x + max.x) as f32 * 0.5,
-        min.y as f32,
-        (min.z + max.z) as f32 * 0.5,
-    );
-    let district_id = nearest_district(&brain.save, center).map(|d| d.id);
+    brain.save.autonomy.enabled = false;
+    brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(5);
+    let district_id = install_player_city_area(&mut brain.save, min, max);
     let bounds = brain.save.primary_bounds();
     let mut queued = 0usize;
     let mut push_project = |save: &mut BotWorldSave,
@@ -11789,12 +11820,23 @@ fn queue_selected_area_masterplan(
         }
     };
 
+    let area_w = size.x.max(16);
+    let area_d = size.z.max(16);
+    push_project(
+        &mut brain.save,
+        BotTaskKind::ExpandRoadGrid,
+        [min.x, min.y + 1, min.z],
+        [area_w, 7, area_d],
+        BotTheme::AmberStreet,
+        10,
+    );
+
     let mut x = min.x;
     while x <= max.x {
-        let chunk_w = (max.x - x + 1).min(44);
+        let chunk_w = (max.x - x + 1).min(40);
         let mut z = min.z;
         while z <= max.z {
-            let chunk_d = (max.z - z + 1).min(44);
+            let chunk_d = (max.z - z + 1).min(40);
             push_project(
                 &mut brain.save,
                 BotTaskKind::ClearFlatten,
@@ -11825,48 +11867,90 @@ fn queue_selected_area_masterplan(
                     8,
                 );
             }
-            z += 44;
+            z += 48;
         }
-        x += 44;
-    }
-
-    let road_y = min.y + 1;
-    let mut road_x = min.x;
-    while road_x <= max.x {
-        let w = (max.x - road_x + 1).min(88);
-        push_project(
-            &mut brain.save,
-            BotTaskKind::BuildRoad,
-            [road_x, road_y, min.z],
-            [w, 7, size.z.clamp(7, 11)],
-            BotTheme::AmberStreet,
-            10,
-        );
-        road_x += 88;
-    }
-    let mut road_z = min.z;
-    while road_z <= max.z {
-        let d = (max.z - road_z + 1).min(88);
-        push_project(
-            &mut brain.save,
-            BotTaskKind::DecorateStreet,
-            [min.x, road_y, road_z],
-            [size.x.clamp(32, 88), 7, d.clamp(7, 11)],
-            BotTheme::AmberStreet,
-            9,
-        );
-        road_z += 88;
+        x += 48;
     }
 
     if queued > 0 {
         brain.hud_message = format!(
-            "Area masterplan accepted: {queued} bot field project(s) queued from A/B selection."
+            "Bot city area accepted from {source_label}: {queued} project(s) queued inside the marked footprint."
         );
         brain.dirty = true;
     } else {
-        brain.hud_message = "Selected area is outside bot city bounds or too small.".into();
+        brain.hud_message = "Marked city area is outside bot city bounds or too small.".into();
     }
     queued
+}
+
+fn install_player_city_area(save: &mut BotWorldSave, min: IVec3, max: IVec3) -> Option<u64> {
+    let size = max - min + IVec3::ONE;
+    let center = [
+        (min.x + max.x) as f32 * 0.5 + 0.5,
+        min.y as f32,
+        (min.z + max.z) as f32 * 0.5 + 0.5,
+    ];
+    let radius = (((size.x as f32 * 0.5).powi(2) + (size.z as f32 * 0.5).powi(2))
+        .sqrt()
+        .ceil() as i32
+        + 10)
+        .clamp(24, MEGA_CITY_RADIUS);
+
+    if let Some(settlement) = save.settlements.first_mut() {
+        settlement.hub = center;
+        settlement.radius = radius;
+        settlement.bounds.center = center;
+        settlement.bounds.radius = radius;
+        settlement.bounds.used_radius = radius as f32;
+        settlement.bounds.max_active_projects = DEFAULT_MAX_ACTIVE_PROJECTS;
+    } else {
+        save.settlements.push(BotSettlement {
+            id: 1,
+            name: "Placed Bot City".into(),
+            hub: center,
+            radius,
+            bounds: BotCityBounds {
+                center,
+                radius,
+                used_radius: radius as f32,
+                max_active_projects: DEFAULT_MAX_ACTIVE_PROJECTS,
+            },
+            theme: BotTheme::CyanAlloy,
+            road_count: 0,
+            building_count: 0,
+            park_count: 0,
+        });
+    }
+
+    let district_kind = if size.x.max(size.z) >= 112 {
+        BotDistrictKind::Skyline
+    } else if size.x.max(size.z) >= 64 {
+        BotDistrictKind::Residential
+    } else {
+        BotDistrictKind::HubCore
+    };
+    let id = save.next_district_id.max(1);
+    save.next_district_id = id + 1;
+    save.districts.retain(|district| {
+        BotCityBounds {
+            center,
+            radius,
+            used_radius: radius as f32,
+            max_active_projects: DEFAULT_MAX_ACTIVE_PROJECTS,
+        }
+        .contains_xz(district.center[0], district.center[2])
+    });
+    save.districts.push(BotDistrict {
+        id,
+        kind: district_kind,
+        name: "Placed City Area".into(),
+        center,
+        radius,
+        road_anchors: Vec::new(),
+        build_slots: Vec::new(),
+        completed_projects: 0,
+    });
+    Some(id)
 }
 
 fn draw_city_control_center(
@@ -11940,9 +12024,13 @@ fn draw_city_control_center(
             .clicked()
             {
                 brain.save.autonomy.bots_active = !brain.save.autonomy.bots_active;
+                if brain.save.autonomy.bots_active {
+                    brain.save.autonomy.enabled = false;
+                }
                 brain.dirty = true;
                 brain.hud_message = if brain.save.autonomy.bots_active {
-                    "Bot workers resumed. They continue from saved project cursors.".into()
+                    "Bot workers resumed in manual mode. They continue queued/saved projects only."
+                        .into()
                 } else {
                     "Bot workers paused. Project sheets and progress are saved.".into()
                 };
@@ -12029,6 +12117,11 @@ fn draw_city_control_center(
             .clicked()
             {
                 brain.save.autonomy.enabled = !brain.save.autonomy.enabled;
+                if brain.save.autonomy.enabled {
+                    brain.save.autonomy.bots_active = true;
+                    brain.force_city_idea = true;
+                    brain.plan_timer = 0.0;
+                }
                 brain.dirty = true;
             }
             ui.add(
@@ -12416,6 +12509,11 @@ pub fn draw_bots_editor(
                 .clicked()
                 {
                     brain.save.autonomy.enabled = !brain.save.autonomy.enabled;
+                    if brain.save.autonomy.enabled {
+                        brain.save.autonomy.bots_active = true;
+                        brain.force_city_idea = true;
+                        brain.plan_timer = 0.0;
+                    }
                     brain.hud_message = if brain.save.autonomy.enabled {
                         "Bot city autonomy resumed.".into()
                     } else {
@@ -12425,6 +12523,8 @@ pub fn draw_bots_editor(
                 }
                 if crate::ui_kit::icon_action(ui, Icon::Wand, "Queue Idea", false, theme).clicked()
                 {
+                    brain.save.autonomy.bots_active = true;
+                    brain.save.autonomy.enabled = false;
                     brain.force_city_idea = true;
                     brain.hud_message = "Companions queued an optional city idea.".into();
                 }
@@ -12772,6 +12872,71 @@ mod tests {
         assert_eq!(save.agents[0].crew_id, None);
         assert_eq!(save.agents[0].memory.curiosity, default_curiosity());
         assert_eq!(save.agents[0].memory.work_focus, default_work_focus());
+    }
+
+    #[test]
+    fn bot_load_defaults_keep_workers_parked_until_commanded() {
+        let world = VoxelWorld::new();
+        let mut save = BotWorldSave::seed("Manual", Vec3::new(0.0, 90.0, 0.0), &world);
+        save.autonomy.enabled = true;
+        save.autonomy.bots_active = true;
+        save.autonomy.intensity = 10;
+
+        prime_autonomous_city_defaults(&mut save);
+
+        assert!(!save.autonomy.enabled);
+        assert!(!save.autonomy.bots_active);
+        assert!(save.autonomy.intensity <= 6);
+        assert!(save
+            .agents
+            .iter()
+            .filter(|bot| bot.companion)
+            .all(|bot| bot.companion_mode == BotCompanionMode::AwaitingInstruction));
+    }
+
+    #[test]
+    fn placed_city_area_sets_bounds_and_queues_manual_projects_inside() {
+        let world = VoxelWorld::new();
+        let mut brain = FriendlyWorldBrain::default();
+        brain.save = BotWorldSave::seed("Area", Vec3::new(0.0, 90.0, 0.0), &world);
+
+        let queued = queue_city_area_masterplan(
+            &mut brain,
+            IVec3::new(-32, 90, -24),
+            IVec3::new(48, 90, 40),
+        );
+        let bounds = brain.save.primary_bounds();
+
+        assert!(queued >= 3);
+        assert!(brain.save.autonomy.bots_active);
+        assert!(!brain.save.autonomy.enabled);
+        assert!(brain
+            .save
+            .districts
+            .iter()
+            .any(|district| district.name == "Placed City Area"));
+        assert!(brain
+            .save
+            .projects
+            .iter()
+            .all(|project| bounds.contains_box(project.origin, project.size)));
+    }
+
+    #[test]
+    fn placed_city_area_bounds_survive_save_normalization() {
+        let world = VoxelWorld::new();
+        let mut brain = FriendlyWorldBrain::default();
+        brain.save = BotWorldSave::seed("Area", Vec3::new(0.0, 90.0, 0.0), &world);
+        queue_city_area_masterplan(&mut brain, IVec3::new(-24, 90, -24), IVec3::new(24, 90, 24));
+        let radius = brain.save.primary_bounds().radius;
+
+        brain.save.normalize();
+
+        assert_eq!(brain.save.primary_bounds().radius, radius);
+        assert!(
+            radius < MEGA_CITY_RADIUS,
+            "placed city areas should reload as the exact player footprint, not expand back to global autonomy"
+        );
     }
 
     #[test]

@@ -2527,7 +2527,7 @@ fn fire_weapon(
 ) {
     let cursor_locked = windows
         .get_single()
-        .map(|w| w.cursor.grab_mode == bevy::window::CursorGrabMode::Locked)
+        .map(crate::mode::cursor_is_captured)
         .unwrap_or(false);
     let Ok((mut weapon, weapon_gtf)) = weapon_q.get_single_mut() else {
         return;
@@ -3799,7 +3799,7 @@ fn scope_input(
 ) {
     let cursor_locked = windows
         .get_single()
-        .map(|w| w.cursor.grab_mode == bevy::window::CursorGrabMode::Locked)
+        .map(crate::mode::cursor_is_captured)
         .unwrap_or(false);
     let reloading = weapon_q
         .get_single()

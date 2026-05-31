@@ -6,7 +6,7 @@
 //!   click once to set start, click again to commit an editable road
 //!   component that follows terrain. Axis drags create straights,
 //!   diagonal drags create clean corner roads, and same-point clicks
-//!   create roundabouts. Width with `[` / `]` (1..=9).
+//!   create roundabouts. Width with `[` / `]` (1..=17).
 //! * **CC District-Theming** — choose Zone to paint district discs on
 //!   the ground; each disc is a tagged decoration, visualized as a
 //!   coloured ring gizmo. Auto-fill with prefabs comes in a later cut.
@@ -274,7 +274,7 @@ fn city_road_save_version() -> u32 {
 }
 
 fn default_saved_road_width() -> u8 {
-    3
+    7
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -644,7 +644,7 @@ impl SnapMode {
 pub struct CityState {
     pub tool: CityTool,
     pub road_style: RoadStyle,
-    pub road_width: u8, // 1..=9
+    pub road_width: u8, // 1..=17
     pub district_kind: DistrictKind,
     pub district_radius: i32, // 2..=24
     pub building_style: BuildingStyle,
@@ -653,6 +653,8 @@ pub struct CityState {
     /// First click of a road in progress. Cleared when the segment
     /// commits or the user cancels with Esc.
     pub pending_road_a: Option<IVec3>,
+    /// First corner of a placed bot city area / district footprint.
+    pub pending_district_a: Option<IVec3>,
     /// First click of a building footprint in progress.
     pub pending_building_a: Option<IVec3>,
     pub roads: Vec<RoadSegment>,
@@ -670,13 +672,14 @@ impl Default for CityState {
         Self {
             tool: CityTool::None,
             road_style: RoadStyle::Asphalt,
-            road_width: 3,
+            road_width: 7,
             district_kind: DistrictKind::Residential,
             district_radius: 6,
             building_style: BuildingStyle::Residential,
             building_floors: 4,
             snap: SnapMode::Off,
             pending_road_a: None,
+            pending_district_a: None,
             pending_building_a: None,
             roads: Vec::new(),
             roads_loaded_world: String::new(),
@@ -760,6 +763,7 @@ fn load_city_roads_for_pending_world(
     city.roads_loaded_world = active.meta.name.clone();
     city.selected_road = None;
     city.pending_road_a = None;
+    city.pending_district_a = None;
     city.pending_building_a = None;
     city.districts.clear();
     city.buildings.clear();
@@ -802,6 +806,7 @@ fn city_input(
     mode: Res<crate::mode::ModeContext>,
     active: Option<Res<crate::settings::ActiveWorld>>,
     mut city: ResMut<CityState>,
+    mut bots: Option<ResMut<crate::bots::FriendlyWorldBrain>>,
     mut telemetry: ResMut<UnifiedTelemetry>,
     mut world: ResMut<VoxelWorld>,
     windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
@@ -820,7 +825,7 @@ fn city_input(
     if live_city_active {
         let cursor_locked = windows
             .get_single()
-            .map(|w| w.cursor.grab_mode == bevy::window::CursorGrabMode::Locked)
+            .map(crate::mode::cursor_is_captured)
             .unwrap_or(false);
         if !cursor_locked {
             wheel.clear();
@@ -843,6 +848,7 @@ fn city_input(
             CityTool::Road
         };
         city.pending_road_a = None;
+        city.pending_district_a = None;
         city.pending_building_a = None;
         city.status = format!("Werkzeug: {}", city.tool.label());
     }
@@ -853,6 +859,7 @@ fn city_input(
             CityTool::District
         };
         city.pending_road_a = None;
+        city.pending_district_a = None;
         city.pending_building_a = None;
         city.status = format!("Werkzeug: {}", city.tool.label());
     }
@@ -863,6 +870,7 @@ fn city_input(
             CityTool::Building
         };
         city.pending_road_a = None;
+        city.pending_district_a = None;
         city.pending_building_a = None;
         city.status = format!("Werkzeug: {}", city.tool.label());
     }
@@ -873,6 +881,7 @@ fn city_input(
             CityTool::Facade
         };
         city.pending_road_a = None;
+        city.pending_district_a = None;
         city.pending_building_a = None;
         city.status = format!("Werkzeug: {}", city.tool.label());
     }
@@ -904,7 +913,7 @@ fn city_input(
     if bare && keys.just_pressed(KeyCode::BracketRight) {
         match city.tool {
             CityTool::Road => {
-                city.road_width = (city.road_width + 1).min(9);
+                city.road_width = (city.road_width + 1).min(17);
                 city.status = format!("Breite {}", city.road_width);
             }
             CityTool::District => {
@@ -923,6 +932,8 @@ fn city_input(
     if keys.just_pressed(KeyCode::Escape) {
         if city.pending_road_a.take().is_some() {
             city.status = "Strasse abgebrochen.".into();
+        } else if city.pending_district_a.take().is_some() {
+            city.status = "Bot-Stadtflaeche abgebrochen.".into();
         } else if city.pending_building_a.take().is_some() {
             city.status = "Gebaeude abgebrochen.".into();
         }
@@ -1089,20 +1100,47 @@ fn city_input(
                         telemetry.build_blocks_changed.saturating_add(n as u64);
                 }
             },
-            CityTool::District => {
-                let d = District {
-                    center: snapped,
-                    radius: city.district_radius,
-                    kind: city.district_kind,
-                };
-                city.districts.push(d);
-                city.status = format!(
-                    "Bezirk {} r={}",
-                    city.district_kind.label(),
-                    city.district_radius
-                );
-                telemetry.city_actions = telemetry.city_actions.saturating_add(1);
-            }
+            CityTool::District => match city.pending_district_a {
+                None => {
+                    city.pending_district_a = Some(snapped);
+                    city.status = format!(
+                        "Bot-Stadtflaeche Ecke A @ {},{} - 2. Klick setzt die Bauzone.",
+                        snapped.x, snapped.z
+                    );
+                }
+                Some(a) => {
+                    let (min, max) = city_area_corners(a, snapped, city.district_radius);
+                    let center = IVec3::new((min.x + max.x) / 2, min.y, (min.z + max.z) / 2);
+                    let size = max - min + IVec3::ONE;
+                    let radius = (((size.x as f32 * 0.5).powi(2) + (size.z as f32 * 0.5).powi(2))
+                        .sqrt()
+                        .ceil() as i32)
+                        .max(city.district_radius);
+                    let kind = city.district_kind;
+                    city.districts.push(District {
+                        center,
+                        radius,
+                        kind,
+                    });
+                    city.pending_district_a = None;
+                    let queued = bots
+                        .as_deref_mut()
+                        .map(|brain| crate::bots::queue_city_area_masterplan(brain, min, max))
+                        .unwrap_or(0);
+                    city.status = if queued > 0 {
+                        format!(
+                            "Bot-Stadtflaeche {}x{} gesetzt: {} Projekt(e) in dieser Zone.",
+                            size.x, size.z, queued
+                        )
+                    } else {
+                        format!(
+                            "Bot-Stadtflaeche {}x{} gesetzt. Bots warten auf eine geladene/gueltige Zone.",
+                            size.x, size.z
+                        )
+                    };
+                    telemetry.city_actions = telemetry.city_actions.saturating_add(1);
+                }
+            },
             CityTool::Building => match city.pending_building_a {
                 None => {
                     city.pending_building_a = Some(snapped);
@@ -1181,7 +1219,9 @@ fn city_input(
                 }
             }
             CityTool::District => {
-                if city.districts.pop().is_some() {
+                if city.pending_district_a.take().is_some() {
+                    city.status = "Bot-Stadtflaeche verworfen.".into();
+                } else if city.districts.pop().is_some() {
                     city.status = "Letzter Bezirk entfernt.".into();
                 }
             }
@@ -1249,6 +1289,20 @@ fn road_tool_snap_cell(p: IVec3, mode: SnapMode, roads: &[RoadSegment]) -> IVec3
     contextual_road_snap_cell(base, roads).unwrap_or(base)
 }
 
+fn city_area_corners(a: IVec3, b: IVec3, fallback_radius: i32) -> (IVec3, IVec3) {
+    if a.x == b.x && a.z == b.z {
+        let r = fallback_radius.max(8);
+        return (
+            IVec3::new(a.x - r, a.y, a.z - r),
+            IVec3::new(a.x + r, a.y, a.z + r),
+        );
+    }
+    (
+        IVec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)),
+        IVec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)),
+    )
+}
+
 fn contextual_road_snap_cell(p: IVec3, roads: &[RoadSegment]) -> Option<IVec3> {
     let point = Vec2::new(p.x as f32 + 0.5, p.z as f32 + 0.5);
     if let Some(handle) = nearest_road_snap_handle(roads, point, 4.0) {
@@ -1271,8 +1325,8 @@ fn nearest_road_path_cell(roads: &[RoadSegment], point: Vec2, max_distance: f32)
     best.map(|(_, q)| IVec2::new(q.x.floor() as i32, q.y.floor() as i32))
 }
 
-const SMART_ROAD_AXIS_JITTER: i32 = 3;
-const SMART_ROAD_AXIS_RATIO: i32 = 3;
+const SMART_ROAD_AXIS_JITTER: i32 = 4;
+const SMART_ROAD_AXIS_RATIO: f32 = 1.6;
 const SMART_ROAD_LENGTH_TOLERANCE: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1318,11 +1372,11 @@ fn dominant_road_drag_axis(dx: i32, dz: i32) -> Option<RoadDragAxis> {
     if ax == 0 && az == 0 {
         return None;
     }
-    if ax >= az && (az <= SMART_ROAD_AXIS_JITTER || ax >= az.saturating_mul(SMART_ROAD_AXIS_RATIO))
+    if ax >= az && (az <= SMART_ROAD_AXIS_JITTER || ax as f32 >= az as f32 * SMART_ROAD_AXIS_RATIO)
     {
         return Some(RoadDragAxis::X);
     }
-    if az >= ax && (ax <= SMART_ROAD_AXIS_JITTER || az >= ax.saturating_mul(SMART_ROAD_AXIS_RATIO))
+    if az >= ax && (ax <= SMART_ROAD_AXIS_JITTER || az as f32 >= ax as f32 * SMART_ROAD_AXIS_RATIO)
     {
         return Some(RoadDragAxis::Z);
     }
@@ -2551,12 +2605,22 @@ fn city_draw_gizmos(
                 city.snap,
                 &city.roads,
             );
-            circle_xz(
-                &mut gizmos,
-                cursor,
-                city.district_radius as f32,
-                city.district_kind.color(),
-            );
+            let col = city.district_kind.color();
+            if let Some(a) = city.pending_district_a {
+                let (min, max) = city_area_corners(a, cursor, city.district_radius);
+                draw_footprint(&mut gizmos, min, max, col, 3);
+                let center = IVec3::new((min.x + max.x) / 2, min.y, (min.z + max.z) / 2);
+                circle_xz(
+                    &mut gizmos,
+                    center,
+                    (((max.x - min.x + 1) as f32 * 0.5).powi(2)
+                        + ((max.z - min.z + 1) as f32 * 0.5).powi(2))
+                    .sqrt(),
+                    col.with_alpha(0.45),
+                );
+            } else {
+                circle_xz(&mut gizmos, cursor, city.district_radius as f32, col);
+            }
         }
         if city.tool == CityTool::Building {
             let origin = cam_tf.translation();
@@ -2823,8 +2887,13 @@ fn draw_hint_hud(
                 lines.push(("N".into(), "Strassen-Tool AUS".into()));
             }
             CityTool::District => {
-                lines.push(("LMB".into(), "Bezirk platzieren".into()));
-                lines.push(("RMB".into(), "Letzten Bezirk loeschen".into()));
+                if city.pending_district_a.is_some() {
+                    lines.push(("LMB".into(), "Ecke B setzt Bot-Stadtflaeche".into()));
+                    lines.push(("RMB / Esc".into(), "Abbrechen".into()));
+                } else {
+                    lines.push(("LMB".into(), "Ecke A fuer Bot-Stadtflaeche".into()));
+                    lines.push(("RMB".into(), "Letzten Bezirk loeschen".into()));
+                }
                 lines.push(("[ / ]".into(), format!("Radius ({})", city.district_radius)));
                 lines.push(("T".into(), "Bezirks-Tool AUS".into()));
             }
@@ -3094,6 +3163,21 @@ mod tests {
         assert_eq!(city.road_width, 5);
         assert_eq!(city.road_style, RoadStyle::Cobble);
         assert_eq!(larger.roundabout_radius, 18);
+    }
+
+    #[test]
+    fn default_road_tool_starts_at_boulevard_scale() {
+        let city = CityState::default();
+        let roundabout = RoadSegment::new(
+            IVec3::new(16, 72, 16),
+            IVec3::new(16, 72, 16),
+            city.road_width,
+            RoadStyle::Asphalt,
+        );
+
+        assert_eq!(city.road_width, 7);
+        assert_eq!(roundabout.roundabout_radius, 14);
+        assert_eq!(roundabout.width, 7);
     }
 
     #[test]
@@ -3386,6 +3470,25 @@ mod tests {
             IVec3::new(24, 72, 16),
             "deliberate two-axis drags should still create one editable corner component"
         );
+    }
+
+    #[test]
+    fn smart_road_drag_axis_locks_clear_straight_intent() {
+        let target = smart_road_drag_target(IVec3::new(0, 72, 0), IVec3::new(30, 72, 18), &[]);
+
+        assert_eq!(
+            target,
+            IVec3::new(30, 72, 0),
+            "a clearly dominant drag direction should become a straight road even when the mouse is not perfectly aligned"
+        );
+    }
+
+    #[test]
+    fn same_point_city_area_uses_radius_square() {
+        let (min, max) = city_area_corners(IVec3::new(10, 72, 20), IVec3::new(10, 72, 20), 12);
+
+        assert_eq!(min, IVec3::new(-2, 72, 8));
+        assert_eq!(max, IVec3::new(22, 72, 32));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use bevy::core_pipeline::bloom::{BloomCompositeMode, BloomSettings};
 use bevy::input::mouse::MouseMotion;
 use bevy::pbr::{FogFalloff, FogSettings};
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, PrimaryWindow};
+use bevy::window::PrimaryWindow;
 
 use crate::daynight::WorldIntelRuntime;
 use crate::settings::{ActiveWorld, PlayerMiningSave, SuitVitalsSave, WorldSettings};
@@ -56,7 +56,6 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 Update,
                 (
-                    grab_cursor,
                     hydrate_progress_from_world_save
                         .run_if(in_state(crate::menu::GameState::InGame)),
                     sync_player_progress_scratch.run_if(in_state(crate::menu::GameState::InGame)),
@@ -357,39 +356,6 @@ fn update_bloom_by_graphics(
     }
 }
 
-fn grab_cursor(
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    state: Res<State<crate::menu::GameState>>,
-    mode: Option<Res<crate::mode::ModeContext>>,
-) {
-    let Ok(mut window) = windows.get_single_mut() else {
-        return;
-    };
-    // Only capture the mouse while actively playing; menus keep it free.
-    if *state.get() == crate::menu::GameState::InGame {
-        if let Some(mode) = mode.as_deref() {
-            if mode.is_build_picker() {
-                window.cursor.grab_mode = CursorGrabMode::None;
-                window.cursor.visible = true;
-                return;
-            }
-            if mode.is_build_live() {
-                window.cursor.grab_mode = CursorGrabMode::Locked;
-                window.cursor.visible = false;
-                return;
-            }
-        }
-        if mouse.just_pressed(MouseButton::Left) {
-            window.cursor.grab_mode = CursorGrabMode::Locked;
-            window.cursor.visible = false;
-        }
-    } else {
-        window.cursor.grab_mode = CursorGrabMode::None;
-        window.cursor.visible = true;
-    }
-}
-
 fn update_look(
     time: Res<Time>,
     mut motion_evr: EventReader<MouseMotion>,
@@ -406,7 +372,7 @@ fn update_look(
 
     let cursor_locked = windows
         .get_single()
-        .map(|w| w.cursor.grab_mode == CursorGrabMode::Locked)
+        .map(crate::mode::cursor_is_captured)
         .unwrap_or(false);
 
     // When scoped, each pixel of mouse movement should correspond to

@@ -446,7 +446,7 @@ fn pick_input(
     // collide with editor UI clicks.
     let cursor_locked = windows
         .get_single()
-        .map(|w| w.cursor.grab_mode == bevy::window::CursorGrabMode::Locked)
+        .map(crate::mode::cursor_is_captured)
         .unwrap_or(false);
     if !cursor_locked {
         return;

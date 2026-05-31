@@ -18,6 +18,28 @@ The planner treats roads as city structure, not decoration. This prevents the
 old failure mode where bots placed buildings first and later carved roads
 through them.
 
+## Player-Placed City Areas
+
+Bot autonomy is not global by default. The player marks a rectangular city
+footprint in-game, and that footprint becomes the active city bound:
+
+```text
+center = (min_corner + max_corner) / 2
+radius = ceil(length((width / 2, depth / 2))) + 10
+```
+
+The planner then queues a manual masterplan inside that bound:
+
+- one road-grid project for the full area;
+- small clear/flatten slices so terrain adapts before architecture appears;
+- varied infill projects, alternating residential blocks, plazas, and glass
+  towers by deterministic cell position;
+- no continuous expansion outside the placed footprint unless the player
+  explicitly enables autonomy.
+
+This keeps the bots working more like roads: the player places the component
+area first, then the system adapts detailed voxel work to that exact space.
+
 ## Site Score
 
 Bots select from bounded candidate sites instead of scanning the whole world.

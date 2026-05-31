@@ -199,10 +199,11 @@ impl Plugin for ModePlugin {
                 )
                     .chain(),
             )
-            .add_systems(
-                Last,
-                (mode_cursor_guard, preserve_player_after_quick_switch).chain(),
-            );
+            // Bevy applies `Window` cursor changes from the `Last` schedule.
+            // Keep the authoritative gameplay cursor policy in `PostUpdate`
+            // so live build/combat capture reaches the OS in the same frame.
+            .add_systems(PostUpdate, mode_cursor_guard)
+            .add_systems(Last, preserve_player_after_quick_switch);
     }
 }
 
@@ -651,6 +652,27 @@ fn cursor_policy_for(
     }
 }
 
+pub fn gameplay_cursor_grab_mode() -> CursorGrabMode {
+    // Bevy 0.14 / winit do not support locked cursor grab on Windows.
+    // Asking for the supported mode directly avoids a failed lock attempt
+    // and keeps the engine's resource state aligned with the actual OS grab.
+    #[cfg(target_os = "windows")]
+    {
+        CursorGrabMode::Confined
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        CursorGrabMode::Locked
+    }
+}
+
+pub fn cursor_is_captured(window: &Window) -> bool {
+    matches!(
+        window.cursor.grab_mode,
+        CursorGrabMode::Locked | CursorGrabMode::Confined
+    )
+}
+
 fn mode_cursor_guard(
     game_state: Res<State<GameState>>,
     mode: Res<ModeContext>,
@@ -673,7 +695,7 @@ fn mode_cursor_guard(
             window.cursor.visible = true;
         }
         CursorPolicy::LockedHidden => {
-            window.cursor.grab_mode = CursorGrabMode::Locked;
+            window.cursor.grab_mode = gameplay_cursor_grab_mode();
             window.cursor.visible = false;
         }
     }
@@ -883,5 +905,27 @@ mod tests {
             cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, true),
             CursorPolicy::ReleasedVisible
         );
+    }
+
+    #[test]
+    fn gameplay_cursor_uses_supported_platform_grab_mode() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(gameplay_cursor_grab_mode(), CursorGrabMode::Confined);
+
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(gameplay_cursor_grab_mode(), CursorGrabMode::Locked);
+    }
+
+    #[test]
+    fn cursor_capture_accepts_platform_fallback_modes() {
+        let mut window = Window::default();
+        window.cursor.grab_mode = CursorGrabMode::None;
+        assert!(!cursor_is_captured(&window));
+
+        window.cursor.grab_mode = CursorGrabMode::Confined;
+        assert!(cursor_is_captured(&window));
+
+        window.cursor.grab_mode = CursorGrabMode::Locked;
+        assert!(cursor_is_captured(&window));
     }
 }
