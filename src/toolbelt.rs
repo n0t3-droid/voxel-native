@@ -411,6 +411,16 @@ fn draw_toolbelt(
         );
         toolbelt.status = mode.status.clone();
     }
+    if let Some(preset) = dock.workflow_preset {
+        let tool = preset.tool();
+        toolbelt.tool = tool;
+        if let Some(brush) = preset.brush() {
+            builder.brush = brush;
+            builder.status = format!("Live Brush {}x{}x{}", brush.x, brush.y, brush.z);
+        }
+        mode.set(ActiveMode::BuildLive { tool }, preset.status());
+        toolbelt.status = mode.status.clone();
+    }
     if dock.toggle_picker {
         let tool = mode.build_tool().unwrap_or(toolbelt.tool);
         if mode.is_build_picker() {
@@ -524,6 +534,98 @@ struct BuildDockResult {
     clicked_tool: Option<ToolbeltTool>,
     toggle_picker: bool,
     brush_preset: Option<IVec3>,
+    workflow_preset: Option<BuildWorkflowPreset>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildWorkflowPreset {
+    Sketch,
+    PushPull,
+    Roads,
+    CityShell,
+    Skyline,
+}
+
+impl BuildWorkflowPreset {
+    const ALL: [Self; 5] = [
+        Self::Sketch,
+        Self::PushPull,
+        Self::Roads,
+        Self::CityShell,
+        Self::Skyline,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sketch => "SKETCH",
+            Self::PushPull => "PUSH",
+            Self::Roads => "ROADS",
+            Self::CityShell => "CITY",
+            Self::Skyline => "TOWER",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Self::Sketch => Icon::Grid,
+            Self::PushPull => Icon::Move,
+            Self::Roads => Icon::Road,
+            Self::CityShell => Icon::City,
+            Self::Skyline => Icon::Wand,
+        }
+    }
+
+    fn tool(self) -> ToolbeltTool {
+        match self {
+            Self::Sketch => ToolbeltTool::DrawRect,
+            Self::PushPull => ToolbeltTool::Sculpt,
+            Self::Roads => ToolbeltTool::CityRoad,
+            Self::CityShell => ToolbeltTool::CityBuilding,
+            Self::Skyline => ToolbeltTool::SmartTower,
+        }
+    }
+
+    fn brush(self) -> Option<IVec3> {
+        match self {
+            Self::Sketch => Some(IVec3::new(4, 1, 1)),
+            Self::PushPull => Some(IVec3::ONE),
+            Self::Roads | Self::CityShell | Self::Skyline => None,
+        }
+    }
+
+    fn status(self) -> String {
+        match self {
+            Self::Sketch => "Sketch workflow: LMB drag a snapped rectangle, release to fill; Alt turns it into Push/Pull.".into(),
+            Self::PushPull => "Push workflow: hover a face, LMB drag depth, release to commit; Alt gives temporary Fill.".into(),
+            Self::Roads => "Road workflow: LMB draw components with endpoint snap; wheel edits width/bridge height; middle mouse retextures.".into(),
+            Self::CityShell => "City workflow: LMB two corners for a building shell; roads and frontage stay component-aware.".into(),
+            Self::Skyline => "Tower workflow: two clicks create a varied skyscraper shell with floors, crown, and undo.".into(),
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Sketch => "One click switches to rectangle sketching and a flat 4x1 brush.",
+            Self::PushPull => "One click switches to SketchUp-style face push/pull.",
+            Self::Roads => {
+                "One click switches to road components: draw, branch, adjust, retexture."
+            }
+            Self::CityShell => {
+                "One click switches to component building shells for fast city blocks."
+            }
+            Self::Skyline => "One click switches to smart tower generation.",
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self {
+            Self::Sketch => egui::Color32::from_rgb(80, 170, 255),
+            Self::PushPull => egui::Color32::from_rgb(110, 210, 255),
+            Self::Roads => egui::Color32::from_rgb(80, 235, 225),
+            Self::CityShell => egui::Color32::from_rgb(130, 255, 125),
+            Self::Skyline => egui::Color32::from_rgb(255, 184, 70),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -612,6 +714,15 @@ fn draw_build_dock(
                 });
 
                 if picker_open {
+                    crate::ui_kit::compact_separator(ui, theme);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
+                        for preset in BuildWorkflowPreset::ALL {
+                            if workflow_preset_chip(ui, preset, active_tool == preset.tool()) {
+                                result.workflow_preset = Some(preset);
+                            }
+                        }
+                    });
                     crate::ui_kit::compact_separator(ui, theme);
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
@@ -963,6 +1074,42 @@ fn tool_chip(
     clicked
 }
 
+fn workflow_preset_chip(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected: bool) -> bool {
+    let color = preset.color();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(82.0, 38.0), egui::Sense::click());
+    let hovered = response.hovered();
+    let fill = if selected {
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 88)
+    } else if hovered {
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 52)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(10, 26, 34, 188)
+    };
+    let painter = ui.painter_at(rect);
+    painter.rect(
+        rect,
+        egui::Rounding::same(7.0),
+        fill,
+        egui::Stroke::new(1.0, if selected { AMBER } else { color }),
+    );
+    paint_icon(
+        &painter,
+        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 9.0), egui::vec2(19.0, 19.0)),
+        preset.icon(),
+        if selected { AMBER } else { color },
+    );
+    painter.text(
+        rect.right_center() - egui::vec2(8.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        preset.label(),
+        egui::FontId::monospace(10.0),
+        TEXT,
+    );
+    let clicked = response.clicked();
+    response.on_hover_text(preset.hint());
+    clicked
+}
+
 impl ToolbeltTool {
     fn left_icon(self) -> Icon {
         match self {
@@ -1115,5 +1262,26 @@ mod tests {
         assert!(left.contains("branch"));
         assert!(right.contains("selected road component"));
         assert!(right.contains("cancel"));
+    }
+
+    #[test]
+    fn workflow_presets_collapse_multi_step_builder_modes() {
+        assert_eq!(BuildWorkflowPreset::Sketch.tool(), ToolbeltTool::DrawRect);
+        assert_eq!(
+            BuildWorkflowPreset::Sketch.brush(),
+            Some(IVec3::new(4, 1, 1))
+        );
+        assert_eq!(BuildWorkflowPreset::Roads.tool(), ToolbeltTool::CityRoad);
+        assert!(BuildWorkflowPreset::Roads
+            .status()
+            .contains("endpoint snap"));
+        assert_eq!(
+            BuildWorkflowPreset::CityShell.tool(),
+            ToolbeltTool::CityBuilding
+        );
+        assert_eq!(
+            BuildWorkflowPreset::Skyline.tool(),
+            ToolbeltTool::SmartTower
+        );
     }
 }

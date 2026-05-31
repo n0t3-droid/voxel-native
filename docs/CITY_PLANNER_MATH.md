@@ -30,6 +30,7 @@ site_score =
   + 1.80 * district_balance
   + 1.35 * route_fit
   + 0.55 * block_fit
+  + 4.00 * road_anchor_alignment
   + 2.50 * semantic_anchor
   - 0.0005 * center_distance
 ```
@@ -41,10 +42,18 @@ The terms are intentionally simple:
 - `district_balance` prevents one repeated project type from taking over.
 - `route_fit` rewards routes with manageable slopes.
 - `block_fit` favors lots that sit cleanly inside the road grid.
+- `road_anchor_alignment` rewards road projects whose generated centerline or
+  road-grid segment follows an authored district street.
 - `semantic_anchor` rewards meaningful frontage, plaza, tower, civic, and
   service relationships.
 - `center_distance` gently prevents every project from collapsing into one
   crowded point.
+
+Road anchors are planning intent, not completed geometry. They are part of the
+road graph for frontage, collision avoidance, and lot reasoning, but the
+duplicate-road test only compares against actual user roads and completed bot
+road projects. This lets bots build the authored street once instead of
+rejecting it as already present.
 
 ## Road Grade Fit
 

@@ -33,12 +33,18 @@ The latest engine work turns bot construction into a road-first city planner:
 - bot projects reserve footprints before building, so roads and buildings do
   not cut through each other while the city grows;
 - duplicate road corridors are rejected before voxel edits are queued;
+- authored district road anchors now guide final road-site selection instead
+  of being mistaken for already-built duplicate roads;
 - civic, service, tower, prep, and detail pads lift to the nearest raised road
   deck instead of sinking back to raw terrain;
 - building lots bind to frontage streets and record the street face plus target
   deck height in the bot plan rows;
 - districts prefer unused project kinds before repeating, giving the skyline
   residential, civic, utility, plaza, and landmark variety;
+- cursor capture is centralized so live build, navigation, combat, menus, and
+  the picker do not fight each other during mode switches;
+- the in-game Build Studio exposes one-click workflow icons for Sketch,
+  Push/Pull, Roads, City Shells, and Towers;
 - max-distance streaming pauses bot edit slices when the visible horizon is
   still catching up, keeping low-end PCs responsive.
 
@@ -52,6 +58,19 @@ The public project view should explain what is implemented, how to run it, and
 which math keeps the engine fast. Current bot-planning details live in
 [`docs/CITY_PLANNER_MATH.md`](docs/CITY_PLANNER_MATH.md).
 
+Verified update for this snapshot:
+
+- road anchors are treated as planning intent, not completed road geometry;
+- road candidates receive a bounded alignment score when their centerline or
+  grid segment follows an authored district street;
+- duplicate checks still protect against actual user roads and completed bot
+  road projects;
+- mode/cursor tests lock the rule that gameplay hides the OS cursor while
+  menus and clickable picker overlays release it;
+- workflow presets collapse common multi-step builder setups into one icon;
+- local engine captures remain ignored rather than becoming GitHub gallery
+  clutter.
+
 ## City Planner Math
 
 The bot planner uses bounded scoring instead of expensive world scans. A site is
@@ -64,6 +83,7 @@ site_score =
   + 1.80 * district_balance
   + 1.35 * route_fit
   + 0.55 * block_fit
+  + 4.00 * road_anchor_alignment
   + 2.50 * semantic_anchor
   - 0.0005 * center_distance
 ```

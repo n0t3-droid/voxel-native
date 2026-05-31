@@ -623,29 +623,56 @@ fn sync_tool_side_effects(
     }
 }
 
-fn mode_cursor_guard(mode: Res<ModeContext>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    let Ok(mut window) = windows.get_single_mut() else {
-        return;
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorPolicy {
+    LockedHidden,
+    ReleasedVisible,
+}
 
-    match mode.mode {
+fn cursor_policy_for(
+    game_state: GameState,
+    mode: ActiveMode,
+    editor_open: bool,
+    command_palette_open: bool,
+) -> CursorPolicy {
+    if game_state != GameState::InGame || editor_open || command_palette_open {
+        return CursorPolicy::ReleasedVisible;
+    }
+    match mode {
         ActiveMode::BuildPicker { .. }
         | ActiveMode::Editor { .. }
         | ActiveMode::Inventory
         | ActiveMode::Paused
-        | ActiveMode::CommandPalette => {
+        | ActiveMode::CommandPalette => CursorPolicy::ReleasedVisible,
+        ActiveMode::BuildLive { .. }
+        | ActiveMode::Combat
+        | ActiveMode::ShipPlacement { .. }
+        | ActiveMode::ShipFlight { .. } => CursorPolicy::LockedHidden,
+    }
+}
+
+fn mode_cursor_guard(
+    game_state: Res<State<GameState>>,
+    mode: Res<ModeContext>,
+    editor: Res<EditorState>,
+    command_palette: Option<Res<CommandPaletteState>>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    let Ok(mut window) = windows.get_single_mut() else {
+        return;
+    };
+
+    match cursor_policy_for(
+        game_state.get().clone(),
+        mode.mode,
+        editor.open,
+        command_palette.as_deref().map(|p| p.open).unwrap_or(false),
+    ) {
+        CursorPolicy::ReleasedVisible => {
             window.cursor.grab_mode = CursorGrabMode::None;
             window.cursor.visible = true;
         }
-        ActiveMode::BuildLive { .. } => {
-            window.cursor.grab_mode = CursorGrabMode::Locked;
-            window.cursor.visible = false;
-        }
-        ActiveMode::Combat => {
-            window.cursor.grab_mode = CursorGrabMode::Locked;
-            window.cursor.visible = false;
-        }
-        ActiveMode::ShipPlacement { .. } | ActiveMode::ShipFlight { .. } => {
+        CursorPolicy::LockedHidden => {
             window.cursor.grab_mode = CursorGrabMode::Locked;
             window.cursor.visible = false;
         }
@@ -802,6 +829,59 @@ mod tests {
                 tool: ToolbeltTool::CityBuilding
             },
             "F7 should be a direct return to the remembered Build Live tool"
+        );
+    }
+
+    #[test]
+    fn cursor_policy_releases_for_menus_even_with_stale_live_mode() {
+        assert_eq!(
+            cursor_policy_for(
+                GameState::Paused,
+                ActiveMode::BuildLive {
+                    tool: ToolbeltTool::BrushPlace,
+                },
+                false,
+                false,
+            ),
+            CursorPolicy::ReleasedVisible
+        );
+    }
+
+    #[test]
+    fn cursor_policy_locks_live_navigation_and_combat_immediately() {
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::BuildLive {
+                    tool: ToolbeltTool::BrushPlace,
+                },
+                false,
+                false,
+            ),
+            CursorPolicy::LockedHidden
+        );
+        assert_eq!(
+            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, false),
+            CursorPolicy::LockedHidden
+        );
+    }
+
+    #[test]
+    fn cursor_policy_releases_only_for_clickable_ingame_overlays() {
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::BuildPicker {
+                    tool: ToolbeltTool::CityRoad,
+                },
+                false,
+                false,
+            ),
+            CursorPolicy::ReleasedVisible
+        );
+        assert_eq!(
+            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, true),
+            CursorPolicy::ReleasedVisible
         );
     }
 }

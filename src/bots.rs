@@ -5586,7 +5586,7 @@ fn road_project_duplicates_existing_corridor(
     if planned.is_empty() {
         return false;
     }
-    let existing = road_corridor_segments(save, district);
+    let existing = built_road_corridor_segments(save, district);
     planned.iter().any(|(a, b, planned_half_width)| {
         existing.iter().any(|(c, d, existing_half_width)| {
             road_segments_are_duplicate_corridors(
@@ -5598,6 +5598,40 @@ fn road_project_duplicates_existing_corridor(
             )
         })
     })
+}
+
+fn built_road_corridor_segments(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+) -> Vec<(Vec2, Vec2, f32)> {
+    let mut segments = Vec::new();
+    for guide in save
+        .user_roads
+        .iter()
+        .filter(|guide| road_guide_matches_district(guide, district))
+    {
+        let half_width = guide.width.max(1) as f32 * 0.5;
+        segments.extend(
+            road_guide_segments(guide)
+                .into_iter()
+                .map(|(a, b)| (a, b, half_width)),
+        );
+    }
+    for project in &save.projects {
+        if project.district_id != Some(district.id)
+            || !is_access_road_project(project.kind)
+            || matches!(project.status, BotProjectStatus::Blocked)
+        {
+            continue;
+        }
+        let half_width = project_road_corridor_half_width(project);
+        segments.extend(
+            project_road_segments(project)
+                .into_iter()
+                .map(|(a, b)| (a, b, half_width)),
+        );
+    }
+    segments
 }
 
 fn road_segments_are_duplicate_corridors(
@@ -7044,8 +7078,52 @@ fn score_planned_site(
     let inside = bounds.contains_box(origin, size);
     score_city_slot_with_route_fit(flatness, road_access, inside, balance, true, route_fit)
         + block_fit.clamp(0.0, 1.0) * 0.55
+        + road_anchor_alignment_score(district, origin, size, kind) * 4.0
         + semantic_road_anchor_score(save, district, origin, size, kind) * 2.5
         - bounds.distance_from_center(center_x as f32, center_z as f32) * 0.0005
+}
+
+fn road_anchor_alignment_score(
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> f32 {
+    if !is_access_road_project(kind) || district.road_anchors.len() < 2 {
+        return 0.0;
+    }
+    let planned_segments = planned_road_segments(origin, size, kind);
+    if planned_segments.is_empty() {
+        return 0.0;
+    }
+
+    let mut best: f32 = 0.0;
+    for pair in district.road_anchors.windows(2) {
+        let a = Vec2::new(pair[0][0] as f32, pair[0][2] as f32);
+        let b = Vec2::new(pair[1][0] as f32, pair[1][2] as f32);
+        let anchor_span = b - a;
+        let anchor_len = anchor_span.length();
+        if anchor_len <= 4.0 {
+            continue;
+        }
+        let anchor_dir = anchor_span / anchor_len;
+        for (road_a, road_b) in &planned_segments {
+            let road_span = *road_b - *road_a;
+            let road_len = road_span.length();
+            if road_len <= 1.0 {
+                continue;
+            }
+            let alignment = (road_span / road_len).dot(anchor_dir).abs();
+            let alignment_score = ((alignment - 0.72) / 0.28).clamp(0.0, 1.0);
+            if alignment_score <= 0.0 {
+                continue;
+            }
+            let distance = segment_to_segment_distance(*road_a, *road_b, a, b);
+            let distance_score = (1.0 - distance / 24.0).clamp(0.0, 1.0);
+            best = best.max(alignment_score * distance_score);
+        }
+    }
+    best
 }
 
 fn semantic_road_anchor_score(
@@ -13706,6 +13784,34 @@ mod tests {
                     && end.distance(Vec2::new(44.0, 16.0)) <= 4.5
             }),
             "autonomous road candidates should include the district's planned anchor street, got {origins:?}"
+        );
+    }
+
+    #[test]
+    fn loaded_road_site_prefers_authored_anchor_street_over_district_center() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Authored Street Wins".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 180,
+            road_anchors: vec![[-44, 90, 96], [44, 90, 96]],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let save = BotWorldSave::default();
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -12, 12);
+        let size = autonomous_project_size(BotTaskKind::BuildRoad);
+
+        let site =
+            find_loaded_build_site(&save, &world, &district, BotTaskKind::BuildRoad, size, 0)
+                .expect("expected a loaded road site");
+        let road_mid_z = build_road_center_z(site[2], size[2], size[0] / 2);
+
+        assert!(
+            (road_mid_z - 96).abs() <= 8,
+            "road site should follow the authored anchor street near z=96 instead of falling back to the district center, got site {site:?} with mid z {road_mid_z}"
         );
     }
 
