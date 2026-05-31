@@ -354,17 +354,18 @@ impl TerrainGenerator {
                 h += rs * pillar;
             }
             Region::CrystalSpires => {
-                // Towering hex-prism-feel pillars up to 200 blocks tall on
-                // a flat glow-sand floor. Perfect for spaceship weaving and
-                // long-range sniper nests.
-                let base_pull = rs * 0.55;
+                // Towering hex-prism-feel pillars on a flat glow-sand
+                // floor. The high threshold keeps the biome readable as
+                // hero spires with flight corridors instead of a dense
+                // translucent wall that overloads low-end GPUs up close.
+                let base_pull = rs * 0.62;
                 let floor = WATER_LEVEL as f64 + 10.0;
                 h = h * (1.0 - base_pull) + floor * base_pull;
-                let r1 = self.ridged_fbm(&self.ridges, wx * 0.012, wz * 0.012, 3);
-                let r2 = self.ridged_fbm(&self.hills_b, wx * 0.012 + 91.3, wz * 0.012 - 47.5, 3);
+                let r1 = self.ridged_fbm(&self.ridges, wx * 0.0075, wz * 0.0075, 3);
+                let r2 = self.ridged_fbm(&self.hills_b, wx * 0.0085 + 91.3, wz * 0.0085 - 47.5, 3);
                 let spike = r1.min(r2);
-                let spike = (spike - 0.40).max(0.0);
-                let spike = spike * spike * spike * 3500.0; // massive tall spires
+                let spike = (spike - 0.49).max(0.0);
+                let spike = spike * spike * spike * 2500.0;
                 h += rs * spike;
             }
             Region::VolcanicWaste => {
@@ -2454,6 +2455,73 @@ impl TerrainGenerator {
     /// at a world (x, z) column. Used to spawn the player above terrain.
     pub fn surface_height_at(&self, wx: i32, wz: i32) -> i32 {
         self.surface_height(wx as f64, wz as f64).0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crystal_spires_keep_flight_corridors_and_bounded_close_range_steps() {
+        let generator = TerrainGenerator::new(12345);
+        let mut samples = 0usize;
+        let mut floor_columns = 0usize;
+        let mut tall_columns = 0usize;
+        let mut max_step = 0i32;
+        let mut max_height = i32::MIN;
+        let mut patches = 0usize;
+
+        'search: for z in (-12_000..=12_000).step_by(256) {
+            for x in (-12_000..=12_000).step_by(256) {
+                let (region, strength) = generator.region(x as f64, z as f64);
+                if region != Region::CrystalSpires || strength < 0.60 {
+                    continue;
+                }
+
+                patches += 1;
+                for dz in (0..64).step_by(4) {
+                    for dx in (0..64).step_by(4) {
+                        let wx = x + dx;
+                        let wz = z + dz;
+                        let h = generator.surface_height_at(wx, wz);
+                        let hx = generator.surface_height_at(wx + 4, wz);
+                        let hz = generator.surface_height_at(wx, wz + 4);
+                        max_height = max_height.max(h);
+                        max_step = max_step.max((h - hx).abs()).max((h - hz).abs());
+                        samples += 1;
+                        if h <= WATER_LEVEL + 30 {
+                            floor_columns += 1;
+                        }
+                        if h >= WATER_LEVEL + 70 {
+                            tall_columns += 1;
+                        }
+                    }
+                }
+
+                if patches >= 16 {
+                    break 'search;
+                }
+            }
+        }
+
+        assert!(patches >= 1, "seed should expose a crystal-spire province");
+        assert!(
+            floor_columns * 5 >= samples,
+            "crystal biome lost its low flight corridors: {floor_columns}/{samples}"
+        );
+        assert!(
+            tall_columns > 0,
+            "crystal biome should still produce a visible hero skyline, max height was {max_height}"
+        );
+        assert!(
+            tall_columns * 2 < samples,
+            "crystal skyline became a near-solid wall: {tall_columns}/{samples}"
+        );
+        assert!(
+            max_step <= 96,
+            "close-range crystal steps are too sharp for low-end rendering: {max_step}"
+        );
     }
 }
 

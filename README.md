@@ -53,6 +53,14 @@ The latest engine work turns bot construction into a road-first city planner:
 - Build Studio now exposes categorized material swatches and architecture
   presets for modern houses, road/traffic layouts, gardens, towers, and
   spacecraft hulls directly in the live builder workflow;
+- wide manual road components now stamp curb edges, sidewalk shoulders, and
+  lightweight lamp markers so editable roads read as city infrastructure
+  instead of flat strips;
+- crystal, ice, water, lava, cockpit-glass, and neon-glass terrain materials
+  avoid Bevy's sorted alpha-blend path, reducing close-range lag in dense
+  glowing biomes on low-end PCs;
+- crystal-spire terrain is bounded by a regression test that keeps hero
+  skylines while preserving open flight corridors and safer close-up geometry;
 - max-distance streaming pauses bot edit slices when the visible horizon is
   still catching up, keeping low-end PCs responsive.
 
@@ -80,6 +88,9 @@ Verified update for this snapshot:
   through-wall rectangle cuts for reliable windows and doors;
 - the material catalog test keeps every buildable voxel block present exactly
   once across the SketchUp-style swatch categories;
+- translucent terrain uses alpha-to-coverage instead of sorted alpha blending,
+  and crystal spires are generated as wider hero forms instead of a solid
+  translucent wall;
 - local engine captures remain ignored rather than becoming GitHub gallery
   clutter.
 

@@ -44,6 +44,17 @@ pub struct MaterialLibrary {
     pub status: String,
 }
 
+pub(crate) fn terrain_alpha_mode_for_block(block: BlockType) -> AlphaMode {
+    let alpha = block.color().to_srgba().alpha;
+    if alpha < 0.99 {
+        // Chunk terrain can fill the whole screen. Alpha-to-coverage keeps
+        // glass/ice/crystal out of Bevy's sorted Blend pass.
+        AlphaMode::AlphaToCoverage
+    } else {
+        AlphaMode::Opaque
+    }
+}
+
 impl MaterialLibrary {
     pub fn rebuild(
         &mut self,
@@ -77,11 +88,7 @@ impl MaterialLibrary {
                 emissive,
                 perceptual_roughness: 1.0,
                 reflectance: 0.05,
-                alpha_mode: if alpha < 0.99 {
-                    AlphaMode::Blend
-                } else {
-                    AlphaMode::Opaque
-                },
+                alpha_mode: terrain_alpha_mode_for_block(swatch.block),
                 ..default()
             });
             let id = swatch.block as MaterialId;
@@ -746,5 +753,24 @@ mod tests {
             lava_signatures > 14,
             "lava only preserved {lava_signatures} far-distance material signatures"
         );
+    }
+
+    #[test]
+    fn translucent_builtin_world_materials_avoid_sorted_alpha_blend() {
+        for block in [
+            BlockType::Water,
+            BlockType::Ice,
+            BlockType::Crystal,
+            BlockType::Lava,
+            BlockType::CockpitGlass,
+            BlockType::LuminiteCrystal,
+            BlockType::IridiumVein,
+        ] {
+            assert_eq!(
+                terrain_alpha_mode_for_block(block),
+                AlphaMode::AlphaToCoverage,
+                "{block:?} should stay out of Bevy's sorted alpha-blend terrain path"
+            );
+        }
     }
 }

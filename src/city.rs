@@ -1905,6 +1905,7 @@ fn clear_road_component(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
             let wz = c.y + perp_z * w;
             let sy = world.surface_height_at(wx, wz);
             let deck_y = road_deck_y_at_sample(world, seg, wx, wz, i, last_index).max(1);
+            changed += clear_road_furniture_column(world, wx, deck_y, wz);
             if deck_y <= sy {
                 let restore = terrain_surface_restore_voxel(world, wx, wz);
                 for y in deck_y..=sy {
@@ -1994,9 +1995,11 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
                     }
                 }
             }
-            if world.edit_set_voxel(wx, deck_y, wz, surface) {
+            let lane_surface = road_lane_surface_voxel(*seg, w, half, surface);
+            if world.edit_set_voxel(wx, deck_y, wz, lane_surface) {
                 changed += 1;
             }
+            changed += stamp_road_furniture_column(world, *seg, i, w, half, wx, deck_y, wz);
         }
         // Centre stripe every 3 cells along the length axis.
         if let Some(s) = stripe {
@@ -2006,6 +2009,67 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
                     changed += 1;
                 }
             }
+        }
+    }
+    changed
+}
+
+fn road_lane_surface_voxel(seg: RoadSegment, w: i32, half: i32, surface: Voxel) -> Voxel {
+    if half < 4 || seg.style == RoadStyle::Dirt {
+        return surface;
+    }
+    let offset = w.abs();
+    if offset == half {
+        Voxel::from(BlockType::ShipHullDark)
+    } else if offset == half - 1 {
+        Voxel::from(BlockType::Limestone)
+    } else {
+        surface
+    }
+}
+
+fn stamp_road_furniture_column(
+    world: &mut VoxelWorld,
+    seg: RoadSegment,
+    index: usize,
+    w: i32,
+    half: i32,
+    wx: i32,
+    deck_y: i32,
+    wz: i32,
+) -> usize {
+    if half < 4 || seg.style == RoadStyle::Dirt || w.abs() != half || index % 36 != 0 {
+        return 0;
+    }
+
+    let mut changed = 0usize;
+    for y_offset in 1..=4 {
+        let voxel = if y_offset == 4 {
+            Voxel::from(BlockType::GlowSand)
+        } else {
+            Voxel::from(BlockType::ShipHullDark)
+        };
+        if world.edit_set_voxel(wx, deck_y + y_offset, wz, voxel) {
+            changed += 1;
+        }
+    }
+    changed
+}
+
+fn clear_road_furniture_column(world: &mut VoxelWorld, wx: i32, deck_y: i32, wz: i32) -> usize {
+    let mut changed = 0usize;
+    for y in (deck_y + 1)..=(deck_y + 5) {
+        if matches!(
+            BlockType::from_voxel(world.voxel_at(wx, y, wz)),
+            BlockType::ShipHullDark
+                | BlockType::GlowSand
+                | BlockType::NeonCyan
+                | BlockType::NeonMagenta
+                | BlockType::NeonAmber
+                | BlockType::EngineCore
+        ) && world.edit_set_voxel(wx, y, wz, AIR)
+        {
+            changed += 1;
         }
     }
     changed
@@ -3038,16 +3102,22 @@ mod tests {
         let road = RoadSegment::new(
             IVec3::new(0, 72, 0),
             IVec3::new(16, 72, 0),
-            7,
+            9,
             RoadStyle::Neon,
         );
         let old_flank_y = world.surface_height_at(8, 3);
+        let old_edge_y = world.surface_height_at(0, 4);
         let center_y = world.surface_height_at(8, 0);
 
         stamp_road(&mut world, &road);
         assert_eq!(
             world.voxel_at(8, old_flank_y, 3),
             Voxel::from(BlockType::Limestone)
+        );
+        assert_eq!(
+            world.voxel_at(0, old_edge_y + 4, 4),
+            Voxel::from(BlockType::GlowSand),
+            "wide editable roads should stamp lightweight lamp furniture"
         );
 
         let narrow_dirt = road.with_width(1).retextured(RoadStyle::Dirt);
@@ -3057,7 +3127,50 @@ mod tests {
             world.voxel_at(8, old_flank_y, 3),
             terrain_surface_restore_voxel(&world, 8, 3)
         );
+        assert_eq!(
+            world.voxel_at(0, old_edge_y + 4, 4),
+            AIR,
+            "editing road width should clear old lamp furniture outside the new component"
+        );
         assert_eq!(world.voxel_at(8, center_y, 0), Voxel::from(BlockType::Dirt));
+    }
+
+    #[test]
+    fn wide_road_component_stamps_curbs_sidewalks_and_lit_furniture() {
+        let mut world = VoxelWorld::new();
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(48, 72, 0),
+            9,
+            RoadStyle::Asphalt,
+        );
+        let curb_y = world.surface_height_at(12, 4);
+        let sidewalk_y = world.surface_height_at(12, 3);
+        let lane_y = world.surface_height_at(12, 2);
+        let lamp_y = world.surface_height_at(0, 4);
+
+        stamp_road(&mut world, &road);
+
+        assert_eq!(
+            world.voxel_at(12, curb_y, 4),
+            Voxel::from(BlockType::ShipHullDark),
+            "wide road edge should read as a curb, not plain asphalt"
+        );
+        assert_eq!(
+            world.voxel_at(12, sidewalk_y, 3),
+            Voxel::from(BlockType::Limestone),
+            "wide roads need walkable sidewalk shoulders for city-scale building"
+        );
+        assert_eq!(
+            world.voxel_at(12, lane_y, 2),
+            Voxel::from(BlockType::Stone),
+            "drivable lane interior should keep the road surface material"
+        );
+        assert_eq!(
+            world.voxel_at(0, lamp_y + 4, 4),
+            Voxel::from(BlockType::GlowSand),
+            "manual road components should carry lightweight city lamp furniture"
+        );
     }
 
     #[test]

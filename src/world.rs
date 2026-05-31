@@ -812,7 +812,7 @@ fn init_world(
         base_color: Color::srgba(0.2, 0.55, 0.85, 0.6),
         perceptual_roughness: 0.1,
         reflectance: 0.3,
-        alpha_mode: AlphaMode::Blend,
+        alpha_mode: AlphaMode::AlphaToCoverage,
         ..default()
     }));
 }
