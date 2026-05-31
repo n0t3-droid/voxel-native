@@ -21,6 +21,8 @@ use crate::world::{VoxelWorld, WorldEditBatch};
 const DRAW_REACH: f32 = 128.0;
 const DRAW_CELL_CAP: usize = 16_384;
 const RECT_CUT_DEPTH_CAP: i32 = 16;
+const RECT_ROOM_CUT_DEPTH_CAP: i32 = 32;
+const RECT_ROOM_CUT_MIN_DEPTH: i32 = 6;
 const RECT_FILL_OWNER: &str = "Sketch Draw";
 const RECT_AXIS_JITTER: i32 = 1;
 const RECT_AXIS_RATIO: f32 = 3.0;
@@ -39,6 +41,7 @@ pub struct RectDrawState {
     action: RectDrawAction,
     button: RectDragButton,
     smart_gesture: bool,
+    room_cut: bool,
     inference: RectEndpointInference,
     voxel: Voxel,
     status_cells: usize,
@@ -112,6 +115,10 @@ fn shape_alt_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
 }
 
+fn shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
+}
+
 fn draw_rect_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, draw: &RectDrawState) -> bool {
     if !mode.is_build_live() {
         return false;
@@ -136,7 +143,7 @@ pub fn rect_draw_input(
     mut history: ResMut<BuilderHistory>,
     builder: Res<BuilderState>,
     windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
-    cam_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
+    cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
 ) {
     if !draw_rect_active(&mode, &keys, &draw) {
         if draw.active {
@@ -168,10 +175,8 @@ pub fn rect_draw_input(
         return;
     }
 
-    let cursor_locked = windows
-        .get_single()
-        .map(crate::mode::cursor_is_captured)
-        .unwrap_or(false);
+    let window = windows.get_single().ok();
+    let cursor_locked = window.map(crate::mode::cursor_is_captured).unwrap_or(false);
     if smart_tool && !cursor_locked {
         if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {
             toolbelt.status =
@@ -181,15 +186,21 @@ pub fn rect_draw_input(
         return;
     }
 
-    let Ok(cam_tf) = cam_q.get_single() else {
+    let Ok((camera, cam_tf)) = cam_q.get_single() else {
         if mouse.just_pressed(MouseButton::Left) {
             toolbelt.status = "Smart Build could not find the player camera this frame.".into();
         }
         motion_evr.clear();
         return;
     };
-    let origin = cam_tf.translation();
-    let dir = cam_tf.forward().as_vec3();
+    let Some((origin, dir)) = draw_input_ray(active_tool, window, camera, cam_tf) else {
+        if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {
+            toolbelt.status =
+                "Sketch Draw needs the pointer inside the game window to pick endpoints.".into();
+        }
+        motion_evr.clear();
+        return;
+    };
 
     if mouse.just_pressed(MouseButton::Left) && draw.active && draw.click_finish {
         commit_rect_fill(&mut draw, &mut world, &mut history, &mut toolbelt);
@@ -198,9 +209,8 @@ pub fn rect_draw_input(
         return;
     }
 
-    let start_cut = smart_tool
-        && (mouse.just_pressed(MouseButton::Right)
-            || (active_tool == ToolbeltTool::BrushCut && mouse.just_pressed(MouseButton::Left)));
+    let start_cut = (mouse.just_pressed(MouseButton::Right) && active_tool != ToolbeltTool::Sculpt)
+        || (active_tool == ToolbeltTool::BrushCut && mouse.just_pressed(MouseButton::Left));
     let start_fill = mouse.just_pressed(MouseButton::Left) && active_tool != ToolbeltTool::BrushCut;
 
     if (start_fill || start_cut) && !draw.active {
@@ -236,6 +246,7 @@ pub fn rect_draw_input(
             RectDragButton::Left
         };
         draw.smart_gesture = smart_tool;
+        draw.room_cut = action == RectDrawAction::Cut && shift_pressed(&keys);
         draw.inference = RectEndpointInference::None;
         draw.voxel = if action == RectDrawAction::Cut {
             AIR
@@ -251,10 +262,12 @@ pub fn rect_draw_input(
                 action.label(),
                 action.preview_verb()
             )
+        } else if draw.room_cut {
+            "Smart Room Cut start set. Drag the wall/floor face; release clears a livable volume behind it.".into()
         } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
             "Quick Fill start set. Keep Alt held while starting; drag to fill, LMB commits.".into()
         } else {
-            "Sketch Draw start set. Drag to a snapped endpoint, release to build, or tap-release then LMB to finish.".into()
+            "Sketch Draw start set. Drag endpoint, release to build. RMB cuts, Shift+RMB clears room depth.".into()
         };
     }
 
@@ -324,6 +337,23 @@ pub fn rect_draw_input(
     }
 }
 
+fn draw_input_ray(
+    active_tool: ToolbeltTool,
+    window: Option<&bevy::window::Window>,
+    camera: &Camera,
+    camera_tf: &GlobalTransform,
+) -> Option<(Vec3, Vec3)> {
+    if matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt) {
+        if let Some(ray) = window
+            .and_then(|window| window.cursor_position())
+            .and_then(|cursor| camera.viewport_to_world(camera_tf, cursor))
+        {
+            return Some((ray.origin, *ray.direction));
+        }
+    }
+    Some((camera_tf.translation(), camera_tf.forward().as_vec3()))
+}
+
 fn commit_rect_fill(
     draw: &mut RectDrawState,
     world: &mut VoxelWorld,
@@ -332,6 +362,13 @@ fn commit_rect_fill(
 ) {
     let cells = match draw.action {
         RectDrawAction::Fill => rect_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP),
+        RectDrawAction::Cut if draw.room_cut => rect_room_cut_cells_through_solid(
+            world,
+            draw.start,
+            draw.current,
+            draw.normal,
+            DRAW_CELL_CAP,
+        ),
         RectDrawAction::Cut => rect_cut_cells_through_solid(
             world,
             draw.start,
@@ -359,11 +396,19 @@ fn commit_rect_fill(
     world.finish_edit_batch(batch);
     let changed = changes.len();
     if changed > 0 {
-        let label = format!("{} {} cells", draw.action.history_label(), changed);
+        let label = if draw.room_cut {
+            format!("Smart room cut {} cells", changed)
+        } else {
+            format!("{} {} cells", draw.action.history_label(), changed)
+        };
         history.record_external(label, changes);
         toolbelt.status = format!(
             "{} committed: {} selected, {} changed cells. Ctrl+Z undo, Ctrl+R redo.",
-            draw.action.label(),
+            if draw.room_cut {
+                "Smart Room Cut"
+            } else {
+                draw.action.label()
+            },
             selected,
             changed
         );
@@ -679,6 +724,49 @@ fn rect_cut_cells_through_solid(
     out
 }
 
+fn rect_room_cut_cells_through_solid(
+    world: &VoxelWorld,
+    a: IVec3,
+    b: IVec3,
+    normal: IVec3,
+    cap: usize,
+) -> Vec<IVec3> {
+    if normal_axis(normal).is_none() {
+        return Vec::new();
+    }
+    let (span_u, span_v) = rect_plane_spans(a, b, normal);
+    let depth = smart_room_cut_depth(span_u, span_v);
+    let inward = -normal;
+    let mut out = Vec::new();
+    for surface in rect_cells(a, b, normal, cap) {
+        for layer in 0..depth {
+            if out.len() >= cap {
+                return out;
+            }
+            let pos = surface + inward * layer;
+            if voxel_is_solid(world.voxel_at(pos.x, pos.y, pos.z)) {
+                out.push(pos);
+            }
+        }
+    }
+    out
+}
+
+fn rect_plane_spans(a: IVec3, b: IVec3, normal: IVec3) -> (i32, i32) {
+    let size = (b - a).abs() + IVec3::ONE;
+    match normal_axis(normal) {
+        Some(0) => (size.y, size.z),
+        Some(1) => (size.x, size.z),
+        Some(2) => (size.x, size.y),
+        _ => (0, 0),
+    }
+}
+
+fn smart_room_cut_depth(span_u: i32, span_v: i32) -> i32 {
+    let broad = span_u.max(span_v).max(1);
+    (broad * 2 / 3).clamp(RECT_ROOM_CUT_MIN_DEPTH, RECT_ROOM_CUT_DEPTH_CAP)
+}
+
 pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<Time>) {
     if !draw.active {
         return;
@@ -879,6 +967,37 @@ mod tests {
         assert!(cells.contains(&IVec3::new(1, 1, 2)));
         assert!(cells.contains(&IVec3::new(1, 1, 1)));
         assert!(cells.contains(&IVec3::new(1, 1, 0)));
+    }
+
+    #[test]
+    fn smart_room_cut_clears_livable_depth_behind_drawn_wall_face() {
+        let mut world = VoxelWorld::new();
+        for x in 0..=7 {
+            for y in 0..=7 {
+                for z in 0..=7 {
+                    world.edit_set_voxel(x, y, z, Voxel::from(BlockType::Stone));
+                }
+            }
+        }
+
+        let cells = rect_room_cut_cells_through_solid(
+            &world,
+            IVec3::new(1, 1, 7),
+            IVec3::new(6, 6, 7),
+            IVec3::Z,
+            DRAW_CELL_CAP,
+        );
+
+        assert!(cells.contains(&IVec3::new(3, 3, 7)));
+        assert!(cells.contains(&IVec3::new(3, 3, 2)));
+        assert!(
+            !cells.contains(&IVec3::new(0, 3, 7)),
+            "room cut should preserve wall shell outside the drawn face"
+        );
+        assert!(
+            cells.len() > 6 * 6 * 3,
+            "room cut should clear a usable volume, not only a shallow hole"
+        );
     }
 
     #[test]

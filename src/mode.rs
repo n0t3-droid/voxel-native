@@ -292,7 +292,7 @@ fn mode_hotkeys(
         mode.set(
             ActiveMode::BuildLive { tool },
             format!(
-                "Creative Build: {}. LMB start -> endpoint builds; RMB cuts; Tab opens tools.",
+                "Creative Build: {}. LMB draws, RMB cuts, Shift+RMB cuts room depth, Ctrl+Z undo.",
                 tool.label()
             ),
         );
@@ -404,7 +404,7 @@ fn mode_hotkeys(
             } else {
                 mode.set(
                     ActiveMode::BuildLive { tool },
-                    "Build Live stays active. LMB start -> endpoint, RMB cuts, Tab opens tools.",
+                    "Build Live stays active. LMB draw, RMB cut, Shift+RMB room cut, Ctrl+Z undo.",
                 );
             }
         }
@@ -548,7 +548,7 @@ fn default_creative_mode() -> ActiveMode {
 }
 
 fn default_creative_status() -> &'static str {
-    "Creative Sketch Builder active. LMB draw snapped faces, RMB cuts openings, G swaps Push/Pull, Tab opens tools."
+    "Creative Sketch Builder active. Visible cursor draws snapped faces; RMB cuts, Shift+RMB clears room depth, Ctrl+Z undo."
 }
 
 fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {
@@ -645,6 +645,9 @@ fn cursor_policy_for(
         | ActiveMode::Inventory
         | ActiveMode::Paused
         | ActiveMode::CommandPalette => CursorPolicy::ReleasedVisible,
+        ActiveMode::BuildLive {
+            tool: ToolbeltTool::DrawRect,
+        } => CursorPolicy::ReleasedVisible,
         ActiveMode::BuildLive { .. }
         | ActiveMode::Combat
         | ActiveMode::ShipPlacement { .. }
@@ -885,6 +888,34 @@ mod tests {
         assert_eq!(
             cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, false),
             CursorPolicy::LockedHidden
+        );
+    }
+
+    #[test]
+    fn cursor_policy_releases_for_sketch_draw_pointer() {
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::BuildLive {
+                    tool: ToolbeltTool::DrawRect,
+                },
+                false,
+                false,
+            ),
+            CursorPolicy::ReleasedVisible,
+            "Sketch Draw needs a real visible cursor for endpoint picking"
+        );
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::BuildLive {
+                    tool: ToolbeltTool::BrushPlace,
+                },
+                false,
+                false,
+            ),
+            CursorPolicy::LockedHidden,
+            "FPS brush tools should keep mouse-look capture"
         );
     }
 

@@ -104,7 +104,7 @@ impl ToolbeltTool {
     pub fn hint(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Move, inspect, and keep weapons off while Build Studio is open.",
-            ToolbeltTool::DrawRect => "SketchUp-style draw-first tool: LMB sets a snapped start point, drag to an endpoint, release to build the exact face/rectangle. RMB uses the same gesture to cut windows, doors, and openings. G swaps to Push/Pull.",
+            ToolbeltTool::DrawRect => "SketchUp-style draw-first pointer tool: LMB draws exact snapped faces, RMB cuts openings, Shift+RMB clears a room-depth interior behind the drawn face. Ctrl+Z/Ctrl+Y undo/redo.",
             ToolbeltTool::Sculpt => "LMB Push/Pulls faces. Alt+LMB temporarily fills rectangles. G swaps Fill/Push.",
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
@@ -215,7 +215,7 @@ impl Default for ToolbeltState {
             palette_open: false,
             tool: ToolbeltTool::DrawRect,
             status:
-                "Creative Sketch Builder: LMB draw a snapped face; RMB cuts; G swaps Push/Pull; Tab opens tools."
+                "Creative Sketch Builder: visible cursor draws faces; RMB cuts; Shift+RMB clears room depth; Ctrl+Z undo."
                     .into(),
         }
     }
@@ -1325,7 +1325,7 @@ impl ToolbeltTool {
     fn left_hint(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Inspect without editing",
-            ToolbeltTool::DrawRect => "Left mouse fills; hold Alt for temporary Push/Pull",
+            ToolbeltTool::DrawRect => "Left mouse draws from visible cursor endpoint",
             ToolbeltTool::Sculpt => "Left mouse Push/Pulls; hold Alt for temporary Fill",
             ToolbeltTool::SmartTower => "Left mouse chooses tower corners",
             ToolbeltTool::BrushPlace => "Left mouse starts a snapped build endpoint",
@@ -1348,7 +1348,7 @@ impl ToolbeltTool {
             ToolbeltTool::AnimationPick => {
                 "Right mouse removes a voxel from the animation selection"
             }
-            ToolbeltTool::DrawRect => "Right mouse cancels Fill; G swaps to Push",
+            ToolbeltTool::DrawRect => "Right mouse cuts; Shift+Right cuts room depth",
             ToolbeltTool::SmartTower => "Right mouse cancels the tower preview",
             ToolbeltTool::BrushCut => "Right mouse starts a snapped cut endpoint",
             ToolbeltTool::CityRoad => {
