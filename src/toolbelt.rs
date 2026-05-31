@@ -56,7 +56,7 @@ impl ToolbeltTool {
     pub fn label(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Navigate / Inspect",
-            ToolbeltTool::DrawRect => "Rectangle Fill",
+            ToolbeltTool::DrawRect => "Sketch Draw",
             ToolbeltTool::Sculpt => "Push Pull Face",
             ToolbeltTool::SmartTower => "Smart Tower",
             ToolbeltTool::BrushPlace => "Smart Builder",
@@ -72,7 +72,7 @@ impl ToolbeltTool {
     pub fn chip_label(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "NAV",
-            ToolbeltTool::DrawRect => "FILL",
+            ToolbeltTool::DrawRect => "SKETCH",
             ToolbeltTool::Sculpt => "PUSH",
             ToolbeltTool::SmartTower => "TOWER",
             ToolbeltTool::BrushPlace => "BUILD",
@@ -104,7 +104,7 @@ impl ToolbeltTool {
     pub fn hint(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Move, inspect, and keep weapons off while Build Studio is open.",
-            ToolbeltTool::DrawRect => "LMB fills rectangles. Alt+LMB temporarily Push/Pulls. G swaps Fill/Push.",
+            ToolbeltTool::DrawRect => "SketchUp-style draw-first tool: LMB sets a snapped start point, drag to an endpoint, release to build the exact face/rectangle. RMB uses the same gesture to cut windows, doors, and openings. G swaps to Push/Pull.",
             ToolbeltTool::Sculpt => "LMB Push/Pulls faces. Alt+LMB temporarily fills rectangles. G swaps Fill/Push.",
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
@@ -213,9 +213,9 @@ impl Default for ToolbeltState {
         Self {
             live: false,
             palette_open: false,
-            tool: ToolbeltTool::BrushPlace,
+            tool: ToolbeltTool::DrawRect,
             status:
-                "Creative Smart Builder: LMB start -> drag to endpoint -> release builds; RMB cuts."
+                "Creative Sketch Builder: LMB draw a snapped face; RMB cuts; G swaps Push/Pull; Tab opens tools."
                     .into(),
         }
     }
@@ -262,7 +262,7 @@ fn toolbelt_hotkeys(
             toolbelt.status = "Weapons armed explicitly. Build tools stay one click away.".into();
         } else {
             if toolbelt.tool == ToolbeltTool::Navigate {
-                toolbelt.tool = ToolbeltTool::BrushPlace;
+                toolbelt.tool = ToolbeltTool::DrawRect;
             }
             toolbelt.live = true;
             toolbelt.palette_open = true;
@@ -276,13 +276,13 @@ fn toolbelt_hotkeys(
         if !toolbelt.live {
             toolbelt.live = true;
             if toolbelt.tool == ToolbeltTool::Navigate {
-                toolbelt.tool = ToolbeltTool::BrushPlace;
+                toolbelt.tool = ToolbeltTool::DrawRect;
             }
             changed = true;
         }
         toolbelt.palette_open = !toolbelt.palette_open;
         if toolbelt.palette_open && toolbelt.tool == ToolbeltTool::Navigate {
-            toolbelt.tool = ToolbeltTool::BrushPlace;
+            toolbelt.tool = ToolbeltTool::DrawRect;
         }
         toolbelt.status = if toolbelt.palette_open {
             "Build Studio picker: click a tool, Q/E cycles tools, Tab closes.".into()
@@ -300,7 +300,7 @@ fn toolbelt_hotkeys(
         toolbelt.palette_open = false;
         changed = true;
         toolbelt.status = if toolbelt.tool == ToolbeltTool::Navigate {
-            toolbelt.tool = ToolbeltTool::BrushPlace;
+            toolbelt.tool = ToolbeltTool::DrawRect;
             format!(
                 "Build Live: {}. {}",
                 toolbelt.tool.label(),
@@ -332,7 +332,7 @@ fn toolbelt_hotkeys(
             toolbelt.status = format!("Picker hidden. Build Live: {}.", toolbelt.tool.label());
         } else if toolbelt.live && toolbelt.tool == ToolbeltTool::DrawRect {
             toolbelt.status =
-                "Rectangle Fill: active drag cancelled. Smart Builder is one click away.".into();
+                "Sketch drag cancelled. LMB starts another snapped face; G swaps Push/Pull.".into();
         } else if toolbelt.live {
             toolbelt.live = false;
             changed = true;
@@ -508,7 +508,7 @@ fn sync_tool_selection(
 
 impl ToolbeltTool {
     fn uses_live_brush(self) -> bool {
-        false
+        matches!(self, Self::BrushPlace | Self::BrushCut)
     }
 }
 
@@ -1419,6 +1419,24 @@ fn active_tool_bg(tool: ToolbeltTool) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_toolbelt_enters_sketch_draw_first() {
+        let toolbelt = ToolbeltState::default();
+
+        assert_eq!(toolbelt.tool, ToolbeltTool::DrawRect);
+        assert!(toolbelt.status.contains("Sketch"));
+        assert!(ToolbeltTool::DrawRect.hint().contains("draw-first"));
+        assert!(ToolbeltTool::DrawRect.hint().contains("RMB"));
+    }
+
+    #[test]
+    fn live_brush_size_controls_only_attach_to_brush_tools() {
+        assert!(ToolbeltTool::BrushPlace.uses_live_brush());
+        assert!(ToolbeltTool::BrushCut.uses_live_brush());
+        assert!(!ToolbeltTool::DrawRect.uses_live_brush());
+        assert!(!ToolbeltTool::CityRoad.uses_live_brush());
+    }
 
     #[test]
     fn city_road_hint_exposes_smart_road_workflow() {

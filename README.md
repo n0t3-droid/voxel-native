@@ -31,9 +31,10 @@ The latest engine work turns bot construction into a road-first city planner:
 - bot autonomy is command-gated by default: workers stay parked on load until
   the player places a city area or explicitly queues a bot task;
 - the City Area tool now behaves like a road component workflow: two clicks
-  mark the exact bot city footprint, then bots adapt roads, clearing, plazas,
-  residential blocks, and towers inside that marked space instead of taking
-  over the whole world;
+  mark the exact bot city footprint, then bots queue bounded avenue strips,
+  a center junction/roundabout block, flatten passes, frontage parcels, plazas,
+  residential blocks, parks, and towers inside that marked space instead of
+  taking over the whole world;
 - roads are editable components with smooth deck grades for bridges, ramps,
   corners, plazas, and future roundabout work;
 - manual roads now start at boulevard scale by default, with larger editable
@@ -51,6 +52,9 @@ The latest engine work turns bot construction into a road-first city planner:
   residential, civic, utility, plaza, and landmark variety;
 - cursor capture is centralized so live build, navigation, combat, menus, and
   the picker do not fight each other during mode switches;
+- live Build mode now defaults to Sketch Draw instead of a low-level brush:
+  LMB draws a snapped face/rectangle, RMB cuts openings, and G swaps into
+  Push/Pull without opening a dense panel;
 - the in-game Build Studio exposes one-click workflow icons for Sketch,
   Push/Pull, Roads, City Shells, and Towers;
 - Sketch-style rectangle drawing keeps its locked floor or wall plane even
@@ -87,8 +91,9 @@ which math keeps the engine fast. Current bot-planning details live in
 Verified update for this snapshot:
 
 - bot load defaults keep workers parked until the player commands them;
-- placed bot city areas persist as the marked footprint and queue manual road,
-  clearing, civic, residential, and skyline projects inside that boundary;
+- placed bot city areas persist as the marked footprint and queue road-skeleton
+  projects before clearing, civic, residential, park, and skyline parcels inside
+  that boundary;
 - road anchors are treated as planning intent, not completed road geometry;
 - road candidates receive a bounded alignment score when their centerline or
   grid segment follows an authored district street;

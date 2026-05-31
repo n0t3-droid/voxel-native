@@ -30,10 +30,13 @@ radius = ceil(length((width / 2, depth / 2))) + 10
 
 The planner then queues a manual masterplan inside that bound:
 
-- one road-grid project for the full area;
+- multiple bounded road-grid strips: the main east-west avenue, the main
+  north-south avenue, secondary streets when the area is large enough, and a
+  center junction/roundabout block;
 - small clear/flatten slices so terrain adapts before architecture appears;
-- varied infill projects, alternating residential blocks, plazas, and glass
-  towers by deterministic cell position;
+- road-front parcel slots derived from the open blocks between those streets;
+- varied infill projects, alternating residential blocks, homes, parks, plazas,
+  and glass towers by deterministic parcel position;
 - no continuous expansion outside the placed footprint unless the player
   explicitly enables autonomy.
 

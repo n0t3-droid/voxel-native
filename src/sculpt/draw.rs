@@ -21,7 +21,7 @@ use crate::world::{VoxelWorld, WorldEditBatch};
 const DRAW_REACH: f32 = 128.0;
 const DRAW_CELL_CAP: usize = 16_384;
 const RECT_CUT_DEPTH_CAP: i32 = 16;
-const RECT_FILL_OWNER: &str = "Rectangle Fill";
+const RECT_FILL_OWNER: &str = "Sketch Draw";
 
 #[derive(Resource, Default)]
 pub struct RectDrawState {
@@ -190,7 +190,7 @@ pub fn rect_draw_input(
         };
         let normal = prev - hit;
         let Some((axis_u, axis_v)) = plane_axes(normal) else {
-            toolbelt.status = "Rectangle Fill found an invalid target normal.".into();
+            toolbelt.status = "Sketch Draw found an invalid target normal.".into();
             motion_evr.clear();
             return;
         };
@@ -231,7 +231,7 @@ pub fn rect_draw_input(
         } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
             "Quick Fill start set. Keep Alt held while starting; drag to fill, LMB commits.".into()
         } else {
-            "Rectangle Fill start set. Drag to fill now, or tap-release then move and LMB to finish.".into()
+            "Sketch Draw start set. Drag to a snapped endpoint, release to build, or tap-release then LMB to finish.".into()
         };
     }
 
@@ -283,7 +283,7 @@ pub fn rect_draw_input(
         if !draw.smart_gesture && draw.motion_len < 4.0 && draw.status_cells <= 1 {
             draw.click_finish = true;
             toolbelt.status =
-                "Rectangle Fill anchor set. Move to grow line/face, LMB commits, RMB/Esc cancels."
+                "Sketch Draw anchor set. Move to grow line/face, LMB commits, RMB/Esc cancels."
                     .into();
         } else {
             commit_rect_fill(&mut draw, &mut world, &mut history, &mut toolbelt);
@@ -607,13 +607,20 @@ pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<T
         return;
     }
     let pulse = 0.55 + 0.45 * (time.elapsed_seconds() * 7.0).sin().abs();
-    let color = Color::srgb(1.0, 0.05 + 0.35 * pulse, 1.0);
+    let color = match draw.action {
+        RectDrawAction::Fill => Color::srgb(0.15 + 0.25 * pulse, 0.95, 1.0),
+        RectDrawAction::Cut => Color::srgb(1.0, 0.15 + 0.25 * pulse, 0.05),
+    };
     let (lo, hi) = rect_bounds(draw.start, draw.current);
     let center = (lo.as_vec3() + hi.as_vec3()) * 0.5 + Vec3::splat(0.5);
     let mut scale = (hi - lo + IVec3::ONE).as_vec3();
     let normal_abs = draw.normal.abs().as_vec3();
-    scale = scale * (Vec3::ONE - normal_abs) + normal_abs * 0.06;
+    scale = scale * (Vec3::ONE - normal_abs) + normal_abs * 0.10;
     gizmos.cuboid(Transform::from_translation(center).with_scale(scale), color);
+    gizmos.cuboid(
+        Transform::from_translation(center).with_scale(scale + Vec3::splat(0.06)),
+        Color::srgba(1.0, 1.0, 1.0, 0.65),
+    );
 }
 
 fn rect_bounds(a: IVec3, b: IVec3) -> (IVec3, IVec3) {

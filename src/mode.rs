@@ -385,7 +385,7 @@ fn mode_hotkeys(
                     if tool == ToolbeltTool::DrawRect {
                         "Push Pull"
                     } else {
-                        "Rectangle Fill"
+                        "Sketch Draw"
                     }
                 )
             } else {
@@ -543,12 +543,12 @@ fn next_mode_for_tab(
 
 fn default_creative_mode() -> ActiveMode {
     ActiveMode::BuildLive {
-        tool: ToolbeltTool::BrushPlace,
+        tool: ToolbeltTool::DrawRect,
     }
 }
 
 fn default_creative_status() -> &'static str {
-    "Creative Smart Builder active. LMB start -> endpoint builds; RMB cuts; Tab opens tools."
+    "Creative Sketch Builder active. LMB draw snapped faces, RMB cuts openings, G swaps Push/Pull, Tab opens tools."
 }
 
 fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {
@@ -710,13 +710,13 @@ mod tests {
         assert_eq!(
             ActiveMode::default(),
             ActiveMode::BuildLive {
-                tool: ToolbeltTool::BrushPlace
+                tool: ToolbeltTool::DrawRect
             }
         );
         let mode = ModeContext::default();
         assert!(!mode.allows_weapons());
         assert!(mode.is_build_live());
-        assert!(mode.status.contains("endpoint"));
+        assert!(mode.status.contains("Sketch"));
         assert!(mode.status.contains("RMB"));
     }
 
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(
             resume_mode_after_overlay(ActiveMode::Paused),
             ActiveMode::BuildLive {
-                tool: ToolbeltTool::BrushPlace
+                tool: ToolbeltTool::DrawRect
             }
         );
         assert_eq!(

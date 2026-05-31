@@ -11820,56 +11820,15 @@ fn queue_area_masterplan(
         }
     };
 
-    let area_w = size.x.max(16);
-    let area_d = size.z.max(16);
-    push_project(
-        &mut brain.save,
-        BotTaskKind::ExpandRoadGrid,
-        [min.x, min.y + 1, min.z],
-        [area_w, 7, area_d],
-        BotTheme::AmberStreet,
-        10,
-    );
-
-    let mut x = min.x;
-    while x <= max.x {
-        let chunk_w = (max.x - x + 1).min(40);
-        let mut z = min.z;
-        while z <= max.z {
-            let chunk_d = (max.z - z + 1).min(40);
-            push_project(
-                &mut brain.save,
-                BotTaskKind::ClearFlatten,
-                [x, min.y, z],
-                [chunk_w, 8, chunk_d],
-                BotTheme::WhiteAlloy,
-                10,
-            );
-
-            if chunk_w >= 28 && chunk_d >= 28 {
-                let skyline = ((x / 44) + (z / 44)).rem_euclid(4) == 0;
-                let civic = ((x / 44) + (z / 44)).rem_euclid(5) == 0;
-                let (kind, theme, h) = if skyline {
-                    (BotTaskKind::BuildGlassTower, BotTheme::MagentaGlass, 58)
-                } else if civic {
-                    (BotTaskKind::BuildPlaza, BotTheme::WhiteAlloy, 8)
-                } else {
-                    (BotTaskKind::BuildResidentialBlock, BotTheme::WhiteAlloy, 16)
-                };
-                let build_w = (chunk_w - 8).clamp(17, 44);
-                let build_d = (chunk_d - 8).clamp(17, 44);
-                push_project(
-                    &mut brain.save,
-                    kind,
-                    [x + 4, min.y + 1, z + 4],
-                    [build_w, h, build_d],
-                    theme,
-                    8,
-                );
-            }
-            z += 48;
-        }
-        x += 48;
+    for spec in city_area_masterplan_specs(min, max) {
+        push_project(
+            &mut brain.save,
+            spec.kind,
+            spec.origin,
+            spec.size,
+            spec.theme,
+            spec.priority,
+        );
     }
 
     if queued > 0 {
@@ -11881,6 +11840,251 @@ fn queue_area_masterplan(
         brain.hud_message = "Marked city area is outside bot city bounds or too small.".into();
     }
     queued
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CityAreaProjectSpec {
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    theme: BotTheme,
+    priority: u8,
+}
+
+fn city_area_masterplan_specs(min: IVec3, max: IVec3) -> Vec<CityAreaProjectSpec> {
+    let street_width = city_area_street_width(min, max);
+    let street_half = street_width / 2;
+    let center_x = (min.x + max.x) / 2;
+    let center_z = (min.z + max.z) / 2;
+    let x_lines = city_area_axis_lines(min.x, max.x, center_x);
+    let z_lines = city_area_axis_lines(min.z, max.z, center_z);
+    let mut specs = Vec::new();
+
+    for &z in &z_lines {
+        let priority = if z == center_z { 10 } else { 8 };
+        specs.push(city_area_road_strip(
+            [min.x, min.y + 1, z - street_half],
+            [(max.x - min.x + 1).max(1), 7, street_width],
+            priority,
+        ));
+    }
+
+    for &x in &x_lines {
+        let priority = if x == center_x { 10 } else { 8 };
+        specs.push(city_area_road_strip(
+            [x - street_half, min.y + 1, min.z],
+            [street_width, 7, (max.z - min.z + 1).max(1)],
+            priority,
+        ));
+    }
+
+    let junction_span = city_area_junction_span(min, max);
+    if junction_span >= 25 {
+        specs.push(city_area_road_strip(
+            [
+                center_x - junction_span / 2,
+                min.y + 1,
+                center_z - junction_span / 2,
+            ],
+            [junction_span, 7, junction_span],
+            10,
+        ));
+    }
+
+    for (idx, (origin, size)) in city_area_frontage_lots(min, max, &x_lines, &z_lines, street_half)
+        .into_iter()
+        .enumerate()
+    {
+        specs.push(CityAreaProjectSpec {
+            kind: BotTaskKind::ClearFlatten,
+            origin: [origin[0], min.y, origin[2]],
+            size: [size[0], 8, size[2]],
+            theme: BotTheme::WhiteAlloy,
+            priority: 6,
+        });
+
+        let (kind, theme, height) = city_area_lot_program(min, max, origin, size, idx);
+        let build_origin = [origin[0] + 3, min.y + 1, origin[2] + 3];
+        let build_size = [size[0] - 6, height, size[2] - 6];
+        if build_size[0] >= 11 && build_size[2] >= 11 {
+            specs.push(CityAreaProjectSpec {
+                kind,
+                origin: build_origin,
+                size: build_size,
+                theme,
+                priority: 5,
+            });
+        }
+    }
+
+    specs.push(CityAreaProjectSpec {
+        kind: BotTaskKind::DecorateStreet,
+        origin: [center_x - street_half, min.y + 1, center_z - street_half],
+        size: [street_width.max(11), 7, street_width.max(11)],
+        theme: BotTheme::AmberStreet,
+        priority: 4,
+    });
+
+    specs
+}
+
+fn city_area_road_strip(origin: [i32; 3], size: [i32; 3], priority: u8) -> CityAreaProjectSpec {
+    CityAreaProjectSpec {
+        kind: BotTaskKind::ExpandRoadGrid,
+        origin,
+        size,
+        theme: BotTheme::AmberStreet,
+        priority,
+    }
+}
+
+fn city_area_street_width(min: IVec3, max: IVec3) -> i32 {
+    let shortest = (max.x - min.x + 1).min(max.z - min.z + 1);
+    if shortest >= 96 {
+        17
+    } else if shortest >= 64 {
+        13
+    } else {
+        9
+    }
+}
+
+fn city_area_junction_span(min: IVec3, max: IVec3) -> i32 {
+    let shortest = (max.x - min.x + 1).min(max.z - min.z + 1);
+    (shortest / 2).clamp(0, 41)
+}
+
+fn city_area_axis_lines(min: i32, max: i32, center: i32) -> Vec<i32> {
+    let mut lines = vec![center];
+    let margin = 24;
+    let spacing = 56;
+    let mut step = spacing;
+    while step <= (max - min).abs() + spacing {
+        let lo = center - step;
+        let hi = center + step;
+        if lo >= min + margin {
+            lines.push(lo);
+        }
+        if hi <= max - margin {
+            lines.push(hi);
+        }
+        if lo < min + margin && hi > max - margin {
+            break;
+        }
+        step += spacing;
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
+fn city_area_frontage_lots(
+    min: IVec3,
+    max: IVec3,
+    x_lines: &[i32],
+    z_lines: &[i32],
+    street_half: i32,
+) -> Vec<([i32; 3], [i32; 3])> {
+    let x_intervals = city_area_open_intervals(min.x, max.x, x_lines, street_half + 4);
+    let z_intervals = city_area_open_intervals(min.z, max.z, z_lines, street_half + 4);
+    let mut lots = Vec::new();
+    for (x0, x1) in x_intervals {
+        for &(z0, z1) in &z_intervals {
+            let width = x1 - x0 + 1;
+            let depth = z1 - z0 + 1;
+            if width >= 20 && depth >= 20 {
+                lots.push(([x0, min.y + 1, z0], [width.min(44), 1, depth.min(44)]));
+            }
+        }
+    }
+    lots.sort_by_key(|(origin, size)| {
+        let cx = origin[0] + size[0] / 2;
+        let cz = origin[2] + size[2] / 2;
+        let center_x = (min.x + max.x) / 2;
+        let center_z = (min.z + max.z) / 2;
+        (cx - center_x).abs() + (cz - center_z).abs()
+    });
+    lots.truncate(24);
+    lots
+}
+
+fn city_area_open_intervals(min: i32, max: i32, lines: &[i32], clearance: i32) -> Vec<(i32, i32)> {
+    let mut intervals = Vec::new();
+    let mut cursor = min + 6;
+    let mut sorted = lines.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    for line in sorted {
+        let end = (line - clearance - 1).min(max - 6);
+        if end - cursor + 1 >= 20 {
+            intervals.push((cursor, end));
+        }
+        cursor = cursor.max(line + clearance + 1);
+    }
+    let end = max - 6;
+    if end - cursor + 1 >= 20 {
+        intervals.push((cursor, end));
+    }
+    intervals
+}
+
+fn city_area_lot_program(
+    min: IVec3,
+    max: IVec3,
+    origin: [i32; 3],
+    size: [i32; 3],
+    idx: usize,
+) -> (BotTaskKind, BotTheme, i32) {
+    let center_x = (min.x + max.x) / 2;
+    let center_z = (min.z + max.z) / 2;
+    let lot_x = origin[0] + size[0] / 2;
+    let lot_z = origin[2] + size[2] / 2;
+    let distance = (lot_x - center_x).abs() + (lot_z - center_z).abs();
+    let area_long = (max.x - min.x + 1).max(max.z - min.z + 1);
+    let seed = (lot_x * 31 + lot_z * 17 + idx as i32 * 13).rem_euclid(11);
+
+    if idx == 0 && area_long >= 64 {
+        (BotTaskKind::BuildPlaza, BotTheme::WhiteAlloy, 8)
+    } else if area_long >= 104 && (distance < 80 || seed <= 2) {
+        (BotTaskKind::BuildGlassTower, BotTheme::MagentaGlass, 58)
+    } else if seed == 3 {
+        (BotTaskKind::BuildPark, BotTheme::GreenPark, 7)
+    } else if seed == 4 {
+        (BotTaskKind::BuildHome, BotTheme::WhiteAlloy, 14)
+    } else {
+        (BotTaskKind::BuildResidentialBlock, BotTheme::WhiteAlloy, 18)
+    }
+}
+
+fn city_area_cross_road_anchors(min: IVec3, max: IVec3) -> Vec<[i32; 3]> {
+    let center_x = (min.x + max.x) / 2;
+    let center_z = (min.z + max.z) / 2;
+    let y = min.y + 1;
+    let west = min.x + 4;
+    let east = max.x - 4;
+    let north = min.z + 4;
+    let south = max.z - 4;
+    vec![
+        [west, y, center_z],
+        [center_x, y, center_z],
+        [east, y, center_z],
+        [center_x, y, center_z],
+        [center_x, y, north],
+        [center_x, y, center_z],
+        [center_x, y, south],
+    ]
+}
+
+fn city_area_build_slots(min: IVec3, max: IVec3) -> Vec<[i32; 3]> {
+    let street_width = city_area_street_width(min, max);
+    let center_x = (min.x + max.x) / 2;
+    let center_z = (min.z + max.z) / 2;
+    let x_lines = city_area_axis_lines(min.x, max.x, center_x);
+    let z_lines = city_area_axis_lines(min.z, max.z, center_z);
+    city_area_frontage_lots(min, max, &x_lines, &z_lines, street_width / 2)
+        .into_iter()
+        .map(|(origin, size)| [origin[0] + size[0] / 2, min.y + 1, origin[2] + size[2] / 2])
+        .collect()
 }
 
 fn install_player_city_area(save: &mut BotWorldSave, min: IVec3, max: IVec3) -> Option<u64> {
@@ -11946,8 +12150,8 @@ fn install_player_city_area(save: &mut BotWorldSave, min: IVec3, max: IVec3) -> 
         name: "Placed City Area".into(),
         center,
         radius,
-        road_anchors: Vec::new(),
-        build_slots: Vec::new(),
+        road_anchors: city_area_cross_road_anchors(min, max),
+        build_slots: city_area_build_slots(min, max),
         completed_projects: 0,
     });
     Some(id)
@@ -12920,6 +13124,68 @@ mod tests {
             .projects
             .iter()
             .all(|project| bounds.contains_box(project.origin, project.size)));
+    }
+
+    #[test]
+    fn placed_city_area_queues_roads_before_frontage_buildings() {
+        let world = VoxelWorld::new();
+        let mut brain = FriendlyWorldBrain::default();
+        brain.save = BotWorldSave::seed("Area", Vec3::new(0.0, 90.0, 0.0), &world);
+
+        queue_city_area_masterplan(&mut brain, IVec3::new(-64, 90, -48), IVec3::new(64, 90, 48));
+
+        let first_non_road = brain
+            .save
+            .projects
+            .iter()
+            .position(|project| !is_access_road_project(project.kind))
+            .expect("placed city area should queue parcel work after roads");
+        assert!(
+            first_non_road >= 3,
+            "a city area should lay multiple road skeleton projects before buildings, got {first_non_road}"
+        );
+        assert!(brain.save.projects[..first_non_road]
+            .iter()
+            .all(|project| project.kind == BotTaskKind::ExpandRoadGrid));
+        assert!(
+            brain.save.projects[first_non_road..].iter().any(|project| {
+                project
+                    .concept
+                    .rows
+                    .iter()
+                    .any(|row| row.phase == "Bot Road Frontage")
+            }),
+            "frontage buildings should know the already queued road skeleton"
+        );
+    }
+
+    #[test]
+    fn placed_city_area_creates_cross_axes_and_build_slots_inside_bounds() {
+        let world = VoxelWorld::new();
+        let mut brain = FriendlyWorldBrain::default();
+        brain.save = BotWorldSave::seed("Area", Vec3::new(0.0, 90.0, 0.0), &world);
+
+        queue_city_area_masterplan(&mut brain, IVec3::new(-72, 90, -56), IVec3::new(72, 90, 56));
+        let bounds = brain.save.primary_bounds();
+        let district = brain
+            .save
+            .districts
+            .iter()
+            .find(|district| district.name == "Placed City Area")
+            .expect("player-placed area should install a city district");
+
+        assert!(
+            district.road_anchors.len() >= 7,
+            "district needs cross-axis road intent for roads and lots"
+        );
+        assert!(
+            !district.build_slots.is_empty(),
+            "district should expose road-front parcel slots"
+        );
+        assert!(district
+            .build_slots
+            .iter()
+            .all(|slot| { bounds.contains_block(IVec3::new(slot[0], slot[1], slot[2])) }));
     }
 
     #[test]
