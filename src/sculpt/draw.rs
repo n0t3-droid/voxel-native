@@ -22,6 +22,9 @@ const DRAW_REACH: f32 = 128.0;
 const DRAW_CELL_CAP: usize = 16_384;
 const RECT_CUT_DEPTH_CAP: i32 = 16;
 const RECT_FILL_OWNER: &str = "Sketch Draw";
+const RECT_AXIS_JITTER: i32 = 1;
+const RECT_AXIS_RATIO: f32 = 3.0;
+const RECT_EQUAL_LENGTH_TOLERANCE: i32 = 2;
 
 #[derive(Resource, Default)]
 pub struct RectDrawState {
@@ -36,6 +39,7 @@ pub struct RectDrawState {
     action: RectDrawAction,
     button: RectDragButton,
     smart_gesture: bool,
+    inference: RectEndpointInference,
     voxel: Voxel,
     status_cells: usize,
 }
@@ -45,6 +49,24 @@ enum RectDrawAction {
     #[default]
     Fill,
     Cut,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RectEndpointInference {
+    #[default]
+    None,
+    Axis,
+    EqualLength,
+}
+
+impl RectEndpointInference {
+    fn status_suffix(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Axis => " Axis lock.",
+            Self::EqualLength => " Equal-length snap.",
+        }
+    }
 }
 
 impl RectDrawAction {
@@ -214,6 +236,7 @@ pub fn rect_draw_input(
             RectDragButton::Left
         };
         draw.smart_gesture = smart_tool;
+        draw.inference = RectEndpointInference::None;
         draw.voxel = if action == RectDrawAction::Cut {
             AIR
         } else {
@@ -241,7 +264,7 @@ pub fn rect_draw_input(
             draw.motion_len += ev.delta.length();
         }
         if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
-            draw.current = snap_rect_endpoint_to_locked_plane(
+            let endpoint = snap_rect_endpoint_to_locked_plane(
                 draw.start,
                 draw.normal,
                 draw.axis_u,
@@ -249,6 +272,10 @@ pub fn rect_draw_input(
                 hit,
                 prev,
             );
+            let (endpoint, inference) =
+                infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
+            draw.current = endpoint;
+            draw.inference = inference;
         } else if let Some(endpoint) = snap_rect_endpoint_from_locked_plane_ray(
             draw.start,
             draw.normal,
@@ -257,22 +284,27 @@ pub fn rect_draw_input(
             origin,
             dir,
         ) {
+            let (endpoint, inference) =
+                infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
             draw.current = endpoint;
+            draw.inference = inference;
         }
         let raw_cells = rect_cell_count(draw.start, draw.current, draw.normal);
         draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
         toolbelt.status = if raw_cells > DRAW_CELL_CAP {
             format!(
-                "{} preview capped: {} of {} cells. Release commits, Esc cancels.",
+                "{} preview capped: {} of {} cells.{} Release commits, Esc cancels.",
                 draw.action.label(),
                 DRAW_CELL_CAP,
-                raw_cells
+                raw_cells,
+                draw.inference.status_suffix()
             )
         } else {
             format!(
-                "{} preview: {} cells snapped to endpoint. Release commits, Esc cancels.",
+                "{} preview: {} cells snapped to endpoint.{} Release commits, Esc cancels.",
                 draw.action.label(),
-                draw.status_cells
+                draw.status_cells,
+                draw.inference.status_suffix()
             )
         };
     } else {
@@ -453,6 +485,51 @@ fn snap_rect_endpoint_from_locked_plane_ray(
         component_by_index(start, plane_axis),
     );
     Some(snapped)
+}
+
+fn infer_rect_endpoint(
+    start: IVec3,
+    raw: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+) -> (IVec3, RectEndpointInference) {
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return (raw, RectEndpointInference::None);
+    }
+    let du = component_by_axis(raw, axis_u) - component_by_axis(start, axis_u);
+    let dv = component_by_axis(raw, axis_v) - component_by_axis(start, axis_v);
+    let au = du.abs();
+    let av = dv.abs();
+    if au == 0 && av == 0 {
+        return (raw, RectEndpointInference::None);
+    }
+
+    let mut inferred = raw;
+    if au > 0 && av > 0 && (av <= RECT_AXIS_JITTER || au as f32 >= av as f32 * RECT_AXIS_RATIO) {
+        set_component_by_axis(&mut inferred, axis_v, component_by_axis(start, axis_v));
+        return (inferred, RectEndpointInference::Axis);
+    }
+    if av > 0 && au > 0 && (au <= RECT_AXIS_JITTER || av as f32 >= au as f32 * RECT_AXIS_RATIO) {
+        set_component_by_axis(&mut inferred, axis_u, component_by_axis(start, axis_u));
+        return (inferred, RectEndpointInference::Axis);
+    }
+
+    if au >= 2 && av >= 2 && (au - av).abs() <= RECT_EQUAL_LENGTH_TOLERANCE {
+        let span = au.max(av);
+        set_component_by_axis(
+            &mut inferred,
+            axis_u,
+            component_by_axis(start, axis_u) + du.signum() * span,
+        );
+        set_component_by_axis(
+            &mut inferred,
+            axis_v,
+            component_by_axis(start, axis_v) + dv.signum() * span,
+        );
+        return (inferred, RectEndpointInference::EqualLength);
+    }
+
+    (raw, RectEndpointInference::None)
 }
 
 fn is_cardinal_axis(axis: IVec3) -> bool {
@@ -734,6 +811,45 @@ mod tests {
             snapped.x > start.x && snapped.z > start.z,
             "floor endpoint should grow from the fixed plane without needing a voxel hit, got {snapped:?}"
         );
+    }
+
+    #[test]
+    fn rect_endpoint_inference_axis_locks_small_hand_jitter() {
+        let (snapped, inference) = infer_rect_endpoint(
+            IVec3::new(10, 64, 10),
+            IVec3::new(31, 64, 11),
+            IVec3::X,
+            IVec3::Z,
+        );
+
+        assert_eq!(snapped, IVec3::new(31, 64, 10));
+        assert_eq!(inference, RectEndpointInference::Axis);
+    }
+
+    #[test]
+    fn rect_endpoint_inference_snaps_near_square_to_equal_lengths() {
+        let (snapped, inference) = infer_rect_endpoint(
+            IVec3::new(0, 64, 0),
+            IVec3::new(7, 64, 5),
+            IVec3::X,
+            IVec3::Z,
+        );
+
+        assert_eq!(snapped, IVec3::new(7, 64, 7));
+        assert_eq!(inference, RectEndpointInference::EqualLength);
+    }
+
+    #[test]
+    fn rect_endpoint_inference_preserves_deliberate_rectangles() {
+        let (snapped, inference) = infer_rect_endpoint(
+            IVec3::new(0, 64, 0),
+            IVec3::new(16, 64, 10),
+            IVec3::X,
+            IVec3::Z,
+        );
+
+        assert_eq!(snapped, IVec3::new(16, 64, 10));
+        assert_eq!(inference, RectEndpointInference::None);
     }
 
     #[test]
