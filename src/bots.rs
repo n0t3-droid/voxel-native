@@ -5133,43 +5133,44 @@ fn choose_district_project(
     if road_count < 4 && seq % 5 == 1 {
         return BotTaskKind::ExpandRoadGrid;
     }
-    match district.kind {
-        BotDistrictKind::HubCore => [
+    let candidates: &[BotTaskKind] = match district.kind {
+        BotDistrictKind::HubCore => &[
             BotTaskKind::LandingPad,
             BotTaskKind::BuildPlaza,
             BotTaskKind::DecorateStreet,
-        ][seq % 3],
-        BotDistrictKind::Residential => [
+        ],
+        BotDistrictKind::Residential => &[
             BotTaskKind::BuildResidentialBlock,
             BotTaskKind::BuildHome,
             BotTaskKind::BuildPark,
-        ][seq % 3],
-        BotDistrictKind::Skyline => [
+        ],
+        BotDistrictKind::Skyline => &[
             BotTaskKind::BuildGlassTower,
             BotTaskKind::BuildTower,
             BotTaskKind::BuildPlaza,
-        ][seq % 3],
-        BotDistrictKind::Park => [
+        ],
+        BotDistrictKind::Park => &[
             BotTaskKind::BuildPark,
             BotTaskKind::BuildPlaza,
             BotTaskKind::DecorateStreet,
-        ][seq % 3],
-        BotDistrictKind::Service => [
+        ],
+        BotDistrictKind::Service => &[
             BotTaskKind::BuildServicePad,
             BotTaskKind::LandingPad,
             BotTaskKind::AddLights,
-        ][seq % 3],
-        BotDistrictKind::Training => [
+        ],
+        BotDistrictKind::Training => &[
             BotTaskKind::TargetRange,
             BotTaskKind::DecorateStreet,
             BotTaskKind::BuildServicePad,
-        ][seq % 3],
-        BotDistrictKind::Scenic => [
+        ],
+        BotDistrictKind::Scenic => &[
             BotTaskKind::BuildPlaza,
             BotTaskKind::BuildGlassTower,
             BotTaskKind::BuildPark,
-        ][seq % 3],
-    }
+        ],
+    };
+    district_project_cycle_choice(save, district.id, candidates, seq)
 }
 
 fn user_road_shape_project_for_district(
@@ -5180,6 +5181,22 @@ fn user_road_shape_project_for_district(
         .into_iter()
         .filter_map(|guide| semantic_project_kind_for_guide(district, guide))
         .find(|kind| !district_has_project_kind(save, district.id, *kind))
+}
+
+fn district_project_cycle_choice(
+    save: &BotWorldSave,
+    district_id: u64,
+    candidates: &[BotTaskKind],
+    seq: usize,
+) -> BotTaskKind {
+    let fallback = candidates[seq % candidates.len()];
+    for offset in 0..candidates.len() {
+        let kind = candidates[(seq + offset) % candidates.len()];
+        if !district_has_project_kind(save, district_id, kind) {
+            return kind;
+        }
+    }
+    fallback
 }
 
 fn semantic_project_kind_for_guide(
@@ -15559,6 +15576,63 @@ mod tests {
         assert_eq!(
             choose_district_project(&save, &district, 1, false),
             BotTaskKind::ExpandRoadGrid
+        );
+    }
+
+    #[test]
+    fn district_project_choice_diversifies_before_repeating_building_kind() {
+        let mut save = BotWorldSave::default();
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Access Grid".into(),
+            origin: [0, 90, -48],
+            size: autonomous_project_size(BotTaskKind::ExpandRoadGrid),
+            theme: BotTheme::AmberStreet,
+            assigned_bot: Some(1),
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            blocked_reason: String::new(),
+            priority: 5,
+            district_id: Some(7),
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        });
+        save.projects.push(BotProject {
+            id: 2,
+            kind: BotTaskKind::BuildGlassTower,
+            label: "First Tower".into(),
+            origin: [8, 90, 8],
+            size: autonomous_project_size(BotTaskKind::BuildGlassTower),
+            theme: BotTheme::CyanAlloy,
+            assigned_bot: Some(2),
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            blocked_reason: String::new(),
+            priority: 5,
+            district_id: Some(7),
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        });
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Diverse Skyline".into(),
+            center: [64.0, 90.0, 0.0],
+            radius: 120,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 1,
+        };
+
+        assert_eq!(
+            choose_district_project(&save, &district, 0, false),
+            BotTaskKind::BuildTower,
+            "skyline districts should choose a different architecture kind before repeating another glass tower"
         );
     }
 
