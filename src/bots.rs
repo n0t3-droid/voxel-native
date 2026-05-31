@@ -7603,15 +7603,19 @@ fn bot_road_frontage_plan_row(
     }
     let (_, project, district) = best?;
     let width = (project_road_corridor_half_width(project) * 2.0).round() as i32;
+    let face = nearest_building_edge_to_road_project(project, origin, size)
+        .map(|(face, _)| face.label())
+        .unwrap_or("nearest street face");
     Some(BotPlanRow {
         phase: "Bot Road Frontage".into(),
         owner: role_owner_label(save, BotRole::Planner, team),
         material: format!("{} road project", project.theme.label()),
         detail: format!(
-            "Use the autonomous {} '{}' in {} as frontage from the bot road graph; keep entries, sidewalks, setbacks, height rhythm, and deck grade sampling tied to this width {width} corridor.",
+            "Use the autonomous {} '{}' in {} as frontage from the bot road graph; bind entries, sidewalks, setbacks, and height rhythm to the {face}; keep deck grade sampling tied to this width {width} corridor with target deck y={}.",
             project.kind.label(),
             project.label,
-            district.name
+            district.name,
+            project.origin[1]
         ),
         status: "queued".into(),
     })
@@ -7622,15 +7626,26 @@ fn nearest_building_edge_distance_to_road_project(
     origin: [i32; 3],
     size: [i32; 3],
 ) -> Option<f32> {
+    nearest_building_edge_to_road_project(project, origin, size).map(|(_, distance)| distance)
+}
+
+fn nearest_building_edge_to_road_project(
+    project: &BotProject,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<(BuildingStreetFace, f32)> {
     let edges = building_edge_segments(origin, size);
     project_road_segments(project)
         .into_iter()
         .flat_map(|(road_a, road_b)| {
-            edges.iter().map(move |(_, edge_a, edge_b)| {
-                segment_to_segment_distance(*edge_a, *edge_b, road_a, road_b)
+            edges.iter().map(move |(face, edge_a, edge_b)| {
+                (
+                    *face,
+                    segment_to_segment_distance(*edge_a, *edge_b, road_a, road_b),
+                )
             })
         })
-        .min_by(|a, b| a.total_cmp(b))
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
 }
 
 fn road_guide_shape_label(shape: BotRoadGuideShape) -> &'static str {
@@ -14093,6 +14108,8 @@ mod tests {
         assert!(frontage.detail.contains("Autonomous Frontage District"));
         assert!(frontage.detail.contains("road graph"));
         assert!(frontage.detail.contains("deck grade"));
+        assert!(frontage.detail.contains("north/min-z street face"));
+        assert!(frontage.detail.contains("target deck y=90"));
     }
 
     #[test]
