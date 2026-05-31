@@ -5361,16 +5361,15 @@ fn semantic_road_lot_origins(
         if !centers.is_empty() {
             return centers
                 .into_iter()
-                .map(|center| project_origin_from_center(world, bounds, center, size))
+                .map(|center| {
+                    let origin = project_origin_from_center(world, bounds, center, size);
+                    align_lot_origin_to_guide_grade(guide, origin, size)
+                })
                 .collect();
         }
     }
-    vec![project_origin_from_center(
-        world,
-        bounds,
-        road_guide_anchor(guide),
-        size,
-    )]
+    let origin = project_origin_from_center(world, bounds, road_guide_anchor(guide), size);
+    vec![align_lot_origin_to_guide_grade(guide, origin, size)]
 }
 
 fn semantic_corner_frontage_centers(guide: &BotRoadGuide, size: [i32; 3]) -> Vec<Vec3> {
@@ -5527,30 +5526,70 @@ fn align_lot_origin_to_road_grade(
     aligned
 }
 
+fn align_lot_origin_to_guide_grade(
+    guide: &BotRoadGuide,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> [i32; 3] {
+    let Some((_, deck_y)) = nearest_road_guide_grade_sample(guide, origin, size) else {
+        return origin;
+    };
+    let deck_y = semantic_road_guide_deck_y(guide)
+        .map(|semantic_y| deck_y.max(semantic_y as f32))
+        .unwrap_or(deck_y);
+    let mut aligned = origin;
+    aligned[1] = aligned[1].max(deck_y.round() as i32);
+    aligned
+}
+
+fn semantic_road_guide_deck_y(guide: &BotRoadGuide) -> Option<i32> {
+    match guide.shape {
+        BotRoadGuideShape::Corner | BotRoadGuideShape::Roundabout => {
+            guide.points.iter().map(|point| point[1]).max()
+        }
+        BotRoadGuideShape::Straight => None,
+    }
+}
+
 fn nearest_user_road_grade_y(
     save: &BotWorldSave,
     district: &BotDistrict,
     origin: [i32; 3],
     size: [i32; 3],
 ) -> Option<i32> {
-    let center = project_center(origin, size);
-    let point = Vec2::new(center.x, center.z);
     let mut best: Option<(f32, f32)> = None;
     for guide in save
         .user_roads
         .iter()
         .filter(|guide| road_guide_matches_district(guide, district))
     {
-        let reach = 34.0 + guide.width.max(1) as f32 * 3.0;
-        for pair in guide.points.windows(2) {
-            let a = Vec2::new(pair[0][0] as f32, pair[0][2] as f32);
-            let b = Vec2::new(pair[1][0] as f32, pair[1][2] as f32);
-            let ab = b - a;
-            let len_sq = ab.length_squared();
-            if len_sq <= f32::EPSILON {
-                continue;
+        if let Some((distance, y)) = nearest_road_guide_grade_sample(guide, origin, size) {
+            if best.map_or(true, |(best_distance, _)| distance < best_distance) {
+                best = Some((distance, y));
             }
-            let t = ((point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+        }
+    }
+    best.map(|(_, y)| y.round() as i32)
+}
+
+fn nearest_road_guide_grade_sample(
+    guide: &BotRoadGuide,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<(f32, f32)> {
+    let probes = building_frontage_grade_probes(origin, size);
+    let reach = 34.0 + guide.width.max(1) as f32 * 3.0;
+    let mut best: Option<(f32, f32)> = None;
+    for pair in guide.points.windows(2) {
+        let a = Vec2::new(pair[0][0] as f32, pair[0][2] as f32);
+        let b = Vec2::new(pair[1][0] as f32, pair[1][2] as f32);
+        let ab = b - a;
+        let len_sq = ab.length_squared();
+        if len_sq <= f32::EPSILON {
+            continue;
+        }
+        for point in &probes {
+            let t = ((*point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
             let nearest = a + ab * t;
             let distance = point.distance(nearest);
             if distance > reach {
@@ -5562,7 +5601,37 @@ fn nearest_user_road_grade_y(
             }
         }
     }
-    best.map(|(_, y)| y.round() as i32)
+    best
+}
+
+fn building_frontage_grade_probes(origin: [i32; 3], size: [i32; 3]) -> Vec<Vec2> {
+    let width = size[0].max(1) as f32;
+    let depth = size[2].max(1) as f32;
+    let min_x = origin[0] as f32;
+    let min_z = origin[2] as f32;
+    let max_x = min_x + width - 1.0;
+    let max_z = min_z + depth - 1.0;
+    let center_x = min_x + width * 0.5;
+    let center_z = min_z + depth * 0.5;
+    let mut probes = vec![Vec2::new(center_x, center_z)];
+    for t in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+        let x = min_x + (max_x - min_x) * t;
+        let z = min_z + (max_z - min_z) * t;
+        push_unique_probe(&mut probes, Vec2::new(x, min_z));
+        push_unique_probe(&mut probes, Vec2::new(x, max_z));
+        push_unique_probe(&mut probes, Vec2::new(min_x, z));
+        push_unique_probe(&mut probes, Vec2::new(max_x, z));
+    }
+    probes
+}
+
+fn push_unique_probe(probes: &mut Vec<Vec2>, point: Vec2) {
+    if probes
+        .iter()
+        .all(|existing| existing.distance_squared(point) > 0.25)
+    {
+        probes.push(point);
+    }
 }
 
 fn reserve_roundabout_interiors_for_lots(
@@ -12420,6 +12489,39 @@ mod tests {
     }
 
     #[test]
+    fn road_grade_alignment_uses_frontage_edge_for_deep_lots() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Deep Tower Edge".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 140,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let road = crate::city::RoadSegment::new(
+            IVec3::new(-48, 90, 0),
+            IVec3::new(48, 90, 0),
+            7,
+            crate::city::RoadStyle::Neon,
+        )
+        .with_endpoint_heights(18, 18);
+        sync_user_city_roads(&mut save, &[road]);
+        let size = [42, 58, 42];
+        let origin = [-21, 80, 44];
+
+        let aligned = align_lot_origin_to_road_grade(&save, &district, origin, size);
+
+        assert!(
+            aligned[1] >= 108,
+            "deep road-front lots should align from the building edge even when the center is far from the road, got {aligned:?}"
+        );
+    }
+
+    #[test]
     fn user_drawn_roundabout_guides_civic_plaza_planning() {
         let district = BotDistrict {
             id: 7,
@@ -12754,6 +12856,50 @@ mod tests {
         assert!(
             frontage > 0.85,
             "set-back corner tower should still read as road frontage, got score {frontage} at origin {origin:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_corner_landmark_origin_aligns_to_raised_turn_grade() {
+        let world = VoxelWorld::new();
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Raised Corner Skyline".into(),
+            center: [16.0, 90.0, 8.0],
+            radius: 140,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let corner = crate::city::RoadSegment::new(
+            IVec3::new(0, 90, 0),
+            IVec3::new(32, 90, 24),
+            7,
+            crate::city::RoadStyle::Neon,
+        )
+        .with_turn_height(24);
+        sync_user_city_roads(&mut save, &[corner]);
+        let guide_turn_y = save
+            .user_roads
+            .first()
+            .and_then(|guide| guide.points.iter().map(|point| point[1]).max())
+            .expect("raised corner guide should keep sampled turn height");
+        let size = autonomous_project_size(BotTaskKind::BuildGlassTower);
+
+        let origins = semantic_road_site_origins(
+            &save,
+            &world,
+            &district,
+            BotTaskKind::BuildGlassTower,
+            size,
+        );
+
+        assert!(
+            origins.iter().any(|origin| origin[1] >= guide_turn_y),
+            "semantic corner landmarks should inherit the raised road turn deck {guide_turn_y}, got {origins:?}"
         );
     }
 
