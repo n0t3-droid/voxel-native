@@ -5331,6 +5331,9 @@ fn best_build_site_from_candidates(
             !project_footprint_blocks_road_corridor(save, district, *origin, size, kind)
         })
         .filter(|origin| !road_project_blocks_city_footprint(save, *origin, size, kind))
+        .filter(|origin| {
+            !road_project_duplicates_existing_corridor(save, district, *origin, size, kind)
+        })
         .max_by(|a, b| {
             let sa = score_planned_site(save, world, district, *a, size, kind);
             let sb = score_planned_site(save, world, district, *b, size, kind);
@@ -5550,6 +5553,52 @@ fn planned_road_corridor_segments(
         .into_iter()
         .map(|(a, b)| (a, b, half_width))
         .collect()
+}
+
+fn road_project_duplicates_existing_corridor(
+    save: &BotWorldSave,
+    district: &BotDistrict,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> bool {
+    if !matches!(kind, BotTaskKind::BuildRoad | BotTaskKind::ExpandRoadGrid) {
+        return false;
+    }
+    let planned = planned_road_corridor_segments(origin, size, kind);
+    if planned.is_empty() {
+        return false;
+    }
+    let existing = road_corridor_segments(save, district);
+    planned.iter().any(|(a, b, planned_half_width)| {
+        existing.iter().any(|(c, d, existing_half_width)| {
+            road_segments_are_duplicate_corridors(
+                *a,
+                *b,
+                *c,
+                *d,
+                planned_half_width + existing_half_width + 3.0,
+            )
+        })
+    })
+}
+
+fn road_segments_are_duplicate_corridors(
+    a: Vec2,
+    b: Vec2,
+    c: Vec2,
+    d: Vec2,
+    max_distance: f32,
+) -> bool {
+    let ab = b - a;
+    let cd = d - c;
+    let ab_len = ab.length();
+    let cd_len = cd.length();
+    if ab_len <= 1.0 || cd_len <= 1.0 {
+        return false;
+    }
+    let alignment = (ab / ab_len).dot(cd / cd_len).abs();
+    alignment >= 0.86 && segment_to_segment_distance(a, b, c, d) <= max_distance
 }
 
 fn semantic_road_site_origins(
@@ -13485,6 +13534,57 @@ mod tests {
         assert_eq!(
             picked, None,
             "road crews should reject routes that cut through completed building footprints"
+        );
+    }
+
+    #[test]
+    fn road_site_selection_rejects_duplicate_existing_road_corridors() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -8, 8);
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "No Duplicate Streets".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 160,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let road_size = autonomous_project_size(BotTaskKind::BuildRoad);
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildRoad,
+            label: "Existing Road".into(),
+            origin: [0, 90, 0],
+            size: road_size,
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+
+        let picked = best_build_site_from_candidates(
+            &save,
+            &world,
+            &district,
+            BotTaskKind::BuildRoad,
+            road_size,
+            vec![[0, 90, 0]],
+        );
+
+        assert_eq!(
+            picked, None,
+            "road crews should extend the city graph instead of restamping a duplicate road corridor"
         );
     }
 
