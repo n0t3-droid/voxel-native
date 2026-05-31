@@ -7333,6 +7333,11 @@ fn build_project_concept(
     } else {
         None
     };
+    let bot_frontage_row = if semantic_anchor_row.is_none() && player_frontage_row.is_none() {
+        bot_road_frontage_plan_row(save, kind, origin, size, &team)
+    } else {
+        None
+    };
     if is_road_project(kind) {
         rows.insert(
             2,
@@ -7398,6 +7403,8 @@ fn build_project_concept(
     if let Some(row) = semantic_anchor_row {
         rows.insert(2, row);
     } else if let Some(row) = player_frontage_row {
+        rows.insert(2, row);
+    } else if let Some(row) = bot_frontage_row {
         rows.insert(2, row);
     }
     BotProjectConcept {
@@ -7542,6 +7549,71 @@ fn player_road_frontage_plan_row(
         ),
         status: "queued".into(),
     })
+}
+
+fn bot_road_frontage_plan_row(
+    save: &BotWorldSave,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    team: &str,
+) -> Option<BotPlanRow> {
+    if is_road_project(kind) || !project_uses_street_face(kind) {
+        return None;
+    }
+    let mut best: Option<(f32, &BotProject, &BotDistrict)> = None;
+    for project in &save.projects {
+        if !is_access_road_project(project.kind)
+            || matches!(project.status, BotProjectStatus::Blocked)
+        {
+            continue;
+        }
+        let Some(district) = project
+            .district_id
+            .and_then(|id| save.districts.iter().find(|district| district.id == id))
+        else {
+            continue;
+        };
+        let Some(distance) = nearest_building_edge_distance_to_road_project(project, origin, size)
+        else {
+            continue;
+        };
+        let reach = 48.0 + project_road_corridor_half_width(project) * 4.0;
+        if distance <= reach && best.map_or(true, |(best_distance, _, _)| distance < best_distance)
+        {
+            best = Some((distance, project, district));
+        }
+    }
+    let (_, project, district) = best?;
+    let width = (project_road_corridor_half_width(project) * 2.0).round() as i32;
+    Some(BotPlanRow {
+        phase: "Bot Road Frontage".into(),
+        owner: role_owner_label(save, BotRole::Planner, team),
+        material: format!("{} road project", project.theme.label()),
+        detail: format!(
+            "Use the autonomous {} '{}' in {} as frontage from the bot road graph; keep entries, sidewalks, setbacks, height rhythm, and deck grade sampling tied to this width {width} corridor.",
+            project.kind.label(),
+            project.label,
+            district.name
+        ),
+        status: "queued".into(),
+    })
+}
+
+fn nearest_building_edge_distance_to_road_project(
+    project: &BotProject,
+    origin: [i32; 3],
+    size: [i32; 3],
+) -> Option<f32> {
+    let edges = building_edge_segments(origin, size);
+    project_road_segments(project)
+        .into_iter()
+        .flat_map(|(road_a, road_b)| {
+            edges.iter().map(move |(_, edge_a, edge_b)| {
+                segment_to_segment_distance(*edge_a, *edge_b, road_a, road_b)
+            })
+        })
+        .min_by(|a, b| a.total_cmp(b))
 }
 
 fn road_guide_shape_label(shape: BotRoadGuideShape) -> &'static str {
@@ -13949,6 +14021,61 @@ mod tests {
         assert!(city_sheet.detail.contains("east/max-x street face"));
         assert!(city_sheet.detail.contains("doors"));
         assert!(city_sheet.detail.contains("road graph"));
+    }
+
+    #[test]
+    fn project_concept_records_bot_road_frontage_intent() {
+        let mut save = BotWorldSave::default();
+        save.districts.push(BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Residential,
+            name: "Autonomous Frontage District".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 140,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        });
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildRoad,
+            label: "Bot-Built Road".into(),
+            origin: [-48, 90, 0],
+            size: [96, 7, 12],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+
+        let concept = build_project_concept(
+            &save,
+            BotTaskKind::BuildResidentialBlock,
+            BotTheme::WhiteAlloy,
+            [-18, 90, 18],
+            [44, 16, 38],
+            "Road-Facing Homes",
+            false,
+            None,
+            None,
+        );
+        let frontage = concept
+            .rows
+            .iter()
+            .find(|row| row.phase == "Bot Road Frontage")
+            .expect("buildings beside autonomous roads should expose a bot road frontage plan row");
+
+        assert!(frontage.detail.contains("autonomous Build Road"));
+        assert!(frontage.detail.contains("Autonomous Frontage District"));
+        assert!(frontage.detail.contains("road graph"));
+        assert!(frontage.detail.contains("deck grade"));
     }
 
     #[test]
