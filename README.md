@@ -26,18 +26,67 @@ coherent sci-fi game.
 
 ## Current Focus
 
-The latest engine work improves the bot-city workflow and max-distance world
-streaming:
+The latest engine work turns bot construction into a road-first city planner:
 
-- autonomous builds no longer use the player as the default construction anchor;
-- a wider no-build buffer keeps projects away from the player and parked ships;
-- starter city recovery is road-first, so decorative street work cannot replace
-  access roads before the city has a real road grid;
-- bot edit slices pause while the effective render horizon is far below the
-  requested max chunk distance;
-- the auto streaming governor recovers the horizon faster after startup stalls;
-- regression tests cover player clearance, road-access planning, queued project
-  pressure, and runtime budget behavior.
+- roads are editable components with smooth deck grades for bridges, ramps,
+  corners, plazas, and future roundabout work;
+- bot projects reserve footprints before building, so roads and buildings do
+  not cut through each other while the city grows;
+- duplicate road corridors are rejected before voxel edits are queued;
+- civic, service, tower, prep, and detail pads lift to the nearest raised road
+  deck instead of sinking back to raw terrain;
+- building lots bind to frontage streets and record the street face plus target
+  deck height in the bot plan rows;
+- districts prefer unused project kinds before repeating, giving the skyline
+  residential, civic, utility, plaza, and landmark variety;
+- max-distance streaming pauses bot edit slices when the visible horizon is
+  still catching up, keeping low-end PCs responsive.
+
+## GitHub Snapshot
+
+This branch is source-first. No old Visual Studio screenshots or stale gallery
+images are tracked here; generated QA screenshots and videos stay local so the
+GitHub front page describes the engine instead of showing outdated captures.
+
+The public project view should explain what is implemented, how to run it, and
+which math keeps the engine fast. Current bot-planning details live in
+[`docs/CITY_PLANNER_MATH.md`](docs/CITY_PLANNER_MATH.md).
+
+## City Planner Math
+
+The bot planner uses bounded scoring instead of expensive world scans. A site is
+chosen from a small candidate set and scored with weighted, clamped terms:
+
+```text
+site_score =
+    2.50 * flatness
+  + 2.40 * road_access
+  + 1.80 * district_balance
+  + 1.35 * route_fit
+  + 0.55 * block_fit
+  + 2.50 * semantic_anchor
+  - 0.0005 * center_distance
+```
+
+Roads prefer routes that can become smooth decks instead of voxel staircases:
+
+```text
+route_fit =
+    1
+  - 0.55 * avg_step / 5
+  - 0.30 * max_step / 9
+  - 0.15 * max(height_range - 18, 0) / 34
+```
+
+Bridge and raised-road heights use smooth interpolation:
+
+```text
+smoothstep(t) = t * t * (3 - 2 * t)
+deck_y(t) = lerp(start_y, end_y, smoothstep(t))
+```
+
+This keeps bot roads readable, lets nearby buildings align to raised decks, and
+avoids turning the low-end target into a brute-force simulation.
 
 ## Build And Run
 
@@ -126,6 +175,9 @@ Status and live screenshots are written under `agent_runs\live_<timestamp>\`.
 | Bots and city autonomy | `src/bots.rs`, `src/city.rs` |
 | UI and engine tools | `src/hud.rs`, `src/editor.rs`, `src/toolbelt.rs`, `src/theme.rs` |
 | QA and automation | `src/qa.rs`, `src/agent_control.rs` |
+
+For the city-planning invariants, formulas, and low-end performance boundaries,
+see [`docs/CITY_PLANNER_MATH.md`](docs/CITY_PLANNER_MATH.md).
 
 ## Development Standard
 
