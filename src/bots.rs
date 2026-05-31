@@ -5326,11 +5326,58 @@ fn best_build_site_from_candidates(
         .into_iter()
         .filter(|origin| bounds.contains_box(*origin, size))
         .filter(|origin| project_anchor_loaded(world, *origin, size))
+        .filter(|origin| !project_footprint_reserved(save, *origin, size, kind))
         .max_by(|a, b| {
             let sa = score_planned_site(save, world, district, *a, size, kind);
             let sb = score_planned_site(save, world, district, *b, size, kind);
             sa.total_cmp(&sb)
         })
+}
+
+fn project_footprint_reserved(
+    save: &BotWorldSave,
+    origin: [i32; 3],
+    size: [i32; 3],
+    kind: BotTaskKind,
+) -> bool {
+    if !project_reserves_city_footprint(kind) {
+        return false;
+    }
+    save.projects
+        .iter()
+        .filter(|project| project_reserves_city_footprint(project.kind))
+        .filter(|project| !matches!(project.status, BotProjectStatus::Blocked))
+        .any(|project| project_footprints_overlap(project.origin, project.size, origin, size, 2))
+}
+
+fn project_reserves_city_footprint(kind: BotTaskKind) -> bool {
+    !matches!(
+        kind,
+        BotTaskKind::BuildRoad
+            | BotTaskKind::RecolorRoad
+            | BotTaskKind::ExpandRoadGrid
+            | BotTaskKind::DecorateStreet
+            | BotTaskKind::AddLights
+            | BotTaskKind::ClearFlatten
+    )
+}
+
+fn project_footprints_overlap(
+    a_origin: [i32; 3],
+    a_size: [i32; 3],
+    b_origin: [i32; 3],
+    b_size: [i32; 3],
+    padding: i32,
+) -> bool {
+    let a_min_x = a_origin[0] - padding;
+    let a_max_x = a_origin[0] + a_size[0].max(1) - 1 + padding;
+    let a_min_z = a_origin[2] - padding;
+    let a_max_z = a_origin[2] + a_size[2].max(1) - 1 + padding;
+    let b_min_x = b_origin[0];
+    let b_max_x = b_origin[0] + b_size[0].max(1) - 1;
+    let b_min_z = b_origin[2];
+    let b_max_z = b_origin[2] + b_size[2].max(1) - 1;
+    a_min_x <= b_max_x && a_max_x >= b_min_x && a_min_z <= b_max_z && a_max_z >= b_min_z
 }
 
 fn semantic_road_site_origins(
@@ -13123,6 +13170,58 @@ mod tests {
                 .iter()
                 .all(|center| center.distance(Vec2::ZERO) >= protected_radius),
             "roundabout lots must stay outside the protected civic/traffic circle radius {protected_radius}, got {centers:?}"
+        );
+    }
+
+    #[test]
+    fn build_site_selection_avoids_existing_project_footprints() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -8, 8);
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Skyline,
+            name: "Reserved Skyline".into(),
+            center: [0.0, 90.0, 0.0],
+            radius: 160,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        let size = autonomous_project_size(BotTaskKind::BuildGlassTower);
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::BuildGlassTower,
+            label: "Existing Tower".into(),
+            origin: [0, 90, 0],
+            size,
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+
+        let picked = best_build_site_from_candidates(
+            &save,
+            &world,
+            &district,
+            BotTaskKind::BuildGlassTower,
+            size,
+            vec![[0, 90, 0], [36, 90, 0]],
+        );
+
+        assert_eq!(
+            picked,
+            Some([36, 90, 0]),
+            "bot planner should reserve occupied project footprints instead of stacking new towers"
         );
     }
 
