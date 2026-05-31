@@ -82,8 +82,9 @@ pub struct WorldSettings {
     /// Weather (rain/snow/fog/wind). See `weather.rs`.
     pub weather: WeatherSettings,
 
-    /// Global art direction. Defaults to the neon shuttle look while
-    /// preserving old save files through serde defaults.
+    /// Global art direction. Defaults to natural terrain; old neon-showcase
+    /// saves still parse, but startup normalization moves the live engine back
+    /// to the grounded world profile.
     #[serde(default = "default_visual_preset")]
     pub visual_preset: VisualPreset,
 
@@ -128,6 +129,8 @@ pub struct WorldSettings {
     #[serde(default)]
     pub companion_ui: CompanionUiSettings,
 }
+
+const NORMAL_TIME_OF_DAY: f32 = 12.25;
 
 /// Named teleport target stored in [`WorldSettings::bookmarks`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,11 +243,11 @@ impl Default for CompanionUiSettings {
 }
 
 fn default_show_companion_dock() -> bool {
-    true
+    false
 }
 
 fn default_companion_editor_assist_enabled() -> bool {
-    true
+    false
 }
 
 /// Admin-gated gameplay toggles. `admin_mode` is the master gate: when
@@ -293,11 +296,12 @@ pub enum WeatherPreset {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VisualPreset {
+    NaturalWorld,
     NeonShuttle,
 }
 
 fn default_visual_preset() -> VisualPreset {
-    VisualPreset::NeonShuttle
+    VisualPreset::NaturalWorld
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -387,7 +391,7 @@ impl Default for WorldSettings {
             runtime_profile: RuntimeProfile::Auto,
             target_fps: default_target_fps(),
             time_mode: TimeMode::Fixed,
-            time_of_day: 21.35,
+            time_of_day: NORMAL_TIME_OF_DAY,
             cycle_speed: 0.01,
             graphics: GraphicsMode::Balanced,
             fov_deg: 78.0,
@@ -557,12 +561,18 @@ impl WorldSettings {
 
         self.target_fps = finite_or(self.target_fps, default_target_fps()).clamp(30.0, 144.0);
         self.fov_deg = finite_or(self.fov_deg, 78.0).clamp(55.0, 100.0);
-        self.time_of_day = finite_or(self.time_of_day, 21.35).rem_euclid(24.0);
+        self.time_of_day = finite_or(self.time_of_day, NORMAL_TIME_OF_DAY).rem_euclid(24.0);
+        if self.time_mode == TimeMode::Fixed && (self.time_of_day - 21.35).abs() < 0.05 {
+            self.time_of_day = NORMAL_TIME_OF_DAY;
+        }
         self.cycle_speed = finite_or(self.cycle_speed, 0.01).clamp(0.0, 2.0);
         self.hud_panel_opacity =
             finite_or(self.hud_panel_opacity, default_hud_panel_opacity()).clamp(0.35, 0.92);
         self.theme.style = crate::theme::ThemeStyle::LiquidGlass;
         self.theme.scanlines = false;
+        self.visual_preset = VisualPreset::NaturalWorld;
+        self.companion_ui.show_companion_dock = false;
+        self.companion_ui.editor_assist_enabled = false;
 
         self.weather.rain_intensity = finite_or(self.weather.rain_intensity, 0.0).clamp(0.0, 1.0);
         self.weather.snow_intensity = finite_or(self.weather.snow_intensity, 0.0).clamp(0.0, 1.0);
@@ -701,13 +711,13 @@ impl WorldMeta {
     pub fn new(name: String, seed: u32) -> Self {
         let now = now_epoch();
         let spawn = crate::terrain::TerrainGenerator::new(seed)
-            .find_neon_showcase_spawn(0, 0, 12_000)
+            .find_natural_spawn(0, 0, 4096)
             .map(|p| [p.x as f32 + 0.5, p.y as f32, p.z as f32 + 0.5])
             .unwrap_or([0.0, 140.0, 0.0]);
         Self {
             name,
             seed,
-            time_of_day: 21.35,
+            time_of_day: NORMAL_TIME_OF_DAY,
             time_mode: TimeMode::Fixed,
             cycle_speed: 0.01,
             weather: WeatherSettings::default(),
@@ -1036,8 +1046,8 @@ mod tests {
             ),
         )"#;
         let settings: WorldSettings = ron::from_str(text).unwrap();
-        assert!(settings.companion_ui.show_companion_dock);
-        assert!(settings.companion_ui.editor_assist_enabled);
+        assert!(!settings.companion_ui.show_companion_dock);
+        assert!(!settings.companion_ui.editor_assist_enabled);
         assert_eq!(
             settings.companion_ui.dock_position,
             CompanionDockPosition::Left
@@ -1048,6 +1058,7 @@ mod tests {
         assert!((settings.hud_panel_opacity - 0.72).abs() < f32::EPSILON);
         assert_eq!(settings.theme.style, crate::theme::ThemeStyle::LiquidGlass);
         assert_eq!(settings.theme.density, crate::theme::UiDensity::Comfortable);
+        assert_eq!(settings.visual_preset, VisualPreset::NaturalWorld);
     }
 
     #[test]
@@ -1072,6 +1083,9 @@ mod tests {
         settings.weather.wind_z = -80.0;
         settings.theme.style = crate::theme::ThemeStyle::ClassicCrt;
         settings.theme.scanlines = true;
+        settings.visual_preset = VisualPreset::NeonShuttle;
+        settings.companion_ui.show_companion_dock = true;
+        settings.companion_ui.editor_assist_enabled = true;
 
         settings.normalize_runtime_safety();
 
@@ -1097,6 +1111,9 @@ mod tests {
         assert_eq!(settings.weather.wind_z, -12.0);
         assert_eq!(settings.theme.style, crate::theme::ThemeStyle::LiquidGlass);
         assert!(!settings.theme.scanlines);
+        assert_eq!(settings.visual_preset, VisualPreset::NaturalWorld);
+        assert!(!settings.companion_ui.show_companion_dock);
+        assert!(!settings.companion_ui.editor_assist_enabled);
     }
 
     #[test]

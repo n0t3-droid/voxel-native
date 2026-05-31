@@ -55,6 +55,14 @@ impl Biome {
     pub fn is_neon_showcase(self) -> bool {
         matches!(self, Biome::AlienReef | Biome::CrystalSpires)
     }
+
+    #[inline]
+    pub fn is_showcase_terrain(self) -> bool {
+        matches!(
+            self,
+            Biome::AlienReef | Biome::CrystalSpires | Biome::GlacierShards | Biome::VolcanicWaste
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +73,16 @@ pub struct NeonSpawnPoint {
     pub biome: Biome,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NaturalSpawnPoint {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub biome: Biome,
+}
+
 /// Macro-region province. Returned by `region()` for any world (x,z).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     Plains,
@@ -200,21 +217,15 @@ impl TerrainGenerator {
         // Third axis: separates karst out from the other 4 quadrants.
         let c = self.region.get([wx * 0.00013 - 41.7, wz * 0.00013 + 23.1]);
 
-        // Region centers in (a, b, c) space. Original 5 sit at c â‰ˆ Â±0.4;
-        // 4 alien regions occupy a far-side c â‰ˆ +0.85 layer with their
-        // own (a, b) corners so they cleanly carve out their own slice
-        // of the world without touching the Earth-like provinces.
-        let centers: [(f64, f64, f64, Region); 9] = [
+        // Region centers in (a, b, c) space. The automatic default map keeps
+        // Earth-like provinces only; showcase materials stay available for
+        // intentional builds instead of invading normal worlds.
+        let centers: [(f64, f64, f64, Region); 5] = [
             (-0.55, -0.55, -0.4, Region::Canyon),
             (0.55, -0.55, -0.4, Region::Plateau),
             (-0.55, 0.55, -0.4, Region::Highland),
             (0.55, 0.55, -0.4, Region::Wetland),
             (0.0, 0.0, 0.4, Region::Karst),
-            // Alien layer (high c) â€” 4 corners.
-            (-0.7, -0.7, 0.85, Region::CrystalSpires),
-            (0.7, -0.7, 0.85, Region::VolcanicWaste),
-            (-0.7, 0.7, 0.85, Region::GlacierShards),
-            (0.7, 0.7, 0.85, Region::AlienReef),
         ];
 
         // Find dominant region by closest center; strength is how much
@@ -2186,6 +2197,7 @@ impl TerrainGenerator {
     /// the insides get hollowed out with multiple floors, the shell
     /// stays solid for manual cutouts, and cardinal entrances let the
     /// player walk inside.
+    #[allow(dead_code)]
     pub fn try_sculpt_palace(&self, chunk: &mut Chunk) {
         let ChunkPos {
             x: cx,
@@ -2362,12 +2374,11 @@ impl TerrainGenerator {
         }
     }
 
-    /// Legacy no-op kept so external call sites compile. New behaviour
-    /// lives in `try_sculpt_palace`.
+    /// Player and bot commands now own city silhouettes. The automatic
+    /// terrain-palace pass made normal worlds look randomly hollowed and
+    /// artificial, so default terrain generation leaves cities alone.
     #[inline]
-    pub fn try_place_city(&self, chunk: &mut Chunk) {
-        self.try_sculpt_palace(chunk);
-    }
+    pub fn try_place_city(&self, _chunk: &mut Chunk) {}
 
     pub fn biome_at(&self, wx: i32, wz: i32) -> Biome {
         let (h, cont) = self.surface_height(wx as f64, wz as f64);
@@ -2451,6 +2462,78 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
+    pub fn find_natural_spawn(
+        &self,
+        origin_x: i32,
+        origin_z: i32,
+        max_radius: i32,
+    ) -> Option<NaturalSpawnPoint> {
+        let mut best: Option<(i32, NaturalSpawnPoint)> = None;
+        let step = 32;
+        let max_radius = max_radius.max(step);
+
+        for radius in (0..=max_radius).step_by(step as usize) {
+            let samples = if radius == 0 {
+                vec![(origin_x, origin_z)]
+            } else {
+                let mut out = Vec::with_capacity(((radius / step) * 8).max(8) as usize);
+                let min_x = origin_x - radius;
+                let max_x = origin_x + radius;
+                let min_z = origin_z - radius;
+                let max_z = origin_z + radius;
+                for x in (min_x..=max_x).step_by(step as usize) {
+                    out.push((x, min_z));
+                    out.push((x, max_z));
+                }
+                for z in ((min_z + step)..=(max_z - step)).step_by(step as usize) {
+                    out.push((min_x, z));
+                    out.push((max_x, z));
+                }
+                out
+            };
+
+            for (x, z) in samples {
+                let surface = self.surface_height_at(x, z);
+                let biome = self.biome_at(x, z);
+                if biome.is_showcase_terrain() || surface <= WATER_LEVEL + 4 {
+                    continue;
+                }
+
+                let hn = self.surface_height_at(x, z - 2);
+                let hs = self.surface_height_at(x, z + 2);
+                let he = self.surface_height_at(x + 2, z);
+                let hw = self.surface_height_at(x - 2, z);
+                let slope = (surface - hn)
+                    .abs()
+                    .max((surface - hs).abs())
+                    .max((surface - he).abs())
+                    .max((surface - hw).abs());
+                if slope > 6 {
+                    continue;
+                }
+
+                let distance = (x - origin_x).abs().max((z - origin_z).abs());
+                let comfortable_height = (surface - (WATER_LEVEL + 18)).abs();
+                let score = distance + slope * 96 + comfortable_height * 2;
+                let candidate = NaturalSpawnPoint {
+                    x,
+                    y: surface + 10,
+                    z,
+                    biome,
+                };
+                if best.map_or(true, |(best_score, _)| score < best_score) {
+                    best = Some((score, candidate));
+                }
+            }
+
+            if radius >= 256 && best.is_some() {
+                break;
+            }
+        }
+
+        best.map(|(_, point)| point)
+    }
+
     /// Public surface height lookup â€” block y of the topmost solid block
     /// at a world (x, z) column. Used to spawn the player above terrain.
     pub fn surface_height_at(&self, wx: i32, wz: i32) -> i32 {
@@ -2463,65 +2546,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn crystal_spires_keep_flight_corridors_and_bounded_close_range_steps() {
+    fn default_world_regions_stay_natural_not_alien_showcases() {
         let generator = TerrainGenerator::new(12345);
         let mut samples = 0usize;
-        let mut floor_columns = 0usize;
-        let mut tall_columns = 0usize;
-        let mut max_step = 0i32;
-        let mut max_height = i32::MIN;
-        let mut patches = 0usize;
 
-        'search: for z in (-12_000..=12_000).step_by(256) {
-            for x in (-12_000..=12_000).step_by(256) {
+        for z in (-12_000..=12_000).step_by(512) {
+            for x in (-12_000..=12_000).step_by(512) {
                 let (region, strength) = generator.region(x as f64, z as f64);
-                if region != Region::CrystalSpires || strength < 0.60 {
-                    continue;
-                }
-
-                patches += 1;
-                for dz in (0..64).step_by(4) {
-                    for dx in (0..64).step_by(4) {
-                        let wx = x + dx;
-                        let wz = z + dz;
-                        let h = generator.surface_height_at(wx, wz);
-                        let hx = generator.surface_height_at(wx + 4, wz);
-                        let hz = generator.surface_height_at(wx, wz + 4);
-                        max_height = max_height.max(h);
-                        max_step = max_step.max((h - hx).abs()).max((h - hz).abs());
-                        samples += 1;
-                        if h <= WATER_LEVEL + 30 {
-                            floor_columns += 1;
-                        }
-                        if h >= WATER_LEVEL + 70 {
-                            tall_columns += 1;
-                        }
-                    }
-                }
-
-                if patches >= 16 {
-                    break 'search;
-                }
+                assert!(
+                    !matches!(
+                        region,
+                        Region::CrystalSpires
+                            | Region::VolcanicWaste
+                            | Region::GlacierShards
+                            | Region::AlienReef
+                    ),
+                    "default terrain should not pick showcase region {region:?} at strength {strength}"
+                );
+                assert!(
+                    !generator.biome_at(x, z).is_showcase_terrain(),
+                    "default terrain should not pick showcase biome at {x},{z}"
+                );
+                samples += 1;
             }
         }
 
-        assert!(patches >= 1, "seed should expose a crystal-spire province");
-        assert!(
-            floor_columns * 5 >= samples,
-            "crystal biome lost its low flight corridors: {floor_columns}/{samples}"
-        );
-        assert!(
-            tall_columns > 0,
-            "crystal biome should still produce a visible hero skyline, max height was {max_height}"
-        );
-        assert!(
-            tall_columns * 2 < samples,
-            "crystal skyline became a near-solid wall: {tall_columns}/{samples}"
-        );
-        assert!(
-            max_step <= 96,
-            "close-range crystal steps are too sharp for low-end rendering: {max_step}"
-        );
+        assert!(samples > 100);
+    }
+
+    #[test]
+    fn natural_spawn_finds_walkable_non_showcase_ground() {
+        let generator = TerrainGenerator::new(12345);
+        let spawn = generator
+            .find_natural_spawn(0, 0, 4096)
+            .expect("normal worlds need a nearby safe terrain entry");
+
+        assert!(!spawn.biome.is_showcase_terrain());
+        assert!(spawn.y > WATER_LEVEL + 4);
     }
 }
 

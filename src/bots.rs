@@ -11786,9 +11786,12 @@ fn queue_area_masterplan(
         return 0;
     }
 
+    let cancelled = cancel_open_projects_for_area_command(&mut brain.save);
+    brain.queued_commands.clear();
     brain.save.autonomy.bots_active = true;
     brain.save.autonomy.enabled = false;
     brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(5);
+    set_companions_to_area_command(&mut brain.save);
     let district_id = install_player_city_area(&mut brain.save, min, max);
     let bounds = brain.save.primary_bounds();
     let mut queued = 0usize;
@@ -11833,13 +11836,50 @@ fn queue_area_masterplan(
 
     if queued > 0 {
         brain.hud_message = format!(
-            "Bot city area accepted from {source_label}: {queued} project(s) queued inside the marked footprint."
+            "Bot city area accepted from {source_label}: {queued} project(s) queued inside the marked footprint; {cancelled} old active job(s) parked."
         );
         brain.dirty = true;
     } else {
         brain.hud_message = "Marked city area is outside bot city bounds or too small.".into();
     }
     queued
+}
+
+fn cancel_open_projects_for_area_command(save: &mut BotWorldSave) -> usize {
+    let mut cancelled_ids = HashSet::new();
+    for project in &mut save.projects {
+        if project.status.is_done() {
+            continue;
+        }
+        project.status = BotProjectStatus::Blocked;
+        project.blocked_reason = "Cancelled by a new marked city area command.".into();
+        cancelled_ids.insert(project.id);
+    }
+    if cancelled_ids.is_empty() {
+        return 0;
+    }
+
+    save.crews
+        .retain(|crew| !cancelled_ids.contains(&crew.project_id));
+    for bot in &mut save.agents {
+        if bot
+            .current_task
+            .as_ref()
+            .is_some_and(|task| cancelled_ids.contains(&task.project_id))
+        {
+            bot.current_task = None;
+            bot.state = BotState::Idle;
+        }
+    }
+    cancelled_ids.len()
+}
+
+fn set_companions_to_area_command(save: &mut BotWorldSave) {
+    for bot in save.agents.iter_mut().filter(|bot| bot.companion) {
+        bot.companion_mode = BotCompanionMode::AssistingTask;
+        bot.memory.last_message =
+            "Group command accepted. We are building only inside the marked city area.".into();
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -13124,6 +13164,52 @@ mod tests {
             .projects
             .iter()
             .all(|project| bounds.contains_box(project.origin, project.size)));
+    }
+
+    #[test]
+    fn placed_city_area_becomes_single_group_command_for_all_bots() {
+        let world = VoxelWorld::new();
+        let mut brain = FriendlyWorldBrain::default();
+        brain.save = BotWorldSave::seed("Area", Vec3::new(0.0, 90.0, 0.0), &world);
+        let stale = add_project_unchecked(
+            &mut brain.save,
+            BotTaskKind::BuildTower,
+            [800, 90, 800],
+            [24, 36, 24],
+            BotTheme::CyanAlloy,
+            None,
+            None,
+            None,
+            1,
+            true,
+        )
+        .unwrap();
+        brain.save.projects[0].status = BotProjectStatus::Active;
+        brain.queued_commands.push(BotTaskCommand::default());
+
+        queue_city_area_masterplan(&mut brain, IVec3::new(-48, 90, -48), IVec3::new(48, 90, 48));
+        let bounds = brain.save.primary_bounds();
+        let stale_project = brain
+            .save
+            .projects
+            .iter()
+            .find(|project| project.id == stale)
+            .unwrap();
+
+        assert_eq!(stale_project.status, BotProjectStatus::Blocked);
+        assert!(brain.queued_commands.is_empty());
+        assert!(brain
+            .save
+            .projects
+            .iter()
+            .filter(|project| !project.status.is_done())
+            .all(|project| bounds.contains_box(project.origin, project.size)));
+        assert!(brain
+            .save
+            .agents
+            .iter()
+            .filter(|bot| bot.companion)
+            .all(|bot| bot.companion_mode == BotCompanionMode::AssistingTask));
     }
 
     #[test]

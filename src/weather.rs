@@ -21,6 +21,7 @@ const PARTICLE_RADIUS: f32 = 36.0;
 const PARTICLE_HEIGHT: f32 = 40.0;
 const RAIN_POOL: usize = 900;
 const SNOW_POOL: usize = 600;
+const CHUNK_WORLD_SIZE: f32 = 16.0;
 
 #[derive(Component)]
 pub struct RainDrop {
@@ -34,6 +35,45 @@ pub struct SnowFlake {
 }
 
 pub struct WeatherPlugin;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FogRecipe {
+    weather_density: f32,
+    start: f32,
+    end: f32,
+}
+
+fn fog_recipe(
+    weather_fog_density: f32,
+    render_distance_chunks: i32,
+    weather_fx_scale: f32,
+    profile_weather_fx_mul: f32,
+    profile_fog_density_mul: f32,
+) -> FogRecipe {
+    let weather_density =
+        (weather_fog_density * weather_fx_scale * profile_weather_fx_mul * profile_fog_density_mul)
+            .clamp(0.0, 1.0);
+    let rd_blocks = (render_distance_chunks.max(8) as f32) * CHUNK_WORLD_SIZE;
+
+    if weather_density <= 0.001 {
+        let end = (rd_blocks * 0.96).clamp(220.0, 980.0);
+        let start = (rd_blocks * 0.55).clamp(120.0, end - 80.0);
+        return FogRecipe {
+            weather_density,
+            start,
+            end,
+        };
+    }
+
+    let end_factor = 0.35 + (1.0 - weather_density) * 0.55;
+    let end = (rd_blocks * end_factor).clamp(70.0, 900.0);
+    let start = (end * 0.25).clamp(18.0, end - 40.0);
+    FogRecipe {
+        weather_density,
+        start,
+        end,
+    }
+}
 
 impl Plugin for WeatherPlugin {
     fn build(&self, app: &mut App) {
@@ -121,24 +161,18 @@ fn apply_fog(
     let Ok(mut fog) = fog_q.get_single_mut() else {
         return;
     };
-    let density = (settings.weather.fog_density
-        * budget.weather_fx_scale
-        * intel.profile.weather_fx_mul
-        * intel.profile.fog_density_mul)
-        .clamp(0.0, 1.0);
-    if density <= 0.001 {
-        fog.color = clear.0.with_alpha(0.0);
-        fog.falloff = FogFalloff::Linear {
-            start: 10_000.0,
-            end: 10_000.0,
-        };
-    } else {
-        fog.color = clear.0;
-        // Stronger fog = much shorter visible range.
-        let start = 10.0 + (1.0 - density) * 80.0;
-        let end = 60.0 + (1.0 - density) * 220.0;
-        fog.falloff = FogFalloff::Linear { start, end };
-    }
+    let recipe = fog_recipe(
+        settings.weather.fog_density,
+        budget.render_distance,
+        budget.weather_fx_scale,
+        intel.profile.weather_fx_mul,
+        intel.profile.fog_density_mul,
+    );
+    fog.color = clear.0;
+    fog.falloff = FogFalloff::Linear {
+        start: recipe.start,
+        end: recipe.end,
+    };
 }
 
 fn update_rain(
@@ -246,5 +280,29 @@ fn update_particle_visibility(
         } else {
             Visibility::Hidden
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_weather_keeps_a_soft_streaming_haze() {
+        let recipe = fog_recipe(0.0, 40, 1.0, 1.0, 1.0);
+
+        assert!(recipe.end < 10_000.0);
+        assert!(recipe.start > 100.0);
+        assert!(recipe.end > recipe.start);
+    }
+
+    #[test]
+    fn weather_fog_shortens_the_distance_veil() {
+        let clear = fog_recipe(0.0, 40, 1.0, 1.0, 1.0);
+        let foggy = fog_recipe(0.8, 40, 1.0, 1.0, 1.0);
+
+        assert!(foggy.weather_density > clear.weather_density);
+        assert!(foggy.end < clear.end);
+        assert!(foggy.start < clear.start);
     }
 }

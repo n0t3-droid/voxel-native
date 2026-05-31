@@ -148,22 +148,22 @@ fn load_player_from_world(
     let mut translation = Vec3::new(pos[0], pos[1], pos[2]);
     let mut yaw = active.meta.player_yaw;
     let mut pitch = active.meta.player_pitch;
-    let mut neon_reframed = false;
-    if settings.visual_preset == crate::settings::VisualPreset::NeonShuttle {
-        let generator = crate::terrain::TerrainGenerator::new(active.meta.seed);
-        let bx = crate::chunk::floor_to_i32_safe(translation.x);
-        let bz = crate::chunk::floor_to_i32_safe(translation.z);
-        if !generator.biome_at(bx, bz).is_neon_showcase() {
-            if let Some(spawn) = generator.find_neon_showcase_spawn(bx, bz, 14_000) {
-                translation = Vec3::new(spawn.x as f32 + 0.5, spawn.y as f32, spawn.z as f32 + 0.5);
-                yaw = -0.72;
-                pitch = -0.18;
-                neon_reframed = true;
-                info!(
-                    "Neon showcase spawn: {:?} at {}, {}, {}",
-                    spawn.biome, spawn.x, spawn.y, spawn.z
-                );
-            }
+    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed);
+    let bx = crate::chunk::floor_to_i32_safe(translation.x);
+    let bz = crate::chunk::floor_to_i32_safe(translation.z);
+    let surface = generator.surface_height_at(bx, bz);
+    if settings.visual_preset == crate::settings::VisualPreset::NaturalWorld
+        && (generator.biome_at(bx, bz).is_showcase_terrain()
+            || translation.y > surface as f32 + 90.0)
+    {
+        if let Some(spawn) = generator.find_natural_spawn(0, 0, 4096) {
+            translation = Vec3::new(spawn.x as f32 + 0.5, spawn.y as f32, spawn.z as f32 + 0.5);
+            yaw = 0.0;
+            pitch = -0.12;
+            info!(
+                "Natural world entry: {:?} at {}, {}, {}",
+                spawn.biome, spawn.x, spawn.y, spawn.z
+            );
         }
     }
     tf.translation = translation;
@@ -173,7 +173,7 @@ fn load_player_from_world(
     // Stream-in takes a moment; keep the player flying until terrain arrives.
     player.flying = true;
     // Placement only runs for fresh worlds (default y = 140 with no custom pos).
-    player.placed_on_surface = neon_reframed || (pos[1] < 200.0 && pos[0].abs() > 0.5);
+    player.placed_on_surface = pos[1] < 200.0 && pos[0].abs() > 0.5;
 }
 
 #[derive(Component)]
@@ -989,13 +989,9 @@ fn place_on_surface_once(
 
 fn neon_showcase_warp_input(
     keys: Res<ButtonInput<KeyCode>>,
-    settings: Res<WorldSettings>,
     world: Res<VoxelWorld>,
     mut query: Query<(&mut Transform, &mut Player)>,
 ) {
-    if settings.visual_preset != crate::settings::VisualPreset::NeonShuttle {
-        return;
-    }
     if !wants_neon_showcase_warp(&keys) {
         return;
     }

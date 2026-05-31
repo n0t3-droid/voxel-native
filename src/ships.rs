@@ -1,20 +1,17 @@
 //! Shuttle battles: local voxel ships, cockpit flight, ship weapons and drones.
 //!
-//! Ships are moving entity hierarchies built from voxel-colored cubes. They do
-//! not mutate terrain chunks while flying, which keeps chunk streaming and the
-//! mesher stable.
+//! Ships are moving entity hierarchies with smooth meshes for the visible
+//! shuttle hulls. They do not mutate terrain chunks while flying, which keeps
+//! chunk streaming and the mesher stable.
 
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
-use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::texture::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy_egui::{egui, EguiContexts};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::blocks::{voxel_color, voxel_is_emissive, BlockType, Voxel};
+use crate::blocks::BlockType;
 use crate::director::{SimulationDirector, UnifiedTelemetry};
 use crate::menu::{GameState, PendingWorldLoad};
 use crate::mode::{ActiveMode, ModeContext};
@@ -294,6 +291,34 @@ struct ShipMotion {
     lateral_speed: f32,
 }
 
+const SHIP_MOUSE_YAW_SENS: f32 = 0.00016;
+const SHIP_MOUSE_PITCH_SENS: f32 = 0.00048;
+const SHIP_KEY_YAW_RATE: f32 = 0.42;
+const SHIP_KEY_PITCH_RATE: f32 = 0.56;
+const SHIP_YAW_RATE_LIMIT: f32 = 0.95;
+const SHIP_PITCH_RATE_LIMIT: f32 = 0.80;
+const SHIP_TARGET_ROLL: f32 = 0.32;
+const SHIP_BANK_YAW_RATE: f32 = 0.14;
+const SHIP_RUDDER_YAW_RATE: f32 = 0.12;
+
+fn ship_target_angular_rates(
+    mouse_dx: f32,
+    mouse_dy: f32,
+    turn_input: f32,
+    pitch_input: f32,
+    dt: f32,
+) -> (f32, f32) {
+    let inv_dt = if dt > 1e-4 { 1.0 / dt } else { 60.0 };
+    let mouse_rate_scale = inv_dt.min(90.0);
+    let yaw = (-mouse_dx * SHIP_MOUSE_YAW_SENS) * mouse_rate_scale + turn_input * SHIP_KEY_YAW_RATE;
+    let pitch =
+        (-mouse_dy * SHIP_MOUSE_PITCH_SENS) * mouse_rate_scale + pitch_input * SHIP_KEY_PITCH_RATE;
+    (
+        yaw.clamp(-SHIP_YAW_RATE_LIMIT, SHIP_YAW_RATE_LIMIT),
+        pitch.clamp(-SHIP_PITCH_RATE_LIMIT, SHIP_PITCH_RATE_LIMIT),
+    )
+}
+
 #[derive(Component)]
 struct ShipPreview;
 
@@ -375,6 +400,35 @@ struct CockpitPanelSpec {
     tone: CockpitPanelTone,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealShipMeshKind {
+    SmoothEllipsoid,
+    RoundNozzle,
+    AeroPlate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RealShipTone {
+    CeramicWhite,
+    CarbonBlack,
+    SmokedGlass,
+    CyanEmission,
+    AmberHeat,
+    LuminiteGlass,
+    MagentaSignal,
+    SeatLeather,
+    ConsoleBlack,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RealShipPartSpec {
+    mesh: RealShipMeshKind,
+    tone: RealShipTone,
+    offset: Vec3,
+    scale: Vec3,
+    rotation: Quat,
+}
+
 #[derive(Resource, Debug, Clone)]
 struct CockpitTransition {
     active: bool,
@@ -417,10 +471,12 @@ impl CockpitTransition {
 #[derive(Default, Resource)]
 struct ShipFxCache {
     cube: Option<Handle<Mesh>>,
+    real_sphere: Option<Handle<Mesh>>,
+    real_cylinder: Option<Handle<Mesh>>,
+    real_plate: Option<Handle<Mesh>>,
     projectile: Option<Handle<Mesh>>,
     explosion: Option<Handle<Mesh>>,
-    mats: std::collections::HashMap<(u16, bool), Handle<StandardMaterial>>,
-    textures: std::collections::HashMap<(u16, bool), Handle<Image>>,
+    real_mats: std::collections::HashMap<(RealShipTone, bool), Handle<StandardMaterial>>,
     projectile_mats: std::collections::HashMap<u8, Handle<StandardMaterial>>,
     cockpit_mats: std::collections::HashMap<u8, Handle<StandardMaterial>>,
     drone_mat: Option<Handle<StandardMaterial>>,
@@ -428,6 +484,7 @@ struct ShipFxCache {
 
 #[derive(Clone)]
 struct ShipBlueprint {
+    #[allow(dead_code)]
     voxels: Vec<ShipVoxel>,
     cockpit_offset: Vec3,
     exit_offset: Vec3,
@@ -1399,12 +1456,269 @@ fn push_box(out: &mut Vec<ShipVoxel>, min: IVec3, max: IVec3, block: BlockType) 
     }
 }
 
+fn realistic_ship_exterior_specs(kind: ShipKind) -> Vec<RealShipPartSpec> {
+    let mut parts = Vec::with_capacity(24);
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::SmoothEllipsoid,
+        RealShipTone::CeramicWhite,
+        Vec3::new(0.0, 0.55, -0.8),
+        Vec3::new(2.55, 0.82, 7.8),
+        Quat::IDENTITY,
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::SmoothEllipsoid,
+        RealShipTone::CeramicWhite,
+        Vec3::new(0.0, 0.86, -6.25),
+        Vec3::new(1.45, 0.55, 2.65),
+        Quat::IDENTITY,
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::SmoothEllipsoid,
+        RealShipTone::CarbonBlack,
+        Vec3::new(0.0, 0.08, -0.9),
+        Vec3::new(1.92, 0.22, 6.6),
+        Quat::IDENTITY,
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::SmoothEllipsoid,
+        RealShipTone::SmokedGlass,
+        Vec3::new(0.0, 1.42, -4.95),
+        Vec3::new(1.45, 0.38, 1.82),
+        Quat::from_rotation_x(-0.05),
+    );
+    for sx in [-1.0, 1.0] {
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::CeramicWhite,
+            Vec3::new(sx * 4.55, 0.38, 0.05),
+            Vec3::new(5.35, 0.12, 2.55),
+            Quat::from_rotation_y(-sx * 0.14) * Quat::from_rotation_z(sx * 0.04),
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::CarbonBlack,
+            Vec3::new(sx * 7.12, 0.52, -0.24),
+            Vec3::new(1.18, 0.14, 2.25),
+            Quat::from_rotation_y(-sx * 0.18),
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::CeramicWhite,
+            Vec3::new(sx * 1.65, 2.20, 4.75),
+            Vec3::new(0.18, 1.64, 2.42),
+            Quat::from_rotation_z(sx * 0.25),
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::RoundNozzle,
+            RealShipTone::CarbonBlack,
+            Vec3::new(sx * 1.55, 0.48, 6.95),
+            Vec3::new(0.55, 1.22, 0.55),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::RoundNozzle,
+            RealShipTone::CyanEmission,
+            Vec3::new(sx * 1.55, 0.48, 7.30),
+            Vec3::new(0.36, 0.38, 0.36),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::LuminiteGlass,
+            Vec3::new(sx * 3.20, 0.98, -1.72),
+            Vec3::new(1.85, 0.035, 0.13),
+            Quat::from_rotation_y(-sx * 0.14),
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::MagentaSignal,
+            Vec3::new(sx * 2.22, 1.02, 4.48),
+            Vec3::new(0.86, 0.035, 0.13),
+            Quat::from_rotation_y(sx * 0.08),
+        );
+    }
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::SmoothEllipsoid,
+        RealShipTone::AmberHeat,
+        Vec3::new(0.0, 0.34, 6.15),
+        Vec3::new(2.35, 0.48, 1.05),
+        Quat::IDENTITY,
+    );
+
+    match kind {
+        ShipKind::ScoutShuttle => {
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::AeroPlate,
+                RealShipTone::CeramicWhite,
+                Vec3::new(0.0, -0.24, 1.70),
+                Vec3::new(1.35, 0.10, 3.4),
+                Quat::IDENTITY,
+            );
+        }
+        ShipKind::StrikeFighter => {
+            for sx in [-1.0, 1.0] {
+                push_real_part(
+                    &mut parts,
+                    RealShipMeshKind::AeroPlate,
+                    RealShipTone::CarbonBlack,
+                    Vec3::new(sx * 7.85, 0.08, 1.30),
+                    Vec3::new(0.28, 4.90, 4.70),
+                    Quat::from_rotation_z(sx * 0.06),
+                );
+                push_real_part(
+                    &mut parts,
+                    RealShipMeshKind::AeroPlate,
+                    RealShipTone::CyanEmission,
+                    Vec3::new(sx * 7.70, 0.10, 0.82),
+                    Vec3::new(0.035, 3.20, 2.90),
+                    Quat::IDENTITY,
+                );
+            }
+        }
+        ShipKind::HeavyDropship => {
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::SmoothEllipsoid,
+                RealShipTone::CeramicWhite,
+                Vec3::new(0.0, 0.55, 1.45),
+                Vec3::new(3.75, 1.18, 5.9),
+                Quat::IDENTITY,
+            );
+            for sx in [-1.0, 1.0] {
+                push_real_part(
+                    &mut parts,
+                    RealShipMeshKind::RoundNozzle,
+                    RealShipTone::CyanEmission,
+                    Vec3::new(sx * 3.2, 0.74, 7.82),
+                    Vec3::new(0.52, 0.54, 0.52),
+                    Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                );
+            }
+        }
+    }
+    parts
+}
+
+fn realistic_cockpit_part_specs(kind: ShipKind, bp: &ShipBlueprint) -> Vec<RealShipPartSpec> {
+    let mut parts = Vec::with_capacity(14);
+    let scale = (bp.hull_radius / 8.0).clamp(0.86, 1.30);
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::SmoothEllipsoid,
+        RealShipTone::SmokedGlass,
+        Vec3::new(0.0, 0.78, -1.18),
+        Vec3::new(1.78 * scale, 0.34, 0.78),
+        Quat::from_rotation_x(0.06),
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::SmoothEllipsoid,
+        RealShipTone::SeatLeather,
+        Vec3::new(0.0, -1.25, 0.68),
+        Vec3::new(0.62, 0.28, 0.72),
+        Quat::IDENTITY,
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::AeroPlate,
+        RealShipTone::SeatLeather,
+        Vec3::new(0.0, -0.70, 1.05),
+        Vec3::new(0.92, 0.92, 0.14),
+        Quat::from_rotation_x(0.22),
+    );
+    for sx in [-1.0, 1.0] {
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::ConsoleBlack,
+            Vec3::new(sx * 1.28, -0.82, -0.58),
+            Vec3::new(0.94, 0.08, 0.82),
+            Quat::from_rotation_x(-0.35) * Quat::from_rotation_z(-sx * 0.12),
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::RoundNozzle,
+            RealShipTone::CarbonBlack,
+            Vec3::new(sx * 0.46, -0.58, -0.46),
+            Vec3::new(0.055, 0.62, 0.055),
+            Quat::from_rotation_x(0.85) * Quat::from_rotation_z(sx * 0.36),
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::RoundNozzle,
+            RealShipTone::CyanEmission,
+            Vec3::new(sx * 1.25, -0.68, -0.86),
+            Vec3::new(0.075, 0.28, 0.075),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        );
+    }
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::AeroPlate,
+        RealShipTone::ConsoleBlack,
+        Vec3::new(0.0, -0.88, -1.08),
+        Vec3::new(2.85, 0.10, 1.16),
+        Quat::from_rotation_x(-0.42),
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::AeroPlate,
+        RealShipTone::CyanEmission,
+        Vec3::new(0.0, -0.76, -1.23),
+        Vec3::new(2.18, 0.035, 0.52),
+        Quat::from_rotation_x(-0.42),
+    );
+    if matches!(kind, ShipKind::HeavyDropship) {
+        for sx in [-1.0, 1.0] {
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::SmoothEllipsoid,
+                RealShipTone::SeatLeather,
+                Vec3::new(sx * 0.56, -1.18, 1.28),
+                Vec3::new(0.46, 0.24, 0.54),
+                Quat::IDENTITY,
+            );
+        }
+    }
+    parts
+}
+
+fn push_real_part(
+    parts: &mut Vec<RealShipPartSpec>,
+    mesh: RealShipMeshKind,
+    tone: RealShipTone,
+    offset: Vec3,
+    scale: Vec3,
+    rotation: Quat,
+) {
+    parts.push(RealShipPartSpec {
+        mesh,
+        tone,
+        offset,
+        scale,
+        rotation,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_ship_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
+    _images: &mut Assets<Image>,
     fx: &mut ShipFxCache,
     kind: ShipKind,
     pos: Vec3,
@@ -1421,9 +1735,9 @@ fn spawn_ship_entity(
                 ..default()
             },
             Name::new(if preview {
-                "ShipPlacementPreview"
+                "RealShipPlacementPreview"
             } else {
-                "VoxelShuttle"
+                "RealisticShuttle"
             }),
         ))
         .id();
@@ -1450,20 +1764,12 @@ fn spawn_ship_entity(
 
     let cube = fx
         .cube
-        .get_or_insert_with(|| meshes.add(Cuboid::new(0.96, 0.96, 0.96)))
+        .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
     commands.entity(root).with_children(|p| {
-        for voxel in &bp.voxels {
-            let mat = material_for_block(fx, materials, images, voxel.block, preview);
-            p.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: mat,
-                transform: Transform::from_translation(voxel.pos.as_vec3()),
-                ..default()
-            });
-        }
+        spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview);
         if !preview {
-            spawn_cockpit_holograms(p, materials, fx, &cube, kind, &bp);
+            spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp);
             spawn_ship_energy_trails(p, materials, fx, &cube, kind);
             p.spawn(PointLightBundle {
                 point_light: PointLight {
@@ -1494,213 +1800,207 @@ fn spawn_ship_entity(
     root
 }
 
-fn material_for_block(
+fn spawn_realistic_ship_exterior(
+    parent: &mut ChildBuilder,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    fx: &mut ShipFxCache,
+    kind: ShipKind,
+    preview: bool,
+) {
+    for part in realistic_ship_exterior_specs(kind) {
+        spawn_real_ship_part(
+            parent,
+            meshes,
+            materials,
+            fx,
+            part,
+            preview,
+            "RealShipExterior",
+        );
+    }
+}
+
+fn spawn_realistic_cockpit_parts(
+    parent: &mut ChildBuilder,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    fx: &mut ShipFxCache,
+    kind: ShipKind,
+    bp: &ShipBlueprint,
+) {
+    for part in realistic_cockpit_part_specs(kind, bp) {
+        let mut part = part;
+        part.offset += bp.cockpit_offset;
+        spawn_real_ship_part(
+            parent,
+            meshes,
+            materials,
+            fx,
+            part,
+            false,
+            "RealCockpitPart",
+        );
+    }
+}
+
+fn spawn_real_ship_part(
+    parent: &mut ChildBuilder,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    fx: &mut ShipFxCache,
+    part: RealShipPartSpec,
+    preview: bool,
+    name: &'static str,
+) {
+    let mesh = real_ship_mesh(fx, meshes, part.mesh);
+    let material = real_ship_material(fx, materials, part.tone, preview);
+    parent.spawn((
+        PbrBundle {
+            mesh,
+            material,
+            transform: Transform::from_translation(part.offset)
+                .with_rotation(part.rotation)
+                .with_scale(part.scale),
+            ..default()
+        },
+        Name::new(name),
+    ));
+}
+
+fn real_ship_mesh(
+    fx: &mut ShipFxCache,
+    meshes: &mut Assets<Mesh>,
+    kind: RealShipMeshKind,
+) -> Handle<Mesh> {
+    match kind {
+        RealShipMeshKind::SmoothEllipsoid => fx
+            .real_sphere
+            .get_or_insert_with(|| meshes.add(Sphere::new(1.0)))
+            .clone(),
+        RealShipMeshKind::RoundNozzle => fx
+            .real_cylinder
+            .get_or_insert_with(|| meshes.add(Cylinder::new(1.0, 1.0)))
+            .clone(),
+        RealShipMeshKind::AeroPlate => fx
+            .real_plate
+            .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
+            .clone(),
+    }
+}
+
+fn real_ship_material(
     fx: &mut ShipFxCache,
     materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    block: BlockType,
+    tone: RealShipTone,
     preview: bool,
 ) -> Handle<StandardMaterial> {
-    let key = (Voxel::from(block), preview);
-    if let Some(mat) = fx.mats.get(&key) {
+    let key = (tone, preview);
+    if let Some(mat) = fx.real_mats.get(&key) {
         return mat.clone();
     }
-    let rgba = voxel_color(Voxel::from(block));
-    let alpha = if preview { 0.34 } else { 1.0 };
-    let base = Color::srgba(rgba[0].min(1.0), rgba[1].min(1.0), rgba[2].min(1.0), alpha);
-    let texture = ship_texture_for_block(fx, images, block, preview);
+    let preview_alpha = if preview { 0.38 } else { 1.0 };
+    let (base, emissive, alpha_mode, metallic, roughness, reflectance) = match tone {
+        RealShipTone::CeramicWhite => (
+            Color::srgba(0.88, 0.93, 0.96, preview_alpha),
+            LinearRgba::rgb(0.05, 0.06, 0.07),
+            if preview {
+                AlphaMode::Blend
+            } else {
+                AlphaMode::Opaque
+            },
+            0.72,
+            0.18,
+            0.76,
+        ),
+        RealShipTone::CarbonBlack => (
+            Color::srgba(0.006, 0.010, 0.014, preview_alpha),
+            LinearRgba::rgb(0.005, 0.025, 0.030),
+            if preview {
+                AlphaMode::Blend
+            } else {
+                AlphaMode::Opaque
+            },
+            0.86,
+            0.22,
+            0.58,
+        ),
+        RealShipTone::SmokedGlass => (
+            Color::srgba(0.0, 0.025, 0.035, if preview { 0.42 } else { 0.88 }),
+            LinearRgba::rgb(0.02, 0.22, 0.28),
+            AlphaMode::Blend,
+            0.10,
+            0.03,
+            0.95,
+        ),
+        RealShipTone::CyanEmission => (
+            Color::srgba(0.02, 0.86, 1.0, if preview { 0.52 } else { 0.74 }),
+            LinearRgba::rgb(0.22, 7.8, 9.4),
+            AlphaMode::Add,
+            0.0,
+            0.08,
+            0.72,
+        ),
+        RealShipTone::AmberHeat => (
+            Color::srgba(1.0, 0.36, 0.06, if preview { 0.34 } else { 0.52 }),
+            LinearRgba::rgb(8.5, 2.2, 0.10),
+            AlphaMode::Add,
+            0.0,
+            0.15,
+            0.58,
+        ),
+        RealShipTone::LuminiteGlass => (
+            Color::srgba(0.56, 1.0, 1.0, if preview { 0.44 } else { 0.66 }),
+            LinearRgba::rgb(1.6, 6.8, 7.2),
+            AlphaMode::Add,
+            0.05,
+            0.04,
+            0.9,
+        ),
+        RealShipTone::MagentaSignal => (
+            Color::srgba(1.0, 0.12, 0.82, if preview { 0.46 } else { 0.72 }),
+            LinearRgba::rgb(6.4, 0.18, 4.8),
+            AlphaMode::Add,
+            0.0,
+            0.09,
+            0.72,
+        ),
+        RealShipTone::SeatLeather => (
+            Color::srgba(0.018, 0.016, 0.014, preview_alpha),
+            LinearRgba::BLACK,
+            if preview {
+                AlphaMode::Blend
+            } else {
+                AlphaMode::Opaque
+            },
+            0.15,
+            0.42,
+            0.35,
+        ),
+        RealShipTone::ConsoleBlack => (
+            Color::srgba(0.006, 0.012, 0.018, preview_alpha),
+            LinearRgba::rgb(0.0, 0.08, 0.12),
+            if preview {
+                AlphaMode::Blend
+            } else {
+                AlphaMode::Opaque
+            },
+            0.55,
+            0.20,
+            0.62,
+        ),
+    };
     let mat = materials.add(StandardMaterial {
-        base_color: if preview {
-            base
-        } else {
-            Color::WHITE.with_alpha(alpha)
-        },
-        base_color_texture: Some(texture),
-        emissive: if block == BlockType::EngineCore {
-            LinearRgba::rgb(rgba[0] * 9.0, rgba[1] * 6.2, rgba[2] * 3.4)
-        } else if voxel_is_emissive(Voxel::from(block)) {
-            LinearRgba::rgb(rgba[0] * 5.4, rgba[1] * 5.4, rgba[2] * 5.4)
-        } else if block == BlockType::CockpitGlass {
-            LinearRgba::rgb(0.18, 0.75, 0.95)
-        } else if block == BlockType::ShipHullDark {
-            LinearRgba::rgb(0.035, 0.060, 0.080)
-        } else if block == BlockType::ShipHullAlloy {
-            LinearRgba::rgb(0.030, 0.040, 0.045)
-        } else {
-            LinearRgba::BLACK
-        },
-        alpha_mode: if preview {
-            AlphaMode::Blend
-        } else {
-            AlphaMode::Opaque
-        },
-        metallic: if matches!(block, BlockType::ShipHullDark | BlockType::ShipHullAlloy) {
-            0.85
-        } else {
-            0.1
-        },
-        perceptual_roughness: if block == BlockType::CockpitGlass {
-            0.05
-        } else if voxel_is_emissive(Voxel::from(block)) {
-            0.16
-        } else {
-            0.34
-        },
-        reflectance: if block == BlockType::CockpitGlass {
-            0.9
-        } else if matches!(block, BlockType::ShipHullDark | BlockType::ShipHullAlloy) {
-            0.62
-        } else {
-            0.35
-        },
+        base_color: base,
+        emissive,
+        alpha_mode,
+        metallic,
+        perceptual_roughness: roughness,
+        reflectance,
         ..default()
     });
-    fx.mats.insert(key, mat.clone());
+    fx.real_mats.insert(key, mat.clone());
     mat
-}
-
-fn ship_texture_for_block(
-    fx: &mut ShipFxCache,
-    images: &mut Assets<Image>,
-    block: BlockType,
-    preview: bool,
-) -> Handle<Image> {
-    let key = (Voxel::from(block), preview);
-    if let Some(texture) = fx.textures.get(&key) {
-        return texture.clone();
-    }
-    let texture = images.add(ship_texture_image(block, preview));
-    fx.textures.insert(key, texture.clone());
-    texture
-}
-
-fn ship_texture_image(block: BlockType, preview: bool) -> Image {
-    let size = 64u32;
-    let base = voxel_color(Voxel::from(block));
-    let mut data = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let u = x as f32 / size as f32;
-            let v = y as f32 / size as f32;
-            let panel = ((x / 16) + (y / 16)) % 2;
-            let seam = x % 16 == 0 || y % 16 == 0 || x % 16 == 15 || y % 16 == 15;
-            let diag = ((x as i32 - y as i32).rem_euclid(13)) == 0;
-            let hash = (((x * 37 + y * 91 + Voxel::from(block) as u32 * 17) & 31) as f32) / 31.0;
-            let rivet = (x % 16 == 3 || x % 16 == 12) && (y % 16 == 3 || y % 16 == 12);
-            let scratch = (x * 11 + y * 7 + Voxel::from(block) as u32 * 5) % 47 == 0;
-
-            let (mut r, mut g, mut b, mut a): (f32, f32, f32, f32) =
-                (base[0], base[1], base[2], 1.0);
-            match block {
-                BlockType::ShipHullDark => {
-                    let shade = 0.70 + hash * 0.26 + panel as f32 * 0.08;
-                    r = (0.060 + shade * 0.075).min(0.22);
-                    g = (0.075 + shade * 0.088).min(0.25);
-                    b = (0.105 + shade * 0.125).min(0.34);
-                    if seam {
-                        r += 0.08;
-                        g += 0.15;
-                        b += 0.19;
-                    }
-                    if rivet {
-                        r += 0.16;
-                        g += 0.18;
-                        b += 0.23;
-                    }
-                    if scratch {
-                        r += 0.07;
-                        g += 0.08;
-                        b += 0.10;
-                    }
-                }
-                BlockType::ShipHullAlloy => {
-                    let brushed = (u * 22.0).sin() * 0.035 + (v * 51.0 + hash).sin() * 0.025;
-                    r = (0.72 + brushed + panel as f32 * 0.045).clamp(0.0, 1.0);
-                    g = (0.78 + brushed + panel as f32 * 0.050).clamp(0.0, 1.0);
-                    b = (0.84 + brushed + panel as f32 * 0.055).clamp(0.0, 1.0);
-                    if seam || diag {
-                        r += 0.10;
-                        g += 0.12;
-                        b += 0.14;
-                    }
-                    if rivet {
-                        r += 0.12;
-                        g += 0.13;
-                        b += 0.13;
-                    }
-                    if scratch {
-                        r -= 0.045;
-                        g -= 0.040;
-                        b -= 0.035;
-                    }
-                }
-                BlockType::CockpitGlass => {
-                    let glare = if diag || (x + y) % 29 == 0 { 0.30 } else { 0.0 };
-                    let grid = if x % 12 == 0 || y % 12 == 0 {
-                        0.16
-                    } else {
-                        0.0
-                    };
-                    let laminate = if (x + y * 3) % 17 == 0 { 0.08 } else { 0.0 };
-                    r = 0.008 + glare * 0.09 + laminate;
-                    g = 0.11 + grid + glare * 0.28 + laminate;
-                    b = 0.17 + grid + glare * 0.36 + laminate;
-                    a = if preview { 0.34 } else { 1.0 };
-                }
-                BlockType::NeonCyan
-                | BlockType::NeonMagenta
-                | BlockType::NeonAmber
-                | BlockType::EngineCore
-                | BlockType::LuminiteCrystal
-                | BlockType::MagnetiteOre
-                | BlockType::IridiumVein => {
-                    let stripe = if x % 10 < 3 || y % 18 < 2 { 0.45 } else { 0.0 };
-                    let core = (1.0 - ((u - 0.5).abs().max((v - 0.5).abs()) * 2.0)).clamp(0.0, 1.0);
-                    let boost = 0.65 + stripe + core * 0.42 + hash * 0.12;
-                    r = (r * boost).min(1.0);
-                    g = (g * boost).min(1.0);
-                    b = (b * boost).min(1.0);
-                }
-                _ => {
-                    let shade = 0.84 + hash * 0.18 + panel as f32 * 0.04;
-                    r = (r * shade).min(1.0);
-                    g = (g * shade).min(1.0);
-                    b = (b * shade).min(1.0);
-                }
-            }
-
-            if preview {
-                let grid = if x % 8 == 0 || y % 8 == 0 { 0.28 } else { 0.0 };
-                r = (r + grid * 0.20).min(1.0);
-                g = (g + grid * 0.72).min(1.0);
-                b = (b + grid * 0.95).min(1.0);
-                a = a.min(0.48);
-            }
-
-            data.push((r.clamp(0.0, 1.0) * 255.0).round() as u8);
-            data.push((g.clamp(0.0, 1.0) * 255.0).round() as u8);
-            data.push((b.clamp(0.0, 1.0) * 255.0).round() as u8);
-            data.push((a.clamp(0.0, 1.0) * 255.0).round() as u8);
-        }
-    }
-    let mut image = Image::new(
-        Extent3d {
-            width: size,
-            height: size,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
-    );
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        address_mode_w: ImageAddressMode::Repeat,
-        ..ImageSamplerDescriptor::linear()
-    });
-    image
 }
 
 fn ship_trail_specs(kind: ShipKind) -> Vec<ShipTrailSpec> {
@@ -1842,12 +2142,14 @@ fn update_ship_energy_trails(
 
 fn spawn_cockpit_holograms(
     parent: &mut ChildBuilder,
+    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     fx: &mut ShipFxCache,
     cube: &Handle<Mesh>,
     kind: ShipKind,
     bp: &ShipBlueprint,
 ) {
+    spawn_realistic_cockpit_parts(parent, meshes, materials, fx, kind, bp);
     for panel in cockpit_panel_specs(kind, bp) {
         let mat = cockpit_panel_material(fx, materials, panel.tone);
         spawn_panel(
@@ -2275,7 +2577,17 @@ fn resolved_world_entry_anchor(
     let pos = active.meta.player_pos;
     let mut anchor = Vec3::new(pos[0], pos[1], pos[2]);
     let mut yaw = active.meta.player_yaw;
-    if settings.visual_preset == crate::settings::VisualPreset::NeonShuttle {
+    if settings.visual_preset == crate::settings::VisualPreset::NaturalWorld {
+        let bx = crate::chunk::floor_to_i32_safe(anchor.x);
+        let bz = crate::chunk::floor_to_i32_safe(anchor.z);
+        let surface = generator.surface_height_at(bx, bz);
+        if generator.biome_at(bx, bz).is_showcase_terrain() || anchor.y > surface as f32 + 90.0 {
+            if let Some(spawn) = generator.find_natural_spawn(0, 0, 4096) {
+                anchor = Vec3::new(spawn.x as f32 + 0.5, spawn.y as f32, spawn.z as f32 + 0.5);
+                yaw = 0.0;
+            }
+        }
+    } else if settings.visual_preset == crate::settings::VisualPreset::NeonShuttle {
         let bx = crate::chunk::floor_to_i32_safe(anchor.x);
         let bz = crate::chunk::floor_to_i32_safe(anchor.z);
         if !generator.biome_at(bx, bz).is_neon_showcase() {
@@ -2781,9 +3093,8 @@ fn ship_flight_input(
         mouse_dx += ev.delta.x;
         mouse_dy += ev.delta.y;
     }
-    let inv_dt = if dt > 1e-4 { 1.0 / dt } else { 60.0 };
-    // Sensitivity scaled so a normal flick produces ~0.9 rad/s, similar to
-    // before but properly integrated against dt.
+    // Sensitivity stays deliberately low: mouse aims the nose, while A/D
+    // commits a smooth aircraft-style turn instead of snapping hard.
     let key_turn_left = keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft);
     let key_turn_right = keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight);
     let turn_input = match (key_turn_left, key_turn_right) {
@@ -2800,14 +3111,18 @@ fn ship_flight_input(
         (false, true) => -1.0,
         _ => 0.0,
     };
-    let target_yaw_rate = (-mouse_dx * 0.00085) * inv_dt.min(120.0) + turn_input * 0.95;
-    let target_pitch_rate = (-mouse_dy * 0.00065) * inv_dt.min(120.0) + pitch_input * 0.78;
-    let look_ease = 1.0 - (-dt * 10.0).exp();
+    let (target_yaw_rate, target_pitch_rate) =
+        ship_target_angular_rates(mouse_dx, mouse_dy, turn_input, pitch_input, dt);
+    let look_ease = 1.0 - (-dt * 6.5).exp();
     motion.yaw_rate += (target_yaw_rate - motion.yaw_rate) * look_ease;
     motion.pitch_rate += (target_pitch_rate - motion.pitch_rate) * look_ease;
     // Clamp angular velocities for a heavier, more cinematic feel.
-    motion.yaw_rate = motion.yaw_rate.clamp(-1.8, 1.8);
-    motion.pitch_rate = motion.pitch_rate.clamp(-1.1, 1.1);
+    motion.yaw_rate = motion
+        .yaw_rate
+        .clamp(-SHIP_YAW_RATE_LIMIT, SHIP_YAW_RATE_LIMIT);
+    motion.pitch_rate = motion
+        .pitch_rate
+        .clamp(-SHIP_PITCH_RATE_LIMIT, SHIP_PITCH_RATE_LIMIT);
 
     let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
     if wheel_delta.abs() > 0.1 {
@@ -2819,13 +3134,13 @@ fn ship_flight_input(
     // --- Roll-coordinated turn: A/D visibly banks the shuttle, but the
     // keyboard rudder above is the primary authority. A is left, D is right.
     let roll_input = turn_input;
-    let target_roll = roll_input * 0.55;
-    let roll_ease = 1.0 - (-dt * 3.2).exp();
+    let target_roll = roll_input * SHIP_TARGET_ROLL;
+    let roll_ease = 1.0 - (-dt * 2.4).exp();
     motion.roll += (target_roll - motion.roll) * roll_ease;
     // Bank-driven turn now follows the same sign as keyboard yaw, so holding
     // A no longer slips/turns right while D no longer slips/turns left.
-    let bank_yaw_rate = motion.roll * 0.35;
-    let rudder = turn_input * 0.35;
+    let bank_yaw_rate = motion.roll * SHIP_BANK_YAW_RATE;
+    let rudder = turn_input * SHIP_RUDDER_YAW_RATE;
     motion.yaw += (motion.yaw_rate + bank_yaw_rate + rudder) * dt;
     motion.pitch = (motion.pitch + motion.pitch_rate * dt).clamp(-0.85, 0.72);
 
@@ -4139,6 +4454,73 @@ mod tests {
     }
 
     #[test]
+    fn visible_ship_renderer_uses_smooth_realistic_meshes_not_voxel_blocks() {
+        for kind in ShipKind::ALL {
+            let shell = realistic_ship_exterior_specs(kind);
+            assert!(
+                shell
+                    .iter()
+                    .filter(|part| part.mesh == RealShipMeshKind::SmoothEllipsoid)
+                    .count()
+                    >= 3,
+                "{kind:?} should be built from smooth body/canopy ellipsoids"
+            );
+            assert!(
+                shell
+                    .iter()
+                    .any(|part| part.tone == RealShipTone::CeramicWhite),
+                "{kind:?} needs the white aircraft-like body from the reference"
+            );
+            assert!(
+                shell
+                    .iter()
+                    .any(|part| part.tone == RealShipTone::SmokedGlass),
+                "{kind:?} needs a black smoked real cockpit canopy"
+            );
+            assert!(
+                shell
+                    .iter()
+                    .filter(|part| part.mesh == RealShipMeshKind::RoundNozzle)
+                    .count()
+                    >= 2,
+                "{kind:?} needs round engine nozzles, not cube engines"
+            );
+        }
+    }
+
+    #[test]
+    fn visible_cockpit_renderer_has_real_seat_glass_and_controls() {
+        for kind in ShipKind::ALL {
+            let bp = blueprint(kind);
+            let real = realistic_cockpit_part_specs(kind, &bp);
+            assert!(
+                real.iter()
+                    .any(|part| part.tone == RealShipTone::SeatLeather),
+                "{kind:?} cockpit should have a real pilot seat"
+            );
+            assert!(
+                real.iter()
+                    .any(|part| part.tone == RealShipTone::SmokedGlass),
+                "{kind:?} cockpit should have a real inner canopy glass layer"
+            );
+            assert!(
+                real.iter()
+                    .filter(|part| part.tone == RealShipTone::ConsoleBlack)
+                    .count()
+                    >= 2,
+                "{kind:?} cockpit should have physical console surfaces"
+            );
+            assert!(
+                real.iter()
+                    .filter(|part| part.mesh == RealShipMeshKind::RoundNozzle)
+                    .count()
+                    >= 2,
+                "{kind:?} cockpit should have yoke/throttle cylinders"
+            );
+        }
+    }
+
+    #[test]
     fn all_ship_kinds_spawn_cyan_and_amber_energy_wakes() {
         for kind in ShipKind::ALL {
             let specs = ship_trail_specs(kind);
@@ -4174,6 +4556,25 @@ mod tests {
         assert!(cruise.vertical_velocity.abs() <= 4.0);
         assert!(cruise.pitch.abs() <= 0.045);
         assert!(cruise.roll.abs() <= 0.065);
+    }
+
+    #[test]
+    fn ship_keyboard_turning_is_deliberately_cinematic_not_twitchy() {
+        let (yaw, pitch) = ship_target_angular_rates(0.0, 0.0, 1.0, 0.0, 1.0 / 60.0);
+
+        assert!(yaw > 0.0);
+        assert!(yaw <= 0.45, "A/D yaw should stay smooth, got {yaw}");
+        assert_eq!(pitch, 0.0);
+    }
+
+    #[test]
+    fn ship_mouse_yaw_is_a_small_aiming_trim() {
+        let (yaw, _) = ship_target_angular_rates(18.0, 0.0, 0.0, 0.0, 1.0 / 60.0);
+
+        assert!(
+            yaw.abs() < 0.28,
+            "mouse left/right should only trim the shuttle nose, got {yaw}"
+        );
     }
 
     #[test]
