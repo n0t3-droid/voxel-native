@@ -8123,6 +8123,15 @@ fn building_foundation_voxel(
     Some((IVec3::new(x, y, z), Voxel::from(block)))
 }
 
+fn civic_deck_base_y(world: &VoxelWorld, origin: IVec3, x: i32, z: i32) -> i32 {
+    let terrain_base = world.surface_height_at(x, z) + 1;
+    if origin.y - terrain_base >= 4 {
+        origin.y
+    } else {
+        terrain_base
+    }
+}
+
 fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Option<(IVec3, Voxel)> {
     let origin = IVec3::new(project.origin[0], project.origin[1], project.origin[2]);
     match project.kind {
@@ -8725,7 +8734,7 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
         BotTaskKind::BuildPark => {
             let x = origin.x + local.x;
             let z = origin.z + local.z;
-            let base = world.surface_height_at(x, z) + 1;
+            let base = civic_deck_base_y(world, origin, x, z);
             let sx = project.size[0] - 1;
             let sz = project.size[2] - 1;
             let street_face = project
@@ -8773,13 +8782,20 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
             } else if !tree && local.y == 2 && (local.x * 3 + local.z).rem_euclid(29) == 0 {
                 Some((IVec3::new(x, base + 2, z), project.theme.signal()))
             } else {
-                None
+                building_foundation_voxel(
+                    world,
+                    x,
+                    z,
+                    base,
+                    local.y,
+                    center_path || gateway_surface,
+                )
             }
         }
         BotTaskKind::BuildPlaza | BotTaskKind::UpgradeDistrict => {
             let x = origin.x + local.x;
             let z = origin.z + local.z;
-            let base = world.surface_height_at(x, z) + 1;
+            let base = civic_deck_base_y(world, origin, x, z);
             let sx = project.size[0] - 1;
             let sz = project.size[2] - 1;
             let edge = local.x == 0 || local.z == 0 || local.x == sx || local.z == sz;
@@ -8847,7 +8863,14 @@ fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Opti
                 };
                 Some((IVec3::new(x, base + local.y, z), voxel))
             } else {
-                None
+                building_foundation_voxel(
+                    world,
+                    x,
+                    z,
+                    base,
+                    local.y,
+                    edge || cross || center || gateway_surface || roundabout_ring,
+                )
             }
         }
         BotTaskKind::AddLights | BotTaskKind::DecorateStreet => {
@@ -13554,6 +13577,51 @@ mod tests {
     }
 
     #[test]
+    fn raised_civic_plaza_gateway_uses_road_grade_deck() {
+        let world = VoxelWorld::new();
+        let terrain_base = world.surface_height_at(41, 21) + 1;
+        let road_grade_base = terrain_base + 24;
+        let project = BotProject {
+            id: 10,
+            kind: BotTaskKind::BuildPlaza,
+            label: "Raised Road-Facing Plaza".into(),
+            origin: [0, road_grade_base, 0],
+            size: [42, 8, 42],
+            theme: BotTheme::WhiteAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::CivicEdge),
+                ..default()
+            },
+        };
+
+        let gateway_floor = project_voxel(&project, IVec3::new(41, 0, 21), &world);
+        let underdeck_support = project_voxel(&project, IVec3::new(10, 1, 21), &world);
+
+        assert_eq!(
+            gateway_floor,
+            Some((
+                IVec3::new(41, road_grade_base, 21),
+                Voxel::from(BlockType::Limestone)
+            ))
+        );
+        assert_eq!(
+            underdeck_support.map(|(pos, _)| pos),
+            Some(IVec3::new(10, road_grade_base - 1, 21))
+        );
+        assert_ne!(underdeck_support.map(|(_, voxel)| voxel), Some(AIR));
+    }
+
+    #[test]
     fn project_concept_records_park_public_gateway() {
         let mut save = BotWorldSave::default();
         save.districts.push(BotDistrict {
@@ -13626,6 +13694,51 @@ mod tests {
         assert_eq!(gateway_floor, Some(Voxel::from(BlockType::Limestone)));
         assert_eq!(gateway_marker, Some(project.theme.signal()));
         assert_ne!(side_edge_tree, Some(project.theme.signal()));
+    }
+
+    #[test]
+    fn raised_park_gateway_uses_road_grade_deck() {
+        let world = VoxelWorld::new();
+        let terrain_base = world.surface_height_at(29, 15) + 1;
+        let road_grade_base = terrain_base + 20;
+        let project = BotProject {
+            id: 11,
+            kind: BotTaskKind::BuildPark,
+            label: "Raised Road-Facing Park".into(),
+            origin: [0, road_grade_base, 0],
+            size: [30, 8, 30],
+            theme: BotTheme::GreenPark,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept {
+                street_face: Some(BuildingStreetFace::East),
+                block_role: Some(CityBlockRole::CivicEdge),
+                ..default()
+            },
+        };
+
+        let gateway_floor = project_voxel(&project, IVec3::new(29, 0, 15), &world);
+        let underdeck_support = project_voxel(&project, IVec3::new(15, 1, 15), &world);
+
+        assert_eq!(
+            gateway_floor,
+            Some((
+                IVec3::new(29, road_grade_base, 15),
+                Voxel::from(BlockType::Limestone)
+            ))
+        );
+        assert_eq!(
+            underdeck_support.map(|(pos, _)| pos),
+            Some(IVec3::new(15, road_grade_base - 1, 15))
+        );
+        assert_ne!(underdeck_support.map(|(_, voxel)| voxel), Some(AIR));
     }
 
     #[test]
