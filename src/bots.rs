@@ -6059,20 +6059,71 @@ fn roundabout_lot_reservations(
     district: &BotDistrict,
     size: [i32; 3],
 ) -> Vec<(Vec2, f32)> {
-    save.user_roads
+    let footprint_half = size[0].max(size[2]).max(1) as f32 * 0.5;
+    let mut reservations: Vec<(Vec2, f32)> = save
+        .user_roads
         .iter()
         .filter(|guide| guide.shape == BotRoadGuideShape::Roundabout)
         .filter(|guide| road_guide_matches_district(guide, district))
         .map(|guide| {
             let anchor = road_guide_anchor(guide);
-            let footprint_half = size[0].max(size[2]).max(1) as f32 * 0.5;
             let min_distance = roundabout_guide_radius(guide)
                 + guide.width.max(1) as f32 * 0.5
                 + footprint_half
                 + 4.0;
             (Vec2::new(anchor.x, anchor.z), min_distance)
         })
-        .collect()
+        .collect();
+    for project in save.projects.iter().filter(|project| {
+        project.district_id == Some(district.id)
+            && project.kind == BotTaskKind::ExpandRoadGrid
+            && !matches!(project.status, BotProjectStatus::Blocked)
+    }) {
+        for center in autonomous_grid_roundabout_centers(project) {
+            let min_distance =
+                6.0 + project_road_corridor_half_width(project) + footprint_half + 4.0;
+            reservations.push((center, min_distance));
+        }
+    }
+    reservations
+}
+
+fn autonomous_grid_roundabout_centers(project: &BotProject) -> Vec<Vec2> {
+    if project.kind != BotTaskKind::ExpandRoadGrid {
+        return Vec::new();
+    }
+    let mid_x = project.size[0].max(1) / 2;
+    let mid_z = project.size[2].max(1) / 2;
+    let mut centers = Vec::new();
+    for local_x in (mid_x - 12)..=(mid_x + 12) {
+        for local_z in (mid_z - 12)..=(mid_z + 12) {
+            if !(0..project.size[0].max(1)).contains(&local_x)
+                || !(0..project.size[2].max(1)).contains(&local_z)
+            {
+                continue;
+            }
+            let local = IVec3::new(local_x, 0, local_z);
+            if road_grid_profile(project.origin, project.size, local).roundabout_center {
+                let center = Vec2::new(
+                    project.origin[0] as f32 + local_x as f32,
+                    project.origin[2] as f32 + local_z as f32,
+                );
+                if centers
+                    .iter()
+                    .all(|existing: &Vec2| existing.distance_squared(center) > 1.0)
+                {
+                    centers.push(center);
+                }
+            }
+        }
+    }
+    if centers.is_empty() {
+        centers.push(Vec2::new(
+            project.origin[0] as f32 + mid_x as f32,
+            project.origin[2] as f32 + mid_z as f32,
+        ));
+    }
+    centers
 }
 
 fn roundabout_guide_radius(guide: &BotRoadGuide) -> f32 {
@@ -13724,6 +13775,62 @@ mod tests {
                 .iter()
                 .all(|center| center.distance(Vec2::ZERO) >= protected_radius),
             "roundabout lots must stay outside the protected civic/traffic circle radius {protected_radius}, got {centers:?}"
+        );
+    }
+
+    #[test]
+    fn roadside_lot_origins_reserve_autonomous_grid_roundabout_center() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Park,
+            name: "Autonomous Civic Ring".into(),
+            center: [48.0, 90.0, 48.0],
+            radius: 160,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.districts.push(district.clone());
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Boulevard Grid".into(),
+            origin: [0, 90, 0],
+            size: [96, 7, 96],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+        let world = VoxelWorld::new();
+        let size = autonomous_project_size(BotTaskKind::BuildPlaza);
+
+        let lots = roadside_lot_origins(&save, &world, &district, BotTaskKind::BuildPlaza, size, 0);
+        let centers: Vec<Vec2> = lots
+            .iter()
+            .map(|origin| {
+                Vec2::new(
+                    origin[0] as f32 + size[0] as f32 * 0.5,
+                    origin[2] as f32 + size[2] as f32 * 0.5,
+                )
+            })
+            .collect();
+        let roundabout_center = Vec2::new(52.0, 52.0);
+        let protected_radius = 6.0 + 5.5 + size[0].max(size[2]) as f32 * 0.5 + 4.0;
+
+        assert!(
+            centers
+                .iter()
+                .all(|center| center.distance(roundabout_center) >= protected_radius),
+            "autonomous grid roundabout center should stay reserved for traffic/civic space radius {protected_radius}, got {centers:?}"
         );
     }
 
