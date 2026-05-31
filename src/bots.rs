@@ -6382,12 +6382,26 @@ fn road_network_points(save: &BotWorldSave, district: &BotDistrict) -> Vec<Vec2>
             let center = project_center(project.origin, project.size);
             points.push(Vec2::new(center.x, center.z));
         }
+        if project.kind == BotTaskKind::ExpandRoadGrid {
+            for center in autonomous_grid_roundabout_centers(project) {
+                push_unique_road_point(&mut points, center);
+            }
+        }
     }
     if points.is_empty() {
         let center = vec3_from_arr(district.center);
         points.push(Vec2::new(center.x, center.z));
     }
     points
+}
+
+fn push_unique_road_point(points: &mut Vec<Vec2>, point: Vec2) {
+    if points
+        .iter()
+        .all(|existing| existing.distance_squared(point) > 1.0)
+    {
+        points.push(point);
+    }
 }
 
 fn project_road_segments(project: &BotProject) -> Vec<(Vec2, Vec2)> {
@@ -14152,6 +14166,48 @@ mod tests {
             .iter()
             .flat_map(|(a, b)| [a, b])
             .all(|point| point.length() < 10.0));
+    }
+
+    #[test]
+    fn road_network_points_include_autonomous_grid_roundabout_centers() {
+        let district = BotDistrict {
+            id: 7,
+            kind: BotDistrictKind::Park,
+            name: "Grid Civic Anchor".into(),
+            center: [48.0, 90.0, 48.0],
+            radius: 160,
+            road_anchors: vec![],
+            build_slots: vec![],
+            completed_projects: 0,
+        };
+        let mut save = BotWorldSave::default();
+        save.projects.push(BotProject {
+            id: 1,
+            kind: BotTaskKind::ExpandRoadGrid,
+            label: "Boulevard Grid".into(),
+            origin: [0, 90, 0],
+            size: [96, 7, 96],
+            theme: BotTheme::AmberStreet,
+            status: BotProjectStatus::Complete,
+            cursor: 0,
+            total_steps: 1,
+            assigned_bot: None,
+            district_id: Some(7),
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 5,
+            concept: BotProjectConcept::default(),
+        });
+
+        let points = road_network_points(&save, &district);
+
+        assert!(
+            points
+                .iter()
+                .any(|point| point.distance(Vec2::new(52.0, 52.0)) <= 1.5),
+            "autonomous road grid roundabout center should be a road-network point for later civic scoring, got {points:?}"
+        );
     }
 
     #[test]
