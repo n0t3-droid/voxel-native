@@ -292,7 +292,7 @@ fn mode_hotkeys(
         mode.set(
             ActiveMode::BuildLive { tool },
             format!(
-                "Creative Build: {}. LMB draws, RMB cuts, Shift+RMB cuts room depth, Ctrl+Z undo.",
+                "Creative Build: {}. LMB draws, RMB orbits in Sketch, Ctrl+LMB cuts, Shift+LMB hollows, Ctrl+Z undo.",
                 tool.label()
             ),
         );
@@ -404,7 +404,7 @@ fn mode_hotkeys(
             } else {
                 mode.set(
                     ActiveMode::BuildLive { tool },
-                    "Build Live stays active. LMB draw, RMB cut, Shift+RMB room cut, Ctrl+Z undo.",
+                    "Build Live stays active. LMB draw, RMB orbit, Ctrl+LMB cut, Shift+LMB hollow, Ctrl+Z undo.",
                 );
             }
         }
@@ -548,7 +548,7 @@ fn default_creative_mode() -> ActiveMode {
 }
 
 fn default_creative_status() -> &'static str {
-    "Creative Sketch Builder active. Visible cursor draws snapped faces; RMB cuts, Shift+RMB clears room depth, Ctrl+Z undo."
+    "Creative Sketch Builder active. LMB draws snapped faces; RMB orbits; Ctrl+LMB cuts; Shift+LMB hollows room depth; Ctrl+Z undo."
 }
 
 fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {
@@ -635,6 +635,7 @@ fn cursor_policy_for(
     mode: ActiveMode,
     editor_open: bool,
     command_palette_open: bool,
+    sketch_orbiting: bool,
 ) -> CursorPolicy {
     if game_state != GameState::InGame || editor_open || command_palette_open {
         return CursorPolicy::ReleasedVisible;
@@ -647,7 +648,13 @@ fn cursor_policy_for(
         | ActiveMode::CommandPalette => CursorPolicy::ReleasedVisible,
         ActiveMode::BuildLive {
             tool: ToolbeltTool::DrawRect,
-        } => CursorPolicy::ReleasedVisible,
+        } => {
+            if sketch_orbiting {
+                CursorPolicy::LockedHidden
+            } else {
+                CursorPolicy::ReleasedVisible
+            }
+        }
         ActiveMode::BuildLive { .. }
         | ActiveMode::Combat
         | ActiveMode::ShipPlacement { .. }
@@ -678,6 +685,7 @@ pub fn cursor_is_captured(window: &Window) -> bool {
 
 fn mode_cursor_guard(
     game_state: Res<State<GameState>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mode: Res<ModeContext>,
     editor: Res<EditorState>,
     command_palette: Option<Res<CommandPaletteState>>,
@@ -692,6 +700,7 @@ fn mode_cursor_guard(
         mode.mode,
         editor.open,
         command_palette.as_deref().map(|p| p.open).unwrap_or(false),
+        mouse.pressed(MouseButton::Right),
     ) {
         CursorPolicy::ReleasedVisible => {
             window.cursor.grab_mode = CursorGrabMode::None;
@@ -867,6 +876,7 @@ mod tests {
                 },
                 false,
                 false,
+                false,
             ),
             CursorPolicy::ReleasedVisible
         );
@@ -882,23 +892,25 @@ mod tests {
                 },
                 false,
                 false,
+                false,
             ),
             CursorPolicy::LockedHidden
         );
         assert_eq!(
-            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, false),
+            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, false, false),
             CursorPolicy::LockedHidden
         );
     }
 
     #[test]
-    fn cursor_policy_releases_for_sketch_draw_pointer() {
+    fn cursor_policy_releases_for_sketch_draw_pointer_until_right_orbit() {
         assert_eq!(
             cursor_policy_for(
                 GameState::InGame,
                 ActiveMode::BuildLive {
                     tool: ToolbeltTool::DrawRect,
                 },
+                false,
                 false,
                 false,
             ),
@@ -909,8 +921,22 @@ mod tests {
             cursor_policy_for(
                 GameState::InGame,
                 ActiveMode::BuildLive {
+                    tool: ToolbeltTool::DrawRect,
+                },
+                false,
+                false,
+                true,
+            ),
+            CursorPolicy::LockedHidden,
+            "Holding RMB in Sketch Draw should immediately become camera orbit"
+        );
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::BuildLive {
                     tool: ToolbeltTool::BrushPlace,
                 },
+                false,
                 false,
                 false,
             ),
@@ -929,11 +955,12 @@ mod tests {
                 },
                 false,
                 false,
+                false,
             ),
             CursorPolicy::ReleasedVisible
         );
         assert_eq!(
-            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, true),
+            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, true, false),
             CursorPolicy::ReleasedVisible
         );
     }

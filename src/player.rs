@@ -358,6 +358,7 @@ fn update_bloom_by_graphics(
 
 fn update_look(
     time: Res<Time>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mut motion_evr: EventReader<MouseMotion>,
     windows: Query<&Window, With<PrimaryWindow>>,
     scope: Res<crate::weapons::ScopeState>,
@@ -385,9 +386,15 @@ fn update_look(
         return;
     }
 
-    if gesture_lock.as_deref().map(|g| g.active).unwrap_or(false) {
+    let sketch_orbiting = mode
+        .as_deref()
+        .and_then(|m| m.build_tool())
+        .is_some_and(|tool| tool == crate::toolbelt::ToolbeltTool::DrawRect)
+        && mouse.pressed(MouseButton::Right);
+
+    if gesture_lock.as_deref().map(|g| g.active).unwrap_or(false) && !sketch_orbiting {
         motion_evr.clear();
-    } else if cursor_locked {
+    } else if cursor_locked || sketch_orbiting {
         for ev in motion_evr.read() {
             player.yaw -= ev.delta.x * player.sensitivity * sens_scale;
             player.pitch =

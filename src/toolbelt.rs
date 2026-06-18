@@ -104,7 +104,7 @@ impl ToolbeltTool {
     pub fn hint(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Move, inspect, and keep weapons off while Build Studio is open.",
-            ToolbeltTool::DrawRect => "SketchUp-style draw-first pointer tool: LMB draws exact snapped faces, RMB cuts openings, Shift+RMB clears a room-depth interior behind the drawn face. Ctrl+Z/Ctrl+Y undo/redo.",
+            ToolbeltTool::DrawRect => "SketchUp-style draw-first tool: LMB draws exact snapped faces, hold RMB orbits the camera, Ctrl+LMB cuts openings, Shift+LMB hollows room depth. Ctrl+Z/Ctrl+Y undo/redo.",
             ToolbeltTool::Sculpt => "LMB Push/Pulls faces. Alt+LMB temporarily fills rectangles. G swaps Fill/Push.",
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
@@ -114,6 +114,277 @@ impl ToolbeltTool {
             ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
             ToolbeltTool::CityFacade => "LMB stamps the active facade onto the targeted wall.",
             ToolbeltTool::AnimationPick => "LMB/RMB pick voxels for animation authoring.",
+        }
+    }
+
+    fn action_hints(self, picker_open: bool) -> [Option<ToolActionHint>; 4] {
+        match self {
+            ToolbeltTool::Navigate => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Inspect",
+                    Icon::Eye,
+                    ActionTone::Dim,
+                    "Inspect the world without editing.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "HOLD",
+                    "Orbit",
+                    Icon::ModeNavigate,
+                    ActionTone::Primary,
+                    "Hold right mouse to move the camera.",
+                )),
+                None,
+                None,
+            ],
+            ToolbeltTool::DrawRect => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Draw",
+                    Icon::Grid,
+                    ActionTone::Tool,
+                    "Drag from a snapped voxel endpoint to draw a face.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "HOLD",
+                    "Orbit",
+                    Icon::ModeNavigate,
+                    ActionTone::Info,
+                    "Hold right mouse to orbit without leaving Sketch Draw.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "CTRL",
+                    "Cut",
+                    Icon::Eraser,
+                    ActionTone::Danger,
+                    "Hold Ctrl and drag left mouse to cut an opening.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "SHIFT",
+                    "Room",
+                    Icon::Cube,
+                    ActionTone::Warning,
+                    "Hold Shift and drag left mouse to hollow a livable room depth.",
+                )),
+            ],
+            ToolbeltTool::Sculpt => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Push",
+                    Icon::Move,
+                    ActionTone::Tool,
+                    "Drag a face to push or pull it.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Ref",
+                    Icon::Snap,
+                    ActionTone::Info,
+                    "Set Push/Pull reference points.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "ALT",
+                    "Fill",
+                    Icon::Grid,
+                    ActionTone::Warning,
+                    "Hold Alt and drag left mouse for temporary rectangle fill.",
+                )),
+                None,
+            ],
+            ToolbeltTool::SmartTower => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "2X",
+                    "Tower",
+                    Icon::City,
+                    ActionTone::Tool,
+                    "Pick two corners to build a detailed tower shell.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Cancel",
+                    Icon::Close,
+                    ActionTone::Warning,
+                    "Cancel the tower preview.",
+                )),
+                None,
+                None,
+            ],
+            ToolbeltTool::BrushPlace => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Build",
+                    Icon::Brush,
+                    ActionTone::Tool,
+                    "Drag from a point to an endpoint to build exact blocks.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Cut",
+                    Icon::Eraser,
+                    ActionTone::Danger,
+                    "Right mouse uses the same endpoint gesture to cut.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Wheel,
+                    "",
+                    "Size",
+                    Icon::Scale,
+                    ActionTone::Info,
+                    "Mouse wheel resizes the live brush.",
+                )),
+                None,
+            ],
+            ToolbeltTool::BrushCut => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Cut",
+                    Icon::Eraser,
+                    ActionTone::Danger,
+                    "Drag from a point to an endpoint to cut exact blocks.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Cut",
+                    Icon::Eraser,
+                    ActionTone::Danger,
+                    "Right mouse also starts a cut gesture.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Wheel,
+                    "",
+                    "Size",
+                    Icon::Scale,
+                    ActionTone::Info,
+                    "Mouse wheel resizes the live brush.",
+                )),
+                None,
+            ],
+            ToolbeltTool::CityRoad => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Road",
+                    Icon::Road,
+                    ActionTone::Tool,
+                    "Draw road components with endpoint and branch snapping.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Delete",
+                    Icon::Delete,
+                    ActionTone::Danger,
+                    "Delete the selected road component or cancel the current road.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Wheel,
+                    "",
+                    "Shape",
+                    Icon::Scale,
+                    if picker_open {
+                        ActionTone::Primary
+                    } else {
+                        ActionTone::Info
+                    },
+                    "Wheel edits selected road width, roundabout radius, or bridge height.",
+                )),
+                None,
+            ],
+            ToolbeltTool::CityDistrict => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "2X",
+                    "Area",
+                    Icon::District,
+                    ActionTone::Tool,
+                    "Mark two corners for the bot city area.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Cancel",
+                    Icon::Close,
+                    ActionTone::Warning,
+                    "Cancel or remove the last city area.",
+                )),
+                None,
+                None,
+            ],
+            ToolbeltTool::CityBuilding => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "2X",
+                    "Shell",
+                    Icon::City,
+                    ActionTone::Tool,
+                    "Choose two corners for a building shell.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Cancel",
+                    Icon::Close,
+                    ActionTone::Warning,
+                    "Remove or cancel the current building shell.",
+                )),
+                None,
+                None,
+            ],
+            ToolbeltTool::CityFacade => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Stamp",
+                    Icon::Open,
+                    ActionTone::Tool,
+                    "Stamp the active facade onto the targeted wall.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Undo",
+                    Icon::Undo,
+                    ActionTone::Warning,
+                    "Remove the last facade stamp.",
+                )),
+                None,
+                None,
+            ],
+            ToolbeltTool::AnimationPick => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Add",
+                    Icon::Animation,
+                    ActionTone::Tool,
+                    "Add a voxel to the animation selection.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Remove",
+                    Icon::Delete,
+                    ActionTone::Danger,
+                    "Remove a voxel from the animation selection.",
+                )),
+                None,
+                None,
+            ],
         }
     }
 
@@ -215,7 +486,7 @@ impl Default for ToolbeltState {
             palette_open: false,
             tool: ToolbeltTool::DrawRect,
             status:
-                "Creative Sketch Builder: visible cursor draws faces; RMB cuts; Shift+RMB clears room depth; Ctrl+Z undo."
+                "Creative Sketch Builder: LMB draws, hold RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows, Ctrl+Z undo."
                     .into(),
         }
     }
@@ -533,6 +804,11 @@ fn step_brush_uniform(brush: IVec3, delta: i32) -> IVec3 {
 fn compact_status(status: &str, tool: ToolbeltTool) -> String {
     if status.len() <= 96 {
         status.to_owned()
+    } else if tool == ToolbeltTool::DrawRect {
+        format!(
+            "{} ready. LMB draw, RMB orbit, Ctrl/Shift+LMB cut.",
+            tool.label()
+        )
     } else {
         format!(
             "{} ready. LMB endpoint build, RMB cut, Tab tools.",
@@ -560,6 +836,46 @@ enum BuildWorkflowPreset {
     CityShell,
     Skyline,
     Spacecraft,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionTone {
+    Tool,
+    Primary,
+    Info,
+    Warning,
+    Danger,
+    Dim,
+}
+
+#[derive(Clone, Copy)]
+struct ToolActionHint {
+    glyph: MouseGlyph,
+    modifier: &'static str,
+    label: &'static str,
+    icon: Icon,
+    tone: ActionTone,
+    hint: &'static str,
+}
+
+impl ToolActionHint {
+    const fn new(
+        glyph: MouseGlyph,
+        modifier: &'static str,
+        label: &'static str,
+        icon: Icon,
+        tone: ActionTone,
+        hint: &'static str,
+    ) -> Self {
+        Self {
+            glyph,
+            modifier,
+            label,
+            icon,
+            tone,
+            hint,
+        }
+    }
 }
 
 impl BuildWorkflowPreset {
@@ -639,7 +955,7 @@ impl BuildWorkflowPreset {
 
     fn status(self) -> String {
         match self {
-            Self::Sketch => "Sketch workflow: LMB drag a snapped rectangle, release to fill; Alt turns it into Push/Pull.".into(),
+            Self::Sketch => "Sketch workflow: LMB drag a snapped rectangle, RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows; Alt turns it into Push/Pull.".into(),
             Self::PushPull => "Push workflow: hover a face, LMB drag depth, release to commit; Alt gives temporary Fill.".into(),
             Self::ModernHouse => "Modern house workflow: white wall material, wide wall brush, locked-plane sketching, then Push/Pull details.".into(),
             Self::Roads => "Road and traffic workflow: draw road components with endpoint snap; wheel edits width/bridge height; middle mouse retextures.".into(),
@@ -708,9 +1024,16 @@ fn draw_build_dock(
             colors.surface_strong.b(),
             if picker_open { 218 } else { 186 },
         ))
-        .stroke(egui::Stroke::new(1.15, colors.info))
+        .stroke(egui::Stroke::new(
+            1.15,
+            if picker_open {
+                colors.info
+            } else {
+                active_tool.category_color()
+            },
+        ))
         .inner_margin(egui::Margin::symmetric(12.0, 9.0))
-        .rounding(egui::Rounding::same(10.0))
+        .rounding(egui::Rounding::same(8.0))
         .shadow(egui::epaint::Shadow {
             offset: egui::vec2(0.0, 10.0),
             blur: 24.0,
@@ -728,23 +1051,7 @@ fn draw_build_dock(
 
                 ui.horizontal(|ui| {
                     selected_tool_badge(ui, active_tool, picker_open, primary);
-                    mouse_action_badge(
-                        ui,
-                        MouseGlyph::Left,
-                        active_tool.left_icon(),
-                        active_tool.category_color(),
-                        active_tool.left_hint(),
-                    );
-                    mouse_action_badge(
-                        ui,
-                        MouseGlyph::Right,
-                        active_tool.right_icon(),
-                        alert_or_dim(active_tool.right_is_cancel(), dim),
-                        active_tool.right_hint(),
-                    );
-                    if let Some((icon, hint)) = active_tool.wheel_action(picker_open) {
-                        mouse_action_badge(ui, MouseGlyph::Wheel, icon, primary, hint);
-                    }
+                    contextual_action_strip(ui, active_tool, picker_open, primary, dim);
                     ui.separator();
                     metric_chip(
                         ui,
@@ -777,6 +1084,10 @@ fn draw_build_dock(
                         result.toggle_picker = true;
                     }
                 });
+
+                if !picker_open {
+                    compact_hud_status(ui, status, active_tool, theme);
+                }
 
                 if picker_open {
                     crate::ui_kit::compact_separator(ui, theme);
@@ -870,6 +1181,127 @@ fn selected_tool_badge(
         primary,
     );
     response.on_hover_text(tool.hint());
+}
+
+fn contextual_action_strip(
+    ui: &mut egui::Ui,
+    tool: ToolbeltTool,
+    picker_open: bool,
+    primary: egui::Color32,
+    dim: egui::Color32,
+) {
+    for action in tool.action_hints(picker_open).into_iter().flatten() {
+        action_card(ui, tool, action, primary, dim);
+    }
+}
+
+fn action_tone_color(
+    tool: ToolbeltTool,
+    tone: ActionTone,
+    primary: egui::Color32,
+    dim: egui::Color32,
+) -> egui::Color32 {
+    match tone {
+        ActionTone::Tool => tool.category_color(),
+        ActionTone::Primary => primary,
+        ActionTone::Info => egui::Color32::from_rgb(82, 230, 255),
+        ActionTone::Warning => AMBER,
+        ActionTone::Danger => egui::Color32::from_rgb(255, 84, 96),
+        ActionTone::Dim => dim,
+    }
+}
+
+fn action_card(
+    ui: &mut egui::Ui,
+    tool: ToolbeltTool,
+    action: ToolActionHint,
+    primary: egui::Color32,
+    dim: egui::Color32,
+) {
+    let color = action_tone_color(tool, action.tone, primary, dim);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(86.0, 40.0), egui::Sense::hover());
+    let hovered = response.hovered();
+    let painter = ui.painter_at(rect);
+    let fill = if hovered {
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 58)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(8, 20, 28, 172)
+    };
+    painter.rect(
+        rect,
+        egui::Rounding::same(7.0),
+        fill,
+        egui::Stroke::new(
+            1.0,
+            if hovered {
+                color
+            } else {
+                color.linear_multiply(0.70)
+            },
+        ),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.top() + 13.0)),
+        egui::Rounding::same(7.0),
+        egui::Color32::from_white_alpha(if hovered { 34 } else { 20 }),
+    );
+    let mouse_rect =
+        egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 8.0), egui::vec2(17.0, 23.0));
+    paint_mouse_glyph(&painter, mouse_rect, action.glyph, color);
+    paint_icon(
+        &painter,
+        egui::Rect::from_min_size(rect.min + egui::vec2(27.0, 10.0), egui::vec2(16.0, 16.0)),
+        action.icon,
+        color,
+    );
+    if !action.modifier.is_empty() {
+        painter.text(
+            rect.min + egui::vec2(45.0, 11.0),
+            egui::Align2::LEFT_CENTER,
+            action.modifier,
+            egui::FontId::monospace(7.2),
+            color,
+        );
+    }
+    painter.text(
+        rect.min + egui::vec2(45.0, 26.0),
+        egui::Align2::LEFT_CENTER,
+        action.label,
+        egui::FontId::monospace(9.7),
+        TEXT,
+    );
+    response.on_hover_text(action.hint);
+}
+
+fn compact_hud_status(
+    ui: &mut egui::Ui,
+    status: &str,
+    active_tool: ToolbeltTool,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    let text = compact_status(status, active_tool);
+    let frame = egui::Frame::none()
+        .fill(egui::Color32::from_rgba_unmultiplied(0, 8, 12, 112))
+        .stroke(egui::Stroke::new(
+            1.0,
+            active_tool.category_color().linear_multiply(0.45),
+        ))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 4.0));
+    ui.add_space(2.0);
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+            paint_icon(ui.painter(), rect, Icon::Hud, active_tool.category_color());
+            ui.label(
+                egui::RichText::new(text)
+                    .monospace()
+                    .size(9.4)
+                    .color(colors.text_muted),
+            );
+        });
+    });
 }
 
 fn category_mark(ui: &mut egui::Ui, tool: ToolbeltTool) {
@@ -1040,52 +1472,11 @@ fn brush_preset_chip(ui: &mut egui::Ui, label: &'static str, size: IVec3, brush:
     .clicked()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MouseGlyph {
     Left,
     Right,
     Wheel,
-}
-
-fn mouse_action_badge(
-    ui: &mut egui::Ui,
-    button: MouseGlyph,
-    icon: Icon,
-    color: egui::Color32,
-    hint: &'static str,
-) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(64.0, 34.0), egui::Sense::hover());
-    let hovered = response.hovered();
-    let bg = if hovered {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 70)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(12, 28, 38, 168)
-    };
-    let painter = ui.painter_at(rect);
-    painter.rect(
-        rect,
-        egui::Rounding::same(8.0),
-        bg,
-        egui::Stroke::new(
-            1.0,
-            if hovered {
-                color
-            } else {
-                color.linear_multiply(0.75)
-            },
-        ),
-    );
-
-    let mouse_rect =
-        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 5.0), egui::vec2(18.0, 24.0));
-    paint_mouse_glyph(&painter, mouse_rect, button, color);
-    paint_icon(
-        &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(34.0, 8.0), egui::vec2(18.0, 18.0)),
-        icon,
-        color,
-    );
-    response.on_hover_text(hint);
 }
 
 fn paint_mouse_glyph(
@@ -1166,14 +1557,6 @@ fn metric_chip(
         TEXT,
     );
     response.on_hover_text(hint);
-}
-
-fn alert_or_dim(alert: bool, dim: egui::Color32) -> egui::Color32 {
-    if alert {
-        AMBER
-    } else {
-        dim
-    }
 }
 
 fn tool_chip(
@@ -1288,89 +1671,6 @@ fn workflow_preset_chip(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected
     clicked
 }
 
-impl ToolbeltTool {
-    fn left_icon(self) -> Icon {
-        match self {
-            ToolbeltTool::Navigate => Icon::Eye,
-            ToolbeltTool::DrawRect => Icon::Grid,
-            ToolbeltTool::Sculpt => Icon::Move,
-            ToolbeltTool::SmartTower => Icon::City,
-            ToolbeltTool::BrushPlace => Icon::Brush,
-            ToolbeltTool::BrushCut => Icon::Eraser,
-            ToolbeltTool::CityRoad => Icon::Road,
-            ToolbeltTool::CityDistrict => Icon::District,
-            ToolbeltTool::CityBuilding => Icon::City,
-            ToolbeltTool::CityFacade => Icon::Open,
-            ToolbeltTool::AnimationPick => Icon::Eye,
-        }
-    }
-
-    fn right_icon(self) -> Icon {
-        match self {
-            ToolbeltTool::BrushPlace => Icon::Eraser,
-            ToolbeltTool::Sculpt => Icon::Snap,
-            ToolbeltTool::AnimationPick => Icon::Delete,
-            ToolbeltTool::Navigate => Icon::ModeNavigate,
-            _ => Icon::Close,
-        }
-    }
-
-    fn right_is_cancel(self) -> bool {
-        !matches!(
-            self,
-            ToolbeltTool::BrushPlace | ToolbeltTool::Sculpt | ToolbeltTool::AnimationPick
-        )
-    }
-
-    fn left_hint(self) -> &'static str {
-        match self {
-            ToolbeltTool::Navigate => "Inspect without editing",
-            ToolbeltTool::DrawRect => "Left mouse draws from visible cursor endpoint",
-            ToolbeltTool::Sculpt => "Left mouse Push/Pulls; hold Alt for temporary Fill",
-            ToolbeltTool::SmartTower => "Left mouse chooses tower corners",
-            ToolbeltTool::BrushPlace => "Left mouse starts a snapped build endpoint",
-            ToolbeltTool::BrushCut => "Left mouse starts a snapped cut endpoint",
-            ToolbeltTool::CityRoad => {
-                "Left mouse auto-snap road points and branch from existing roads"
-            }
-            ToolbeltTool::CityDistrict => "Left mouse places a bot city area corner",
-            ToolbeltTool::CityBuilding => "Left mouse chooses building corners",
-            ToolbeltTool::CityFacade => "Left mouse stamps the active facade",
-            ToolbeltTool::AnimationPick => "Left mouse adds a voxel to the animation selection",
-        }
-    }
-
-    fn right_hint(self) -> &'static str {
-        match self {
-            ToolbeltTool::Navigate => "Right mouse is reserved for inspect mode",
-            ToolbeltTool::BrushPlace => "Right mouse starts a snapped cut endpoint",
-            ToolbeltTool::Sculpt => "Right mouse sets Push/Pull reference points",
-            ToolbeltTool::AnimationPick => {
-                "Right mouse removes a voxel from the animation selection"
-            }
-            ToolbeltTool::DrawRect => "Right mouse cuts; Shift+Right cuts room depth",
-            ToolbeltTool::SmartTower => "Right mouse cancels the tower preview",
-            ToolbeltTool::BrushCut => "Right mouse starts a snapped cut endpoint",
-            ToolbeltTool::CityRoad => {
-                "Right mouse deletes the selected road component or cancels the current road"
-            }
-            ToolbeltTool::CityDistrict => "Right mouse cancels or removes the last city area",
-            ToolbeltTool::CityBuilding => "Right mouse removes or cancels the current building",
-            ToolbeltTool::CityFacade => "Right mouse removes the last facade stamp",
-        }
-    }
-
-    fn wheel_action(self, picker_open: bool) -> Option<(Icon, &'static str)> {
-        if picker_open {
-            Some((Icon::Rotate, "Mouse wheel cycles tools"))
-        } else if self.uses_live_brush() {
-            Some((Icon::Scale, "Mouse wheel resizes the live brush"))
-        } else {
-            None
-        }
-    }
-}
-
 fn live_chip(ui: &mut egui::Ui, live: bool, expanded: bool, primary: egui::Color32) -> bool {
     let size = if expanded {
         egui::vec2(50.0, 48.0)
@@ -1431,6 +1731,49 @@ mod tests {
     }
 
     #[test]
+    fn sketch_action_cards_match_non_destructive_orbit_workflow() {
+        let actions: Vec<ToolActionHint> = ToolbeltTool::DrawRect
+            .action_hints(false)
+            .into_iter()
+            .flatten()
+            .collect();
+
+        assert_eq!(actions.len(), 4);
+        assert!(actions
+            .iter()
+            .any(|a| a.glyph == MouseGlyph::Left && a.modifier.is_empty() && a.label == "Draw"));
+        assert!(actions.iter().any(|a| a.glyph == MouseGlyph::Right
+            && a.modifier == "HOLD"
+            && a.label == "Orbit"
+            && a.tone == ActionTone::Info));
+        assert!(actions.iter().any(|a| a.glyph == MouseGlyph::Left
+            && a.modifier == "CTRL"
+            && a.label == "Cut"
+            && a.tone == ActionTone::Danger));
+        assert!(actions.iter().any(|a| a.glyph == MouseGlyph::Left
+            && a.modifier == "SHIFT"
+            && a.label == "Room"
+            && a.tone == ActionTone::Warning));
+    }
+
+    #[test]
+    fn road_action_cards_surface_component_editing() {
+        let actions: Vec<ToolActionHint> = ToolbeltTool::CityRoad
+            .action_hints(false)
+            .into_iter()
+            .flatten()
+            .collect();
+
+        assert!(actions.iter().any(|a| a.label == "Road"));
+        assert!(actions
+            .iter()
+            .any(|a| a.label == "Delete" && a.tone == ActionTone::Danger));
+        assert!(actions
+            .iter()
+            .any(|a| a.glyph == MouseGlyph::Wheel && a.label == "Shape"));
+    }
+
+    #[test]
     fn live_brush_size_controls_only_attach_to_brush_tools() {
         assert!(ToolbeltTool::BrushPlace.uses_live_brush());
         assert!(ToolbeltTool::BrushCut.uses_live_brush());
@@ -1450,14 +1793,25 @@ mod tests {
     }
 
     #[test]
-    fn city_road_mouse_hints_explain_fast_branching_and_component_delete() {
-        let left = ToolbeltTool::CityRoad.left_hint();
-        let right = ToolbeltTool::CityRoad.right_hint();
+    fn city_road_action_hints_explain_fast_branching_and_component_delete() {
+        let actions: Vec<ToolActionHint> = ToolbeltTool::CityRoad
+            .action_hints(false)
+            .into_iter()
+            .flatten()
+            .collect();
+        let road = actions
+            .iter()
+            .find(|a| a.label == "Road")
+            .expect("road action");
+        let delete = actions
+            .iter()
+            .find(|a| a.label == "Delete")
+            .expect("delete action");
 
-        assert!(left.contains("auto-snap"));
-        assert!(left.contains("branch"));
-        assert!(right.contains("selected road component"));
-        assert!(right.contains("cancel"));
+        assert!(road.hint.contains("endpoint"));
+        assert!(road.hint.contains("branch"));
+        assert!(delete.hint.contains("selected road component"));
+        assert!(delete.hint.contains("cancel"));
     }
 
     #[test]

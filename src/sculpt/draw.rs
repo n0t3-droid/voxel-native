@@ -4,8 +4,9 @@
 //! needs before the heavier transform-gizmo phases are worth anything:
 //! hold LMB on a face, drag the crosshair to a block endpoint on the locked
 //! plane, release to fill it with the active builder block. In the default
-//! smart builder, RMB does the same gesture as a cut. Esc cancels the active
-//! preview. Undo/redo uses the shared builder history.
+//! sketch builder, RMB is reserved for camera orbit; Ctrl+LMB cuts an
+//! opening and Shift+LMB clears room depth. Esc cancels the active preview.
+//! Undo/redo uses the shared builder history.
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
@@ -111,12 +112,54 @@ impl RectDragButton {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RectStartIntent {
+    fill: bool,
+    cut: bool,
+    room_cut: bool,
+    button: RectDragButton,
+}
+
+fn rect_start_intent(
+    active_tool: ToolbeltTool,
+    left_just: bool,
+    right_just: bool,
+    ctrl: bool,
+    shift: bool,
+) -> RectStartIntent {
+    let smart_tool = matches!(
+        active_tool,
+        ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
+    );
+    let sketch_tool = active_tool == ToolbeltTool::DrawRect;
+    let modifier_cut = sketch_tool && left_just && (ctrl || shift);
+    let brush_cut = active_tool == ToolbeltTool::BrushCut && left_just;
+    let smart_right_cut = smart_tool && right_just;
+    let cut = modifier_cut || brush_cut || smart_right_cut;
+    let fill = left_just && !cut && active_tool != ToolbeltTool::BrushCut;
+    let button = if smart_right_cut {
+        RectDragButton::Right
+    } else {
+        RectDragButton::Left
+    };
+    RectStartIntent {
+        fill,
+        cut,
+        room_cut: sketch_tool && shift && modifier_cut,
+        button,
+    }
+}
+
 fn shape_alt_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
 }
 
 fn shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
+}
+
+fn ctrl_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
 }
 
 fn draw_rect_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, draw: &RectDrawState) -> bool {
@@ -161,12 +204,7 @@ pub fn rect_draw_input(
         ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
     );
 
-    if (keys.just_pressed(KeyCode::Escape)
-        || (mouse.just_pressed(MouseButton::Right)
-            && draw.active
-            && draw.action == RectDrawAction::Fill))
-        && draw.active
-    {
+    if keys.just_pressed(KeyCode::Escape) && draw.active {
         draw.active = false;
         draw.click_finish = false;
         gesture_lock.release(RECT_FILL_OWNER);
@@ -193,7 +231,8 @@ pub fn rect_draw_input(
         motion_evr.clear();
         return;
     };
-    let Some((origin, dir)) = draw_input_ray(active_tool, window, camera, cam_tf) else {
+    let Some((origin, dir)) = draw_input_ray(active_tool, cursor_locked, window, camera, cam_tf)
+    else {
         if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {
             toolbelt.status =
                 "Sketch Draw needs the pointer inside the game window to pick endpoints.".into();
@@ -202,18 +241,22 @@ pub fn rect_draw_input(
         return;
     };
 
-    if mouse.just_pressed(MouseButton::Left) && draw.active && draw.click_finish {
+    let start_intent = rect_start_intent(
+        active_tool,
+        mouse.just_pressed(MouseButton::Left),
+        mouse.just_pressed(MouseButton::Right),
+        ctrl_pressed(&keys),
+        shift_pressed(&keys),
+    );
+
+    if start_intent.fill && draw.active && draw.click_finish {
         commit_rect_fill(&mut draw, &mut world, &mut history, &mut toolbelt);
         gesture_lock.release(RECT_FILL_OWNER);
         motion_evr.clear();
         return;
     }
 
-    let start_cut = (mouse.just_pressed(MouseButton::Right) && active_tool != ToolbeltTool::Sculpt)
-        || (active_tool == ToolbeltTool::BrushCut && mouse.just_pressed(MouseButton::Left));
-    let start_fill = mouse.just_pressed(MouseButton::Left) && active_tool != ToolbeltTool::BrushCut;
-
-    if (start_fill || start_cut) && !draw.active {
+    if (start_intent.fill || start_intent.cut) && !draw.active {
         let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) else {
             toolbelt.status =
                 "Smart Build needs a target face. Aim at a visible block face.".into();
@@ -226,13 +269,13 @@ pub fn rect_draw_input(
             motion_evr.clear();
             return;
         };
-        let action = if start_cut {
+        let action = if start_intent.cut {
             RectDrawAction::Cut
         } else {
             RectDrawAction::Fill
         };
         draw.active = true;
-        let start = rect_start_cell(action, hit, prev);
+        let start = rect_start_cell_from_ray(action, hit, prev, axis_u, axis_v, origin, dir);
         draw.start = start;
         draw.current = start;
         draw.normal = normal;
@@ -240,13 +283,9 @@ pub fn rect_draw_input(
         draw.axis_v = axis_v;
         draw.motion_len = 0.0;
         draw.action = action;
-        draw.button = if start_cut && mouse.just_pressed(MouseButton::Right) {
-            RectDragButton::Right
-        } else {
-            RectDragButton::Left
-        };
+        draw.button = start_intent.button;
         draw.smart_gesture = smart_tool;
-        draw.room_cut = action == RectDrawAction::Cut && shift_pressed(&keys);
+        draw.room_cut = action == RectDrawAction::Cut && start_intent.room_cut;
         draw.inference = RectEndpointInference::None;
         draw.voxel = if action == RectDrawAction::Cut {
             AIR
@@ -267,7 +306,7 @@ pub fn rect_draw_input(
         } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
             "Quick Fill start set. Keep Alt held while starting; drag to fill, LMB commits.".into()
         } else {
-            "Sketch Draw start set. Drag endpoint, release to build. RMB cuts, Shift+RMB clears room depth.".into()
+            "Sketch Draw start set. Drag endpoint, release to build. Hold RMB to orbit; Ctrl+LMB cuts, Shift+LMB hollows.".into()
         };
     }
 
@@ -277,13 +316,15 @@ pub fn rect_draw_input(
             draw.motion_len += ev.delta.length();
         }
         if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
-            let endpoint = snap_rect_endpoint_to_locked_plane(
+            let endpoint = snap_rect_endpoint_to_locked_plane_from_ray(
                 draw.start,
                 draw.normal,
                 draw.axis_u,
                 draw.axis_v,
                 hit,
                 prev,
+                origin,
+                dir,
             );
             let (endpoint, inference) =
                 infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
@@ -339,11 +380,12 @@ pub fn rect_draw_input(
 
 fn draw_input_ray(
     active_tool: ToolbeltTool,
+    cursor_locked: bool,
     window: Option<&bevy::window::Window>,
     camera: &Camera,
     camera_tf: &GlobalTransform,
 ) -> Option<(Vec3, Vec3)> {
-    if matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt) {
+    if matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt) && !cursor_locked {
         if let Some(ray) = window
             .and_then(|window| window.cursor_position())
             .and_then(|cursor| camera.viewport_to_world(camera_tf, cursor))
@@ -403,7 +445,7 @@ fn commit_rect_fill(
         };
         history.record_external(label, changes);
         toolbelt.status = format!(
-            "{} committed: {} selected, {} changed cells. Ctrl+Z undo, Ctrl+R redo.",
+            "{} committed: {} selected, {} changed cells. Ctrl+Z undo, Ctrl+Y redo.",
             if draw.room_cut {
                 "Smart Room Cut"
             } else {
@@ -455,6 +497,72 @@ fn rect_start_cell(action: RectDrawAction, hit: IVec3, adjacent: IVec3) -> IVec3
     }
 }
 
+fn rect_start_cell_from_ray(
+    action: RectDrawAction,
+    hit: IVec3,
+    adjacent: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+) -> IVec3 {
+    let mut start = rect_start_cell(action, hit, adjacent);
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return start;
+    }
+    if let Some(face_hit) = ray_face_hit_point(ray_origin, ray_dir, hit, adjacent) {
+        set_component_by_axis(
+            &mut start,
+            axis_u,
+            round_to_i32_safe(vec_component_by_axis(face_hit, axis_u)),
+        );
+        set_component_by_axis(
+            &mut start,
+            axis_v,
+            round_to_i32_safe(vec_component_by_axis(face_hit, axis_v)),
+        );
+    }
+    start
+}
+
+fn snap_rect_endpoint_to_locked_plane_from_ray(
+    start: IVec3,
+    normal: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    hit: IVec3,
+    adjacent: IVec3,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+) -> IVec3 {
+    let mut snapped =
+        snap_rect_endpoint_to_locked_plane(start, normal, axis_u, axis_v, hit, adjacent);
+    let Some(plane_axis) = normal_axis(normal) else {
+        return snapped;
+    };
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return snapped;
+    }
+    if let Some(face_hit) = ray_face_hit_point(ray_origin, ray_dir, hit, adjacent) {
+        set_component_by_axis(
+            &mut snapped,
+            axis_u,
+            round_to_i32_safe(vec_component_by_axis(face_hit, axis_u)),
+        );
+        set_component_by_axis(
+            &mut snapped,
+            axis_v,
+            round_to_i32_safe(vec_component_by_axis(face_hit, axis_v)),
+        );
+        set_component_by_index(
+            &mut snapped,
+            plane_axis,
+            component_by_index(start, plane_axis),
+        );
+    }
+    snapped
+}
+
 fn snap_rect_endpoint_to_locked_plane(
     start: IVec3,
     normal: IVec3,
@@ -484,6 +592,31 @@ fn snap_rect_endpoint_to_locked_plane(
     set_component_by_axis(&mut snapped, axis_v, component_by_axis(hovered, axis_v));
     set_component_by_index(&mut snapped, plane_axis, start_plane);
     snapped
+}
+
+fn ray_face_hit_point(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    hit: IVec3,
+    adjacent: IVec3,
+) -> Option<Vec3> {
+    let normal = adjacent - hit;
+    let axis = normal_axis(normal)?;
+    let denom = vec_component_by_index(ray_dir, axis);
+    if denom.abs() < 1e-5 {
+        return None;
+    }
+    let plane = if component_by_index(normal, axis) > 0 {
+        component_by_index(hit, axis) as f32 + 1.0
+    } else {
+        component_by_index(hit, axis) as f32
+    };
+    let t = (plane - vec_component_by_index(ray_origin, axis)) / denom;
+    if !t.is_finite() || t < 0.0 {
+        return None;
+    }
+    let face_hit = ray_origin + ray_dir * t;
+    face_hit.is_finite().then_some(face_hit)
 }
 
 fn snap_rect_endpoint_from_locked_plane_ray(
@@ -517,12 +650,12 @@ fn snap_rect_endpoint_from_locked_plane_ray(
     set_component_by_axis(
         &mut snapped,
         axis_u,
-        floor_to_i32_safe(vec_component_by_axis(hit, axis_u)),
+        round_to_i32_safe(vec_component_by_axis(hit, axis_u)),
     );
     set_component_by_axis(
         &mut snapped,
         axis_v,
-        floor_to_i32_safe(vec_component_by_axis(hit, axis_v)),
+        round_to_i32_safe(vec_component_by_axis(hit, axis_v)),
     );
     set_component_by_index(
         &mut snapped,
@@ -609,11 +742,11 @@ fn vec_component_by_index(v: Vec3, index: usize) -> f32 {
     }
 }
 
-fn floor_to_i32_safe(value: f32) -> i32 {
+fn round_to_i32_safe(value: f32) -> i32 {
     if !value.is_finite() {
         return 0;
     }
-    value.floor().clamp(i32::MIN as f32, i32::MAX as f32) as i32
+    value.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
 
 fn component_by_index(v: IVec3, index: usize) -> i32 {
@@ -828,6 +961,29 @@ mod tests {
     }
 
     #[test]
+    fn sketch_right_mouse_is_reserved_for_orbit_not_cut() {
+        let intent = rect_start_intent(ToolbeltTool::DrawRect, false, true, false, false);
+
+        assert!(
+            !intent.cut && !intent.fill,
+            "RMB in Sketch Draw should not remove blocks; it is camera orbit"
+        );
+    }
+
+    #[test]
+    fn sketch_modifier_left_mouse_selects_cut_and_room_cut() {
+        let cut = rect_start_intent(ToolbeltTool::DrawRect, true, false, true, false);
+        assert!(cut.cut);
+        assert!(!cut.room_cut);
+        assert_eq!(cut.button, RectDragButton::Left);
+
+        let room = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, true);
+        assert!(room.cut);
+        assert!(room.room_cut);
+        assert_eq!(room.button, RectDragButton::Left);
+    }
+
+    #[test]
     fn rect_endpoint_snaps_hovered_block_to_locked_floor_plane() {
         let start = IVec3::new(10, 64, 10);
         let hit = IVec3::new(18, 70, 14);
@@ -837,6 +993,41 @@ mod tests {
             snap_rect_endpoint_to_locked_plane(start, IVec3::Y, IVec3::X, IVec3::Z, hit, adjacent);
 
         assert_eq!(snapped, IVec3::new(18, 64, 14));
+    }
+
+    #[test]
+    fn rect_start_snaps_to_nearest_block_corner_on_hit_face() {
+        let start = rect_start_cell_from_ray(
+            RectDrawAction::Fill,
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+            IVec3::X,
+            IVec3::Z,
+            Vec3::new(10.82, 5.0, 14.18),
+            Vec3::NEG_Y,
+        );
+
+        assert_eq!(
+            start,
+            IVec3::new(11, 1, 14),
+            "start point should snap to a real voxel grid corner, not only the hit cell center"
+        );
+    }
+
+    #[test]
+    fn rect_endpoint_snaps_to_nearest_block_corner_from_ray_hit() {
+        let snapped = snap_rect_endpoint_to_locked_plane_from_ray(
+            IVec3::new(0, 1, 0),
+            IVec3::Y,
+            IVec3::X,
+            IVec3::Z,
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+            Vec3::new(10.82, 5.0, 14.18),
+            Vec3::NEG_Y,
+        );
+
+        assert_eq!(snapped, IVec3::new(11, 1, 14));
     }
 
     #[test]
