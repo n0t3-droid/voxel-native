@@ -17,6 +17,7 @@ use crate::menu::GameState;
 use crate::mode::{ActiveMode, ModeContext};
 use crate::settings::WorldSettings;
 use crate::theme::{AMBER, TEXT};
+use crate::world::VoxelWorld;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbeltTool {
@@ -622,7 +623,8 @@ fn draw_toolbelt(
     mut toolbelt: ResMut<ToolbeltState>,
     mut mode: ResMut<ModeContext>,
     mut builder: ResMut<BuilderState>,
-    history: Res<BuilderHistory>,
+    mut history: ResMut<BuilderHistory>,
+    mut world: ResMut<VoxelWorld>,
     mut wheel: EventReader<MouseWheel>,
 ) {
     if !mode.is_build() {
@@ -731,6 +733,15 @@ fn draw_toolbelt(
         builder.status = format!("Live Brush {}x{}x{}", size.x, size.y, size.z);
         toolbelt.status = builder.status.clone();
     }
+    if let Some(command) = dock.history_command {
+        let result = match command {
+            HistoryCommand::Undo => history.pop_undo(&mut world),
+            HistoryCommand::Redo => history.pop_redo(&mut world),
+        };
+        let status = format_history_command_status(command, result);
+        toolbelt.status = status.clone();
+        mode.status = status;
+    }
 }
 
 fn sync_tool_selection(
@@ -824,11 +835,19 @@ struct BuildDockResult {
     brush_preset: Option<IVec3>,
     workflow_preset: Option<BuildWorkflowPreset>,
     block_choice: Option<BlockType>,
+    history_command: Option<HistoryCommand>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryCommand {
+    Undo,
+    Redo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BuildWorkflowPreset {
     Sketch,
+    Room,
     PushPull,
     ModernHouse,
     Roads,
@@ -879,8 +898,9 @@ impl ToolActionHint {
 }
 
 impl BuildWorkflowPreset {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Sketch,
+        Self::Room,
         Self::PushPull,
         Self::ModernHouse,
         Self::Roads,
@@ -893,6 +913,7 @@ impl BuildWorkflowPreset {
     fn label(self) -> &'static str {
         match self {
             Self::Sketch => "SKETCH",
+            Self::Room => "ROOM",
             Self::PushPull => "PUSH",
             Self::ModernHouse => "HOUSE",
             Self::Roads => "ROADS",
@@ -906,6 +927,7 @@ impl BuildWorkflowPreset {
     fn icon(self) -> Icon {
         match self {
             Self::Sketch => Icon::Grid,
+            Self::Room => Icon::Open,
             Self::PushPull => Icon::Move,
             Self::ModernHouse => Icon::Builder,
             Self::Roads => Icon::Road,
@@ -919,6 +941,7 @@ impl BuildWorkflowPreset {
     fn tool(self) -> ToolbeltTool {
         match self {
             Self::Sketch => ToolbeltTool::DrawRect,
+            Self::Room => ToolbeltTool::DrawRect,
             Self::PushPull => ToolbeltTool::Sculpt,
             Self::ModernHouse => ToolbeltTool::DrawRect,
             Self::Roads => ToolbeltTool::CityRoad,
@@ -932,6 +955,7 @@ impl BuildWorkflowPreset {
     fn brush(self) -> Option<IVec3> {
         match self {
             Self::Sketch => Some(IVec3::new(4, 1, 1)),
+            Self::Room => Some(IVec3::new(8, 1, 1)),
             Self::PushPull => Some(IVec3::ONE),
             Self::ModernHouse => Some(IVec3::new(8, 1, 1)),
             Self::Landscape => Some(IVec3::new(8, 1, 8)),
@@ -943,6 +967,7 @@ impl BuildWorkflowPreset {
     fn block(self) -> Option<BlockType> {
         match self {
             Self::Sketch => Some(BlockType::Stone),
+            Self::Room => Some(BlockType::Limestone),
             Self::PushPull => Some(BlockType::Limestone),
             Self::ModernHouse => Some(BlockType::Limestone),
             Self::Roads => Some(BlockType::Stone),
@@ -956,6 +981,7 @@ impl BuildWorkflowPreset {
     fn status(self) -> String {
         match self {
             Self::Sketch => "Sketch workflow: LMB drag a snapped rectangle, RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows; Alt turns it into Push/Pull.".into(),
+            Self::Room => "Room workflow: build a solid mass, then Shift+LMB drag a wall face to hollow livable depth; Ctrl+LMB cuts doors and windows.".into(),
             Self::PushPull => "Push workflow: hover a face, LMB drag depth, release to commit; Alt gives temporary Fill.".into(),
             Self::ModernHouse => "Modern house workflow: white wall material, wide wall brush, locked-plane sketching, then Push/Pull details.".into(),
             Self::Roads => "Road and traffic workflow: draw road components with endpoint snap; wheel edits width/bridge height; middle mouse retextures.".into(),
@@ -969,6 +995,9 @@ impl BuildWorkflowPreset {
     fn hint(self) -> &'static str {
         match self {
             Self::Sketch => "One click switches to rectangle sketching and a flat 4x1 brush.",
+            Self::Room => {
+                "One click switches to Sketch Draw with hollow-room guidance for interiors."
+            }
             Self::PushPull => "One click switches to SketchUp-style face push/pull.",
             Self::ModernHouse => "White plaster, broad wall brush, fast modern-house massing.",
             Self::Roads => {
@@ -990,6 +1019,7 @@ impl BuildWorkflowPreset {
     fn color(self) -> egui::Color32 {
         match self {
             Self::Sketch => egui::Color32::from_rgb(80, 170, 255),
+            Self::Room => egui::Color32::from_rgb(80, 235, 190),
             Self::PushPull => egui::Color32::from_rgb(110, 210, 255),
             Self::ModernHouse => egui::Color32::from_rgb(240, 245, 230),
             Self::Roads => egui::Color32::from_rgb(80, 235, 225),
@@ -1071,14 +1101,26 @@ fn draw_build_dock(
                     } else {
                         metric_chip(ui, Icon::Snap, "SNAP", primary, "Endpoint snap is active");
                     }
-                    metric_chip(
+                    if history_chip(
                         ui,
                         Icon::Undo,
                         &undo_count.to_string(),
                         primary,
-                        "Undo stack",
-                    );
-                    metric_chip(ui, Icon::Redo, &redo_count.to_string(), dim, "Redo stack");
+                        undo_count > 0,
+                        "Undo last build edit",
+                    ) {
+                        result.history_command = Some(HistoryCommand::Undo);
+                    }
+                    if history_chip(
+                        ui,
+                        Icon::Redo,
+                        &redo_count.to_string(),
+                        dim,
+                        redo_count > 0,
+                        "Redo last undone build edit",
+                    ) {
+                        result.history_command = Some(HistoryCommand::Redo);
+                    }
                     ui.separator();
                     if live_chip(ui, true, picker_open, primary) {
                         result.toggle_picker = true;
@@ -1559,6 +1601,84 @@ fn metric_chip(
     response.on_hover_text(hint);
 }
 
+fn history_chip(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    value: &str,
+    color: egui::Color32,
+    enabled: bool,
+    hint: &'static str,
+) -> bool {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(70.0, 34.0), sense);
+    let hovered = response.hovered() && enabled;
+    let painter = ui.painter_at(rect);
+    let visible_color = if enabled {
+        color
+    } else {
+        color.linear_multiply(0.35)
+    };
+    let fill = if hovered {
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 54)
+    } else {
+        egui::Color32::from_rgba_premultiplied(0, 8, 6, 180)
+    };
+    painter.rect(
+        rect,
+        egui::Rounding::same(4.0),
+        fill,
+        egui::Stroke::new(
+            if enabled { 1.15 } else { 1.0 },
+            visible_color.linear_multiply(if hovered { 0.95 } else { 0.55 }),
+        ),
+    );
+    paint_icon(
+        &painter,
+        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 8.0), egui::vec2(17.0, 17.0)),
+        icon,
+        visible_color,
+    );
+    painter.text(
+        rect.right_center() - egui::vec2(7.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        value,
+        egui::FontId::monospace(10.5),
+        if enabled {
+            TEXT
+        } else {
+            egui::Color32::from_white_alpha(92)
+        },
+    );
+    response
+        .on_hover_text(if enabled {
+            hint
+        } else {
+            "No build history for this command yet."
+        })
+        .clicked()
+        && enabled
+}
+
+fn format_history_command_status(
+    command: HistoryCommand,
+    result: Option<(String, usize)>,
+) -> String {
+    match (command, result) {
+        (HistoryCommand::Undo, Some((label, n))) => {
+            format!("Undo '{label}': {n} voxels restored. Click Redo or press Ctrl+Y.")
+        }
+        (HistoryCommand::Redo, Some((label, n))) => {
+            format!("Redo '{label}': {n} voxels applied. Click Undo or press Ctrl+Z.")
+        }
+        (HistoryCommand::Undo, None) => "Undo: no build edits to rewind yet.".into(),
+        (HistoryCommand::Redo, None) => "Redo: no undone build edits to replay yet.".into(),
+    }
+}
+
 fn tool_chip(
     ui: &mut egui::Ui,
     tool: ToolbeltTool,
@@ -1774,6 +1894,19 @@ mod tests {
     }
 
     #[test]
+    fn history_command_statuses_are_direct_and_actionable() {
+        let undo = format_history_command_status(
+            HistoryCommand::Undo,
+            Some(("Sketch Fill 12 cells".into(), 12)),
+        );
+        let redo = format_history_command_status(HistoryCommand::Redo, None);
+
+        assert!(undo.contains("Undo 'Sketch Fill 12 cells'"));
+        assert!(undo.contains("Click Redo"));
+        assert!(redo.contains("no undone build edits"));
+    }
+
+    #[test]
     fn live_brush_size_controls_only_attach_to_brush_tools() {
         assert!(ToolbeltTool::BrushPlace.uses_live_brush());
         assert!(ToolbeltTool::BrushCut.uses_live_brush());
@@ -1821,6 +1954,8 @@ mod tests {
             BuildWorkflowPreset::Sketch.brush(),
             Some(IVec3::new(4, 1, 1))
         );
+        assert_eq!(BuildWorkflowPreset::Room.tool(), ToolbeltTool::DrawRect);
+        assert!(BuildWorkflowPreset::Room.status().contains("Shift+LMB"));
         assert_eq!(BuildWorkflowPreset::Roads.tool(), ToolbeltTool::CityRoad);
         assert!(BuildWorkflowPreset::Roads
             .status()
@@ -1843,6 +1978,10 @@ mod tests {
         );
         assert_eq!(
             BuildWorkflowPreset::ModernHouse.block(),
+            Some(crate::blocks::BlockType::Limestone)
+        );
+        assert_eq!(
+            BuildWorkflowPreset::Room.block(),
             Some(crate::blocks::BlockType::Limestone)
         );
         assert_eq!(
