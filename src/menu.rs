@@ -695,6 +695,25 @@ fn draw_pause_main(
                         report.refreshed_loaded_chunks
                     );
                 }
+                if let Some(report) = world.last_repair_report {
+                    let repair_text = if report.removed_chunks == 0 {
+                        format!("0 fixed / {} scanned", report.scanned_chunks)
+                    } else {
+                        format!(
+                            "{} fixed / {} scanned / {} live refreshed",
+                            report.removed_chunks,
+                            report.scanned_chunks,
+                            report.refreshed_loaded_chunks
+                        )
+                    };
+                    crate::ui_kit::status_chip(
+                        ui,
+                        Icon::Wand,
+                        "REPAIR",
+                        &repair_text,
+                        settings.theme,
+                    );
+                }
                 ui.add_space(6.0);
                 if crate::ui_kit::major_action(
                     ui,

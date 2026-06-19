@@ -110,6 +110,7 @@ fn reinit_world_for_active(
     world.column_top_cy.clear();
     world.edit_dirty_chunks.clear();
     world.edit_save_dirty = false;
+    world.last_repair_report = None;
     if let Some(active) = active.as_deref() {
         let (overrides, manifest) = load_edited_overrides_for_world(&active.meta.name);
         if !overrides.is_empty() {
@@ -167,6 +168,9 @@ pub struct VoxelWorld {
     /// save request. Autosave uses this to avoid serialising every edit
     /// chunk every 30 seconds when nothing changed.
     pub edit_save_dirty: bool,
+    /// Last explicit visual-repair result, shown in the pause menu so the
+    /// repair action never feels like a silent no-op.
+    pub last_repair_report: Option<WorldRepairReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -478,6 +482,7 @@ impl VoxelWorld {
             column_top_cy: AHashMap::new(),
             edit_dirty_chunks: AHashSet::new(),
             edit_save_dirty: false,
+            last_repair_report: None,
         }
     }
 
@@ -526,6 +531,7 @@ impl VoxelWorld {
         if report.removed_chunks > 0 {
             self.edit_save_dirty = true;
         }
+        self.last_repair_report = Some(report);
         report
     }
 
@@ -1993,6 +1999,7 @@ mod tests {
         assert_eq!(report.scanned_chunks, 1);
         assert_eq!(report.removed_chunks, 1);
         assert_eq!(report.refreshed_loaded_chunks, 1);
+        assert_eq!(world.last_repair_report, Some(report));
         assert!(!world.edited_overrides.contains_key(&pos));
         assert!(world.edit_save_dirty);
         assert!(world.edit_dirty_chunks.contains(&pos));
@@ -2012,6 +2019,7 @@ mod tests {
         assert_eq!(report.scanned_chunks, 1);
         assert_eq!(report.removed_chunks, 0);
         assert_eq!(report.kept_chunks, 1);
+        assert_eq!(world.last_repair_report, Some(report));
         assert!(world.edited_overrides.contains_key(&pos));
         assert!(!world.edit_save_dirty);
     }
