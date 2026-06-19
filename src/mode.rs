@@ -592,6 +592,9 @@ fn sync_legacy_toolbelt(mut toolbelt: ResMut<ToolbeltState>, mode: Res<ModeConte
 
     toolbelt.live = mode.mode.is_build();
     toolbelt.palette_open = mode.mode.is_build_picker();
+    if !toolbelt.live || toolbelt.tool != ToolbeltTool::DrawRect {
+        toolbelt.clear_contextual_workflow();
+    }
 
     if mode.is_changed() && !mode.status.is_empty() {
         toolbelt.status = mode.status.clone();

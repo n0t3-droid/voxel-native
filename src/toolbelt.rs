@@ -478,6 +478,7 @@ pub struct ToolbeltState {
     pub palette_open: bool,
     pub tool: ToolbeltTool,
     pub status: String,
+    active_workflow: Option<BuildWorkflowPreset>,
 }
 
 impl Default for ToolbeltState {
@@ -489,6 +490,7 @@ impl Default for ToolbeltState {
             status:
                 "Creative Sketch Builder: LMB draws, hold RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows, Ctrl+Z undo."
                     .into(),
+            active_workflow: Some(BuildWorkflowPreset::Sketch),
         }
     }
 }
@@ -505,6 +507,45 @@ impl ToolbeltState {
 
     pub fn blocks_weapons(&self) -> bool {
         self.palette_open || self.live
+    }
+
+    pub fn room_workflow_active(&self) -> bool {
+        self.live
+            && !self.palette_open
+            && self.tool == ToolbeltTool::DrawRect
+            && self.active_workflow == Some(BuildWorkflowPreset::Room)
+    }
+
+    pub fn clear_contextual_workflow(&mut self) {
+        self.active_workflow = None;
+    }
+
+    fn room_workflow_selected(&self) -> bool {
+        self.tool == ToolbeltTool::DrawRect
+            && self.active_workflow == Some(BuildWorkflowPreset::Room)
+    }
+
+    fn select_tool(&mut self, tool: ToolbeltTool) {
+        self.tool = tool;
+        self.active_workflow = if tool == ToolbeltTool::DrawRect {
+            Some(BuildWorkflowPreset::Sketch)
+        } else {
+            None
+        };
+    }
+
+    fn select_workflow(&mut self, preset: BuildWorkflowPreset) {
+        self.tool = preset.tool();
+        self.active_workflow = Some(preset);
+    }
+
+    fn sync_workflow_to_tool(&mut self) {
+        if self
+            .active_workflow
+            .is_some_and(|preset| preset.tool() != self.tool)
+        {
+            self.active_workflow = None;
+        }
     }
 }
 
@@ -534,7 +575,7 @@ fn toolbelt_hotkeys(
             toolbelt.status = "Weapons armed explicitly. Build tools stay one click away.".into();
         } else {
             if toolbelt.tool == ToolbeltTool::Navigate {
-                toolbelt.tool = ToolbeltTool::DrawRect;
+                toolbelt.select_tool(ToolbeltTool::DrawRect);
             }
             toolbelt.live = true;
             toolbelt.palette_open = true;
@@ -548,13 +589,13 @@ fn toolbelt_hotkeys(
         if !toolbelt.live {
             toolbelt.live = true;
             if toolbelt.tool == ToolbeltTool::Navigate {
-                toolbelt.tool = ToolbeltTool::DrawRect;
+                toolbelt.select_tool(ToolbeltTool::DrawRect);
             }
             changed = true;
         }
         toolbelt.palette_open = !toolbelt.palette_open;
         if toolbelt.palette_open && toolbelt.tool == ToolbeltTool::Navigate {
-            toolbelt.tool = ToolbeltTool::DrawRect;
+            toolbelt.select_tool(ToolbeltTool::DrawRect);
         }
         toolbelt.status = if toolbelt.palette_open {
             "Build Studio picker: click a tool, Q/E cycles tools, Tab closes.".into()
@@ -572,7 +613,7 @@ fn toolbelt_hotkeys(
         toolbelt.palette_open = false;
         changed = true;
         toolbelt.status = if toolbelt.tool == ToolbeltTool::Navigate {
-            toolbelt.tool = ToolbeltTool::DrawRect;
+            toolbelt.select_tool(ToolbeltTool::DrawRect);
             format!(
                 "Build Live: {}. {}",
                 toolbelt.tool.label(),
@@ -590,10 +631,12 @@ fn toolbelt_hotkeys(
     if toolbelt.palette_open || toolbelt.live {
         if keys.just_pressed(KeyCode::KeyQ) {
             toolbelt.tool = toolbelt.tool.stepped(-1);
+            toolbelt.sync_workflow_to_tool();
             changed = true;
         }
         if keys.just_pressed(KeyCode::KeyE) {
             toolbelt.tool = toolbelt.tool.stepped(1);
+            toolbelt.sync_workflow_to_tool();
             changed = true;
         }
     }
@@ -661,7 +704,8 @@ fn draw_toolbelt(
             mode.status = toolbelt.status.clone();
         }
     }
-    let status = compact_status(&toolbelt.status, active_tool);
+    toolbelt.sync_workflow_to_tool();
+    let status = compact_status(&toolbelt.status, active_tool, toolbelt.active_workflow);
     let brush = builder.brush;
 
     let dock = draw_build_dock(
@@ -672,6 +716,7 @@ fn draw_toolbelt(
         brush,
         history.undo_len(),
         history.redo_len(),
+        toolbelt.active_workflow,
         theme,
         primary,
         dim,
@@ -679,7 +724,7 @@ fn draw_toolbelt(
     );
 
     if let Some(tool) = dock.clicked_tool {
-        toolbelt.tool = tool;
+        toolbelt.select_tool(tool);
         mode.set(
             ActiveMode::BuildLive { tool },
             format!("Build Live: {}. {}", tool.label(), tool.hint()),
@@ -688,7 +733,7 @@ fn draw_toolbelt(
     }
     if let Some(preset) = dock.workflow_preset {
         let tool = preset.tool();
-        toolbelt.tool = tool;
+        toolbelt.select_workflow(preset);
         if let Some(brush) = preset.brush() {
             builder.brush = brush;
             builder.status = format!("Live Brush {}x{}x{}", brush.x, brush.y, brush.z);
@@ -750,6 +795,8 @@ fn sync_tool_selection(
     studio: &mut AnimationStudio,
     builder: &mut BuilderState,
 ) {
+    toolbelt.sync_workflow_to_tool();
+
     if let Some(city_tool) = toolbelt.tool.city_tool() {
         city.tool = city_tool;
         city.pending_road_a = None;
@@ -773,6 +820,8 @@ fn sync_tool_selection(
                 toolbelt.tool.label(),
                 toolbelt.tool.hint()
             )
+        } else if toolbelt.room_workflow_selected() {
+            "Build Live: Room workflow. LMB hollows a livable volume, Ctrl+LMB cuts doors/windows, RMB orbits, Ctrl+Z undo.".into()
         } else {
             format!(
                 "Build Live: {}. {}",
@@ -812,9 +861,15 @@ fn step_brush_uniform(brush: IVec3, delta: i32) -> IVec3 {
     )
 }
 
-fn compact_status(status: &str, tool: ToolbeltTool) -> String {
+fn compact_status(
+    status: &str,
+    tool: ToolbeltTool,
+    active_workflow: Option<BuildWorkflowPreset>,
+) -> String {
     if status.len() <= 96 {
         status.to_owned()
+    } else if active_workflow == Some(BuildWorkflowPreset::Room) && tool == ToolbeltTool::DrawRect {
+        "Room workflow ready. LMB hollow, Ctrl+LMB opening, RMB orbit, Ctrl+Z undo.".to_owned()
     } else if tool == ToolbeltTool::DrawRect {
         format!(
             "{} ready. LMB draw, RMB orbit, Ctrl/Shift+LMB cut.",
@@ -826,6 +881,20 @@ fn compact_status(status: &str, tool: ToolbeltTool) -> String {
             tool.label()
         )
     }
+}
+
+fn workflow_preset_selected(
+    preset: BuildWorkflowPreset,
+    active_tool: ToolbeltTool,
+    active_workflow: Option<BuildWorkflowPreset>,
+) -> bool {
+    if active_workflow == Some(preset) {
+        return active_tool == preset.tool();
+    }
+
+    active_workflow.is_none()
+        && preset == BuildWorkflowPreset::Sketch
+        && active_tool == ToolbeltTool::DrawRect
 }
 
 #[derive(Default)]
@@ -988,7 +1057,7 @@ impl BuildWorkflowPreset {
     fn status(self) -> String {
         match self {
             Self::Sketch => "Sketch workflow: LMB drag a snapped rectangle, RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows; Alt turns it into Push/Pull.".into(),
-            Self::Room => "Room workflow: build a solid mass, then Shift+LMB drag a wall face to hollow livable depth; Ctrl+LMB cuts doors and windows.".into(),
+            Self::Room => "Room workflow: LMB drag a wall/floor face to hollow livable depth; Ctrl+LMB cuts doors and windows; RMB orbits.".into(),
             Self::PushPull => "Push workflow: hover a face, LMB drag depth, release to commit; Alt gives temporary Fill.".into(),
             Self::ModernHouse => "Modern house workflow: white wall material, wide wall brush, locked-plane sketching, then Push/Pull details.".into(),
             Self::Roads => "Road and traffic workflow: draw road components with endpoint snap; wheel edits width/bridge height; middle mouse retextures.".into(),
@@ -1003,7 +1072,7 @@ impl BuildWorkflowPreset {
         match self {
             Self::Sketch => "One click switches to rectangle sketching and a flat 4x1 brush.",
             Self::Room => {
-                "One click switches to Sketch Draw with hollow-room guidance for interiors."
+                "One click switches to direct room hollowing: LMB hollows, Ctrl+LMB opens doors/windows."
             }
             Self::PushPull => "One click switches to SketchUp-style face push/pull.",
             Self::ModernHouse => "White plaster, broad wall brush, fast modern-house massing.",
@@ -1047,6 +1116,7 @@ fn draw_build_dock(
     brush: IVec3,
     undo_count: usize,
     redo_count: usize,
+    active_workflow: Option<BuildWorkflowPreset>,
     theme: crate::theme::ThemeSettings,
     primary: egui::Color32,
     dim: egui::Color32,
@@ -1088,7 +1158,14 @@ fn draw_build_dock(
 
                 ui.horizontal(|ui| {
                     selected_tool_badge(ui, active_tool, picker_open, primary);
-                    contextual_action_strip(ui, active_tool, picker_open, primary, dim);
+                    contextual_action_strip(
+                        ui,
+                        active_tool,
+                        picker_open,
+                        active_workflow,
+                        primary,
+                        dim,
+                    );
                     ui.separator();
                     metric_chip(
                         ui,
@@ -1135,7 +1212,7 @@ fn draw_build_dock(
                 });
 
                 if !picker_open {
-                    quick_workflow_bar(ui, active_tool, theme, &mut result);
+                    quick_workflow_bar(ui, active_tool, active_workflow, theme, &mut result);
                     compact_hud_status(ui, status, active_tool, theme);
                 }
 
@@ -1144,7 +1221,11 @@ fn draw_build_dock(
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
                         for preset in BuildWorkflowPreset::ALL {
-                            if workflow_preset_chip(ui, preset, active_tool == preset.tool()) {
+                            if workflow_preset_chip(
+                                ui,
+                                preset,
+                                workflow_preset_selected(preset, active_tool, active_workflow),
+                            ) {
                                 result.workflow_preset = Some(preset);
                             }
                         }
@@ -1237,12 +1318,54 @@ fn contextual_action_strip(
     ui: &mut egui::Ui,
     tool: ToolbeltTool,
     picker_open: bool,
+    active_workflow: Option<BuildWorkflowPreset>,
     primary: egui::Color32,
     dim: egui::Color32,
 ) {
-    for action in tool.action_hints(picker_open).into_iter().flatten() {
+    for action in contextual_action_hints(tool, picker_open, active_workflow)
+        .into_iter()
+        .flatten()
+    {
         action_card(ui, tool, action, primary, dim);
     }
+}
+
+fn contextual_action_hints(
+    tool: ToolbeltTool,
+    picker_open: bool,
+    active_workflow: Option<BuildWorkflowPreset>,
+) -> [Option<ToolActionHint>; 4] {
+    if tool == ToolbeltTool::DrawRect && active_workflow == Some(BuildWorkflowPreset::Room) {
+        return [
+            Some(ToolActionHint::new(
+                MouseGlyph::Left,
+                "",
+                "Hollow",
+                Icon::Open,
+                ActionTone::Warning,
+                "Drag a wall or floor face to carve a livable room volume behind it.",
+            )),
+            Some(ToolActionHint::new(
+                MouseGlyph::Right,
+                "HOLD",
+                "Orbit",
+                Icon::ModeNavigate,
+                ActionTone::Info,
+                "Hold right mouse to orbit while the Room workflow stays armed.",
+            )),
+            Some(ToolActionHint::new(
+                MouseGlyph::Left,
+                "CTRL",
+                "Opening",
+                Icon::Eraser,
+                ActionTone::Danger,
+                "Hold Ctrl and drag left mouse to cut doors, windows, and exact openings.",
+            )),
+            None,
+        ];
+    }
+
+    tool.action_hints(picker_open)
 }
 
 fn action_tone_color(
@@ -1326,6 +1449,7 @@ fn action_card(
 fn quick_workflow_bar(
     ui: &mut egui::Ui,
     active_tool: ToolbeltTool,
+    active_workflow: Option<BuildWorkflowPreset>,
     theme: crate::theme::ThemeSettings,
     result: &mut BuildDockResult,
 ) {
@@ -1347,7 +1471,11 @@ fn quick_workflow_bar(
                     .color(colors.text_muted),
             );
             for preset in BuildWorkflowPreset::QUICK {
-                if workflow_preset_chip(ui, preset, active_tool == preset.tool()) {
+                if workflow_preset_chip(
+                    ui,
+                    preset,
+                    workflow_preset_selected(preset, active_tool, active_workflow),
+                ) {
                     result.workflow_preset = Some(preset);
                 }
             }
@@ -1362,7 +1490,7 @@ fn compact_hud_status(
     theme: crate::theme::ThemeSettings,
 ) {
     let colors = theme.semantic();
-    let text = compact_status(status, active_tool);
+    let text = status.to_owned();
     let frame = egui::Frame::none()
         .fill(egui::Color32::from_rgba_unmultiplied(0, 8, 12, 112))
         .stroke(egui::Stroke::new(
@@ -1888,6 +2016,11 @@ mod tests {
         assert!(toolbelt.status.contains("Sketch"));
         assert!(ToolbeltTool::DrawRect.hint().contains("draw-first"));
         assert!(ToolbeltTool::DrawRect.hint().contains("RMB"));
+        assert!(workflow_preset_selected(
+            BuildWorkflowPreset::Sketch,
+            toolbelt.tool,
+            toolbelt.active_workflow
+        ));
     }
 
     #[test]
@@ -1914,6 +2047,54 @@ mod tests {
             && a.modifier == "SHIFT"
             && a.label == "Room"
             && a.tone == ActionTone::Warning));
+    }
+
+    #[test]
+    fn room_workflow_action_cards_show_plain_left_mouse_hollowing() {
+        let actions: Vec<ToolActionHint> = contextual_action_hints(
+            ToolbeltTool::DrawRect,
+            false,
+            Some(BuildWorkflowPreset::Room),
+        )
+        .into_iter()
+        .flatten()
+        .collect();
+
+        assert!(actions.iter().any(|a| a.glyph == MouseGlyph::Left
+            && a.modifier.is_empty()
+            && a.label == "Hollow"
+            && a.tone == ActionTone::Warning));
+        assert!(actions
+            .iter()
+            .any(|a| a.glyph == MouseGlyph::Right && a.modifier == "HOLD" && a.label == "Orbit"));
+        assert!(actions.iter().any(|a| a.glyph == MouseGlyph::Left
+            && a.modifier == "CTRL"
+            && a.label == "Opening"
+            && a.tone == ActionTone::Danger));
+    }
+
+    #[test]
+    fn room_workflow_state_only_activates_in_live_sketch_draw() {
+        let mut toolbelt = ToolbeltState::default();
+        toolbelt.live = true;
+        toolbelt.palette_open = false;
+        toolbelt.select_workflow(BuildWorkflowPreset::Room);
+
+        assert!(toolbelt.room_workflow_active());
+        assert!(workflow_preset_selected(
+            BuildWorkflowPreset::Room,
+            toolbelt.tool,
+            toolbelt.active_workflow
+        ));
+
+        toolbelt.tool = ToolbeltTool::Sculpt;
+        toolbelt.sync_workflow_to_tool();
+        assert!(!toolbelt.room_workflow_active());
+        assert!(!workflow_preset_selected(
+            BuildWorkflowPreset::Room,
+            toolbelt.tool,
+            toolbelt.active_workflow
+        ));
     }
 
     #[test]
@@ -1995,7 +2176,8 @@ mod tests {
             Some(IVec3::new(4, 1, 1))
         );
         assert_eq!(BuildWorkflowPreset::Room.tool(), ToolbeltTool::DrawRect);
-        assert!(BuildWorkflowPreset::Room.status().contains("Shift+LMB"));
+        assert!(BuildWorkflowPreset::Room.status().contains("LMB drag"));
+        assert!(!BuildWorkflowPreset::Room.status().contains("Shift+LMB"));
         assert_eq!(BuildWorkflowPreset::Roads.tool(), ToolbeltTool::CityRoad);
         assert!(BuildWorkflowPreset::Roads
             .status()

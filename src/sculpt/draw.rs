@@ -126,13 +126,15 @@ fn rect_start_intent(
     right_just: bool,
     ctrl: bool,
     shift: bool,
+    room_workflow: bool,
 ) -> RectStartIntent {
     let smart_tool = matches!(
         active_tool,
         ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
     );
     let sketch_tool = active_tool == ToolbeltTool::DrawRect;
-    let modifier_cut = sketch_tool && left_just && (ctrl || shift);
+    let room_cut = sketch_tool && left_just && !ctrl && (shift || room_workflow);
+    let modifier_cut = sketch_tool && left_just && (ctrl || shift || room_workflow);
     let brush_cut = active_tool == ToolbeltTool::BrushCut && left_just;
     let smart_right_cut = smart_tool && right_just;
     let cut = modifier_cut || brush_cut || smart_right_cut;
@@ -145,7 +147,7 @@ fn rect_start_intent(
     RectStartIntent {
         fill,
         cut,
-        room_cut: sketch_tool && shift && modifier_cut,
+        room_cut,
         button,
     }
 }
@@ -247,6 +249,7 @@ pub fn rect_draw_input(
         mouse.just_pressed(MouseButton::Right),
         ctrl_pressed(&keys),
         shift_pressed(&keys),
+        toolbelt.room_workflow_active(),
     );
 
     if start_intent.fill && draw.active && draw.click_finish {
@@ -302,7 +305,7 @@ pub fn rect_draw_input(
                 action.preview_verb()
             )
         } else if draw.room_cut {
-            "Smart Room Cut start set. Drag the wall/floor face; release clears a livable volume behind it.".into()
+            "Smart Room Hollow start set. Drag the wall/floor face; release clears a livable volume behind it.".into()
         } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
             "Quick Fill start set. Keep Alt held while starting; drag to fill, LMB commits.".into()
         } else {
@@ -345,10 +348,15 @@ pub fn rect_draw_input(
         }
         let raw_cells = rect_cell_count(draw.start, draw.current, draw.normal);
         draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
+        let action_label = if draw.room_cut {
+            "Smart Room Hollow"
+        } else {
+            draw.action.label()
+        };
         toolbelt.status = if raw_cells > DRAW_CELL_CAP {
             format!(
                 "{} preview capped: {} of {} cells.{} Release commits, Esc cancels.",
-                draw.action.label(),
+                action_label,
                 DRAW_CELL_CAP,
                 raw_cells,
                 draw.inference.status_suffix()
@@ -356,7 +364,7 @@ pub fn rect_draw_input(
         } else {
             format!(
                 "{} preview: {} cells snapped to endpoint.{} Release commits, Esc cancels.",
-                draw.action.label(),
+                action_label,
                 draw.status_cells,
                 draw.inference.status_suffix()
             )
@@ -439,7 +447,7 @@ fn commit_rect_fill(
     let changed = changes.len();
     if changed > 0 {
         let label = if draw.room_cut {
-            format!("Smart room cut {} cells", changed)
+            format!("Smart room hollow {} cells", changed)
         } else {
             format!("{} {} cells", draw.action.history_label(), changed)
         };
@@ -447,7 +455,7 @@ fn commit_rect_fill(
         toolbelt.status = format!(
             "{} committed: {} selected, {} changed cells. Ctrl+Z undo, Ctrl+Y redo.",
             if draw.room_cut {
-                "Smart Room Cut"
+                "Smart Room Hollow"
             } else {
                 draw.action.label()
             },
@@ -962,7 +970,7 @@ mod tests {
 
     #[test]
     fn sketch_right_mouse_is_reserved_for_orbit_not_cut() {
-        let intent = rect_start_intent(ToolbeltTool::DrawRect, false, true, false, false);
+        let intent = rect_start_intent(ToolbeltTool::DrawRect, false, true, false, false, false);
 
         assert!(
             !intent.cut && !intent.fill,
@@ -972,15 +980,33 @@ mod tests {
 
     #[test]
     fn sketch_modifier_left_mouse_selects_cut_and_room_cut() {
-        let cut = rect_start_intent(ToolbeltTool::DrawRect, true, false, true, false);
+        let cut = rect_start_intent(ToolbeltTool::DrawRect, true, false, true, false, false);
         assert!(cut.cut);
         assert!(!cut.room_cut);
         assert_eq!(cut.button, RectDragButton::Left);
 
-        let room = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, true);
+        let room = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, true, false);
         assert!(room.cut);
         assert!(room.room_cut);
         assert_eq!(room.button, RectDragButton::Left);
+    }
+
+    #[test]
+    fn room_workflow_left_mouse_hollows_without_modifier() {
+        let room = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, false, true);
+
+        assert!(room.cut);
+        assert!(room.room_cut);
+        assert_eq!(room.button, RectDragButton::Left);
+    }
+
+    #[test]
+    fn ctrl_left_mouse_cuts_openings_even_inside_room_workflow() {
+        let cut = rect_start_intent(ToolbeltTool::DrawRect, true, false, true, false, true);
+
+        assert!(cut.cut);
+        assert!(!cut.room_cut);
+        assert_eq!(cut.button, RectDragButton::Left);
     }
 
     #[test]
