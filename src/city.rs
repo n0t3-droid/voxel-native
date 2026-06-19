@@ -1073,6 +1073,20 @@ fn city_input(
         }
     }
 
+    if bare
+        && city.tool == CityTool::District
+        && mouse.just_released(MouseButton::Left)
+        && city.pending_district_a.is_some()
+    {
+        let start = city.pending_district_a.unwrap();
+        if let Some((min, max)) =
+            city_area_drag_release_corners(start, snapped, city.district_radius)
+        {
+            commit_city_area_from_corners(&mut city, &mut bots, &mut telemetry, &world, min, max);
+            return;
+        }
+    }
+
     // --- Mouse: commit action -----------------------------------------
     if bare && mouse.just_pressed(MouseButton::Left) {
         match city.tool {
@@ -1100,45 +1114,20 @@ fn city_input(
                 None => {
                     city.pending_district_a = Some(snapped);
                     city.status = format!(
-                        "Bot-Stadtflaeche Ecke A @ {},{} - 2. Klick setzt die Bauzone.",
+                        "Bot city area start @ {},{} - drag/release places the build zone, or click endpoint.",
                         snapped.x, snapped.z
                     );
                 }
                 Some(a) => {
                     let (min, max) = city_area_corners(a, snapped, city.district_radius);
-                    let center = IVec3::new((min.x + max.x) / 2, min.y, (min.z + max.z) / 2);
-                    let size = max - min + IVec3::ONE;
-                    let radius = (((size.x as f32 * 0.5).powi(2) + (size.z as f32 * 0.5).powi(2))
-                        .sqrt()
-                        .ceil() as i32)
-                        .max(city.district_radius);
-                    let kind = city.district_kind;
-                    city.districts.push(District {
-                        center,
-                        radius,
-                        kind,
-                    });
-                    city.pending_district_a = None;
-                    let queued = bots
-                        .as_deref_mut()
-                        .map(|brain| {
-                            crate::bots::queue_city_area_masterplan_with_world(
-                                brain, &*world, min, max,
-                            )
-                        })
-                        .unwrap_or(0);
-                    city.status = if queued > 0 {
-                        format!(
-                            "Bot-Stadtflaeche {}x{} gesetzt: {} Projekt(e) in dieser Zone.",
-                            size.x, size.z, queued
-                        )
-                    } else {
-                        format!(
-                            "Bot-Stadtflaeche {}x{} gesetzt. Bots warten auf eine geladene/gueltige Zone.",
-                            size.x, size.z
-                        )
-                    };
-                    telemetry.city_actions = telemetry.city_actions.saturating_add(1);
+                    commit_city_area_from_corners(
+                        &mut city,
+                        &mut bots,
+                        &mut telemetry,
+                        &world,
+                        min,
+                        max,
+                    );
                 }
             },
             CityTool::Building => match city.pending_building_a {
@@ -1301,6 +1290,53 @@ fn city_area_corners(a: IVec3, b: IVec3, fallback_radius: i32) -> (IVec3, IVec3)
         IVec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)),
         IVec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)),
     )
+}
+
+fn city_area_drag_release_corners(
+    start: IVec3,
+    raw: IVec3,
+    fallback_radius: i32,
+) -> Option<(IVec3, IVec3)> {
+    (start.x != raw.x || start.z != raw.z).then(|| city_area_corners(start, raw, fallback_radius))
+}
+
+fn commit_city_area_from_corners(
+    city: &mut CityState,
+    bots: &mut Option<ResMut<crate::bots::FriendlyWorldBrain>>,
+    telemetry: &mut UnifiedTelemetry,
+    world: &VoxelWorld,
+    min: IVec3,
+    max: IVec3,
+) {
+    let center = IVec3::new((min.x + max.x) / 2, min.y, (min.z + max.z) / 2);
+    let size = max - min + IVec3::ONE;
+    let radius = (((size.x as f32 * 0.5).powi(2) + (size.z as f32 * 0.5).powi(2))
+        .sqrt()
+        .ceil() as i32)
+        .max(city.district_radius);
+    let kind = city.district_kind;
+    city.districts.push(District {
+        center,
+        radius,
+        kind,
+    });
+    city.pending_district_a = None;
+    let queued = bots
+        .as_deref_mut()
+        .map(|brain| crate::bots::queue_city_area_masterplan_with_world(brain, world, min, max))
+        .unwrap_or(0);
+    city.status = if queued > 0 {
+        format!(
+            "Bot city area {}x{} placed: {} project(s) queued inside this zone.",
+            size.x, size.z, queued
+        )
+    } else {
+        format!(
+            "Bot city area {}x{} placed. Bots wait until the zone is valid and loaded.",
+            size.x, size.z
+        )
+    };
+    telemetry.city_actions = telemetry.city_actions.saturating_add(1);
 }
 
 fn contextual_road_snap_cell(p: IVec3, roads: &[RoadSegment]) -> Option<IVec3> {
@@ -2935,10 +2971,10 @@ fn draw_hint_hud(
             }
             CityTool::District => {
                 if city.pending_district_a.is_some() {
-                    lines.push(("LMB".into(), "Ecke B setzt Bot-Stadtflaeche".into()));
+                    lines.push(("LMB release".into(), "Bot-Stadtflaeche zeichnen".into()));
                     lines.push(("RMB / Esc".into(), "Abbrechen".into()));
                 } else {
-                    lines.push(("LMB".into(), "Ecke A fuer Bot-Stadtflaeche".into()));
+                    lines.push(("LMB hold".into(), "Ecke A setzen, ziehen, loslassen".into()));
                     lines.push(("RMB".into(), "Letzten Bezirk loeschen".into()));
                 }
                 lines.push(("[ / ]".into(), format!("Radius ({})", city.district_radius)));
@@ -3536,6 +3572,23 @@ mod tests {
 
         assert_eq!(min, IVec3::new(-2, 72, 8));
         assert_eq!(max, IVec3::new(22, 72, 32));
+    }
+
+    #[test]
+    fn city_area_drag_release_commits_only_after_real_drag() {
+        let start = IVec3::new(10, 72, 20);
+        let end = IVec3::new(42, 72, 52);
+
+        assert_eq!(
+            city_area_drag_release_corners(start, end, 8),
+            Some((IVec3::new(10, 72, 20), IVec3::new(42, 72, 52))),
+            "drag-release should place the exact bot city footprint the player drew"
+        );
+        assert_eq!(
+            city_area_drag_release_corners(start, start, 8),
+            None,
+            "a click without drag should remain available for the deliberate radius-square workflow"
+        );
     }
 
     #[test]

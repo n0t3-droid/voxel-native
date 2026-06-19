@@ -111,7 +111,7 @@ impl ToolbeltTool {
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
             ToolbeltTool::BrushCut => "LMB or RMB starts a cut point, drag to an endpoint, release to remove exact snapped blocks.",
             ToolbeltTool::CityRoad => "LMB drag/release draws roads: auto-snaps to endpoints/branches, continues from the last point, and inherits width, texture, and bridge height. Wheel edits selected roads: body width/radius, handle bridge height. Middle mouse retextures the selected component.",
-            ToolbeltTool::CityDistrict => "Two LMB clicks mark the exact bot city footprint. Bots stay parked until an area or explicit task is placed, then plan roads and buildings inside that space.",
+            ToolbeltTool::CityDistrict => "LMB drag/release marks the exact bot city footprint. Bots stay parked until an area or explicit task is placed, then plan roads and buildings inside that space.",
             ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
             ToolbeltTool::CityFacade => "LMB stamps the active facade onto the targeted wall.",
             ToolbeltTool::AnimationPick => "LMB/RMB pick voxels for animation authoring.",
@@ -309,11 +309,11 @@ impl ToolbeltTool {
             ToolbeltTool::CityDistrict => [
                 Some(ToolActionHint::new(
                     MouseGlyph::Left,
-                    "2X",
+                    "DRAG",
                     "Area",
                     Icon::District,
                     ActionTone::Tool,
-                    "Mark two corners for the bot city area.",
+                    "Hold and drag/release two corners for the bot city area; same-point two-click keeps radius placement.",
                 )),
                 Some(ToolActionHint::new(
                     MouseGlyph::Right,
@@ -2167,6 +2167,24 @@ mod tests {
         assert!(road.hint.contains("branch"));
         assert!(delete.hint.contains("selected road component"));
         assert!(delete.hint.contains("cancel"));
+    }
+
+    #[test]
+    fn city_area_action_hints_explain_drag_release_bot_zone() {
+        let actions: Vec<ToolActionHint> = ToolbeltTool::CityDistrict
+            .action_hints(false)
+            .into_iter()
+            .flatten()
+            .collect();
+        let area = actions
+            .iter()
+            .find(|a| a.label == "Area")
+            .expect("area action");
+
+        assert_eq!(area.glyph, MouseGlyph::Left);
+        assert_eq!(area.modifier, "DRAG");
+        assert!(area.hint.contains("drag/release"));
+        assert!(ToolbeltTool::CityDistrict.hint().contains("drag/release"));
     }
 
     #[test]
