@@ -315,60 +315,67 @@ pub fn rect_draw_input(
 
     if draw.active {
         gesture_lock.lock(RECT_FILL_OWNER);
-        for ev in motion_evr.read() {
-            draw.motion_len += ev.delta.length();
-        }
-        if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
-            let endpoint = snap_rect_endpoint_to_locked_plane_from_ray(
+        if rect_draw_endpoint_updates(draw.smart_gesture, mouse.pressed(MouseButton::Right)) {
+            for ev in motion_evr.read() {
+                draw.motion_len += ev.delta.length();
+            }
+            if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
+                let endpoint = snap_rect_endpoint_to_locked_plane_from_ray(
+                    draw.start,
+                    draw.normal,
+                    draw.axis_u,
+                    draw.axis_v,
+                    hit,
+                    prev,
+                    origin,
+                    dir,
+                );
+                let (endpoint, inference) =
+                    infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
+                draw.current = endpoint;
+                draw.inference = inference;
+            } else if let Some(endpoint) = snap_rect_endpoint_from_locked_plane_ray(
                 draw.start,
                 draw.normal,
                 draw.axis_u,
                 draw.axis_v,
-                hit,
-                prev,
                 origin,
                 dir,
-            );
-            let (endpoint, inference) =
-                infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
-            draw.current = endpoint;
-            draw.inference = inference;
-        } else if let Some(endpoint) = snap_rect_endpoint_from_locked_plane_ray(
-            draw.start,
-            draw.normal,
-            draw.axis_u,
-            draw.axis_v,
-            origin,
-            dir,
-        ) {
-            let (endpoint, inference) =
-                infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
-            draw.current = endpoint;
-            draw.inference = inference;
+            ) {
+                let (endpoint, inference) =
+                    infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
+                draw.current = endpoint;
+                draw.inference = inference;
+            }
+            let raw_cells = rect_cell_count(draw.start, draw.current, draw.normal);
+            draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
+            let action_label = if draw.room_cut {
+                "Smart Room Hollow"
+            } else {
+                draw.action.label()
+            };
+            toolbelt.status = if raw_cells > DRAW_CELL_CAP {
+                format!(
+                    "{} preview capped: {} of {} cells.{} Release commits, Esc cancels.",
+                    action_label,
+                    DRAW_CELL_CAP,
+                    raw_cells,
+                    draw.inference.status_suffix()
+                )
+            } else {
+                format!(
+                    "{} preview: {} cells snapped to endpoint.{} Release commits, Esc cancels.",
+                    action_label,
+                    draw.status_cells,
+                    draw.inference.status_suffix()
+                )
+            };
+        } else {
+            motion_evr.clear();
+            toolbelt.status =
+                "Sketch Draw orbiting: endpoint held. Release RMB to continue snapping, LMB release commits."
+                    .into();
         }
-        let raw_cells = rect_cell_count(draw.start, draw.current, draw.normal);
-        draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
-        let action_label = if draw.room_cut {
-            "Smart Room Hollow"
-        } else {
-            draw.action.label()
-        };
-        toolbelt.status = if raw_cells > DRAW_CELL_CAP {
-            format!(
-                "{} preview capped: {} of {} cells.{} Release commits, Esc cancels.",
-                action_label,
-                DRAW_CELL_CAP,
-                raw_cells,
-                draw.inference.status_suffix()
-            )
-        } else {
-            format!(
-                "{} preview: {} cells snapped to endpoint.{} Release commits, Esc cancels.",
-                action_label,
-                draw.status_cells,
-                draw.inference.status_suffix()
-            )
-        };
     } else {
         motion_evr.clear();
     }
@@ -377,7 +384,7 @@ pub fn rect_draw_input(
         if !draw.smart_gesture && draw.motion_len < 4.0 && draw.status_cells <= 1 {
             draw.click_finish = true;
             toolbelt.status =
-                "Sketch Draw anchor set. Move to grow line/face, LMB commits, RMB/Esc cancels."
+                "Sketch Draw anchor set. Move to grow line/face, LMB commits, RMB orbits, Esc cancels."
                     .into();
         } else {
             commit_rect_fill(&mut draw, &mut world, &mut history, &mut toolbelt);
@@ -402,6 +409,10 @@ fn draw_input_ray(
         }
     }
     Some((camera_tf.translation(), camera_tf.forward().as_vec3()))
+}
+
+fn rect_draw_endpoint_updates(smart_gesture: bool, right_held: bool) -> bool {
+    smart_gesture || !right_held
 }
 
 fn commit_rect_fill(
@@ -975,6 +986,23 @@ mod tests {
         assert!(
             !intent.cut && !intent.fill,
             "RMB in Sketch Draw should not remove blocks; it is camera orbit"
+        );
+    }
+
+    #[test]
+    fn sketch_right_mouse_orbit_freezes_endpoint_drag_updates() {
+        assert!(
+            !rect_draw_endpoint_updates(false, true),
+            "RMB orbit in Sketch Draw should hold the current endpoint instead of distorting the preview"
+        );
+        assert!(rect_draw_endpoint_updates(false, false));
+    }
+
+    #[test]
+    fn smart_right_mouse_cut_keeps_endpoint_tracking() {
+        assert!(
+            rect_draw_endpoint_updates(true, true),
+            "classic smart RMB cut gestures still need endpoint tracking while held"
         );
     }
 

@@ -549,7 +549,7 @@ pub fn begin_drag(
     gesture_lock.lock(PUSH_PULL_OWNER);
     toolbelt.status = if mode.build_tool() == Some(ToolbeltTool::DrawRect) {
         format!(
-            "Quick Push/Pull started: {} cells locked. Release Alt after start if needed; LMB release commits.",
+            "Quick Push/Pull started: {} cells locked. Hold RMB to orbit without changing depth; LMB release commits.",
             drag.face_cells.len()
         )
     } else if let Some(d) = reference_d {
@@ -564,12 +564,12 @@ pub fn begin_drag(
         }
     } else if face.clipped {
         format!(
-            "Push Pull Face started: {} cells locked (face capped). Drag LMB to extrude/cut. RMB twice before dragging sets reference length.",
+            "Push Pull Face started: {} cells locked (face capped). Drag LMB to extrude/cut; hold RMB to orbit; Esc cancels.",
             drag.face_cells.len()
         )
     } else {
         format!(
-            "Push Pull Face started: {} cells locked. Drag LMB to extrude/cut. RMB twice before dragging sets reference length.",
+            "Push Pull Face started: {} cells locked. Drag LMB to extrude/cut; hold RMB to orbit; Esc cancels.",
             drag.face_cells.len()
         )
     };
@@ -606,12 +606,24 @@ pub fn update_drag(
         return;
     }
 
-    if keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right) {
+    if pushpull_drag_cancel_requested(
+        keys.just_pressed(KeyCode::Escape),
+        mouse.just_pressed(MouseButton::Right),
+    ) {
         revert_preview(&mut world, &mut drag);
         state.status = "Sculpt: cancelled.".into();
         toolbelt.status = "Push Pull Face cancelled. Preview reverted.".into();
         drag.clear();
         gesture_lock.release(PUSH_PULL_OWNER);
+        motion_evr.clear();
+        return;
+    }
+
+    if !pushpull_drag_accepts_motion(mouse.pressed(MouseButton::Right)) {
+        state.status = "Sculpt: orbiting; Push/Pull depth held.".into();
+        toolbelt.status =
+            "Push Pull Face held while orbiting. Release RMB to keep tuning, release LMB to commit."
+                .into();
         motion_evr.clear();
         return;
     }
@@ -682,6 +694,14 @@ pub fn update_drag(
             state.status
         )
     };
+}
+
+fn pushpull_drag_cancel_requested(escape_just: bool, _right_just: bool) -> bool {
+    escape_just
+}
+
+fn pushpull_drag_accepts_motion(right_held: bool) -> bool {
+    !right_held
 }
 
 fn preview_distance_cap(face_cells: usize) -> i32 {
@@ -1199,6 +1219,24 @@ mod tests {
             .expect("ray should intersect the front face");
         assert!(matches!(point.kind, InferenceSnapKind::FaceCenter));
         assert_eq!(point.point, Vec3::new(0.5, 0.5, 0.0));
+    }
+
+    #[test]
+    fn right_mouse_does_not_cancel_active_pushpull_drag() {
+        assert!(
+            !pushpull_drag_cancel_requested(false, true),
+            "RMB during Push/Pull should orbit the camera, not revert the preview"
+        );
+        assert!(pushpull_drag_cancel_requested(true, false));
+    }
+
+    #[test]
+    fn right_mouse_orbit_freezes_pushpull_depth_motion() {
+        assert!(
+            !pushpull_drag_accepts_motion(true),
+            "RMB orbit should move the camera without also changing Push/Pull depth"
+        );
+        assert!(pushpull_drag_accepts_motion(false));
     }
 }
 
