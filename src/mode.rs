@@ -292,7 +292,7 @@ fn mode_hotkeys(
         mode.set(
             ActiveMode::BuildLive { tool },
             format!(
-                "Creative Build: {}. LMB draws, RMB orbits in Sketch, Ctrl+LMB cuts, Shift+LMB hollows, Ctrl+Z undo.",
+                "Creative Build: {}. Sketch LMB draws floors and opens vertical walls, RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows, Ctrl+Z undo.",
                 tool.label()
             ),
         );
@@ -404,7 +404,7 @@ fn mode_hotkeys(
             } else {
                 mode.set(
                     ActiveMode::BuildLive { tool },
-                    "Build Live stays active. LMB draw, RMB orbit, Ctrl+LMB cut, Shift+LMB hollow, Ctrl+Z undo.",
+                    "Build Live stays active. Sketch LMB draws floors and opens walls, RMB orbit, Ctrl+LMB cut, Shift+LMB hollow, Ctrl+Z undo.",
                 );
             }
         }
@@ -548,7 +548,7 @@ fn default_creative_mode() -> ActiveMode {
 }
 
 fn default_creative_status() -> &'static str {
-    "Creative Sketch Builder active. LMB draws snapped faces; RMB orbits; Ctrl+LMB cuts; Shift+LMB hollows room depth; Ctrl+Z undo."
+    "Creative Sketch Builder active. LMB draws floors and opens vertical walls; RMB orbits; Ctrl+LMB cuts; Shift+LMB hollows room depth; Ctrl+Z undo."
 }
 
 fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {

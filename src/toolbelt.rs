@@ -105,7 +105,7 @@ impl ToolbeltTool {
     pub fn hint(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Move, inspect, and keep weapons off while Build Studio is open.",
-            ToolbeltTool::DrawRect => "SketchUp-style draw-first tool: LMB draws exact snapped faces, hold RMB orbits the camera, Ctrl+LMB cuts openings, Shift+LMB hollows room depth. Ctrl+Z/Ctrl+Y undo/redo.",
+            ToolbeltTool::DrawRect => "SketchUp-style draw-first tool: LMB draws floors/roofs, LMB on vertical walls cuts openings, hold RMB orbits, Ctrl+LMB forces cut, Shift+LMB hollows room depth. Ctrl+Z/Ctrl+Y undo/redo.",
             ToolbeltTool::Sculpt => "LMB Push/Pulls faces. Alt+LMB temporarily fills rectangles. G swaps Fill/Push.",
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
@@ -147,7 +147,7 @@ impl ToolbeltTool {
                     "Draw",
                     Icon::Grid,
                     ActionTone::Tool,
-                    "Drag from a snapped voxel endpoint to draw a face.",
+                    "Drag from a snapped endpoint: floors build, vertical walls open.",
                 )),
                 Some(ToolActionHint::new(
                     MouseGlyph::Right,
@@ -488,7 +488,7 @@ impl Default for ToolbeltState {
             palette_open: false,
             tool: ToolbeltTool::DrawRect,
             status:
-                "Creative Sketch Builder: LMB draws, hold RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows, Ctrl+Z undo."
+                "Creative Sketch Builder: LMB draws floors and opens vertical walls, hold RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows, Ctrl+Z undo."
                     .into(),
             active_workflow: Some(BuildWorkflowPreset::Sketch),
         }
@@ -872,7 +872,7 @@ fn compact_status(
         "Room workflow ready. LMB hollow, Ctrl+LMB opening, RMB orbit, Ctrl+Z undo.".to_owned()
     } else if tool == ToolbeltTool::DrawRect {
         format!(
-            "{} ready. LMB draw, RMB orbit, Ctrl/Shift+LMB cut.",
+            "{} ready. LMB draws floors or opens walls, RMB orbit, Ctrl/Shift+LMB cut.",
             tool.label()
         )
     } else {
@@ -1064,7 +1064,7 @@ impl BuildWorkflowPreset {
 
     fn status(self) -> String {
         match self {
-            Self::Sketch => "Sketch workflow: LMB drag a snapped rectangle, RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows; Alt turns it into Push/Pull.".into(),
+            Self::Sketch => "Sketch workflow: LMB drag a snapped rectangle; floors build, vertical walls open; RMB orbits; Ctrl+LMB cuts; Shift+LMB hollows; Alt turns it into Push/Pull.".into(),
             Self::Room => "Room workflow: LMB drag a wall/floor face to hollow livable depth; Ctrl+LMB cuts doors and windows; RMB orbits.".into(),
             Self::PushPull => "Push workflow: hover a face, LMB drag depth, release to commit; Alt gives temporary Fill.".into(),
             Self::ModernHouse => "Modern house workflow: white wall material, wide wall brush, locked-plane sketching, then Push/Pull details.".into(),

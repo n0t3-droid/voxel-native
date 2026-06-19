@@ -155,6 +155,20 @@ fn rect_start_intent(
     }
 }
 
+fn rect_action_for_start_intent(
+    intent: RectStartIntent,
+    active_tool: ToolbeltTool,
+    normal: IVec3,
+) -> RectDrawAction {
+    if intent.cut {
+        return RectDrawAction::Cut;
+    }
+    if active_tool == ToolbeltTool::DrawRect && intent.fill && normal.y == 0 {
+        return RectDrawAction::Cut;
+    }
+    RectDrawAction::Fill
+}
+
 fn shape_alt_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
 }
@@ -275,11 +289,9 @@ pub fn rect_draw_input(
             motion_evr.clear();
             return;
         };
-        let action = if start_intent.cut {
-            RectDrawAction::Cut
-        } else {
-            RectDrawAction::Fill
-        };
+        let action = rect_action_for_start_intent(start_intent, active_tool, normal);
+        let auto_opening =
+            action == RectDrawAction::Cut && start_intent.fill && !start_intent.cut && !smart_tool;
         draw.active = true;
         let start = rect_start_cell_from_ray(action, hit, prev, axis_u, axis_v, origin, dir);
         draw.start = start;
@@ -309,6 +321,8 @@ pub fn rect_draw_input(
             )
         } else if draw.room_cut {
             "Smart Room Hollow start set. Drag the wall/floor face; release clears a livable volume behind it.".into()
+        } else if auto_opening {
+            "Sketch Opening start set. Drag a door/window rectangle; release cuts through the wall. RMB orbits.".into()
         } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
             "Quick Fill start set. Keep Alt held while starting; drag to fill, LMB commits.".into()
         } else {
@@ -1115,6 +1129,26 @@ mod tests {
         assert!(room.cut);
         assert!(room.room_cut);
         assert_eq!(room.button, RectDragButton::Left);
+    }
+
+    #[test]
+    fn plain_sketch_left_mouse_opens_vertical_wall_faces() {
+        let intent = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, false, false);
+
+        assert_eq!(
+            rect_action_for_start_intent(intent, ToolbeltTool::DrawRect, IVec3::X),
+            RectDrawAction::Cut
+        );
+    }
+
+    #[test]
+    fn plain_sketch_left_mouse_still_builds_on_floor_faces() {
+        let intent = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, false, false);
+
+        assert_eq!(
+            rect_action_for_start_intent(intent, ToolbeltTool::DrawRect, IVec3::Y),
+            RectDrawAction::Fill
+        );
     }
 
     #[test]
