@@ -1087,6 +1087,18 @@ fn city_input(
         }
     }
 
+    if bare
+        && city.tool == CityTool::Building
+        && mouse.just_released(MouseButton::Left)
+        && city.pending_building_a.is_some()
+    {
+        let start = city.pending_building_a.unwrap();
+        if let Some((min, max)) = building_shell_drag_release_corners(start, snapped) {
+            commit_building_shell_from_corners(&mut city, &mut telemetry, &mut world, min, max);
+            return;
+        }
+    }
+
     // --- Mouse: commit action -----------------------------------------
     if bare && mouse.just_pressed(MouseButton::Left) {
         match city.tool {
@@ -1134,33 +1146,19 @@ fn city_input(
                 None => {
                     city.pending_building_a = Some(snapped);
                     city.status = format!(
-                        "Gebaeudeecke A @ {},{} — 2. Klick setzt gegenueberliegende Ecke.",
+                        "Building shell start @ {},{} - drag/release places the footprint, or click endpoint.",
                         snapped.x, snapped.z
                     );
                 }
                 Some(a) => {
-                    let min = IVec3::new(a.x.min(snapped.x), a.y, a.z.min(snapped.z));
-                    let max = IVec3::new(a.x.max(snapped.x), a.y, a.z.max(snapped.z));
-                    let bld = Building {
+                    let (min, max) = building_shell_corners(a, snapped);
+                    commit_building_shell_from_corners(
+                        &mut city,
+                        &mut telemetry,
+                        &mut world,
                         min,
                         max,
-                        floors: city.building_floors,
-                        style: city.building_style,
-                    };
-                    let n = stamp_building(&mut world, &bld);
-                    city.buildings.push(bld);
-                    city.pending_building_a = None;
-                    city.status = format!(
-                        "{} {}x{} @ {} Etagen ({} Bloecke) — Rohbau ohne Fenster; Einschnitte im BAUEN-Tab selbst schneiden.",
-                        city.building_style.label(),
-                        max.x - min.x + 1,
-                        max.z - min.z + 1,
-                        city.building_floors,
-                        n
                     );
-                    telemetry.city_actions = telemetry.city_actions.saturating_add(1);
-                    telemetry.build_blocks_changed =
-                        telemetry.build_blocks_changed.saturating_add(n as u64);
                 }
             },
             CityTool::Facade => {
@@ -1298,6 +1296,45 @@ fn city_area_drag_release_corners(
     fallback_radius: i32,
 ) -> Option<(IVec3, IVec3)> {
     (start.x != raw.x || start.z != raw.z).then(|| city_area_corners(start, raw, fallback_radius))
+}
+
+fn building_shell_corners(a: IVec3, b: IVec3) -> (IVec3, IVec3) {
+    (
+        IVec3::new(a.x.min(b.x), a.y, a.z.min(b.z)),
+        IVec3::new(a.x.max(b.x), a.y, a.z.max(b.z)),
+    )
+}
+
+fn building_shell_drag_release_corners(start: IVec3, raw: IVec3) -> Option<(IVec3, IVec3)> {
+    (start.x != raw.x || start.z != raw.z).then(|| building_shell_corners(start, raw))
+}
+
+fn commit_building_shell_from_corners(
+    city: &mut CityState,
+    telemetry: &mut UnifiedTelemetry,
+    world: &mut VoxelWorld,
+    min: IVec3,
+    max: IVec3,
+) {
+    let bld = Building {
+        min,
+        max,
+        floors: city.building_floors,
+        style: city.building_style,
+    };
+    let n = stamp_building(world, &bld);
+    city.buildings.push(bld);
+    city.pending_building_a = None;
+    city.status = format!(
+        "{} shell {}x{} x {} floors ({} blocks). Use Room/Sketch cuts for interiors, doors, and windows.",
+        city.building_style.label(),
+        max.x - min.x + 1,
+        max.z - min.z + 1,
+        city.building_floors,
+        n
+    );
+    telemetry.city_actions = telemetry.city_actions.saturating_add(1);
+    telemetry.build_blocks_changed = telemetry.build_blocks_changed.saturating_add(n as u64);
 }
 
 fn commit_city_area_from_corners(
@@ -2982,10 +3019,10 @@ fn draw_hint_hud(
             }
             CityTool::Building => {
                 if city.pending_building_a.is_some() {
-                    lines.push(("LMB".into(), "Ecke B setzen (Gebaeude stampt)".into()));
+                    lines.push(("LMB release".into(), "Gebaeude-Footprint zeichnen".into()));
                     lines.push(("RMB / Esc".into(), "Abbrechen".into()));
                 } else {
-                    lines.push(("LMB".into(), "Ecke A setzen".into()));
+                    lines.push(("LMB hold".into(), "Ecke A setzen, ziehen, loslassen".into()));
                     lines.push(("RMB".into(), "Letztes Gebaeude vergessen".into()));
                 }
                 lines.push(("[ / ]".into(), format!("Etagen ({})", city.building_floors)));
@@ -3588,6 +3625,23 @@ mod tests {
             city_area_drag_release_corners(start, start, 8),
             None,
             "a click without drag should remain available for the deliberate radius-square workflow"
+        );
+    }
+
+    #[test]
+    fn building_shell_drag_release_commits_only_after_real_drag() {
+        let start = IVec3::new(4, 72, 8);
+        let end = IVec3::new(18, 72, 26);
+
+        assert_eq!(
+            building_shell_drag_release_corners(start, end),
+            Some((IVec3::new(4, 72, 8), IVec3::new(18, 72, 26))),
+            "drag-release should draw the exact shell footprint the player aimed"
+        );
+        assert_eq!(
+            building_shell_drag_release_corners(start, start),
+            None,
+            "a click without drag should stay available for deliberate tiny-shell placement"
         );
     }
 

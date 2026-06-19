@@ -112,7 +112,7 @@ impl ToolbeltTool {
             ToolbeltTool::BrushCut => "LMB or RMB starts a cut point, drag to an endpoint, release to remove exact snapped blocks.",
             ToolbeltTool::CityRoad => "LMB drag/release draws roads: auto-snaps to endpoints/branches, continues from the last point, and inherits width, texture, and bridge height. Wheel edits selected roads: body width/radius, handle bridge height. Middle mouse retextures the selected component.",
             ToolbeltTool::CityDistrict => "LMB drag/release marks the exact bot city footprint. Bots stay parked until an area or explicit task is placed, then plan roads and buildings inside that space.",
-            ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
+            ToolbeltTool::CityBuilding => "LMB drag/release sets two corners for a solid building shell; use Room and Sketch cuts for interiors, doors, and windows.",
             ToolbeltTool::CityFacade => "LMB stamps the active facade onto the targeted wall.",
             ToolbeltTool::AnimationPick => "LMB/RMB pick voxels for animation authoring.",
         }
@@ -329,11 +329,11 @@ impl ToolbeltTool {
             ToolbeltTool::CityBuilding => [
                 Some(ToolActionHint::new(
                     MouseGlyph::Left,
-                    "2X",
+                    "DRAG",
                     "Shell",
                     Icon::City,
                     ActionTone::Tool,
-                    "Choose two corners for a building shell.",
+                    "Hold and drag/release two corners for a building shell footprint.",
                 )),
                 Some(ToolActionHint::new(
                     MouseGlyph::Right,
@@ -920,6 +920,7 @@ enum BuildWorkflowPreset {
     PushPull,
     ModernHouse,
     Roads,
+    BotArea,
     Landscape,
     CityShell,
     Skyline,
@@ -967,22 +968,25 @@ impl ToolActionHint {
 }
 
 impl BuildWorkflowPreset {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Sketch,
         Self::Room,
         Self::PushPull,
         Self::ModernHouse,
         Self::Roads,
+        Self::BotArea,
         Self::Landscape,
         Self::CityShell,
         Self::Skyline,
         Self::Spacecraft,
     ];
-    const QUICK: [Self; 5] = [
+    const QUICK: [Self; 7] = [
         Self::Sketch,
         Self::Room,
         Self::PushPull,
         Self::Roads,
+        Self::BotArea,
+        Self::CityShell,
         Self::Skyline,
     ];
 
@@ -993,6 +997,7 @@ impl BuildWorkflowPreset {
             Self::PushPull => "PUSH",
             Self::ModernHouse => "HOUSE",
             Self::Roads => "ROADS",
+            Self::BotArea => "AREA",
             Self::Landscape => "GARDEN",
             Self::CityShell => "CITY",
             Self::Skyline => "TOWER",
@@ -1007,6 +1012,7 @@ impl BuildWorkflowPreset {
             Self::PushPull => Icon::Move,
             Self::ModernHouse => Icon::Builder,
             Self::Roads => Icon::Road,
+            Self::BotArea => Icon::District,
             Self::Landscape => Icon::Brush,
             Self::CityShell => Icon::City,
             Self::Skyline => Icon::Wand,
@@ -1021,6 +1027,7 @@ impl BuildWorkflowPreset {
             Self::PushPull => ToolbeltTool::Sculpt,
             Self::ModernHouse => ToolbeltTool::DrawRect,
             Self::Roads => ToolbeltTool::CityRoad,
+            Self::BotArea => ToolbeltTool::CityDistrict,
             Self::Landscape => ToolbeltTool::DrawRect,
             Self::CityShell => ToolbeltTool::CityBuilding,
             Self::Skyline => ToolbeltTool::SmartTower,
@@ -1036,7 +1043,7 @@ impl BuildWorkflowPreset {
             Self::ModernHouse => Some(IVec3::new(8, 1, 1)),
             Self::Landscape => Some(IVec3::new(8, 1, 8)),
             Self::Spacecraft => Some(IVec3::new(6, 1, 1)),
-            Self::Roads | Self::CityShell | Self::Skyline => None,
+            Self::Roads | Self::BotArea | Self::CityShell | Self::Skyline => None,
         }
     }
 
@@ -1047,6 +1054,7 @@ impl BuildWorkflowPreset {
             Self::PushPull => Some(BlockType::Limestone),
             Self::ModernHouse => Some(BlockType::Limestone),
             Self::Roads => Some(BlockType::Stone),
+            Self::BotArea => None,
             Self::Landscape => Some(BlockType::Grass),
             Self::CityShell => Some(BlockType::Limestone),
             Self::Skyline => Some(BlockType::CockpitGlass),
@@ -1061,8 +1069,9 @@ impl BuildWorkflowPreset {
             Self::PushPull => "Push workflow: hover a face, LMB drag depth, release to commit; Alt gives temporary Fill.".into(),
             Self::ModernHouse => "Modern house workflow: white wall material, wide wall brush, locked-plane sketching, then Push/Pull details.".into(),
             Self::Roads => "Road and traffic workflow: draw road components with endpoint snap; wheel edits width/bridge height; middle mouse retextures.".into(),
+            Self::BotArea => "Bot city area workflow: LMB drag/release the footprint where bots may plan roads, buildings, and city work.".into(),
             Self::Landscape => "Garden workflow: large ground brush for lawns, paths, pools, and planted courtyards.".into(),
-            Self::CityShell => "City workflow: LMB two corners for a building shell; roads and frontage stay component-aware.".into(),
+            Self::CityShell => "City workflow: LMB drag/release a building shell footprint; roads and frontage stay component-aware.".into(),
             Self::Skyline => "Tower workflow: two clicks create a varied skyscraper shell with floors, crown, and undo.".into(),
             Self::Spacecraft => "Spacecraft workflow: alloy material and long hull brush for shuttles, fins, and cockpit follow-up.".into(),
         }
@@ -1078,6 +1087,9 @@ impl BuildWorkflowPreset {
             Self::ModernHouse => "White plaster, broad wall brush, fast modern-house massing.",
             Self::Roads => {
                 "One click switches to road components: draw, branch, adjust, retexture."
+            }
+            Self::BotArea => {
+                "One click switches to bot city area drawing: mark where bots are allowed to build."
             }
             Self::Landscape => {
                 "Grass material and ground brush for gardens, lawns, and terrain detail."
@@ -1099,6 +1111,7 @@ impl BuildWorkflowPreset {
             Self::PushPull => egui::Color32::from_rgb(110, 210, 255),
             Self::ModernHouse => egui::Color32::from_rgb(240, 245, 230),
             Self::Roads => egui::Color32::from_rgb(80, 235, 225),
+            Self::BotArea => egui::Color32::from_rgb(120, 255, 180),
             Self::Landscape => egui::Color32::from_rgb(130, 235, 95),
             Self::CityShell => egui::Color32::from_rgb(130, 255, 125),
             Self::Skyline => egui::Color32::from_rgb(255, 184, 70),
@@ -2188,6 +2201,24 @@ mod tests {
     }
 
     #[test]
+    fn building_shell_action_hints_explain_drag_release_footprint() {
+        let actions: Vec<ToolActionHint> = ToolbeltTool::CityBuilding
+            .action_hints(false)
+            .into_iter()
+            .flatten()
+            .collect();
+        let shell = actions
+            .iter()
+            .find(|a| a.label == "Shell")
+            .expect("shell action");
+
+        assert_eq!(shell.glyph, MouseGlyph::Left);
+        assert_eq!(shell.modifier, "DRAG");
+        assert!(shell.hint.contains("drag/release"));
+        assert!(ToolbeltTool::CityBuilding.hint().contains("drag/release"));
+    }
+
+    #[test]
     fn workflow_presets_collapse_multi_step_builder_modes() {
         assert_eq!(BuildWorkflowPreset::Sketch.tool(), ToolbeltTool::DrawRect);
         assert_eq!(
@@ -2201,6 +2232,13 @@ mod tests {
         assert!(BuildWorkflowPreset::Roads
             .status()
             .contains("endpoint snap"));
+        assert_eq!(
+            BuildWorkflowPreset::BotArea.tool(),
+            ToolbeltTool::CityDistrict
+        );
+        assert!(BuildWorkflowPreset::BotArea
+            .status()
+            .contains("drag/release"));
         assert_eq!(
             BuildWorkflowPreset::CityShell.tool(),
             ToolbeltTool::CityBuilding
@@ -2220,6 +2258,8 @@ mod tests {
                 BuildWorkflowPreset::Room,
                 BuildWorkflowPreset::PushPull,
                 BuildWorkflowPreset::Roads,
+                BuildWorkflowPreset::BotArea,
+                BuildWorkflowPreset::CityShell,
                 BuildWorkflowPreset::Skyline,
             ]
         );
