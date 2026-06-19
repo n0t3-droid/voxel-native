@@ -110,7 +110,7 @@ impl ToolbeltTool {
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
             ToolbeltTool::BrushCut => "LMB or RMB starts a cut point, drag to an endpoint, release to remove exact snapped blocks.",
-            ToolbeltTool::CityRoad => "LMB draws roads: auto-snaps to endpoints/branches, continues from the last point, and inherits width, texture, and bridge height. Wheel edits selected roads: body width/radius, handle bridge height. Middle mouse retextures the selected component.",
+            ToolbeltTool::CityRoad => "LMB drag/release draws roads: auto-snaps to endpoints/branches, continues from the last point, and inherits width, texture, and bridge height. Wheel edits selected roads: body width/radius, handle bridge height. Middle mouse retextures the selected component.",
             ToolbeltTool::CityDistrict => "Two LMB clicks mark the exact bot city footprint. Bots stay parked until an area or explicit task is placed, then plan roads and buildings inside that space.",
             ToolbeltTool::CityBuilding => "LMB sets two corners for a solid building shell.",
             ToolbeltTool::CityFacade => "LMB stamps the active facade onto the targeted wall.",
@@ -282,7 +282,7 @@ impl ToolbeltTool {
                     "Road",
                     Icon::Road,
                     ActionTone::Tool,
-                    "Draw road components with endpoint and branch snapping.",
+                    "Hold and drag to draw road components with endpoint and branch snapping; click endpoints still works.",
                 )),
                 Some(ToolActionHint::new(
                     MouseGlyph::Right,
@@ -2140,6 +2140,7 @@ mod tests {
         let hint = ToolbeltTool::CityRoad.hint();
 
         assert!(hint.contains("auto-snaps"));
+        assert!(hint.contains("drag/release"));
         assert!(hint.contains("continues"));
         assert!(hint.contains("inherits"));
         assert!(hint.contains("bridge height"));

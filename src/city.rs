@@ -2,9 +2,9 @@
 //!
 //! Slim Cut 1 of the plan-v3 city system:
 //!
-//! * **CA Road-Grid-Tool** — choose Road in the STADT tab or Toolbelt,
-//!   click once to set start, click again to commit an editable road
-//!   component that follows terrain. Axis drags create straights,
+//! * **CA Road-Grid-Tool** - choose Road in the STADT tab or Toolbelt,
+//!   hold LMB, drag, and release to commit an editable road component
+//!   that follows terrain. Two-click placement still works. Axis drags create straights,
 //!   diagonal drags create clean corner roads, and same-point clicks
 //!   create roundabouts. Width with `[` / `]` (1..=17).
 //! * **CC District-Theming** — choose Zone to paint district discs on
@@ -1054,50 +1054,46 @@ fn city_input(
         city.status = "Textur: auf eine Strassenkomponente zielen.".into();
     }
 
+    if bare
+        && city.tool == CityTool::Road
+        && mouse.just_released(MouseButton::Left)
+        && city.pending_road_a.is_some()
+    {
+        let start = city.pending_road_a.unwrap();
+        if let Some(target) = road_drag_release_target(start, snapped, &city.roads) {
+            commit_road_segment_from_points(
+                &mut city,
+                &mut telemetry,
+                &mut world,
+                active.as_deref(),
+                start,
+                target,
+            );
+            return;
+        }
+    }
+
     // --- Mouse: commit action -----------------------------------------
     if bare && mouse.just_pressed(MouseButton::Left) {
         match city.tool {
             CityTool::Road => match city.pending_road_a {
                 None => {
                     city.pending_road_a = Some(snapped);
-                    city.status =
-                        format!("Start @ {},{} — 2. Klick setzt Ende.", snapped.x, snapped.z);
+                    city.status = format!(
+                        "Start @ {},{} - drag/release draws road, or click endpoint.",
+                        snapped.x, snapped.z
+                    );
                 }
                 Some(a) => {
                     let target = smart_road_drag_target(a, snapped, &city.roads);
-                    let seg = road_segment_from_drag(
+                    commit_road_segment_from_points(
+                        &mut city,
+                        &mut telemetry,
+                        &mut world,
+                        active.as_deref(),
                         a,
                         target,
-                        city.road_width,
-                        city.road_style,
-                        &city.roads,
                     );
-                    let n = stamp_road(&mut world, &seg);
-                    city.roads.push(seg);
-                    save_city_roads_for_active(active.as_deref(), &city.roads);
-                    city.road_width = seg.width;
-                    city.road_style = seg.style;
-                    city.pending_road_a = road_continuation_start(&seg);
-                    city.status = if let Some(next) = city.pending_road_a {
-                        format!(
-                            "Strasse {} {} ({} Bloecke) - weiter ab {},{}.",
-                            seg.shape.label(),
-                            seg.style.label(),
-                            n,
-                            next.x,
-                            next.z
-                        )
-                    } else {
-                        format!(
-                            "Strasse {} {} ({} Bloecke)",
-                            seg.shape.label(),
-                            seg.style.label(),
-                            n
-                        )
-                    };
-                    telemetry.city_actions = telemetry.city_actions.saturating_add(1);
-                    telemetry.build_blocks_changed =
-                        telemetry.build_blocks_changed.saturating_add(n as u64);
                 }
             },
             CityTool::District => match city.pending_district_a {
@@ -1450,6 +1446,47 @@ fn road_segment_from_drag(
         segment = segment.with_turn_height(turn);
     }
     segment
+}
+
+fn road_drag_release_target(start: IVec3, raw: IVec3, roads: &[RoadSegment]) -> Option<IVec3> {
+    let target = smart_road_drag_target(start, raw, roads);
+    (target.x != start.x || target.z != start.z).then_some(target)
+}
+
+fn commit_road_segment_from_points(
+    city: &mut CityState,
+    telemetry: &mut UnifiedTelemetry,
+    world: &mut VoxelWorld,
+    active: Option<&crate::settings::ActiveWorld>,
+    start: IVec3,
+    target: IVec3,
+) {
+    let seg = road_segment_from_drag(start, target, city.road_width, city.road_style, &city.roads);
+    let n = stamp_road(world, &seg);
+    city.roads.push(seg);
+    save_city_roads_for_active(active, &city.roads);
+    city.road_width = seg.width;
+    city.road_style = seg.style;
+    city.pending_road_a = road_continuation_start(&seg);
+    city.status = if let Some(next) = city.pending_road_a {
+        format!(
+            "Road {} {} ({} blocks) - continue from {},{}.",
+            seg.shape.label(),
+            seg.style.label(),
+            n,
+            next.x,
+            next.z
+        )
+    } else {
+        format!(
+            "Road {} {} ({} blocks)",
+            seg.shape.label(),
+            seg.style.label(),
+            n
+        )
+    };
+    telemetry.city_actions = telemetry.city_actions.saturating_add(1);
+    telemetry.build_blocks_changed = telemetry.build_blocks_changed.saturating_add(n as u64);
 }
 
 fn sync_road_brush_from_component(city: &mut CityState, road: RoadSegment) {
@@ -2864,11 +2901,17 @@ fn draw_hint_hud(
         match city.tool {
             CityTool::Road => {
                 if city.pending_road_a.is_some() {
-                    lines.push(("LMB".into(), "Strassenende setzen + weiterzeichnen".into()));
+                    lines.push((
+                        "LMB release".into(),
+                        "Strassenende zeichnen + weiterfuehren".into(),
+                    ));
                     lines.push(("Auto".into(), "Laenge / Brueckenhoehe erben".into()));
                     lines.push(("RMB / Esc".into(), "Abbrechen".into()));
                 } else {
-                    lines.push(("LMB".into(), "Strassenstart setzen".into()));
+                    lines.push((
+                        "LMB hold".into(),
+                        "Strassenstart setzen, ziehen, loslassen".into(),
+                    ));
                     lines.push(("RMB".into(), "Letzte Strasse loeschen".into()));
                 }
                 if let Some(idx) = city.selected_road {
@@ -3590,6 +3633,29 @@ mod tests {
             next.style,
             RoadStyle::Neon,
             "a connected road should inherit the source texture so roads blend by default"
+        );
+    }
+
+    #[test]
+    fn road_drag_release_commits_when_cursor_reaches_a_different_endpoint() {
+        let start = IVec3::new(0, 72, 0);
+        let raw = IVec3::new(24, 72, 3);
+
+        assert_eq!(
+            road_drag_release_target(start, raw, &[]),
+            Some(IVec3::new(24, 72, 0)),
+            "drag-release should behave like drawing the road, with axis snap applied"
+        );
+    }
+
+    #[test]
+    fn road_drag_release_keeps_same_point_available_for_roundabouts() {
+        let start = IVec3::new(16, 72, 16);
+
+        assert_eq!(
+            road_drag_release_target(start, start, &[]),
+            None,
+            "same-point clicks should still allow the deliberate two-click roundabout workflow"
         );
     }
 
