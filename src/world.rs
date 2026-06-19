@@ -1329,16 +1329,31 @@ fn mesh_dirty_chunks(
         })
         .unwrap_or(Vec2::ZERO);
 
-    // Drain the dirty set into a candidate list. Retain anything we
-    // can't schedule this frame (no slots / missing neighbours) so it's
-    // picked up next frame without rescanning the whole world. The
-    // scratch Vec is reused across frames to avoid per-frame heap
-    // churn.
+    // Drain a bounded window of the dirty set into a candidate list.
+    // Retain anything we can't schedule this frame (no slots / missing
+    // neighbours) so it is picked up next frame. We deliberately avoid
+    // sorting the whole dirty backlog: bot cities, road edits, and dense
+    // scenic biomes can mark thousands of chunks dirty at once, while the
+    // runtime budget may only allow a handful of mesh jobs this frame.
     let mut candidates = std::mem::take(&mut streamer.mesh_candidates_scratch);
     candidates.clear();
-    candidates.reserve(streamer.dirty_queue.len());
+    let dirty_total = streamer.dirty_queue.len();
+    let schedule_budget = budget.meshes_per_frame.max(1) as usize;
+    let scan_budget = dirty_mesh_candidate_scan_budget(
+        dirty_total,
+        schedule_budget,
+        max_in_flight,
+        budget.queue_pressure.max(budget.frame_pressure),
+    );
+    candidates.reserve(scan_budget.min(dirty_total));
     let queue: AHashSet<ChunkPos> = std::mem::take(&mut streamer.dirty_queue);
-    for p in queue {
+    let mut scanned = 0usize;
+    let mut queue_iter = queue.into_iter();
+    while scanned < scan_budget {
+        let Some(p) = queue_iter.next() else {
+            break;
+        };
+        scanned += 1;
         let Some(c) = world.chunks.get(&p) else {
             continue;
         };
@@ -1360,13 +1375,13 @@ fn mesh_dirty_chunks(
         let scenic = biome_stream_bonus(&world.generator, p.x, p.z);
         candidates.push((priority_score(p.x - pcx, p.z - pcz, forward) + scenic, p));
     }
+    streamer.dirty_queue.extend(queue_iter);
     candidates.sort_unstable_by_key(|(s, _)| *s);
 
     #[cfg(not(target_arch = "wasm32"))]
     let pool = AsyncComputeTaskPool::get();
     let mut slots = max_in_flight - streamer.pending_meshes.len();
     let mut scheduled_this_frame = 0usize;
-    let schedule_budget = budget.meshes_per_frame.max(1) as usize;
 
     for (_s, pos) in candidates.drain(..) {
         if slots == 0 || scheduled_this_frame >= schedule_budget {
@@ -1526,6 +1541,31 @@ fn mark_chunk_and_neighbours_dirty(
             streamer.dirty_queue.insert(n);
         }
     }
+}
+
+fn dirty_mesh_candidate_scan_budget(
+    dirty_total: usize,
+    schedule_budget: usize,
+    max_in_flight: usize,
+    pressure: f32,
+) -> usize {
+    if dirty_total == 0 {
+        return 0;
+    }
+    let pressure = pressure.clamp(0.0, 1.25);
+    let multiplier = if pressure >= 0.85 {
+        32
+    } else if pressure >= 0.55 {
+        48
+    } else {
+        96
+    };
+    let budget = schedule_budget
+        .max(1)
+        .saturating_mul(multiplier)
+        .max(max_in_flight.saturating_mul(2))
+        .max(64);
+    budget.min(dirty_total)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1783,5 +1823,27 @@ mod tests {
         world.insert_chunk(center, solid_chunk(center, BlockType::Stone.into()));
 
         assert!(!uniform_chunk_is_trivially_invisible(&mut world, center, 4));
+    }
+
+    #[test]
+    fn dirty_mesh_candidate_scan_budget_scans_small_queues_fully() {
+        assert_eq!(dirty_mesh_candidate_scan_budget(24, 4, 80, 0.0), 24);
+    }
+
+    #[test]
+    fn dirty_mesh_candidate_scan_budget_caps_large_backlogs() {
+        let budget = dirty_mesh_candidate_scan_budget(10_000, 4, 80, 1.0);
+
+        assert!(budget < 10_000);
+        assert_eq!(budget, 160);
+    }
+
+    #[test]
+    fn dirty_mesh_candidate_scan_budget_expands_when_stable() {
+        let pressured = dirty_mesh_candidate_scan_budget(10_000, 4, 80, 1.0);
+        let stable = dirty_mesh_candidate_scan_budget(10_000, 4, 80, 0.0);
+
+        assert!(stable > pressured);
+        assert_eq!(stable, 384);
     }
 }
