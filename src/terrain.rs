@@ -296,12 +296,9 @@ impl TerrainGenerator {
         // boost stretched (threshold 0.55â†’0.62, coefficient 110â†’90) so
         // mountains rise more slowly across a wider footprint.
         let peak_boost = (cont - 0.62).max(0.0);
-        let peak_boost = peak_boost * peak_boost * 180.0; // boosted mountains massively
+        let peak_boost = peak_boost * peak_boost * 80.0;
         let base = 50.0 + cont * 32.0 + (1.0 - erod.abs()) * 8.0;
-        let mut h = base
-            + hills * 22.0 // much taller rolling hills
-            + ridges * 150.0 * mountain_mask // gigantic mountains
-            + peak_boost;
+        let mut h = base + hills * 14.0 + ridges * 72.0 * mountain_mask + peak_boost;
 
         // ----------- Macro-region modifier -----------
         // Apply ONE geographic-province transform with high strength
@@ -320,24 +317,26 @@ impl TerrainGenerator {
                     h = h * (1.0 - pull) + banded * pull;
                     // Boost overall canyon altitude so mesas tower
                     // dramatically above the canyon floor.
-                    h += rs * 40.0; // taller overall canyon altitude
-                                    // Carved canyon floors: where erosion is high, drop
-                                    // a deep slot. Creates river-cut canyons through
-                                    // the mesa fields.
-                    let carve = (erod.abs() - 0.45).max(0.0) * 60.0; // deeper carves
+                    h += rs * 22.0;
+                    // Carved canyon floors: where erosion is high, drop
+                    // a deep slot. Creates river-cut canyons through
+                    // the mesa fields.
+                    let carve = (erod.abs() - 0.45).max(0.0) * 38.0;
                     h -= rs * carve;
                 }
             }
             Region::Plateau => {
                 // Vast tableland at h~88. Tibetan / Iberian high steppe.
-                let plateau_h = 110.0; // much higher plateau
+                let plateau_h = 88.0;
                 let pull = rs * 0.70;
                 h = h * (1.0 - pull) + plateau_h * pull;
-                h += rs * hills * 15.0; // more varied tableland
+                h += rs * hills * 8.0;
             }
             Region::Highland => {
-                // Alpine: amplify ridges dramatically.
-                h += rs * ridges.abs() * 120.0; // far taller ridges in highland
+                // Alpine: strong enough for skyline silhouettes, capped
+                // so normal worlds do not turn into vertical walls that
+                // hitch low-end machines when approached.
+                h += rs * ridges.abs() * 58.0;
             }
             Region::Wetland => {
                 // Floodplain: pull to just above water level.
@@ -360,8 +359,8 @@ impl TerrainGenerator {
                                                                                          // Cube to make pillars sharp & isolated rather than
                                                                                          // continuous ridges. Threshold so only the strongest
                                                                                          // peaks become pillars.
-                let pillar = (pillar_n - 0.55).max(0.0);
-                let pillar = pillar * pillar * pillar * 1600.0; // much taller pillars
+                let pillar = (pillar_n - 0.62).max(0.0);
+                let pillar = pillar * pillar * pillar * 520.0;
                 h += rs * pillar;
             }
             Region::CrystalSpires => {
@@ -588,7 +587,7 @@ impl TerrainGenerator {
         // horizontal stripe.
         let line_wobble = self.moisture.get([wx * 0.008, wz * 0.008]) * 6.0
             + self.erosion.get([wx * 0.02, wz * 0.02]) * 3.0;
-        let snow_line = 118 + (temp * -15.0) as i32 + line_wobble as i32;
+        let snow_line = 138 + (temp * -15.0) as i32 + line_wobble as i32;
         let rock_line = snow_line - 20 + (line_wobble * 0.6) as i32;
         if height > snow_line {
             return Biome::SnowyMountains;
@@ -1215,7 +1214,7 @@ impl TerrainGenerator {
                         // patches only, no tall stalks that block
                         // visibility.
                         if is_sand_ground && surface < WATER_LEVEL - 2 && r < 0.06 {
-                            chunk.set(lx, above_ly as usize, lz, BlockType::AlienMoss.into());
+                            chunk.set(lx, above_ly as usize, lz, BlockType::MossStone.into());
                         }
                     }
                     Biome::CrystalSpires => {
@@ -1781,13 +1780,13 @@ impl TerrainGenerator {
 
             let keep = match biome {
                 Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.18,
-                Biome::GlacierShards => r_gate < 0.065,
-                Biome::VolcanicWaste => r_gate < 0.045,
-                Biome::Forest | Biome::Jungle | Biome::Karst => r_gate < 0.008,
-                Biome::Mesa => r_gate < 0.006,
+                Biome::GlacierShards => r_gate < 0.045,
+                Biome::VolcanicWaste => r_gate < 0.030,
+                Biome::Forest | Biome::Jungle | Biome::Karst => false,
+                Biome::Mesa => false,
                 Biome::Desert | Biome::Savanna | Biome::Beach | Biome::Ocean => false,
-                Biome::Mountains | Biome::SnowyMountains | Biome::Tundra => r_gate < 0.006,
-                _ => r_gate < 0.003,
+                Biome::Mountains | Biome::SnowyMountains | Biome::Tundra => false,
+                _ => false,
             };
             if !keep {
                 continue;
@@ -2063,7 +2062,8 @@ impl TerrainGenerator {
     ) {
         let block = match biome {
             Biome::Mesa => BlockType::RedStone,
-            Biome::SnowyMountains | Biome::GlacierShards => BlockType::Ice,
+            Biome::GlacierShards => BlockType::Ice,
+            Biome::SnowyMountains => BlockType::Stone,
             Biome::CrystalSpires => BlockType::Crystal,
             Biome::Tundra => BlockType::Gravel,
             _ => BlockType::Stone,
@@ -2583,6 +2583,59 @@ mod tests {
 
         assert!(!spawn.biome.is_showcase_terrain());
         assert!(spawn.y > WATER_LEVEL + 4);
+    }
+
+    #[test]
+    fn default_generated_chunks_do_not_scatter_showcase_blocks() {
+        let generator = TerrainGenerator::new(12345);
+        let showcase_blocks: [Voxel; 9] = [
+            BlockType::Crystal.into(),
+            BlockType::LuminiteCrystal.into(),
+            BlockType::MagnetiteOre.into(),
+            BlockType::IridiumVein.into(),
+            BlockType::AlienMoss.into(),
+            BlockType::BoneRock.into(),
+            BlockType::GlowSand.into(),
+            BlockType::Basalt.into(),
+            BlockType::Lava.into(),
+        ];
+        let sample_columns = [(-8, -8), (-3, 5), (0, 0), (6, -4), (11, 9)];
+
+        for (cx, cz) in sample_columns {
+            for cy in 0..10 {
+                let mut chunk = Chunk::new(ChunkPos::new(cx, cy, cz));
+                generator.generate(&mut chunk);
+                for ly in 0..CHUNK_SIZE {
+                    for lz in 0..CHUNK_SIZE {
+                        for lx in 0..CHUNK_SIZE {
+                            let voxel = chunk.get(lx, ly, lz);
+                            assert!(
+                                !showcase_blocks.contains(&voxel),
+                                "default chunk {cx},{cy},{cz} unexpectedly contains showcase block {voxel}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_surface_heights_stay_in_playable_streaming_range() {
+        let generator = TerrainGenerator::new(12345);
+        let mut highest = i32::MIN;
+
+        for z in (-12_000..=12_000).step_by(384) {
+            for x in (-12_000..=12_000).step_by(384) {
+                let surface = generator.surface_height_at(x, z);
+                highest = highest.max(surface);
+            }
+        }
+
+        assert!(
+            highest <= 220,
+            "default terrain should stay playable for normal streaming budgets; highest sample was {highest}"
+        );
     }
 }
 

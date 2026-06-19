@@ -909,6 +909,13 @@ impl BuildWorkflowPreset {
         Self::Skyline,
         Self::Spacecraft,
     ];
+    const QUICK: [Self; 5] = [
+        Self::Sketch,
+        Self::Room,
+        Self::PushPull,
+        Self::Roads,
+        Self::Skyline,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -1128,6 +1135,7 @@ fn draw_build_dock(
                 });
 
                 if !picker_open {
+                    quick_workflow_bar(ui, active_tool, theme, &mut result);
                     compact_hud_status(ui, status, active_tool, theme);
                 }
 
@@ -1313,6 +1321,38 @@ fn action_card(
         TEXT,
     );
     response.on_hover_text(action.hint);
+}
+
+fn quick_workflow_bar(
+    ui: &mut egui::Ui,
+    active_tool: ToolbeltTool,
+    theme: crate::theme::ThemeSettings,
+    result: &mut BuildDockResult,
+) {
+    let colors = theme.semantic();
+    let frame = egui::Frame::none()
+        .fill(egui::Color32::from_rgba_unmultiplied(0, 12, 16, 104))
+        .stroke(egui::Stroke::new(1.0, colors.stroke))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(7.0, 4.0));
+    ui.add_space(2.0);
+    frame.show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(5.0, 3.0);
+            ui.label(
+                egui::RichText::new("QUICK")
+                    .monospace()
+                    .size(9.0)
+                    .strong()
+                    .color(colors.text_muted),
+            );
+            for preset in BuildWorkflowPreset::QUICK {
+                if workflow_preset_chip(ui, preset, active_tool == preset.tool()) {
+                    result.workflow_preset = Some(preset);
+                }
+            }
+        });
+    });
 }
 
 fn compact_hud_status(
@@ -1967,6 +2007,20 @@ mod tests {
         assert_eq!(
             BuildWorkflowPreset::Skyline.tool(),
             ToolbeltTool::SmartTower
+        );
+    }
+
+    #[test]
+    fn quick_workflow_bar_exposes_no_function_key_core_actions() {
+        assert_eq!(
+            BuildWorkflowPreset::QUICK,
+            [
+                BuildWorkflowPreset::Sketch,
+                BuildWorkflowPreset::Room,
+                BuildWorkflowPreset::PushPull,
+                BuildWorkflowPreset::Roads,
+                BuildWorkflowPreset::Skyline,
+            ]
         );
     }
 
