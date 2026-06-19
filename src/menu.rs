@@ -665,6 +665,39 @@ fn draw_pause_main(
                 ui.add_space(6.0);
                 if crate::ui_kit::major_action(
                     ui,
+                    Icon::Wand,
+                    "Repair Terrain",
+                    "Remove old visual artifact chunks",
+                    false,
+                    settings.theme,
+                )
+                .clicked()
+                {
+                    let report = world.repair_visual_artifact_overrides();
+                    if report.removed_chunks > 0 {
+                        streamer.frontier_complete = false;
+                        streamer.needs_orphan_scan = true;
+                        save_current_world(
+                            settings,
+                            active,
+                            scratch,
+                            player_q,
+                            ship_q,
+                            ship_inventory,
+                            brain,
+                            world,
+                        );
+                    }
+                    info!(
+                        "Scanned {} edit chunks, repaired {}, refreshed {} loaded chunks.",
+                        report.scanned_chunks,
+                        report.removed_chunks,
+                        report.refreshed_loaded_chunks
+                    );
+                }
+                ui.add_space(6.0);
+                if crate::ui_kit::major_action(
+                    ui,
                     Icon::Layout,
                     "Toolbench",
                     "HUD, world and visual settings",

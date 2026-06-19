@@ -18,8 +18,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::blocks::{
-    effective_material_for_voxel, normalize_material_for_voxel, voxel_is_solid, MaterialId, Voxel,
-    AIR, DEFAULT_MATERIAL,
+    effective_material_for_voxel, normalize_material_for_voxel, voxel_is_solid, BlockType,
+    MaterialId, Voxel, AIR, DEFAULT_MATERIAL,
 };
 use crate::chunk::{
     world_to_chunk, Chunk, ChunkPos, SharedMaterials, SharedVoxels, CHUNK_SIZE_I, CHUNK_VOLUME,
@@ -174,6 +174,14 @@ pub struct EditedChunkOverride {
     pub voxels: Vec<Voxel>,
     #[serde(default)]
     pub materials: Vec<MaterialId>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorldRepairReport {
+    pub scanned_chunks: usize,
+    pub removed_chunks: usize,
+    pub refreshed_loaded_chunks: usize,
+    pub kept_chunks: usize,
 }
 
 impl EditedChunkOverride {
@@ -333,6 +341,61 @@ fn edited_chunk_file(dir: &std::path::Path, pos: ChunkPos) -> PathBuf {
     dir.join(format!("{}_{}_{}.ron", pos.x, pos.y, pos.z))
 }
 
+fn override_looks_like_visual_artifact(
+    pos: ChunkPos,
+    data: &EditedChunkOverride,
+    generator: &TerrainGenerator,
+) -> bool {
+    if data.voxels.len() != CHUNK_VOLUME {
+        return false;
+    }
+
+    let wx = pos.x * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
+    let wz = pos.z * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
+    let biome = generator.biome_at(wx, wz);
+    if biome.is_showcase_terrain() {
+        return false;
+    }
+
+    let mut non_air = 0usize;
+    let mut showcase = 0usize;
+    let mut cold = 0usize;
+    for &voxel in &data.voxels {
+        if voxel == AIR {
+            continue;
+        }
+        non_air += 1;
+        match BlockType::from_voxel(voxel) {
+            BlockType::Crystal
+            | BlockType::LuminiteCrystal
+            | BlockType::MagnetiteOre
+            | BlockType::IridiumVein
+            | BlockType::AlienMoss
+            | BlockType::BoneRock
+            | BlockType::GlowSand
+            | BlockType::Basalt
+            | BlockType::Lava => showcase += 1,
+            BlockType::Snow | BlockType::Ice => cold += 1,
+            _ => {}
+        }
+    }
+
+    if non_air < 64 {
+        return false;
+    }
+
+    let showcase_ratio = showcase as f32 / non_air as f32;
+    let cold_ratio = cold as f32 / non_air as f32;
+    showcase_ratio >= 0.35
+        || (cold_ratio >= 0.72
+            && !matches!(
+                biome,
+                crate::terrain::Biome::SnowyMountains
+                    | crate::terrain::Biome::Tundra
+                    | crate::terrain::Biome::Ocean
+            ))
+}
+
 fn now_epoch() -> u64 {
     crate::platform::now_epoch()
 }
@@ -421,6 +484,67 @@ impl VoxelWorld {
     pub fn clear_chunks(&mut self) {
         self.chunks.clear();
         self.loaded_column_counts.clear();
+    }
+
+    /// Remove saved edit chunks that are overwhelmingly old showcase /
+    /// ice-artifact material in normal terrain, then regenerate any
+    /// currently loaded chunks from terrain. This is intentionally
+    /// conservative: ordinary stone/wood/road/building edits stay.
+    pub fn repair_visual_artifact_overrides(&mut self) -> WorldRepairReport {
+        let mut report = WorldRepairReport {
+            scanned_chunks: self.edited_overrides.len(),
+            ..default()
+        };
+        let to_remove: Vec<ChunkPos> = self
+            .edited_overrides
+            .iter()
+            .filter_map(|(pos, data)| {
+                if override_looks_like_visual_artifact(*pos, data, &self.generator) {
+                    Some(*pos)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        report.removed_chunks = to_remove.len();
+        report.kept_chunks = report.scanned_chunks.saturating_sub(report.removed_chunks);
+
+        for pos in to_remove {
+            self.edited_overrides.remove(&pos);
+            self.column_top_cy.remove(&(pos.x, pos.z));
+            if self.chunks.contains_key(&pos) {
+                let mut regenerated = Chunk::new(pos);
+                self.generator.generate(&mut regenerated);
+                regenerated.dirty = true;
+                self.insert_chunk(pos, regenerated);
+                report.refreshed_loaded_chunks += 1;
+            }
+            self.mark_chunk_family_dirty(pos);
+        }
+
+        if report.removed_chunks > 0 {
+            self.edit_save_dirty = true;
+        }
+        report
+    }
+
+    fn mark_chunk_family_dirty(&mut self, cp: ChunkPos) {
+        self.edit_dirty_chunks.insert(cp);
+        for (dx, dy, dz) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            let n = ChunkPos::new(cp.x + dx, cp.y + dy, cp.z + dz);
+            if let Some(c) = self.chunks.get_mut(&n) {
+                c.dirty = true;
+                self.edit_dirty_chunks.insert(n);
+            }
+        }
     }
 
     pub fn insert_chunk(&mut self, pos: ChunkPos, chunk: Chunk) -> Option<Chunk> {
@@ -1783,6 +1907,13 @@ mod tests {
         chunk
     }
 
+    fn override_chunk(voxel: Voxel) -> EditedChunkOverride {
+        EditedChunkOverride {
+            voxels: vec![voxel; CHUNK_VOLUME],
+            materials: Vec::new(),
+        }
+    }
+
     #[test]
     fn known_air_slots_do_not_need_placeholder_chunks() {
         let mut world = VoxelWorld::new();
@@ -1845,5 +1976,43 @@ mod tests {
 
         assert!(stable > pressured);
         assert_eq!(stable, 384);
+    }
+
+    #[test]
+    fn visual_artifact_repair_removes_showcase_override_and_regenerates_loaded_chunk() {
+        let mut world = VoxelWorld::new();
+        let pos = ChunkPos::new(0, 3, 0);
+        let alien_moss: Voxel = BlockType::AlienMoss.into();
+        world
+            .edited_overrides
+            .insert(pos, override_chunk(alien_moss));
+        world.insert_chunk(pos, solid_chunk(pos, alien_moss));
+
+        let report = world.repair_visual_artifact_overrides();
+
+        assert_eq!(report.scanned_chunks, 1);
+        assert_eq!(report.removed_chunks, 1);
+        assert_eq!(report.refreshed_loaded_chunks, 1);
+        assert!(!world.edited_overrides.contains_key(&pos));
+        assert!(world.edit_save_dirty);
+        assert!(world.edit_dirty_chunks.contains(&pos));
+        assert_ne!(world.chunks.get(&pos).unwrap().get(0, 0, 0), alien_moss);
+    }
+
+    #[test]
+    fn visual_artifact_repair_keeps_normal_build_overrides() {
+        let mut world = VoxelWorld::new();
+        let pos = ChunkPos::new(1, 3, 1);
+        world
+            .edited_overrides
+            .insert(pos, override_chunk(BlockType::Limestone.into()));
+
+        let report = world.repair_visual_artifact_overrides();
+
+        assert_eq!(report.scanned_chunks, 1);
+        assert_eq!(report.removed_chunks, 0);
+        assert_eq!(report.kept_chunks, 1);
+        assert!(world.edited_overrides.contains_key(&pos));
+        assert!(!world.edit_save_dirty);
     }
 }
