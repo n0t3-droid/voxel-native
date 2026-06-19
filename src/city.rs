@@ -2365,8 +2365,9 @@ fn lerp_grade(start: f32, end: f32, t: f32) -> f32 {
 // ---------------------------------------------------------------------
 
 /// Stamp a procedural rectangular building onto the terrain. Flat roof,
-/// solid perimeter walls, hollow interior with floor slabs every 3
-/// blocks of height. Returns the number of voxels changed.
+/// perimeter walls with simple door/window openings, hollow interior
+/// with floor slabs every 3 blocks of height. Returns the number of
+/// voxels changed.
 ///
 /// This is **not** a WFC / facade-library placer — it's a deliberate
 /// "1-click box" primitive that gets you from empty lot to skyline in
@@ -2421,7 +2422,7 @@ fn stamp_building(world: &mut VoxelWorld, bld: &Building) -> usize {
             for h in 1..total_h {
                 let y = base_y + h;
                 if on_perimeter {
-                    let v = if voxel_on_door(h, wx, wz, &bld) {
+                    let v = if voxel_on_door(h, wx, wz, &bld) || voxel_on_window(h, wx, wz, &bld) {
                         AIR
                     } else {
                         wall
@@ -2449,11 +2450,11 @@ fn stamp_building(world: &mut VoxelWorld, bld: &Building) -> usize {
     changed
 }
 
-/// Heuristic door opening: carve a 1-wide gap in the middle of the
-/// shorter side at ground level (h=1). Returns true when `(wx, wz, h)`
-/// falls on the door tile so [`stamp_building`] can skip the wall.
+/// Heuristic door opening: carve a 1-wide, 2-high gap in the middle of
+/// the shorter side. Returns true when `(wx, wz, h)` falls on the door
+/// tile so [`stamp_building`] can skip the wall.
 fn voxel_on_door(h: i32, wx: i32, wz: i32, bld: &Building) -> bool {
-    if h != 1 {
+    if !(1..=2).contains(&h) {
         return false;
     }
     let w = bld.max.x - bld.min.x;
@@ -2469,6 +2470,31 @@ fn voxel_on_door(h: i32, wx: i32, wz: i32, bld: &Building) -> bool {
         let mid_x = (bld.min.x + bld.max.x) / 2;
         wz == bld.min.z && wx == mid_x
     }
+}
+
+/// Repeated cheap facade openings, aligned to the voxel storey height.
+/// This gives one-drag building shells an immediately readable interior
+/// without adding mesh complexity or per-building facade state.
+fn voxel_on_window(h: i32, wx: i32, wz: i32, bld: &Building) -> bool {
+    if h < 2 || (h % 3) != 2 {
+        return false;
+    }
+
+    let w = bld.max.x - bld.min.x;
+    let d = bld.max.z - bld.min.z;
+    if w < 4 || d < 4 {
+        return false;
+    }
+
+    let on_x_edge = wx == bld.min.x || wx == bld.max.x;
+    let on_z_edge = wz == bld.min.z || wz == bld.max.z;
+    if on_x_edge && wz > bld.min.z && wz < bld.max.z {
+        return (wz - bld.min.z) % 4 == 2;
+    }
+    if on_z_edge && wx > bld.min.x && wx < bld.max.x {
+        return (wx - bld.min.x) % 4 == 2;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------
@@ -3642,6 +3668,47 @@ mod tests {
             building_shell_drag_release_corners(start, start),
             None,
             "a click without drag should stay available for deliberate tiny-shell placement"
+        );
+    }
+
+    #[test]
+    fn building_shell_stamps_livable_doors_and_windows() {
+        let mut world = VoxelWorld::new();
+        let bld = Building {
+            min: IVec3::new(0, 72, 0),
+            max: IVec3::new(10, 72, 8),
+            floors: 4,
+            style: BuildingStyle::Commercial,
+        };
+        let mut ground = i32::MIN;
+        for x in bld.min.x..=bld.max.x {
+            for z in bld.min.z..=bld.max.z {
+                ground = ground.max(world.surface_height_at(x, z));
+            }
+        }
+        let base_y = ground + 1;
+
+        stamp_building(&mut world, &bld);
+
+        assert_eq!(
+            world.voxel_at(5, base_y + 1, 0),
+            AIR,
+            "front door should be open at player height"
+        );
+        assert_eq!(
+            world.voxel_at(5, base_y + 2, 0),
+            AIR,
+            "front door should not be a one-block slit"
+        );
+        assert_eq!(
+            world.voxel_at(0, base_y + 5, 2),
+            AIR,
+            "upper floors should get repeated window openings"
+        );
+        assert_eq!(
+            world.voxel_at(0, base_y + 5, 1),
+            Voxel::from(BuildingStyle::Commercial.wall()),
+            "window carving should leave normal wall cells between openings"
         );
     }
 
