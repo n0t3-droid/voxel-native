@@ -1,12 +1,6 @@
 # Voxel-Native
 
-Voxel-Native is the native Rust successor to R93G: a Bevy/wgpu voxel engine
-focused on fast streaming worlds, shuttle flight, shooter systems, friendly
-robots, and autonomous city construction that can still run on modest PCs.
-
-The project goal is not just a voxel sandbox. It is a playable engine where the
-world, the UI, the spacecraft, the bots, and the terrain all work together as a
-coherent sci-fi game.
+The project goal is not just a voxel sandbox.
 
 ## Engine Pillars
 
