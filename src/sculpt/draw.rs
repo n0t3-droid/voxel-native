@@ -44,6 +44,7 @@ pub struct RectDrawState {
     smart_gesture: bool,
     room_cut: bool,
     inference: RectEndpointInference,
+    reference_span: IVec2,
     voxel: Voxel,
     status_cells: usize,
 }
@@ -61,6 +62,7 @@ enum RectEndpointInference {
     None,
     Axis,
     EqualLength,
+    ReferenceLength,
 }
 
 impl RectEndpointInference {
@@ -69,6 +71,7 @@ impl RectEndpointInference {
             Self::None => "",
             Self::Axis => " Axis lock.",
             Self::EqualLength => " Equal-length snap.",
+            Self::ReferenceLength => " Reference length snap.",
         }
     }
 }
@@ -330,8 +333,13 @@ pub fn rect_draw_input(
                     origin,
                     dir,
                 );
-                let (endpoint, inference) =
-                    infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
+                let (endpoint, inference) = infer_rect_endpoint_with_reference(
+                    draw.start,
+                    endpoint,
+                    draw.axis_u,
+                    draw.axis_v,
+                    draw.reference_span,
+                );
                 draw.current = endpoint;
                 draw.inference = inference;
             } else if let Some(endpoint) = snap_rect_endpoint_from_locked_plane_ray(
@@ -342,8 +350,13 @@ pub fn rect_draw_input(
                 origin,
                 dir,
             ) {
-                let (endpoint, inference) =
-                    infer_rect_endpoint(draw.start, endpoint, draw.axis_u, draw.axis_v);
+                let (endpoint, inference) = infer_rect_endpoint_with_reference(
+                    draw.start,
+                    endpoint,
+                    draw.axis_u,
+                    draw.axis_v,
+                    draw.reference_span,
+                );
                 draw.current = endpoint;
                 draw.inference = inference;
             }
@@ -421,6 +434,8 @@ fn commit_rect_fill(
     history: &mut BuilderHistory,
     toolbelt: &mut ToolbeltState,
 ) {
+    let next_reference_span =
+        rect_reference_span(draw.start, draw.current, draw.axis_u, draw.axis_v);
     let cells = match draw.action {
         RectDrawAction::Fill => rect_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP),
         RectDrawAction::Cut if draw.room_cut => rect_room_cut_cells_through_solid(
@@ -482,6 +497,9 @@ fn commit_rect_fill(
     }
     draw.active = false;
     draw.click_finish = false;
+    if next_reference_span != IVec2::ZERO {
+        draw.reference_span = next_reference_span;
+    }
 }
 
 fn normal_axis(normal: IVec3) -> Option<usize> {
@@ -684,11 +702,22 @@ fn snap_rect_endpoint_from_locked_plane_ray(
     Some(snapped)
 }
 
+#[cfg(test)]
 fn infer_rect_endpoint(
     start: IVec3,
     raw: IVec3,
     axis_u: IVec3,
     axis_v: IVec3,
+) -> (IVec3, RectEndpointInference) {
+    infer_rect_endpoint_with_reference(start, raw, axis_u, axis_v, IVec2::ZERO)
+}
+
+fn infer_rect_endpoint_with_reference(
+    start: IVec3,
+    raw: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    reference_span: IVec2,
 ) -> (IVec3, RectEndpointInference) {
     if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
         return (raw, RectEndpointInference::None);
@@ -704,11 +733,25 @@ fn infer_rect_endpoint(
     let mut inferred = raw;
     if au > 0 && av > 0 && (av <= RECT_AXIS_JITTER || au as f32 >= av as f32 * RECT_AXIS_RATIO) {
         set_component_by_axis(&mut inferred, axis_v, component_by_axis(start, axis_v));
-        return (inferred, RectEndpointInference::Axis);
+        return snap_endpoint_to_reference_length(
+            start,
+            inferred,
+            axis_u,
+            axis_v,
+            reference_span,
+            RectEndpointInference::Axis,
+        );
     }
     if av > 0 && au > 0 && (au <= RECT_AXIS_JITTER || av as f32 >= au as f32 * RECT_AXIS_RATIO) {
         set_component_by_axis(&mut inferred, axis_u, component_by_axis(start, axis_u));
-        return (inferred, RectEndpointInference::Axis);
+        return snap_endpoint_to_reference_length(
+            start,
+            inferred,
+            axis_u,
+            axis_v,
+            reference_span,
+            RectEndpointInference::Axis,
+        );
     }
 
     if au >= 2 && av >= 2 && (au - av).abs() <= RECT_EQUAL_LENGTH_TOLERANCE {
@@ -726,7 +769,62 @@ fn infer_rect_endpoint(
         return (inferred, RectEndpointInference::EqualLength);
     }
 
-    (raw, RectEndpointInference::None)
+    snap_endpoint_to_reference_length(
+        start,
+        raw,
+        axis_u,
+        axis_v,
+        reference_span,
+        RectEndpointInference::None,
+    )
+}
+
+fn snap_endpoint_to_reference_length(
+    start: IVec3,
+    raw: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    reference_span: IVec2,
+    fallback: RectEndpointInference,
+) -> (IVec3, RectEndpointInference) {
+    let mut snapped = raw;
+    let mut used_reference = false;
+    let references = [reference_span.x.abs(), reference_span.y.abs()];
+    for axis in [axis_u, axis_v] {
+        let delta = component_by_axis(snapped, axis) - component_by_axis(start, axis);
+        let span = delta.abs();
+        let reference = references
+            .iter()
+            .copied()
+            .filter(|reference| *reference > 0)
+            .filter(|reference| {
+                span > 0 && (span - *reference).abs() <= RECT_EQUAL_LENGTH_TOLERANCE
+            })
+            .min_by_key(|reference| (span - *reference).abs());
+        if let Some(reference) = reference {
+            set_component_by_axis(
+                &mut snapped,
+                axis,
+                component_by_axis(start, axis) + delta.signum() * reference,
+            );
+            used_reference = true;
+        }
+    }
+    if used_reference {
+        (snapped, RectEndpointInference::ReferenceLength)
+    } else {
+        (raw, fallback)
+    }
+}
+
+fn rect_reference_span(start: IVec3, current: IVec3, axis_u: IVec3, axis_v: IVec3) -> IVec2 {
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return IVec2::ZERO;
+    }
+    IVec2::new(
+        (component_by_axis(current, axis_u) - component_by_axis(start, axis_u)).abs(),
+        (component_by_axis(current, axis_v) - component_by_axis(start, axis_v)).abs(),
+    )
 }
 
 fn is_cardinal_axis(axis: IVec3) -> bool {
@@ -1170,6 +1268,48 @@ mod tests {
 
         assert_eq!(snapped, IVec3::new(7, 64, 7));
         assert_eq!(inference, RectEndpointInference::EqualLength);
+    }
+
+    #[test]
+    fn rect_endpoint_inference_reuses_previous_drawn_length() {
+        let (snapped, inference) = infer_rect_endpoint_with_reference(
+            IVec3::new(0, 64, 0),
+            IVec3::new(11, 64, 1),
+            IVec3::X,
+            IVec3::Z,
+            IVec2::new(12, 0),
+        );
+
+        assert_eq!(snapped, IVec3::new(12, 64, 0));
+        assert_eq!(inference, RectEndpointInference::ReferenceLength);
+    }
+
+    #[test]
+    fn rect_endpoint_inference_reuses_previous_height_as_new_width() {
+        let (snapped, inference) = infer_rect_endpoint_with_reference(
+            IVec3::new(0, 64, 0),
+            IVec3::new(11, 64, 0),
+            IVec3::X,
+            IVec3::Z,
+            IVec2::new(0, 12),
+        );
+
+        assert_eq!(snapped, IVec3::new(12, 64, 0));
+        assert_eq!(inference, RectEndpointInference::ReferenceLength);
+    }
+
+    #[test]
+    fn rect_endpoint_inference_keeps_deliberate_new_length() {
+        let (snapped, inference) = infer_rect_endpoint_with_reference(
+            IVec3::new(0, 64, 0),
+            IVec3::new(17, 64, 0),
+            IVec3::X,
+            IVec3::Z,
+            IVec2::new(12, 0),
+        );
+
+        assert_eq!(snapped, IVec3::new(17, 64, 0));
+        assert_eq!(inference, RectEndpointInference::None);
     }
 
     #[test]
