@@ -96,6 +96,12 @@ and Push/Pull extrusion into a top face plus side faces. `SketchDocument` can
 export an existing semantic face into a B-Rep kernel, which is the bridge toward
 SketchUp-style face editing before voxel rasterization.
 
+The SketchUp inference/transform video follow-up has also started at the
+semantic layer. `SketchDocument` now has undoable `scale_selection_about_pivot`
+and `flip_selection_across_plane` operations. These support exact scale factors,
+component-instance transforms, arbitrary mirror planes from inferred axes/faces,
+and geometry/bounds updates for faces, curves, openings, rooms, and extrusions.
+
 ## Important Remaining Gaps
 
 - SketchUp equivalence is not complete. Circle, polygon, arc, and freehand now
@@ -108,6 +114,8 @@ SketchUp-style face editing before voxel rasterization.
   live Pencil/Rectangle/Push/Pull/Openings, then voxelize B-Rep previews/commits
   through the existing batch edit and undo paths. Semantic material/transform/
   opening actions should operate on `ToolController.selection`.
+- The live editor UI still needs to call the new semantic Scale/Flip operations
+  from mouse handles, wheel/toolbox selection, and visible inference cues.
 - Startup can still inherit huge generated save/edit/bot state locally. Keep
   source commits separate from generated `saves/` unless deliberately testing a
   specific world.

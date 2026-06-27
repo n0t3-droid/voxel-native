@@ -341,6 +341,23 @@ impl SketchBounds {
             max: self.max + delta,
         }
     }
+
+    fn transformed(self, mut transform: impl FnMut(Vec3) -> Vec3) -> Self {
+        SketchBounds::from_points(self.corners().into_iter().map(&mut transform)).unwrap_or(self)
+    }
+
+    fn corners(self) -> [Vec3; 8] {
+        [
+            self.min,
+            self.max,
+            Vec3::new(self.min.x, self.min.y, self.max.z),
+            Vec3::new(self.min.x, self.max.y, self.min.z),
+            Vec3::new(self.max.x, self.min.y, self.min.z),
+            Vec3::new(self.min.x, self.max.y, self.max.z),
+            Vec3::new(self.max.x, self.min.y, self.max.z),
+            Vec3::new(self.max.x, self.max.y, self.min.z),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2666,6 +2683,43 @@ impl SketchDocument {
         Ok(summary)
     }
 
+    pub fn scale_selection_about_pivot(
+        &mut self,
+        selection: &SelectionSet,
+        pivot: Vec3,
+        scale: Vec3,
+        label: impl Into<String>,
+    ) -> Result<SketchEditSummary, SketchModelError> {
+        if scale.x.abs() <= f32::EPSILON
+            || scale.y.abs() <= f32::EPSILON
+            || scale.z.abs() <= f32::EPSILON
+        {
+            return Err(SketchModelError::InvalidGeometry(
+                "Scale factors must be non-zero",
+            ));
+        }
+        self.modify_selection(selection, label, |kind| {
+            scale_entity_kind(kind, pivot, scale);
+        })
+    }
+
+    pub fn flip_selection_across_plane(
+        &mut self,
+        selection: &SelectionSet,
+        plane_origin: Vec3,
+        plane_normal: Vec3,
+        label: impl Into<String>,
+    ) -> Result<SketchEditSummary, SketchModelError> {
+        let normal = plane_normal
+            .try_normalize()
+            .ok_or(SketchModelError::InvalidGeometry(
+                "Flip plane normal must be non-zero",
+            ))?;
+        self.modify_selection(selection, label, |kind| {
+            flip_entity_kind(kind, plane_origin, normal);
+        })
+    }
+
     pub fn copy_selection_linear_array(
         &mut self,
         selection: &SelectionSet,
@@ -2781,6 +2835,47 @@ impl SketchDocument {
             records.push(SketchEntityRecord { context, entity });
         }
         Ok(records)
+    }
+
+    fn modify_selection(
+        &mut self,
+        selection: &SelectionSet,
+        label: impl Into<String>,
+        mut edit: impl FnMut(&mut SketchEntityKind),
+    ) -> Result<SketchEditSummary, SketchModelError> {
+        let label = label.into();
+        let mut changes = Vec::with_capacity(selection.len());
+        for entity_id in selection.ordered() {
+            let context = self.context_for_entity(*entity_id)?;
+            let before = self
+                .entities
+                .get(entity_id)
+                .cloned()
+                .ok_or(SketchModelError::UnknownEntity(*entity_id))?;
+            let mut after = before.clone();
+            edit(&mut after.kind);
+            changes.push(SketchEditChange::Modified {
+                context,
+                before,
+                after,
+            });
+        }
+
+        let batch = SketchEditBatch::new(label, changes);
+        let summary = batch.summary();
+        if summary.entity_count == 0 {
+            return Ok(summary);
+        }
+
+        for change in &batch.changes {
+            if let SketchEditChange::Modified { context, after, .. } = change {
+                self.restore_entity_in_context(*context, after);
+            }
+        }
+        self.undo_stack.push(batch);
+        self.redo_stack.clear();
+        self.undo_generation += 1;
+        Ok(summary)
     }
 
     fn context_for_entity(&self, entity: SketchId) -> Result<SketchId, SketchModelError> {
@@ -3511,6 +3606,273 @@ fn translate_entity_kind(kind: &mut SketchEntityKind, delta: Vec3) {
 fn translate_points(points: &mut [Vec3], delta: Vec3) {
     for point in points {
         *point += delta;
+    }
+}
+
+fn scale_entity_kind(kind: &mut SketchEntityKind, pivot: Vec3, scale: Vec3) {
+    match kind {
+        SketchEntityKind::Vertex { point } => {
+            *point = scale_point_about_pivot(*point, pivot, scale)
+        }
+        SketchEntityKind::Edge { a, b } => {
+            *a = scale_point_about_pivot(*a, pivot, scale);
+            *b = scale_point_about_pivot(*b, pivot, scale);
+        }
+        SketchEntityKind::Face { vertices, normal } => {
+            scale_points(vertices, pivot, scale);
+            *normal = scaled_normal(*normal, scale);
+            recompute_face_normal(vertices, normal);
+        }
+        SketchEntityKind::CircleFace {
+            center,
+            normal,
+            radius,
+            vertices,
+            ..
+        }
+        | SketchEntityKind::PolygonFace {
+            center,
+            normal,
+            radius,
+            vertices,
+            ..
+        } => {
+            *center = scale_point_about_pivot(*center, pivot, scale);
+            scale_points(vertices, pivot, scale);
+            *normal = scaled_normal(*normal, scale);
+            recompute_face_normal(vertices, normal);
+            *radius *= dominant_abs_scale(scale);
+        }
+        SketchEntityKind::ArcCurve {
+            center,
+            normal,
+            radius,
+            start_direction,
+            points,
+            ..
+        } => {
+            *center = scale_point_about_pivot(*center, pivot, scale);
+            scale_points(points, pivot, scale);
+            *normal = scaled_normal(*normal, scale);
+            *start_direction = scaled_direction(*start_direction, scale);
+            *radius *= dominant_abs_scale(scale);
+        }
+        SketchEntityKind::FreehandCurve { points } => {
+            scale_points(points, pivot, scale);
+        }
+        SketchEntityKind::PushPullExtrusion {
+            base_vertices,
+            top_vertices,
+            normal,
+            depth,
+            bounds,
+            ..
+        } => {
+            scale_points(base_vertices, pivot, scale);
+            scale_points(top_vertices, pivot, scale);
+            *normal = scaled_normal(*normal, scale);
+            *depth *= scale_along_direction(*normal, scale).abs();
+            *bounds = bounds.transformed(|point| scale_point_about_pivot(point, pivot, scale));
+        }
+        SketchEntityKind::Opening {
+            center,
+            size,
+            normal,
+            bounds,
+            ..
+        } => {
+            *center = scale_point_about_pivot(*center, pivot, scale);
+            *size *= scale.abs();
+            *normal = scaled_normal(*normal, scale);
+            *bounds = bounds.transformed(|point| scale_point_about_pivot(point, pivot, scale));
+        }
+        SketchEntityKind::Room {
+            shell_bounds,
+            interior_bounds,
+            wall_thickness,
+            ..
+        } => {
+            *shell_bounds =
+                shell_bounds.transformed(|point| scale_point_about_pivot(point, pivot, scale));
+            *interior_bounds =
+                interior_bounds.transformed(|point| scale_point_about_pivot(point, pivot, scale));
+            *wall_thickness *= scale.min_element().abs();
+        }
+        SketchEntityKind::Group { .. } => {}
+        SketchEntityKind::ComponentInstance { transform, .. } => {
+            transform.translation = scale_point_about_pivot(transform.translation, pivot, scale);
+            transform.scale *= scale;
+        }
+        SketchEntityKind::GuidePoint { point } => {
+            *point = scale_point_about_pivot(*point, pivot, scale);
+        }
+        SketchEntityKind::GuideLine { origin, direction } => {
+            *origin = scale_point_about_pivot(*origin, pivot, scale);
+            *direction = scaled_direction(*direction, scale);
+        }
+        SketchEntityKind::SectionPlane { origin, normal } => {
+            *origin = scale_point_about_pivot(*origin, pivot, scale);
+            *normal = scaled_normal(*normal, scale);
+        }
+    }
+}
+
+fn flip_entity_kind(kind: &mut SketchEntityKind, plane_origin: Vec3, plane_normal: Vec3) {
+    match kind {
+        SketchEntityKind::Vertex { point } => {
+            *point = reflect_point_across_plane(*point, plane_origin, plane_normal);
+        }
+        SketchEntityKind::Edge { a, b } => {
+            *a = reflect_point_across_plane(*a, plane_origin, plane_normal);
+            *b = reflect_point_across_plane(*b, plane_origin, plane_normal);
+        }
+        SketchEntityKind::Face { vertices, normal } => {
+            reflect_points(vertices, plane_origin, plane_normal);
+            vertices.reverse();
+            *normal = reflect_direction_across_plane(*normal, plane_normal);
+            recompute_face_normal(vertices, normal);
+        }
+        SketchEntityKind::CircleFace {
+            center,
+            normal,
+            vertices,
+            ..
+        }
+        | SketchEntityKind::PolygonFace {
+            center,
+            normal,
+            vertices,
+            ..
+        } => {
+            *center = reflect_point_across_plane(*center, plane_origin, plane_normal);
+            reflect_points(vertices, plane_origin, plane_normal);
+            vertices.reverse();
+            *normal = reflect_direction_across_plane(*normal, plane_normal);
+            recompute_face_normal(vertices, normal);
+        }
+        SketchEntityKind::ArcCurve {
+            center,
+            normal,
+            start_direction,
+            points,
+            ..
+        } => {
+            *center = reflect_point_across_plane(*center, plane_origin, plane_normal);
+            reflect_points(points, plane_origin, plane_normal);
+            *normal = reflect_direction_across_plane(*normal, plane_normal);
+            *start_direction = reflect_direction_across_plane(*start_direction, plane_normal);
+        }
+        SketchEntityKind::FreehandCurve { points } => {
+            reflect_points(points, plane_origin, plane_normal);
+        }
+        SketchEntityKind::PushPullExtrusion {
+            base_vertices,
+            top_vertices,
+            normal,
+            bounds,
+            ..
+        } => {
+            reflect_points(base_vertices, plane_origin, plane_normal);
+            reflect_points(top_vertices, plane_origin, plane_normal);
+            base_vertices.reverse();
+            top_vertices.reverse();
+            *normal = reflect_direction_across_plane(*normal, plane_normal);
+            *bounds = bounds
+                .transformed(|point| reflect_point_across_plane(point, plane_origin, plane_normal));
+        }
+        SketchEntityKind::Opening {
+            center,
+            normal,
+            bounds,
+            ..
+        } => {
+            *center = reflect_point_across_plane(*center, plane_origin, plane_normal);
+            *normal = reflect_direction_across_plane(*normal, plane_normal);
+            *bounds = bounds
+                .transformed(|point| reflect_point_across_plane(point, plane_origin, plane_normal));
+        }
+        SketchEntityKind::Room {
+            shell_bounds,
+            interior_bounds,
+            ..
+        } => {
+            *shell_bounds = shell_bounds
+                .transformed(|point| reflect_point_across_plane(point, plane_origin, plane_normal));
+            *interior_bounds = interior_bounds
+                .transformed(|point| reflect_point_across_plane(point, plane_origin, plane_normal));
+        }
+        SketchEntityKind::Group { .. } => {}
+        SketchEntityKind::ComponentInstance { transform, .. } => {
+            transform.translation =
+                reflect_point_across_plane(transform.translation, plane_origin, plane_normal);
+            let axis = dominant_axis(plane_normal);
+            let reflected_scale = -component_by_index_vec3(transform.scale, axis);
+            set_component_by_index_vec3(&mut transform.scale, axis, reflected_scale);
+        }
+        SketchEntityKind::GuidePoint { point } => {
+            *point = reflect_point_across_plane(*point, plane_origin, plane_normal);
+        }
+        SketchEntityKind::GuideLine { origin, direction } => {
+            *origin = reflect_point_across_plane(*origin, plane_origin, plane_normal);
+            *direction = reflect_direction_across_plane(*direction, plane_normal);
+        }
+        SketchEntityKind::SectionPlane { origin, normal } => {
+            *origin = reflect_point_across_plane(*origin, plane_origin, plane_normal);
+            *normal = reflect_direction_across_plane(*normal, plane_normal);
+        }
+    }
+}
+
+fn scale_points(points: &mut [Vec3], pivot: Vec3, scale: Vec3) {
+    for point in points {
+        *point = scale_point_about_pivot(*point, pivot, scale);
+    }
+}
+
+fn reflect_points(points: &mut [Vec3], plane_origin: Vec3, plane_normal: Vec3) {
+    for point in points {
+        *point = reflect_point_across_plane(*point, plane_origin, plane_normal);
+    }
+}
+
+fn scale_point_about_pivot(point: Vec3, pivot: Vec3, scale: Vec3) -> Vec3 {
+    pivot + (point - pivot) * scale
+}
+
+fn reflect_point_across_plane(point: Vec3, plane_origin: Vec3, plane_normal: Vec3) -> Vec3 {
+    point - plane_normal * (2.0 * (point - plane_origin).dot(plane_normal))
+}
+
+fn reflect_direction_across_plane(direction: Vec3, plane_normal: Vec3) -> Vec3 {
+    safe_normal(direction - plane_normal * (2.0 * direction.dot(plane_normal)))
+}
+
+fn scaled_direction(direction: Vec3, scale: Vec3) -> Vec3 {
+    safe_normal(direction * scale)
+}
+
+fn scaled_normal(normal: Vec3, scale: Vec3) -> Vec3 {
+    safe_normal(Vec3::new(
+        normal.x / scale.x,
+        normal.y / scale.y,
+        normal.z / scale.z,
+    ))
+}
+
+fn scale_along_direction(direction: Vec3, scale: Vec3) -> f32 {
+    let direction = safe_normal(direction).abs();
+    direction.dot(scale.abs())
+}
+
+fn dominant_abs_scale(scale: Vec3) -> f32 {
+    scale.x.abs().max(scale.y.abs()).max(scale.z.abs())
+}
+
+fn recompute_face_normal(vertices: &[Vec3], normal: &mut Vec3) {
+    if let Some(recomputed) = cad_polygon_normal(vertices) {
+        *normal = recomputed;
+    } else {
+        *normal = safe_normal(*normal);
     }
 }
 
@@ -5362,6 +5724,119 @@ mod tests {
         assert!(matches!(
             &doc.entity(line).unwrap().kind,
             SketchEntityKind::Edge { a, .. } if *a == Vec3::new(2.0, 3.0, 4.0)
+        ));
+    }
+
+    #[test]
+    fn scale_selection_about_pivot_resizes_geometry_and_instances_with_undo() {
+        let mut doc = SketchDocument::new();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 2.0,
+                Vec3::Y,
+                "Scale source",
+            )
+            .unwrap();
+        let definition = doc.create_component_definition("Glass Panel").unwrap();
+        let instance = doc
+            .add_component_instance(definition, SketchTransform::from_translation(Vec3::X))
+            .unwrap();
+        let mut selection = SelectionSet::default();
+        selection.select(face);
+        selection.select(instance);
+
+        let scaled = doc
+            .scale_selection_about_pivot(
+                &selection,
+                Vec3::ZERO,
+                Vec3::new(3.0, 2.0, 1.0),
+                "Scale exact",
+            )
+            .unwrap();
+
+        assert_eq!(scaled.label, "Scale exact");
+        assert_eq!(scaled.entity_count, 2);
+        assert!(matches!(
+            &doc.entity(face).unwrap().kind,
+            SketchEntityKind::Face { vertices, normal }
+                if vertices[1] == Vec3::new(6.0, 0.0, 0.0)
+                    && vertices[2] == Vec3::new(6.0, 2.0, 0.0)
+                    && *normal == Vec3::Z
+        ));
+        assert!(matches!(
+            &doc.entity(instance).unwrap().kind,
+            SketchEntityKind::ComponentInstance { transform, .. }
+                if transform.translation == Vec3::new(3.0, 0.0, 0.0)
+                    && transform.scale == Vec3::new(3.0, 2.0, 1.0)
+        ));
+
+        let undone = doc.undo_last().expect("undo scale");
+        assert_eq!(undone.label, "Scale exact");
+        assert!(matches!(
+            &doc.entity(face).unwrap().kind,
+            SketchEntityKind::Face { vertices, .. }
+                if vertices[1] == Vec3::new(2.0, 0.0, 0.0)
+                    && vertices[2] == Vec3::new(2.0, 1.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn flip_selection_across_plane_mirrors_geometry_and_component_instances() {
+        let mut doc = SketchDocument::new();
+        let line = doc
+            .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0))
+            .unwrap();
+        let definition = doc.create_component_definition("Door").unwrap();
+        let instance = doc
+            .add_component_instance(
+                definition,
+                SketchTransform::from_translation(Vec3::new(3.0, 0.0, 0.0)),
+            )
+            .unwrap();
+        let mut selection = SelectionSet::default();
+        selection.select(line);
+        selection.select(instance);
+
+        let flipped = doc
+            .flip_selection_across_plane(&selection, Vec3::X, Vec3::X, "Flip red axis")
+            .unwrap();
+
+        assert_eq!(flipped.label, "Flip red axis");
+        assert!(matches!(
+            &doc.entity(line).unwrap().kind,
+            SketchEntityKind::Edge { a, b }
+                if *a == Vec3::new(2.0, 0.0, 0.0) && *b == Vec3::ZERO
+        ));
+        assert!(matches!(
+            &doc.entity(instance).unwrap().kind,
+            SketchEntityKind::ComponentInstance { transform, .. }
+                if transform.translation == Vec3::new(-1.0, 0.0, 0.0)
+                    && transform.scale == Vec3::new(-1.0, 1.0, 1.0)
+        ));
+    }
+
+    #[test]
+    fn scale_and_flip_reject_degenerate_inference_inputs() {
+        let mut doc = SketchDocument::new();
+        let line = doc
+            .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::X)
+            .unwrap();
+        let mut selection = SelectionSet::default();
+        selection.select(line);
+
+        assert!(matches!(
+            doc.scale_selection_about_pivot(&selection, Vec3::ZERO, Vec3::ZERO, "Bad scale"),
+            Err(SketchModelError::InvalidGeometry(
+                "Scale factors must be non-zero"
+            ))
+        ));
+        assert!(matches!(
+            doc.flip_selection_across_plane(&selection, Vec3::ZERO, Vec3::ZERO, "Bad flip"),
+            Err(SketchModelError::InvalidGeometry(
+                "Flip plane normal must be non-zero"
+            ))
         ));
     }
 
