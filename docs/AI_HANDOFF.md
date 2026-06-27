@@ -17,15 +17,18 @@ handoff unless a later task explicitly needs a reproducible save.
 
 - Build/editor UI has been moving away from visible F-key switching toward a
   mouse-first Sketch Editor toolbox and status bar.
-- The Sketch Editor toolbox now has a smaller primary rail and a hover drawer
-  with grouped sections: Draw, Shape, and World. Each visible workflow button
-  shows a simple label plus an inference cue such as Point, Corner, Face, Path,
-  Area, Axis, Plane, or Volume so the player can tell what the tool snaps to
-  before clicking it.
-- The hover drawer keeps focus while the cursor moves from the rail into the
-  drawer. Cursor policy is also UI-aware: right mouse only becomes world orbit
-  when the pointer is not over the Sketch Editor UI, so the toolbox should not
-  make the mouse disappear while selecting tools.
+- The Sketch Editor toolbox now has a smaller primary rail ordered for house
+  building first: Select, Line, Box, Push/Pull, Move, Scale, Rotate, Opening,
+  Room, Material, Road, Bots, and House. Advanced circle/polygon/arc/freehand,
+  city, landscape, tower, and spacecraft tools stay in grouped hover drawers
+  instead of crowding the first rail.
+- Each visible workflow button shows a simple label plus an inference cue such
+  as Point, Corner, Face, Path, Area, Axis, Plane, or Volume so the player can
+  tell what the tool snaps to before clicking it.
+- The hover drawer has a bridge zone and short grace hold while the cursor
+  moves from the rail into the drawer. Cursor policy is also UI-aware: right
+  mouse only becomes world orbit when the pointer is not over the Sketch Editor
+  UI, so the toolbox should not make the mouse disappear while selecting tools.
 - `sketch_model` is now the semantic spine for editor tools, transactions,
   selection, inference, components, rectangle/pencil semantics, room/opening
   semantics, and Push/Pull-style operations.
@@ -123,8 +126,9 @@ and geometry/bounds updates for faces, curves, openings, rooms, and extrusions.
   live Pencil/Rectangle/Push/Pull/Openings, then voxelize B-Rep previews/commits
   through the existing batch edit and undo paths. Semantic material/transform/
   opening actions should operate on `ToolController.selection`.
-- The live editor UI still needs to call the new semantic Scale/Flip operations
-  from mouse handles, wheel/toolbox selection, and visible inference cues.
+- Move, Scale, and Rotate are now first-class editor tool IDs and primary rail
+  tools, but live mouse handles still need to call the semantic transform
+  operations on `ToolController.selection`.
 - Startup can still inherit huge generated save/edit/bot state locally. Keep
   source commits separate from generated `saves/` unless deliberately testing a
   specific world.

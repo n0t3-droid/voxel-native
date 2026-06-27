@@ -27,6 +27,14 @@ pub enum ToolbeltTool {
     /// SketchUp-style direct-manipulation sculpting. Hover a flat face
     /// to highlight it, click, move to push/pull, click again to commit.
     Sculpt,
+    /// Move selected semantic geometry/components with snapped references.
+    TransformMove,
+    /// Scale selected semantic geometry/components around inference handles.
+    TransformScale,
+    /// Rotate selected semantic geometry/components around snapped axes.
+    TransformRotate,
+    /// Pick or apply material/style to the active tool or selected component.
+    MaterialPicker,
     /// Intent-first high-rise generator: two corners become a detailed tower.
     SmartTower,
     BrushPlace,
@@ -44,6 +52,10 @@ impl ToolbeltTool {
             ToolbeltTool::Navigate => "Navigate / Inspect",
             ToolbeltTool::DrawRect => "Sketch Draw",
             ToolbeltTool::Sculpt => "Push Pull Face",
+            ToolbeltTool::TransformMove => "Move Selection",
+            ToolbeltTool::TransformScale => "Scale Selection",
+            ToolbeltTool::TransformRotate => "Rotate Selection",
+            ToolbeltTool::MaterialPicker => "Material Style",
             ToolbeltTool::SmartTower => "Smart Tower",
             ToolbeltTool::BrushPlace => "Smart Builder",
             ToolbeltTool::BrushCut => "Smart Cut",
@@ -60,6 +72,10 @@ impl ToolbeltTool {
             ToolbeltTool::Navigate => "NAV",
             ToolbeltTool::DrawRect => "RECT",
             ToolbeltTool::Sculpt => "PUSH",
+            ToolbeltTool::TransformMove => "MOVE",
+            ToolbeltTool::TransformScale => "SCALE",
+            ToolbeltTool::TransformRotate => "ROTATE",
+            ToolbeltTool::MaterialPicker => "MAT",
             ToolbeltTool::SmartTower => "TOWER",
             ToolbeltTool::BrushPlace => "BUILD",
             ToolbeltTool::BrushCut => "CUT",
@@ -76,6 +92,10 @@ impl ToolbeltTool {
             ToolbeltTool::Navigate => Icon::ModeNavigate,
             ToolbeltTool::DrawRect => Icon::Grid,
             ToolbeltTool::Sculpt => Icon::Builder,
+            ToolbeltTool::TransformMove => Icon::Move,
+            ToolbeltTool::TransformScale => Icon::Scale,
+            ToolbeltTool::TransformRotate => Icon::Rotate,
+            ToolbeltTool::MaterialPicker => Icon::Textures,
             ToolbeltTool::SmartTower => Icon::City,
             ToolbeltTool::BrushPlace => Icon::Brush,
             ToolbeltTool::BrushCut => Icon::Eraser,
@@ -92,6 +112,10 @@ impl ToolbeltTool {
             ToolbeltTool::Navigate => "Move, inspect, and keep weapons off while the Sketch Editor is open.",
             ToolbeltTool::DrawRect => "SketchUp-style draw-first tool: click start, move to a snapped endpoint, click again to commit. Floors, roofs, and wall faces build; Opening cuts doors/windows. RMB orbits. Ctrl+Z/Ctrl+Y undo/redo.",
             ToolbeltTool::Sculpt => "SketchUp-style Push/Pull: click a face, move to choose depth, click again to commit. Use the toolbox to return to Rectangle or Pencil.",
+            ToolbeltTool::TransformMove => "Select a drawn face/component, then drag along endpoint, midpoint, face-center, or axis inference to move it.",
+            ToolbeltTool::TransformScale => "Select a drawn face/component, then drag a corner/edge handle to resize it from a snapped pivot.",
+            ToolbeltTool::TransformRotate => "Select a drawn face/component, then drag the rotate ring; snaps favor clean 15/45/90 degree axes.",
+            ToolbeltTool::MaterialPicker => "Pick a material/style for the selected component or for the next draw/pull/opening tool.",
             ToolbeltTool::SmartTower => "Two LMB clicks create a detailed skyscraper shell with floors, windows, crown, and undo.",
             ToolbeltTool::BrushPlace => "LMB starts a block point, drag to an endpoint, release to build; RMB uses the same gesture to cut.",
             ToolbeltTool::BrushCut => "LMB or RMB starts a cut point, drag to an endpoint, release to remove exact snapped blocks.",
@@ -185,6 +209,86 @@ impl ToolbeltTool {
                     ActionTone::Warning,
                     "Use Rectangle from the toolbox for temporary fill instead.",
                 )),
+                None,
+            ],
+            ToolbeltTool::TransformMove => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "DRAG",
+                    "Move",
+                    Icon::Move,
+                    ActionTone::Tool,
+                    "Drag selected geometry along endpoint, midpoint, face-center, or axis inference.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "HOLD",
+                    "Orbit",
+                    Icon::ModeNavigate,
+                    ActionTone::Primary,
+                    "Orbit without losing the selected transform tool.",
+                )),
+                None,
+                None,
+            ],
+            ToolbeltTool::TransformScale => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "DRAG",
+                    "Scale",
+                    Icon::Scale,
+                    ActionTone::Tool,
+                    "Drag a corner or edge handle to resize from a snapped pivot.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "HOLD",
+                    "Orbit",
+                    Icon::ModeNavigate,
+                    ActionTone::Primary,
+                    "Orbit without cancelling the scale tool.",
+                )),
+                None,
+                None,
+            ],
+            ToolbeltTool::TransformRotate => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "DRAG",
+                    "Rotate",
+                    Icon::Rotate,
+                    ActionTone::Tool,
+                    "Drag a rotate ring; clean axes and 15/45/90 degree snaps are preferred.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "HOLD",
+                    "Orbit",
+                    Icon::ModeNavigate,
+                    ActionTone::Primary,
+                    "Orbit while keeping rotate selected.",
+                )),
+                None,
+                None,
+            ],
+            ToolbeltTool::MaterialPicker => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Apply",
+                    Icon::Textures,
+                    ActionTone::Tool,
+                    "Apply the active style/material to the selected component or next tool.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Wheel,
+                    "",
+                    "Style",
+                    Icon::Scale,
+                    ActionTone::Info,
+                    "Scroll material styles while the pointer is over the editor UI.",
+                )),
+                None,
                 None,
             ],
             ToolbeltTool::SmartTower => [
@@ -379,6 +483,10 @@ impl ToolbeltTool {
         match self {
             ToolbeltTool::Navigate => egui::Color32::from_rgb(180, 210, 190),
             ToolbeltTool::DrawRect | ToolbeltTool::Sculpt => egui::Color32::from_rgb(80, 170, 255),
+            ToolbeltTool::TransformMove
+            | ToolbeltTool::TransformScale
+            | ToolbeltTool::TransformRotate => egui::Color32::from_rgb(255, 205, 92),
+            ToolbeltTool::MaterialPicker => egui::Color32::from_rgb(180, 235, 255),
             ToolbeltTool::SmartTower => egui::Color32::from_rgb(130, 255, 125),
             ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut => {
                 egui::Color32::from_rgb(255, 184, 70)
@@ -538,6 +646,7 @@ pub struct ToolbeltPlugin;
 pub struct SketchEditorUiFocus {
     pub pointer_over_editor_ui: bool,
     pub hover_drawer_open: bool,
+    pub hover_drawer_grace_remaining: f32,
 }
 
 impl Plugin for ToolbeltPlugin {
@@ -550,6 +659,7 @@ impl Plugin for ToolbeltPlugin {
 
 fn draw_toolbelt(
     mut contexts: EguiContexts,
+    time: Res<Time>,
     settings: Res<WorldSettings>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut mode: ResMut<ModeContext>,
@@ -563,6 +673,8 @@ fn draw_toolbelt(
 ) {
     if !mode.is_build() {
         ui_focus.pointer_over_editor_ui = false;
+        ui_focus.hover_drawer_open = false;
+        ui_focus.hover_drawer_grace_remaining = 0.0;
         wheel.clear();
         return;
     }
@@ -598,8 +710,18 @@ fn draw_toolbelt(
         dim,
         ctx,
     );
-    ui_focus.pointer_over_editor_ui = dock.wheel_navigation_hovered;
-    ui_focus.hover_drawer_open = !expanded && (dock.toolbox_hovered || dock.drawer_hovered);
+    ui_focus.pointer_over_editor_ui = dock.wheel_navigation_hovered || dock.hover_bridge_hovered;
+    let hover_state = next_hover_drawer_state(
+        expanded,
+        dock.toolbox_hovered,
+        dock.drawer_hovered,
+        dock.hover_bridge_hovered,
+        ui_focus.hover_drawer_open,
+        ui_focus.hover_drawer_grace_remaining,
+        time.delta_seconds(),
+    );
+    ui_focus.hover_drawer_open = hover_state.open;
+    ui_focus.hover_drawer_grace_remaining = hover_state.grace_remaining;
 
     let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
     if live {
@@ -787,12 +909,63 @@ struct BuildDockResult {
     wheel_navigation_hovered: bool,
     toolbox_hovered: bool,
     drawer_hovered: bool,
+    hover_bridge_hovered: bool,
     toggle_picker: bool,
     exit_editor: bool,
     brush_preset: Option<IVec3>,
     workflow_preset: Option<BuildWorkflowPreset>,
     block_choice: Option<BlockType>,
     history_command: Option<HistoryCommand>,
+}
+
+const HOVER_DRAWER_GRACE_SECONDS: f32 = 0.24;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HoverDrawerState {
+    open: bool,
+    grace_remaining: f32,
+}
+
+fn next_hover_drawer_state(
+    picker_open: bool,
+    toolbox_hovered: bool,
+    drawer_hovered: bool,
+    bridge_hovered: bool,
+    was_open: bool,
+    grace_remaining: f32,
+    delta_seconds: f32,
+) -> HoverDrawerState {
+    if picker_open || toolbox_hovered || drawer_hovered || bridge_hovered {
+        return HoverDrawerState {
+            open: true,
+            grace_remaining: HOVER_DRAWER_GRACE_SECONDS,
+        };
+    }
+
+    let remaining = if was_open {
+        (grace_remaining - delta_seconds.max(0.0)).max(0.0)
+    } else {
+        0.0
+    };
+    HoverDrawerState {
+        open: remaining > 0.0,
+        grace_remaining: remaining,
+    }
+}
+
+fn hover_drawer_bridge_rect(screen: egui::Rect) -> egui::Rect {
+    let center_y = screen.center().y;
+    egui::Rect::from_min_max(
+        egui::pos2(72.0, center_y - 340.0),
+        egui::pos2(118.0, center_y + 340.0),
+    )
+}
+
+fn hover_drawer_bridge_hovered(ctx: &egui::Context) -> bool {
+    let Some(pointer) = ctx.pointer_hover_pos() else {
+        return false;
+    };
+    hover_drawer_bridge_rect(ctx.screen_rect()).contains(pointer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -802,26 +975,46 @@ enum ToolboxSelection {
 }
 
 impl ToolboxSelection {
-    const ORDER: [Self; 17] = [
+    const ORDER: [Self; 21] = [
         Self::Tool(ToolbeltTool::Navigate),
         Self::Workflow(BuildWorkflowPreset::Pencil),
         Self::Workflow(BuildWorkflowPreset::Sketch),
+        Self::Workflow(BuildWorkflowPreset::PushPull),
+        Self::Tool(ToolbeltTool::TransformMove),
+        Self::Tool(ToolbeltTool::TransformScale),
+        Self::Tool(ToolbeltTool::TransformRotate),
+        Self::Workflow(BuildWorkflowPreset::Opening),
+        Self::Workflow(BuildWorkflowPreset::Room),
+        Self::Tool(ToolbeltTool::MaterialPicker),
+        Self::Workflow(BuildWorkflowPreset::Roads),
+        Self::Workflow(BuildWorkflowPreset::BotArea),
+        Self::Workflow(BuildWorkflowPreset::ModernHouse),
         Self::Workflow(BuildWorkflowPreset::Circle),
         Self::Workflow(BuildWorkflowPreset::Polygon),
         Self::Workflow(BuildWorkflowPreset::Arc),
         Self::Workflow(BuildWorkflowPreset::Freehand),
-        Self::Workflow(BuildWorkflowPreset::PushPull),
-        Self::Workflow(BuildWorkflowPreset::Room),
-        Self::Workflow(BuildWorkflowPreset::Opening),
-        Self::Workflow(BuildWorkflowPreset::Roads),
-        Self::Workflow(BuildWorkflowPreset::BotArea),
         Self::Workflow(BuildWorkflowPreset::CityShell),
-        Self::Workflow(BuildWorkflowPreset::ModernHouse),
         Self::Workflow(BuildWorkflowPreset::Landscape),
         Self::Workflow(BuildWorkflowPreset::Skyline),
         Self::Workflow(BuildWorkflowPreset::Spacecraft),
     ];
 }
+
+const PRIMARY_TOOLBOX_ITEMS: [ToolboxSelection; 13] = [
+    ToolboxSelection::Tool(ToolbeltTool::Navigate),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
+    ToolboxSelection::Tool(ToolbeltTool::TransformMove),
+    ToolboxSelection::Tool(ToolbeltTool::TransformScale),
+    ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
+    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryCommand {
@@ -968,6 +1161,7 @@ impl BuildWorkflowPreset {
         Self::Skyline,
         Self::Spacecraft,
     ];
+    #[cfg(test)]
     const TOOLBOX: [Self; 8] = [
         Self::Pencil,
         Self::Sketch,
@@ -1251,8 +1445,13 @@ fn active_toolbox_selection(
     if let Some(preset) = active_workflow {
         return ToolboxSelection::Workflow(preset);
     }
-    if active_tool == ToolbeltTool::Navigate {
-        return ToolboxSelection::Tool(ToolbeltTool::Navigate);
+    match active_tool {
+        ToolbeltTool::Navigate
+        | ToolbeltTool::TransformMove
+        | ToolbeltTool::TransformScale
+        | ToolbeltTool::TransformRotate
+        | ToolbeltTool::MaterialPicker => return ToolboxSelection::Tool(active_tool),
+        _ => {}
     }
     BuildWorkflowPreset::ALL
         .into_iter()
@@ -1308,10 +1507,17 @@ fn apply_toolbox_selection(
     match selection {
         ToolboxSelection::Tool(tool) => {
             toolbelt.select_tool(tool);
-            mode.set(
-                ActiveMode::BuildLive { tool },
-                format!("Sketch Editor: {}. {}", tool.label(), tool.hint()),
-            );
+            if tool == ToolbeltTool::MaterialPicker {
+                mode.set(
+                    ActiveMode::BuildPicker { tool },
+                    "Material Style: pick a material for the selected component or next tool.",
+                );
+            } else {
+                mode.set(
+                    ActiveMode::BuildLive { tool },
+                    format!("Sketch Editor: {}. {}", tool.label(), tool.hint()),
+                );
+            }
             toolbelt.status = mode.status.clone();
         }
         ToolboxSelection::Workflow(preset) => {
@@ -1346,6 +1552,10 @@ fn editor_tool_for_tool(tool: ToolbeltTool) -> crate::sketch_model::EditorToolId
         ToolbeltTool::Navigate => crate::sketch_model::EditorToolId::Select,
         ToolbeltTool::DrawRect => crate::sketch_model::EditorToolId::Rectangle,
         ToolbeltTool::Sculpt => crate::sketch_model::EditorToolId::PushPull,
+        ToolbeltTool::TransformMove => crate::sketch_model::EditorToolId::Move,
+        ToolbeltTool::TransformScale => crate::sketch_model::EditorToolId::Scale,
+        ToolbeltTool::TransformRotate => crate::sketch_model::EditorToolId::Rotate,
+        ToolbeltTool::MaterialPicker => crate::sketch_model::EditorToolId::Material,
         ToolbeltTool::CityRoad => crate::sketch_model::EditorToolId::Road,
         ToolbeltTool::CityDistrict => crate::sketch_model::EditorToolId::BotArea,
         _ => crate::sketch_model::EditorToolId::Rectangle,
@@ -1404,7 +1614,9 @@ fn draw_build_dock(
         dim,
         &mut result,
     );
-    let drawer_visible = picker_open || hover_drawer_open || result.toolbox_hovered;
+    result.hover_bridge_hovered = hover_drawer_bridge_hovered(ctx);
+    let drawer_visible =
+        picker_open || hover_drawer_open || result.toolbox_hovered || result.hover_bridge_hovered;
     draw_editor_status_bar(
         ctx,
         active_tool,
@@ -1483,24 +1695,32 @@ fn draw_editor_toolbox(
                 ui.set_width(66.0);
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 5.0);
                 ui.vertical_centered(|ui| {
-                    if toolbox_tool_button(
-                        ui,
-                        ToolbeltTool::Navigate,
-                        "SELECT",
-                        active_tool == ToolbeltTool::Navigate,
-                        primary,
-                        dim,
-                    ) {
-                        result.clicked_tool = Some(ToolbeltTool::Navigate);
-                    }
-                    editor_toolbox_separator(ui, colors.stroke);
-                    for preset in BuildWorkflowPreset::TOOLBOX {
-                        if toolbox_workflow_button(
-                            ui,
-                            preset,
-                            workflow_preset_selected(preset, active_tool, active_workflow),
-                        ) {
-                            result.workflow_preset = Some(preset);
+                    for (index, item) in PRIMARY_TOOLBOX_ITEMS.into_iter().enumerate() {
+                        if index == 1 || index == 7 || index == 10 {
+                            editor_toolbox_separator(ui, colors.stroke);
+                        }
+                        match item {
+                            ToolboxSelection::Tool(tool) => {
+                                if toolbox_tool_button(
+                                    ui,
+                                    tool,
+                                    toolbox_tool_label(tool),
+                                    active_tool == tool && active_workflow.is_none(),
+                                    primary,
+                                    dim,
+                                ) {
+                                    result.clicked_tool = Some(tool);
+                                }
+                            }
+                            ToolboxSelection::Workflow(preset) => {
+                                if toolbox_workflow_button(
+                                    ui,
+                                    preset,
+                                    workflow_preset_selected(preset, active_tool, active_workflow),
+                                ) {
+                                    result.workflow_preset = Some(preset);
+                                }
+                            }
                         }
                     }
                     editor_toolbox_separator(ui, colors.stroke);
@@ -1813,6 +2033,17 @@ fn active_editor_hint(tool: ToolbeltTool, active_workflow: Option<BuildWorkflowP
         .unwrap_or_else(|| tool.hint().to_owned())
 }
 
+fn toolbox_tool_label(tool: ToolbeltTool) -> &'static str {
+    match tool {
+        ToolbeltTool::Navigate => "Select",
+        ToolbeltTool::TransformMove => "Move",
+        ToolbeltTool::TransformScale => "Scale",
+        ToolbeltTool::TransformRotate => "Rotate",
+        ToolbeltTool::MaterialPicker => "Mat",
+        _ => tool.chip_label(),
+    }
+}
+
 fn workflow_toolbox_label(preset: BuildWorkflowPreset) -> &'static str {
     match preset {
         BuildWorkflowPreset::Pencil => "Line",
@@ -1836,7 +2067,7 @@ fn workflow_toolbox_label(preset: BuildWorkflowPreset) -> &'static str {
 
 fn toolbox_workflow_button(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected: bool) -> bool {
     let color = preset.color();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 50.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 41.0), egui::Sense::click());
     let hovered = response.hovered();
     let fill = if selected {
         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 74)
@@ -1855,8 +2086,8 @@ fn toolbox_workflow_button(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selec
     paint_icon(
         &painter,
         egui::Rect::from_center_size(
-            rect.center_top() + egui::vec2(-2.0, 14.0),
-            egui::vec2(18.0, 18.0),
+            rect.center_top() + egui::vec2(-2.0, 12.0),
+            egui::vec2(16.0, 16.0),
         ),
         preset.icon(),
         if selected { AMBER } else { color },
@@ -1878,14 +2109,14 @@ fn toolbox_workflow_button(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selec
         if selected { AMBER } else { color },
     );
     painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 17.0),
+        rect.center_bottom() - egui::vec2(0.0, 14.5),
         egui::Align2::CENTER_BOTTOM,
         workflow_toolbox_label(preset),
-        egui::FontId::monospace(8.4),
+        egui::FontId::monospace(8.0),
         TEXT,
     );
     painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 5.0),
+        rect.center_bottom() - egui::vec2(0.0, 4.0),
         egui::Align2::CENTER_BOTTOM,
         cue.label(),
         egui::FontId::monospace(6.8),
@@ -1905,7 +2136,7 @@ fn toolbox_tool_button(
     dim: egui::Color32,
 ) -> bool {
     let color = if selected { AMBER } else { primary };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 44.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 41.0), egui::Sense::click());
     let hovered = response.hovered();
     let fill = if selected {
         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 70)
@@ -1924,8 +2155,8 @@ fn toolbox_tool_button(
     paint_icon(
         &painter,
         egui::Rect::from_center_size(
-            rect.center_top() + egui::vec2(0.0, 14.0),
-            egui::vec2(18.0, 18.0),
+            rect.center_top() + egui::vec2(0.0, 12.0),
+            egui::vec2(16.0, 16.0),
         ),
         tool.icon(),
         if selected { AMBER } else { color },
@@ -1956,7 +2187,7 @@ fn toolbox_command_button(
     } else {
         egui::Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 36.0), sense);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 32.0), sense);
     let hovered = response.hovered() && enabled;
     let visible = if enabled {
         color
@@ -2822,7 +3053,7 @@ mod tests {
                 Some(BuildWorkflowPreset::CityShell),
                 -1.0
             ),
-            Some(ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse))
+            Some(ToolboxSelection::Workflow(BuildWorkflowPreset::Landscape))
         );
         assert_eq!(
             toolbox_wheel_selection(
@@ -3084,6 +3315,52 @@ mod tests {
         assert!(groups[1].presets.contains(&BuildWorkflowPreset::PushPull));
         assert_eq!(groups[2].label, "World");
         assert!(groups[2].presets.contains(&BuildWorkflowPreset::Spacecraft));
+    }
+
+    #[test]
+    fn hover_drawer_grace_keeps_panel_open_across_toolbox_gap() {
+        let state = next_hover_drawer_state(false, false, false, false, true, 0.18, 0.05);
+
+        assert!(state.open);
+        assert!(state.grace_remaining > 0.12);
+    }
+
+    #[test]
+    fn primary_editor_order_prioritizes_house_editing_before_world_tools() {
+        assert_eq!(
+            PRIMARY_TOOLBOX_ITEMS,
+            [
+                ToolboxSelection::Tool(ToolbeltTool::Navigate),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
+                ToolboxSelection::Tool(ToolbeltTool::TransformMove),
+                ToolboxSelection::Tool(ToolbeltTool::TransformScale),
+                ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
+                ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
+            ]
+        );
+    }
+
+    #[test]
+    fn transform_toolbox_selection_routes_to_editor_tools() {
+        assert_eq!(
+            toolbox_selection_editor_tool(ToolboxSelection::Tool(ToolbeltTool::TransformMove)),
+            crate::sketch_model::EditorToolId::Move
+        );
+        assert_eq!(
+            toolbox_selection_editor_tool(ToolboxSelection::Tool(ToolbeltTool::TransformScale)),
+            crate::sketch_model::EditorToolId::Scale
+        );
+        assert_eq!(
+            toolbox_selection_editor_tool(ToolboxSelection::Tool(ToolbeltTool::TransformRotate)),
+            crate::sketch_model::EditorToolId::Rotate
+        );
     }
 
     #[test]

@@ -347,7 +347,13 @@ fn semantic_select_input_active(
         && left_just_pressed
         && !pointer_over_editor_ui
         && (build_tool == Some(ToolbeltTool::Navigate)
-            || active_editor_tool == crate::sketch_model::EditorToolId::Select)
+            || matches!(
+                active_editor_tool,
+                crate::sketch_model::EditorToolId::Select
+                    | crate::sketch_model::EditorToolId::Move
+                    | crate::sketch_model::EditorToolId::Scale
+                    | crate::sketch_model::EditorToolId::Rotate
+            ))
 }
 
 fn apply_semantic_selection_click(
