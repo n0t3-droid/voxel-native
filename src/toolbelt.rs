@@ -910,6 +910,7 @@ struct BuildDockResult {
     toolbox_hovered: bool,
     drawer_hovered: bool,
     hover_bridge_hovered: bool,
+    hovered_selection: Option<ToolboxSelection>,
     toggle_picker: bool,
     exit_editor: bool,
     brush_preset: Option<IVec3>,
@@ -918,7 +919,24 @@ struct BuildDockResult {
     history_command: Option<HistoryCommand>,
 }
 
-const HOVER_DRAWER_GRACE_SECONDS: f32 = 0.24;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorDrawerSurface {
+    Hidden,
+    HoverFlyout,
+    FullDrawer,
+}
+
+fn editor_drawer_surface(picker_open: bool, hover_open: bool) -> EditorDrawerSurface {
+    if picker_open {
+        EditorDrawerSurface::FullDrawer
+    } else if hover_open {
+        EditorDrawerSurface::HoverFlyout
+    } else {
+        EditorDrawerSurface::Hidden
+    }
+}
+
+const HOVER_DRAWER_GRACE_SECONDS: f32 = 0.42;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HoverDrawerState {
@@ -956,8 +974,8 @@ fn next_hover_drawer_state(
 fn hover_drawer_bridge_rect(screen: egui::Rect) -> egui::Rect {
     let center_y = screen.center().y;
     egui::Rect::from_min_max(
-        egui::pos2(72.0, center_y - 340.0),
-        egui::pos2(118.0, center_y + 340.0),
+        egui::pos2(68.0, center_y - 390.0),
+        egui::pos2(160.0, center_y + 390.0),
     )
 }
 
@@ -1390,6 +1408,14 @@ struct WorkflowDrawerGroup {
     presets: &'static [BuildWorkflowPreset],
 }
 
+#[derive(Clone, Copy)]
+struct ToolboxContextGroup {
+    label: &'static str,
+    hint: &'static str,
+    icon: Icon,
+    items: &'static [ToolboxSelection],
+}
+
 const DRAW_WORKFLOWS: [BuildWorkflowPreset; 6] = [
     BuildWorkflowPreset::Pencil,
     BuildWorkflowPreset::Sketch,
@@ -1414,6 +1440,139 @@ const WORLD_WORKFLOWS: [BuildWorkflowPreset; 6] = [
     BuildWorkflowPreset::Skyline,
     BuildWorkflowPreset::Spacecraft,
 ];
+
+const DRAW_CONTEXT_ITEMS: [ToolboxSelection; 6] = [
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Circle),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Polygon),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Arc),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Freehand),
+];
+
+const EDIT_CONTEXT_ITEMS: [ToolboxSelection; 6] = [
+    ToolboxSelection::Tool(ToolbeltTool::Navigate),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
+    ToolboxSelection::Tool(ToolbeltTool::TransformMove),
+    ToolboxSelection::Tool(ToolbeltTool::TransformScale),
+    ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
+    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
+];
+
+const OPEN_CONTEXT_ITEMS: [ToolboxSelection; 5] = [
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
+    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
+];
+
+const HOUSE_CONTEXT_ITEMS: [ToolboxSelection; 6] = [
+    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
+    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
+];
+
+const CITY_CONTEXT_ITEMS: [ToolboxSelection; 5] = [
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::CityShell),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Landscape),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
+];
+
+const SCENE_CONTEXT_ITEMS: [ToolboxSelection; 5] = [
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Landscape),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Skyline),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Spacecraft),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
+];
+
+fn context_group_for_selection(selection: ToolboxSelection) -> ToolboxContextGroup {
+    match selection {
+        ToolboxSelection::Tool(ToolbeltTool::DrawRect)
+        | ToolboxSelection::Workflow(
+            BuildWorkflowPreset::Pencil
+            | BuildWorkflowPreset::Sketch
+            | BuildWorkflowPreset::Circle
+            | BuildWorkflowPreset::Polygon
+            | BuildWorkflowPreset::Arc
+            | BuildWorkflowPreset::Freehand,
+        ) => ToolboxContextGroup {
+            label: "Draw",
+            hint: "Start with points, corners, and clean planar faces.",
+            icon: Icon::Pipette,
+            items: &DRAW_CONTEXT_ITEMS,
+        },
+        ToolboxSelection::Tool(ToolbeltTool::Sculpt)
+        | ToolboxSelection::Tool(
+            ToolbeltTool::Navigate
+            | ToolbeltTool::TransformMove
+            | ToolbeltTool::TransformScale
+            | ToolbeltTool::TransformRotate
+            | ToolbeltTool::MaterialPicker,
+        )
+        | ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull) => ToolboxContextGroup {
+            label: "Edit Selected",
+            hint: "Select a face/component, then pull, move, scale, rotate, or style it.",
+            icon: Icon::Move,
+            items: &EDIT_CONTEXT_ITEMS,
+        },
+        ToolboxSelection::Workflow(BuildWorkflowPreset::Opening | BuildWorkflowPreset::Room) => {
+            ToolboxContextGroup {
+                label: "Openings",
+                hint: "Cut doors/windows, hollow rooms, then finish walls and materials.",
+                icon: Icon::Open,
+                items: &OPEN_CONTEXT_ITEMS,
+            }
+        }
+        ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse) => ToolboxContextGroup {
+            label: "House Builder",
+            hint: "Footprint, pull walls, cut openings, hollow the room, then style it.",
+            icon: Icon::Builder,
+            items: &HOUSE_CONTEXT_ITEMS,
+        },
+        ToolboxSelection::Workflow(
+            BuildWorkflowPreset::Roads
+            | BuildWorkflowPreset::BotArea
+            | BuildWorkflowPreset::CityShell,
+        ) => ToolboxContextGroup {
+            label: "City Layout",
+            hint: "Draw roads and mark bot/city areas after the building shell is clear.",
+            icon: Icon::Road,
+            items: &CITY_CONTEXT_ITEMS,
+        },
+        ToolboxSelection::Workflow(
+            BuildWorkflowPreset::Landscape
+            | BuildWorkflowPreset::Skyline
+            | BuildWorkflowPreset::Spacecraft,
+        ) => ToolboxContextGroup {
+            label: "Scene",
+            hint: "Add gardens, skyline massing, and spacecraft once the main build reads cleanly.",
+            icon: Icon::City,
+            items: &SCENE_CONTEXT_ITEMS,
+        },
+        ToolboxSelection::Tool(
+            ToolbeltTool::SmartTower
+            | ToolbeltTool::BrushPlace
+            | ToolbeltTool::BrushCut
+            | ToolbeltTool::CityRoad
+            | ToolbeltTool::CityDistrict
+            | ToolbeltTool::CityBuilding
+            | ToolbeltTool::CityFacade
+            | ToolbeltTool::AnimationPick,
+        ) => ToolboxContextGroup {
+            label: "City Layout",
+            hint: "Advanced world tools stay grouped away from the first building flow.",
+            icon: Icon::City,
+            items: &CITY_CONTEXT_ITEMS,
+        },
+    }
+}
 
 fn workflow_drawer_groups() -> [WorkflowDrawerGroup; 3] {
     [
@@ -1615,8 +1774,9 @@ fn draw_build_dock(
         &mut result,
     );
     result.hover_bridge_hovered = hover_drawer_bridge_hovered(ctx);
-    let drawer_visible =
+    let hover_visible =
         picker_open || hover_drawer_open || result.toolbox_hovered || result.hover_bridge_hovered;
+    let surface = editor_drawer_surface(picker_open, hover_visible);
     draw_editor_status_bar(
         ctx,
         active_tool,
@@ -1632,18 +1792,34 @@ fn draw_build_dock(
         dim,
         &mut result,
     );
-    if drawer_visible {
-        draw_editor_drawer(
-            ctx,
-            active_tool,
-            active_workflow,
-            active_block,
-            brush,
-            theme,
-            colors.info,
-            drawer_visible,
-            &mut result,
-        );
+    match surface {
+        EditorDrawerSurface::Hidden => {}
+        EditorDrawerSurface::HoverFlyout => {
+            let hovered = result
+                .hovered_selection
+                .unwrap_or_else(|| active_toolbox_selection(active_tool, active_workflow));
+            draw_editor_hover_flyout(
+                ctx,
+                hovered,
+                active_tool,
+                active_workflow,
+                theme,
+                primary,
+                &mut result,
+            );
+        }
+        EditorDrawerSurface::FullDrawer => {
+            draw_editor_drawer(
+                ctx,
+                active_tool,
+                active_workflow,
+                active_block,
+                brush,
+                theme,
+                colors.info,
+                &mut result,
+            );
+        }
     }
 
     result
@@ -1701,23 +1877,32 @@ fn draw_editor_toolbox(
                         }
                         match item {
                             ToolboxSelection::Tool(tool) => {
-                                if toolbox_tool_button(
+                                let (clicked, hovered) = toolbox_tool_button(
                                     ui,
                                     tool,
                                     toolbox_tool_label(tool),
                                     active_tool == tool && active_workflow.is_none(),
                                     primary,
                                     dim,
-                                ) {
+                                );
+                                if hovered {
+                                    result.hovered_selection = Some(ToolboxSelection::Tool(tool));
+                                }
+                                if clicked {
                                     result.clicked_tool = Some(tool);
                                 }
                             }
                             ToolboxSelection::Workflow(preset) => {
-                                if toolbox_workflow_button(
+                                let (clicked, hovered) = toolbox_workflow_button(
                                     ui,
                                     preset,
                                     workflow_preset_selected(preset, active_tool, active_workflow),
-                                ) {
+                                );
+                                if hovered {
+                                    result.hovered_selection =
+                                        Some(ToolboxSelection::Workflow(preset));
+                                }
+                                if clicked {
                                     result.workflow_preset = Some(preset);
                                 }
                             }
@@ -1887,14 +2072,15 @@ fn draw_editor_drawer(
     brush: IVec3,
     theme: crate::theme::ThemeSettings,
     accent: egui::Color32,
-    drawer_visible: bool,
     result: &mut BuildDockResult,
 ) {
     let colors = theme.semantic();
-    let open_t = ctx.animate_bool(
-        egui::Id::new("voxel_native_sketch_editor_hover_drawer_anim"),
-        drawer_visible,
-    );
+    let open_t = ctx
+        .animate_bool(
+            egui::Id::new("voxel_native_sketch_editor_full_drawer_anim"),
+            true,
+        )
+        .clamp(0.0, 1.0);
     let fill_alpha = (168.0 + 58.0 * open_t).round() as u8;
     let frame = egui::Frame::none()
         .fill(egui::Color32::from_rgba_unmultiplied(
@@ -1950,7 +2136,7 @@ fn draw_editor_drawer(
                 });
                 crate::ui_kit::compact_separator(ui, theme);
                 ui.label(
-                    egui::RichText::new("HOVER TOOLBOX")
+                    egui::RichText::new("ADVANCED WORKFLOWS")
                         .monospace()
                         .size(9.5)
                         .strong()
@@ -1986,6 +2172,98 @@ fn draw_editor_drawer(
                 material_catalog_panel(ui, active_block, theme, result);
             });
         });
+    result.wheel_navigation_hovered |= area.response.hovered();
+    result.drawer_hovered |= area.response.hovered();
+}
+
+fn draw_editor_hover_flyout(
+    ctx: &egui::Context,
+    hovered: ToolboxSelection,
+    active_tool: ToolbeltTool,
+    active_workflow: Option<BuildWorkflowPreset>,
+    theme: crate::theme::ThemeSettings,
+    accent: egui::Color32,
+    result: &mut BuildDockResult,
+) {
+    let colors = theme.semantic();
+    let group = context_group_for_selection(hovered);
+    let open_t = ctx
+        .animate_bool(
+            egui::Id::new("voxel_native_sketch_editor_context_flyout"),
+            true,
+        )
+        .clamp(0.0, 1.0);
+    let frame = egui::Frame::none()
+        .fill(egui::Color32::from_rgba_unmultiplied(
+            colors.surface_strong.r(),
+            colors.surface_strong.g(),
+            colors.surface_strong.b(),
+            210,
+        ))
+        .stroke(egui::Stroke::new(1.0, accent))
+        .inner_margin(egui::Margin::symmetric(9.0, 8.0))
+        .rounding(egui::Rounding::same(8.0))
+        .shadow(egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 7.0),
+            blur: 18.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(112),
+        });
+
+    let area = egui::Area::new(egui::Id::new(
+        "voxel_native_sketch_editor_context_flyout_area",
+    ))
+    .anchor(
+        egui::Align2::LEFT_CENTER,
+        egui::vec2(92.0 + 12.0 * open_t, -34.0),
+    )
+    .order(egui::Order::Foreground)
+    .show(ctx, |ui| {
+        frame.show(ui, |ui| {
+            ui.set_width(286.0);
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                paint_icon(ui.painter(), rect, group.icon, accent);
+                ui.label(
+                    egui::RichText::new(group.label)
+                        .monospace()
+                        .size(11.0)
+                        .strong()
+                        .color(accent),
+                );
+            });
+            ui.label(
+                egui::RichText::new(group.hint)
+                    .monospace()
+                    .size(9.0)
+                    .color(colors.text_muted),
+            );
+            crate::ui_kit::compact_separator(ui, theme);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                for item in group.items {
+                    let selected = match *item {
+                        ToolboxSelection::Tool(tool) => {
+                            active_tool == tool && active_workflow.is_none()
+                        }
+                        ToolboxSelection::Workflow(preset) => {
+                            workflow_preset_selected(preset, active_tool, active_workflow)
+                        }
+                    };
+                    if toolbox_selection_chip(ui, *item, selected, accent) {
+                        match *item {
+                            ToolboxSelection::Tool(tool) => result.clicked_tool = Some(tool),
+                            ToolboxSelection::Workflow(preset) => {
+                                result.workflow_preset = Some(preset);
+                            }
+                        }
+                    }
+                }
+            });
+        });
+    });
     result.wheel_navigation_hovered |= area.response.hovered();
     result.drawer_hovered |= area.response.hovered();
 }
@@ -2033,6 +2311,60 @@ fn active_editor_hint(tool: ToolbeltTool, active_workflow: Option<BuildWorkflowP
         .unwrap_or_else(|| tool.hint().to_owned())
 }
 
+fn toolbox_selection_chip(
+    ui: &mut egui::Ui,
+    selection: ToolboxSelection,
+    selected: bool,
+    fallback: egui::Color32,
+) -> bool {
+    let (icon, label, base_color) = match selection {
+        ToolboxSelection::Tool(tool) => {
+            (tool.icon(), toolbox_tool_label(tool), tool.category_color())
+        }
+        ToolboxSelection::Workflow(preset) => (
+            preset.icon(),
+            workflow_toolbox_label(preset),
+            preset.color(),
+        ),
+    };
+    let color = if selected { AMBER } else { base_color };
+    let stroke = if selected {
+        AMBER
+    } else {
+        fallback.linear_multiply(0.75)
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(86.0, 34.0), egui::Sense::click());
+    let hovered = response.hovered();
+    let fill = if selected {
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 72)
+    } else if hovered {
+        egui::Color32::from_rgba_unmultiplied(base_color.r(), base_color.g(), base_color.b(), 40)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(5, 20, 28, 168)
+    };
+    let painter = ui.painter_at(rect);
+    painter.rect(
+        rect,
+        egui::Rounding::same(6.0),
+        fill,
+        egui::Stroke::new(1.0, stroke),
+    );
+    paint_icon(
+        &painter,
+        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 8.0), egui::vec2(16.0, 16.0)),
+        icon,
+        color,
+    );
+    painter.text(
+        rect.right_center() - egui::vec2(7.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        label,
+        egui::FontId::monospace(8.0),
+        TEXT,
+    );
+    response.clicked()
+}
+
 fn toolbox_tool_label(tool: ToolbeltTool) -> &'static str {
     match tool {
         ToolbeltTool::Navigate => "Select",
@@ -2065,7 +2397,11 @@ fn workflow_toolbox_label(preset: BuildWorkflowPreset) -> &'static str {
     }
 }
 
-fn toolbox_workflow_button(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected: bool) -> bool {
+fn toolbox_workflow_button(
+    ui: &mut egui::Ui,
+    preset: BuildWorkflowPreset,
+    selected: bool,
+) -> (bool, bool) {
     let color = preset.color();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 41.0), egui::Sense::click());
     let hovered = response.hovered();
@@ -2123,8 +2459,8 @@ fn toolbox_workflow_button(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selec
         egui::Color32::from_white_alpha(150),
     );
     let clicked = response.clicked();
-    response.on_hover_text(preset.inference_hover_text());
-    clicked
+    let hovered = response.hovered();
+    (clicked, hovered)
 }
 
 fn toolbox_tool_button(
@@ -2134,7 +2470,7 @@ fn toolbox_tool_button(
     selected: bool,
     primary: egui::Color32,
     dim: egui::Color32,
-) -> bool {
+) -> (bool, bool) {
     let color = if selected { AMBER } else { primary };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 41.0), egui::Sense::click());
     let hovered = response.hovered();
@@ -2169,8 +2505,8 @@ fn toolbox_tool_button(
         TEXT,
     );
     let clicked = response.clicked();
-    response.on_hover_text(tool.hint());
-    clicked
+    let hovered = response.hovered();
+    (clicked, hovered)
 }
 
 fn toolbox_command_button(
@@ -3361,6 +3697,59 @@ mod tests {
             toolbox_selection_editor_tool(ToolboxSelection::Tool(ToolbeltTool::TransformRotate)),
             crate::sketch_model::EditorToolId::Rotate
         );
+    }
+
+    #[test]
+    fn hover_surface_is_compact_not_full_style_drawer() {
+        assert_eq!(
+            editor_drawer_surface(false, false),
+            EditorDrawerSurface::Hidden
+        );
+        assert_eq!(
+            editor_drawer_surface(false, true),
+            EditorDrawerSurface::HoverFlyout
+        );
+        assert_eq!(
+            editor_drawer_surface(true, true),
+            EditorDrawerSurface::FullDrawer
+        );
+    }
+
+    #[test]
+    fn contextual_hover_groups_do_not_mix_unrelated_tools() {
+        let edit = context_group_for_selection(ToolboxSelection::Tool(ToolbeltTool::TransformMove));
+        assert_eq!(edit.label, "Edit Selected");
+        assert!(edit
+            .items
+            .contains(&ToolboxSelection::Tool(ToolbeltTool::TransformScale)));
+        assert!(edit
+            .items
+            .contains(&ToolboxSelection::Tool(ToolbeltTool::TransformRotate)));
+        assert!(!edit
+            .items
+            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::Roads)));
+
+        let draw =
+            context_group_for_selection(ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil));
+        assert_eq!(draw.label, "Draw");
+        assert!(draw.items.len() <= 6);
+        assert!(!draw
+            .items
+            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea)));
+
+        let house = context_group_for_selection(ToolboxSelection::Workflow(
+            BuildWorkflowPreset::ModernHouse,
+        ));
+        assert_eq!(house.label, "House Builder");
+        assert!(house
+            .items
+            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull)));
+        assert!(house
+            .items
+            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::Opening)));
+        assert!(!house
+            .items
+            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea)));
     }
 
     #[test]

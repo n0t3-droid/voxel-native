@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use bevy::prelude::{App, IVec3, Plugin, Quat, Resource, Vec3};
+use bevy::prelude::{App, IVec3, Mat4, Plugin, Quat, Resource, Vec2, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
 
 const PLANAR_GRAPH_SCALE: f32 = 1000.0;
@@ -4124,6 +4124,254 @@ impl HitRecord {
 #[derive(Resource, Debug, Clone, Default, PartialEq)]
 pub struct SemanticHoverHit(pub Option<HitRecord>);
 
+#[derive(Resource, Debug, Clone, Default)]
+pub struct PickService;
+
+impl PickService {
+    pub fn best(hits: impl IntoIterator<Item = HitRecord>) -> Option<HitRecord> {
+        let mut ranked: Vec<_> = hits.into_iter().collect();
+        Self::rank(&mut ranked);
+        ranked.into_iter().next()
+    }
+
+    pub fn ranked(hits: impl IntoIterator<Item = HitRecord>) -> Vec<HitRecord> {
+        let mut ranked: Vec<_> = hits.into_iter().collect();
+        Self::rank(&mut ranked);
+        ranked
+    }
+
+    fn rank(hits: &mut [HitRecord]) {
+        hits.sort_by(|a, b| {
+            a.distance
+                .total_cmp(&b.distance)
+                .then_with(|| hit_kind_pick_order(a.kind).cmp(&hit_kind_pick_order(b.kind)))
+                .then_with(|| a.entity.raw().cmp(&b.entity.raw()))
+        });
+    }
+}
+
+fn hit_kind_pick_order(kind: HitKind) -> u8 {
+    match kind {
+        HitKind::Vertex => 0,
+        HitKind::Edge => 1,
+        HitKind::Face => 2,
+        HitKind::Instance => 3,
+        HitKind::Guide => 4,
+        HitKind::SectionPlane => 5,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SketchRay {
+    pub origin: Vec3,
+    pub direction: Vec3,
+}
+
+impl SketchRay {
+    pub fn new(origin: Vec3, direction: Vec3) -> Option<Self> {
+        Some(Self {
+            origin,
+            direction: direction.try_normalize()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenProjection {
+    pub screen: Vec2,
+    pub ndc: Vec3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenSpaceSnapSettings {
+    pub radius_pixels: f32,
+    pub sticky_bonus: f32,
+}
+
+impl Default for ScreenSpaceSnapSettings {
+    fn default() -> Self {
+        Self {
+            radius_pixels: 15.0,
+            sticky_bonus: 0.22,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenSpaceInferenceCandidate {
+    pub inference: InferenceCandidate,
+    pub screen_point: Vec2,
+    pub screen_distance: f32,
+    pub depth: f32,
+    pub sticky: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RectangleDrawingPlane {
+    pub origin: Vec3,
+    pub normal: Vec3,
+    pub axis_u: Vec3,
+    pub axis_v: Vec3,
+}
+
+pub fn project_world_to_screen(
+    world_point: Vec3,
+    view_projection: Mat4,
+    viewport_size: Vec2,
+) -> Option<ScreenProjection> {
+    if viewport_size.x <= 0.0 || viewport_size.y <= 0.0 {
+        return None;
+    }
+    let clip: Vec4 = view_projection * world_point.extend(1.0);
+    if clip.w <= 1.0e-6 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    if !ndc.is_finite() {
+        return None;
+    }
+    let screen = Vec2::new(
+        (ndc.x * 0.5 + 0.5) * viewport_size.x,
+        (0.5 - ndc.y * 0.5) * viewport_size.y,
+    );
+    Some(ScreenProjection { screen, ndc })
+}
+
+pub fn screen_space_inference_candidates(
+    candidates: impl IntoIterator<Item = InferenceCandidate>,
+    cursor_screen: Vec2,
+    view_projection: Mat4,
+    viewport_size: Vec2,
+    settings: ScreenSpaceSnapSettings,
+    sticky_kind: Option<InferenceKind>,
+) -> Vec<ScreenSpaceInferenceCandidate> {
+    let radius = settings.radius_pixels.max(1.0);
+    let mut projected: Vec<_> = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let projection =
+                project_world_to_screen(candidate.point, view_projection, viewport_size)?;
+            let screen_distance = projection.screen.distance(cursor_screen);
+            (screen_distance <= radius).then(|| ScreenSpaceInferenceCandidate {
+                sticky: sticky_kind == Some(candidate.kind),
+                inference: candidate,
+                screen_point: projection.screen,
+                screen_distance,
+                depth: projection.ndc.z,
+            })
+        })
+        .collect();
+    rank_screen_space_candidates(&mut projected, radius, settings.sticky_bonus);
+    projected
+}
+
+pub fn best_screen_space_inference(
+    candidates: impl IntoIterator<Item = InferenceCandidate>,
+    cursor_screen: Vec2,
+    view_projection: Mat4,
+    viewport_size: Vec2,
+    settings: ScreenSpaceSnapSettings,
+    sticky_kind: Option<InferenceKind>,
+) -> Option<ScreenSpaceInferenceCandidate> {
+    screen_space_inference_candidates(
+        candidates,
+        cursor_screen,
+        view_projection,
+        viewport_size,
+        settings,
+        sticky_kind,
+    )
+    .into_iter()
+    .next()
+}
+
+fn rank_screen_space_candidates(
+    candidates: &mut [ScreenSpaceInferenceCandidate],
+    radius_pixels: f32,
+    sticky_bonus: f32,
+) {
+    candidates.sort_by(|a, b| {
+        let a_score = screen_space_snap_score(a, radius_pixels, sticky_bonus);
+        let b_score = screen_space_snap_score(b, radius_pixels, sticky_bonus);
+        a_score
+            .total_cmp(&b_score)
+            .then_with(|| a.depth.total_cmp(&b.depth))
+            .then_with(|| {
+                stable_kind_order(a.inference.kind).cmp(&stable_kind_order(b.inference.kind))
+            })
+    });
+}
+
+fn screen_space_snap_score(
+    candidate: &ScreenSpaceInferenceCandidate,
+    radius_pixels: f32,
+    sticky_bonus: f32,
+) -> f32 {
+    let distance_score = (candidate.screen_distance / radius_pixels.max(1.0)).clamp(0.0, 1.0);
+    let kind_score = match candidate.inference.kind {
+        InferenceKind::Endpoint => 0.0,
+        InferenceKind::Midpoint => 0.16,
+        InferenceKind::Intersection => 0.2,
+        InferenceKind::OnEdge => 0.34,
+        InferenceKind::FaceCenter => 0.42,
+        InferenceKind::OnFace => 0.55,
+        InferenceKind::AxisX | InferenceKind::AxisY | InferenceKind::AxisZ => 0.72,
+        InferenceKind::Parallel | InferenceKind::Perpendicular => 0.78,
+        InferenceKind::FromPoint => 0.82,
+    };
+    kind_score + distance_score * 0.12 - if candidate.sticky { sticky_bonus } else { 0.0 }
+}
+
+pub fn closest_point_on_locked_axis_from_ray(
+    ray_origin: Vec3,
+    ray_direction: Vec3,
+    line_origin: Vec3,
+    line_direction: Vec3,
+) -> Option<Vec3> {
+    let c_dir = ray_direction.try_normalize()?;
+    let u = line_direction.try_normalize()?;
+    let n = u.cross(c_dir);
+    if n.length_squared() < 1.0e-8 {
+        return Some(line_origin + u * (ray_origin - line_origin).dot(u));
+    }
+    let c_cross_n = c_dir.cross(n);
+    let denominator = u.dot(c_cross_n);
+    if denominator.abs() < 1.0e-8 {
+        return Some(line_origin + u * (ray_origin - line_origin).dot(u));
+    }
+    let s = (ray_origin - line_origin).dot(c_cross_n) / denominator;
+    Some(line_origin + u * s)
+}
+
+pub fn rectangle_plane_from_view_or_face(
+    origin: Vec3,
+    view_direction: Vec3,
+    hovered_face_normal: Option<Vec3>,
+    locked_axis: Option<Vec3>,
+) -> Option<RectangleDrawingPlane> {
+    let normal = if let Some(axis) = locked_axis {
+        axis.try_normalize()?
+    } else if let Some(face_normal) = hovered_face_normal {
+        face_normal.try_normalize()?
+    } else {
+        dominant_view_axis(view_direction)?
+    };
+    let (axis_u, axis_v, normal) = plane_basis(normal, None);
+    Some(RectangleDrawingPlane {
+        origin,
+        normal,
+        axis_u,
+        axis_v,
+    })
+}
+
+fn dominant_view_axis(view_direction: Vec3) -> Option<Vec3> {
+    let view = view_direction.try_normalize()?;
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    axes.into_iter()
+        .max_by(|a, b| view.dot(*a).abs().total_cmp(&view.dot(*b).abs()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionUpdate {
     Ignored,
@@ -4293,6 +4541,19 @@ impl InferenceLock {
 pub struct InferenceService;
 
 impl InferenceService {
+    pub fn from_pick(
+        document: &SketchDocument,
+        hit: &HitRecord,
+        reference_point: Option<Vec3>,
+    ) -> Result<Vec<InferenceCandidate>, SketchModelError> {
+        let mut candidates = document.entity_inference_candidates(hit.entity)?;
+        push_hit_inference_candidate(hit, &mut candidates);
+        if let Some(reference_point) = reference_point {
+            push_reference_inference_candidates(reference_point, hit.world_point, &mut candidates);
+        }
+        Ok(Self::ranked(candidates))
+    }
+
     pub fn best(
         candidates: impl IntoIterator<Item = InferenceCandidate>,
     ) -> Option<InferenceCandidate> {
@@ -4316,6 +4577,88 @@ impl InferenceService {
                 .then_with(|| b.kind.priority().cmp(&a.kind.priority()))
                 .then_with(|| stable_kind_order(a.kind).cmp(&stable_kind_order(b.kind)))
         });
+    }
+}
+
+fn push_hit_inference_candidate(hit: &HitRecord, candidates: &mut Vec<InferenceCandidate>) {
+    let mut candidate = match hit.kind {
+        HitKind::Vertex => InferenceCandidate::new(
+            InferenceKind::Endpoint,
+            hit.world_point,
+            1.04,
+            InferenceKind::Endpoint.tooltip(),
+        ),
+        HitKind::Edge => InferenceCandidate::new(
+            InferenceKind::OnEdge,
+            hit.world_point,
+            0.82,
+            InferenceKind::OnEdge.tooltip(),
+        ),
+        HitKind::Face => InferenceCandidate::new(
+            InferenceKind::OnFace,
+            hit.world_point,
+            0.78,
+            InferenceKind::OnFace.tooltip(),
+        ),
+        HitKind::Guide => InferenceCandidate::new(
+            InferenceKind::FromPoint,
+            hit.world_point,
+            0.74,
+            InferenceKind::FromPoint.tooltip(),
+        ),
+        HitKind::SectionPlane => InferenceCandidate::new(
+            InferenceKind::OnFace,
+            hit.world_point,
+            0.72,
+            "On section plane",
+        ),
+        HitKind::Instance => InferenceCandidate::new(
+            InferenceKind::FromPoint,
+            hit.world_point,
+            0.54,
+            "On component",
+        ),
+    };
+    if let Some(normal) = hit.normal.and_then(|normal| normal.try_normalize()) {
+        candidate = candidate.with_plane_normal(normal);
+    }
+    candidates.push(candidate);
+}
+
+fn push_reference_inference_candidates(
+    reference_point: Vec3,
+    raw_point: Vec3,
+    candidates: &mut Vec<InferenceCandidate>,
+) {
+    let delta = raw_point - reference_point;
+    for (kind, axis) in [
+        (InferenceKind::AxisX, Vec3::X),
+        (InferenceKind::AxisY, Vec3::Y),
+        (InferenceKind::AxisZ, Vec3::Z),
+    ] {
+        let projected = reference_point + axis * delta.dot(axis);
+        if (projected - reference_point).length_squared() > PLANAR_GRAPH_MIN_AREA {
+            candidates.push(
+                InferenceCandidate::new(
+                    kind,
+                    projected,
+                    0.68,
+                    format!("{} from point", kind.tooltip()),
+                )
+                .with_direction(axis),
+            );
+        }
+    }
+    if let Some(direction) = delta.try_normalize() {
+        candidates.push(
+            InferenceCandidate::new(
+                InferenceKind::FromPoint,
+                raw_point,
+                0.62,
+                InferenceKind::FromPoint.tooltip(),
+            )
+            .with_direction(direction),
+        );
     }
 }
 
@@ -5475,6 +5818,7 @@ pub struct SketchModelPlugin;
 impl Plugin for SketchModelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SketchDocument>()
+            .init_resource::<PickService>()
             .init_resource::<InferenceService>()
             .init_resource::<ToolController>()
             .init_resource::<EditorToolCatalog>()
@@ -5994,6 +6338,222 @@ mod tests {
         assert!(controller.selection().is_empty());
         assert!(controller.preview_generation() > generation_after_select);
         assert_eq!(controller.clear_selection(), SelectionUpdate::Ignored);
+    }
+
+    #[test]
+    fn pick_service_ranks_raw_hits_before_inference_is_applied() {
+        let near_face = HitRecord::new(
+            SketchId::new_for_test(20),
+            [],
+            HitKind::Face,
+            Vec3::new(0.5, 0.5, 0.0),
+            1.0,
+        );
+        let far_vertex = HitRecord::new(
+            SketchId::new_for_test(10),
+            [],
+            HitKind::Vertex,
+            Vec3::ZERO,
+            8.0,
+        );
+
+        let best = PickService::best([far_vertex.clone(), near_face.clone()]).unwrap();
+
+        assert_eq!(best.entity, near_face.entity);
+        assert_eq!(best.kind, HitKind::Face);
+    }
+
+    #[test]
+    fn pick_service_uses_hit_kind_only_as_same_distance_tiebreaker() {
+        let face = HitRecord::new(
+            SketchId::new_for_test(30),
+            [],
+            HitKind::Face,
+            Vec3::new(1.0, 1.0, 0.0),
+            2.0,
+        );
+        let vertex = HitRecord::new(
+            SketchId::new_for_test(40),
+            [],
+            HitKind::Vertex,
+            Vec3::new(1.0, 1.0, 0.0),
+            2.0,
+        );
+
+        let best = PickService::best([face, vertex]).unwrap();
+
+        assert_eq!(best.entity, SketchId::new_for_test(40));
+        assert_eq!(best.kind, HitKind::Vertex);
+    }
+
+    #[test]
+    fn inference_service_builds_input_point_candidates_from_pick() {
+        let mut doc = SketchDocument::new();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 4.0,
+                Vec3::Y * 3.0,
+                "Rectangle",
+            )
+            .unwrap();
+        let hit = HitRecord::new(face, [], HitKind::Face, Vec3::new(2.0, 1.5, 0.0), 1.0)
+            .with_normal(Vec3::Z);
+
+        let candidates = InferenceService::from_pick(&doc, &hit, None).unwrap();
+        let kinds: BTreeSet<_> = candidates.iter().map(|candidate| candidate.kind).collect();
+
+        assert!(kinds.contains(&InferenceKind::Endpoint));
+        assert!(kinds.contains(&InferenceKind::Midpoint));
+        assert!(kinds.contains(&InferenceKind::FaceCenter));
+        assert!(kinds.contains(&InferenceKind::OnFace));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.kind == InferenceKind::OnFace
+                && candidate.point == Vec3::new(2.0, 1.5, 0.0)
+                && candidate.plane_normal == Some(Vec3::Z)));
+    }
+
+    #[test]
+    fn inference_service_adds_reference_axis_and_from_point_candidates() {
+        let mut doc = SketchDocument::new();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 4.0,
+                Vec3::Y * 3.0,
+                "Rectangle",
+            )
+            .unwrap();
+        let hit = HitRecord::new(face, [], HitKind::Face, Vec3::new(4.0, 2.0, 0.0), 1.0)
+            .with_normal(Vec3::Z);
+
+        let candidates =
+            InferenceService::from_pick(&doc, &hit, Some(Vec3::new(1.0, 2.0, 0.0))).unwrap();
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == InferenceKind::AxisX
+                && candidate.point == Vec3::new(4.0, 2.0, 0.0)
+                && candidate.direction == Some(Vec3::X)
+        }));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.kind == InferenceKind::FromPoint
+                && candidate.point == Vec3::new(4.0, 2.0, 0.0)));
+    }
+
+    #[test]
+    fn project_world_to_screen_maps_ndc_to_viewport_pixels() {
+        let projection =
+            project_world_to_screen(Vec3::ZERO, Mat4::IDENTITY, Vec2::new(200.0, 100.0))
+                .expect("projection");
+
+        assert_eq!(projection.screen, Vec2::new(100.0, 50.0));
+        assert_eq!(projection.ndc, Vec3::ZERO);
+    }
+
+    #[test]
+    fn screen_space_inference_prefers_endpoint_priority_inside_snap_radius() {
+        let endpoint = InferenceCandidate::new(
+            InferenceKind::Endpoint,
+            Vec3::new(0.10, 0.0, 0.0),
+            1.0,
+            "Endpoint",
+        );
+        let face = InferenceCandidate::new(InferenceKind::OnFace, Vec3::ZERO, 1.0, "On face");
+
+        let best = best_screen_space_inference(
+            [face, endpoint],
+            Vec2::new(100.0, 100.0),
+            Mat4::IDENTITY,
+            Vec2::new(200.0, 200.0),
+            ScreenSpaceSnapSettings::default(),
+            None,
+        )
+        .expect("best candidate");
+
+        assert_eq!(best.inference.kind, InferenceKind::Endpoint);
+    }
+
+    #[test]
+    fn screen_space_inference_sticky_candidate_can_survive_small_distance_loss() {
+        let midpoint = InferenceCandidate::new(
+            InferenceKind::Midpoint,
+            Vec3::new(0.12, 0.0, 0.0),
+            1.0,
+            "Midpoint",
+        );
+        let edge = InferenceCandidate::new(InferenceKind::OnEdge, Vec3::ZERO, 1.0, "On edge");
+
+        let best = best_screen_space_inference(
+            [edge, midpoint],
+            Vec2::new(100.0, 100.0),
+            Mat4::IDENTITY,
+            Vec2::new(200.0, 200.0),
+            ScreenSpaceSnapSettings::default(),
+            Some(InferenceKind::Midpoint),
+        )
+        .expect("best candidate");
+
+        assert_eq!(best.inference.kind, InferenceKind::Midpoint);
+        assert!(best.sticky);
+    }
+
+    #[test]
+    fn locked_axis_projection_uses_skew_line_math_from_camera_ray() {
+        let locked = closest_point_on_locked_axis_from_ray(
+            Vec3::new(4.0, 5.0, 10.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::X,
+        )
+        .expect("locked point");
+
+        assert!((locked - Vec3::new(4.0, 2.0, 3.0)).length() < 1.0e-5);
+    }
+
+    #[test]
+    fn locked_axis_projection_falls_back_when_ray_parallel_to_axis() {
+        let locked = closest_point_on_locked_axis_from_ray(
+            Vec3::new(6.0, 2.0, 0.0),
+            Vec3::X,
+            Vec3::new(1.0, 2.0, 0.0),
+            Vec3::X,
+        )
+        .expect("locked point");
+
+        assert_eq!(locked, Vec3::new(6.0, 2.0, 0.0));
+    }
+
+    #[test]
+    fn rectangle_plane_inherits_hovered_face_normal_before_view_axis() {
+        let plane = rectangle_plane_from_view_or_face(Vec3::ZERO, Vec3::Z, Some(Vec3::Y), None)
+            .expect("face plane");
+
+        assert_eq!(plane.normal, Vec3::Y);
+        assert!(plane.axis_u.dot(plane.normal).abs() < 1.0e-5);
+        assert!(plane.axis_v.dot(plane.normal).abs() < 1.0e-5);
+        assert!(plane.axis_u.dot(plane.axis_v).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn rectangle_plane_uses_dominant_view_axis_in_empty_space() {
+        let plane =
+            rectangle_plane_from_view_or_face(Vec3::ZERO, Vec3::new(0.2, -0.3, 0.9), None, None)
+                .expect("view plane");
+
+        assert_eq!(plane.normal, Vec3::Z);
+    }
+
+    #[test]
+    fn rectangle_plane_arrow_lock_overrides_face_and_view_axis() {
+        let plane =
+            rectangle_plane_from_view_or_face(Vec3::ZERO, Vec3::Z, Some(Vec3::Y), Some(Vec3::X))
+                .expect("locked plane");
+
+        assert_eq!(plane.normal, Vec3::X);
     }
 
     #[test]

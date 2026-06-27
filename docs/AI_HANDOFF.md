@@ -19,16 +19,19 @@ handoff unless a later task explicitly needs a reproducible save.
   mouse-first Sketch Editor toolbox and status bar.
 - The Sketch Editor toolbox now has a smaller primary rail ordered for house
   building first: Select, Line, Box, Push/Pull, Move, Scale, Rotate, Opening,
-  Room, Material, Road, Bots, and House. Advanced circle/polygon/arc/freehand,
-  city, landscape, tower, and spacecraft tools stay in grouped hover drawers
-  instead of crowding the first rail.
+  Room, Material, Road, Bots, and House. Hovering a rail icon opens a compact
+  contextual flyout for that tool family (`Draw`, `Edit Selected`, `Openings`,
+  `House Builder`, `City Layout`, or `Scene`) instead of dumping every workflow
+  into one large mixed drawer.
 - Each visible workflow button shows a simple label plus an inference cue such
   as Point, Corner, Face, Path, Area, Axis, Plane, or Volume so the player can
   tell what the tool snaps to before clicking it.
-- The hover drawer has a bridge zone and short grace hold while the cursor
-  moves from the rail into the drawer. Cursor policy is also UI-aware: right
-  mouse only becomes world orbit when the pointer is not over the Sketch Editor
-  UI, so the toolbox should not make the mouse disappear while selecting tools.
+- The contextual flyout has a wider bridge zone and longer grace hold while
+  the cursor moves from the rail into the flyout. The full workflow/material
+  catalog is now the explicit `STYLE` drawer only. Cursor policy is also
+  UI-aware: right mouse only becomes world orbit when the pointer is not over
+  the Sketch Editor UI, so the toolbox should not make the mouse disappear
+  while selecting tools.
 - `sketch_model` is now the semantic spine for editor tools, transactions,
   selection, inference, components, rectangle/pencil semantics, room/opening
   semantics, and Push/Pull-style operations.
@@ -101,6 +104,31 @@ Navigate clicks now consume that hover record and update
 transforms, openings, and bot edits that target existing semantic faces instead
 of flood-filling anonymous voxels.
 
+The PDF-required "pick first, infer second" split is now represented in the
+semantic layer. `PickService` ranks raw `HitRecord`s by distance and hit-kind
+tiebreaks without applying snap bias, while `InferenceService::from_pick`
+converts the chosen raw hit into InputPoint-style endpoint, midpoint,
+face-center, on-face, axis, and from-point candidates. This is still not full
+SketchUp inference parity, but it prevents the next tools from mixing raycast
+selection and snapping into one opaque helper.
+
+The user's later R93G system specification adds the exact Phase-1 math layer:
+`project_world_to_screen`, `screen_space_inference_candidates`,
+`best_screen_space_inference`, `closest_point_on_locked_axis_from_ray`, and
+`rectangle_plane_from_view_or_face`. These cover view-projection/NDC candidate
+projection, SketchUp-style screen-space priority plus sticky inference,
+skew-line axis locking for Shift/arrow constraints, and dynamic Rectangle plane
+selection from locked axis, hovered face normal, or dominant view axis.
+
+The first live Pencil/Sketch Draw wiring is now in `src/sculpt/draw.rs`.
+Start and hover input points store their exact world marker, snap kind, and
+discrete voxel endpoint. Endpoint, midpoint, and face-center snaps now affect
+the drawn start/end cell instead of being status text only. The Draw gizmo
+renders small colored input-point markers plus an axis guide, and Pencil can
+use arrow-key axis locks: Right = X, Left = Z, Up = Y height, Down = clear.
+When Pencil leaves the original face plane through an axis lock, its voxel
+stroke uses a 3D line path instead of collapsing back onto the old plane.
+
 The first lightweight B-Rep/vector layer now lives in `src/sketch_model.rs` as
 `SketchBRepKernel`. It stores linked vertices, oriented edges, loop faces, plane
 equations, and supports the first PDF-required operations: coplanar face split
@@ -121,7 +149,13 @@ and geometry/bounds updates for faces, curves, openings, rooms, and extrusions.
   first-pass raster tools and need real curve editing, face splitting, and
   component-aware geometry.
 - The builder still needs stronger endpoint/midpoint/face-center inference for
-  all drafting tools, not only rectangle/pencil and Push/Pull.
+  all drafting tools. Pencil/Sketch Draw now has first live input-point markers
+  and arrow locks, but Push/Pull, Move, Scale, Rotate, Opening, and every
+  advanced draw tool still need the same universal pipeline.
+- The new screen-space snap and skew-line locking math is tested in
+  `sketch_model`, but only the first Pencil/Sketch Draw path consumes axis
+  locking live. The remaining tools still need to consume it per frame and draw
+  green/cyan/red/blue inference overlays near the cursor.
 - The next major architecture step should wire the new `SketchBRepKernel` into
   live Pencil/Rectangle/Push/Pull/Openings, then voxelize B-Rep previews/commits
   through the existing batch edit and undo paths. Semantic material/transform/
@@ -129,6 +163,9 @@ and geometry/bounds updates for faces, curves, openings, rooms, and extrusions.
 - Move, Scale, and Rotate are now first-class editor tool IDs and primary rail
   tools, but live mouse handles still need to call the semantic transform
   operations on `ToolController.selection`.
+- `docs/SKETCHUP_EQUIVALENCE_AUDIT.md` tracks which PDF/SketchUp capabilities
+  are actual, partial, or missing. Keep it honest; do not mark a feature exact
+  just because a similarly named Rust type exists.
 - Startup can still inherit huge generated save/edit/bot state locally. Keep
   source commits separate from generated `saves/` unless deliberately testing a
   specific world.

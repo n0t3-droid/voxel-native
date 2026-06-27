@@ -29,7 +29,7 @@ const RECT_FILL_OWNER: &str = "Sketch Draw";
 const RECT_AXIS_JITTER: i32 = 1;
 const RECT_AXIS_RATIO: f32 = 3.0;
 const RECT_EQUAL_LENGTH_TOLERANCE: i32 = 2;
-const RECT_FACE_SNAP_RADIUS: f32 = 0.24;
+const RECT_FACE_SNAP_RADIUS: f32 = 0.30;
 
 #[derive(Resource, Default)]
 pub struct RectDrawState {
@@ -49,6 +49,10 @@ pub struct RectDrawState {
     shape_workflow: SketchShapeWorkflow,
     inference: RectEndpointInference,
     snap_kind: Option<RectFaceSnapKind>,
+    start_snap_kind: Option<RectFaceSnapKind>,
+    axis_lock: Option<RectAxisLock>,
+    start_point: Vec3,
+    current_point: Vec3,
     tool_generation: u64,
     reference_span: IVec2,
     voxel: Voxel,
@@ -88,6 +92,19 @@ enum RectFaceSnapKind {
     FaceCenter,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RectAxisLock {
+    X,
+    Y,
+    Z,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RectFaceInputPoint {
+    point: Vec3,
+    kind: Option<RectFaceSnapKind>,
+}
+
 impl RectEndpointInference {
     fn status_suffix(self) -> &'static str {
         match self {
@@ -120,15 +137,50 @@ fn rect_face_snap_inference_kind(
     }
 }
 
+impl RectAxisLock {
+    fn axis(self) -> IVec3 {
+        match self {
+            Self::X => IVec3::X,
+            Self::Y => IVec3::Y,
+            Self::Z => IVec3::Z,
+        }
+    }
+
+    fn axis_vec3(self) -> Vec3 {
+        self.axis().as_vec3()
+    }
+
+    fn status_suffix(self) -> &'static str {
+        match self {
+            Self::X => " X axis lock.",
+            Self::Y => " Y height lock.",
+            Self::Z => " Z axis lock.",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::X => Color::srgb(1.0, 0.18, 0.16),
+            Self::Y => Color::srgb(0.18, 0.55, 1.0),
+            Self::Z => Color::srgb(0.12, 1.0, 0.30),
+        }
+    }
+}
+
 fn rect_status_suffix(
     snap_kind: Option<RectFaceSnapKind>,
     inference: RectEndpointInference,
+    axis_lock: Option<RectAxisLock>,
 ) -> String {
     let mut suffix = String::new();
     if let Some(snap_kind) = snap_kind {
         suffix.push_str(snap_kind.status_suffix());
     }
-    suffix.push_str(inference.status_suffix());
+    if let Some(axis_lock) = axis_lock {
+        suffix.push_str(axis_lock.status_suffix());
+    } else {
+        suffix.push_str(inference.status_suffix());
+    }
     suffix
 }
 
@@ -269,6 +321,36 @@ fn ctrl_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
 }
 
+fn update_rect_axis_lock(
+    keys: &ButtonInput<KeyCode>,
+    current: Option<RectAxisLock>,
+) -> Option<RectAxisLock> {
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        return toggle_rect_axis_lock(current, RectAxisLock::X);
+    }
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        return toggle_rect_axis_lock(current, RectAxisLock::Y);
+    }
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        return toggle_rect_axis_lock(current, RectAxisLock::Z);
+    }
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        return None;
+    }
+    current
+}
+
+fn toggle_rect_axis_lock(
+    current: Option<RectAxisLock>,
+    requested: RectAxisLock,
+) -> Option<RectAxisLock> {
+    if current == Some(requested) {
+        None
+    } else {
+        Some(requested)
+    }
+}
+
 fn sketch_tool_uses_click_finish(active_tool: ToolbeltTool, smart_tool: bool) -> bool {
     !smart_tool && matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
 }
@@ -306,6 +388,17 @@ fn rect_should_ignore_world_click_for_editor_ui(
     pointer_over_editor_ui && (left_just || right_just)
 }
 
+fn clear_rect_preview(draw: &mut RectDrawState) {
+    draw.active = false;
+    draw.click_finish = false;
+    draw.pencil_line = false;
+    draw.shape_workflow = SketchShapeWorkflow::Rectangle;
+    draw.snap_kind = None;
+    draw.start_snap_kind = None;
+    draw.axis_lock = None;
+    draw.inference = RectEndpointInference::None;
+}
+
 fn draw_rect_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, draw: &RectDrawState) -> bool {
     if !mode.is_build_live() {
         return false;
@@ -338,11 +431,7 @@ pub fn rect_draw_input(
 ) {
     if !draw_rect_active(&mode, &keys, &draw) {
         if draw.active {
-            draw.active = false;
-            draw.click_finish = false;
-            draw.pencil_line = false;
-            draw.shape_workflow = SketchShapeWorkflow::Rectangle;
-            draw.snap_kind = None;
+            clear_rect_preview(&mut draw);
             tool_controller
                 .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolSwitch);
         }
@@ -352,11 +441,7 @@ pub fn rect_draw_input(
     }
 
     if rect_should_cancel_for_tool_selection(&draw, toolbelt.selection_generation()) {
-        draw.active = false;
-        draw.click_finish = false;
-        draw.pencil_line = false;
-        draw.shape_workflow = SketchShapeWorkflow::Rectangle;
-        draw.snap_kind = None;
+        clear_rect_preview(&mut draw);
         tool_controller
             .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolboxClick);
         gesture_lock.release(RECT_FILL_OWNER);
@@ -384,11 +469,7 @@ pub fn rect_draw_input(
     }
 
     if keys.just_pressed(KeyCode::Escape) && draw.active {
-        draw.active = false;
-        draw.click_finish = false;
-        draw.pencil_line = false;
-        draw.shape_workflow = SketchShapeWorkflow::Rectangle;
-        draw.snap_kind = None;
+        clear_rect_preview(&mut draw);
         tool_controller.cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
         gesture_lock.release(RECT_FILL_OWNER);
         toolbelt.status =
@@ -479,9 +560,17 @@ pub fn rect_draw_input(
             rect_action_for_start_intent(start_intent, active_tool, normal)
         };
         draw.active = true;
-        let start = rect_start_cell_from_ray(action, hit, prev, axis_u, axis_v, origin, dir);
+        let start_input = rect_face_input_point(origin, dir, hit, prev);
+        let mut start = rect_start_cell_from_ray(action, hit, prev, axis_u, axis_v, origin, dir);
+        if let Some(input) = start_input {
+            start = apply_face_input_point_to_cell(start, input, axis_u, axis_v);
+        }
         draw.start = start;
         draw.current = start;
+        draw.start_point = start_input
+            .map(|input| input.point)
+            .unwrap_or_else(|| start.as_vec3());
+        draw.current_point = draw.start_point;
         draw.normal = normal;
         draw.axis_u = axis_u;
         draw.axis_v = axis_v;
@@ -493,8 +582,9 @@ pub fn rect_draw_input(
         draw.pencil_line = pencil_line;
         draw.shape_workflow = shape_workflow;
         draw.inference = RectEndpointInference::None;
-        draw.snap_kind = ray_face_hit_point(origin, dir, hit, prev)
-            .and_then(|face_hit| classify_rect_face_snap(face_hit, hit, prev));
+        draw.snap_kind = start_input.and_then(|input| input.kind);
+        draw.start_snap_kind = draw.snap_kind;
+        draw.axis_lock = None;
         draw.tool_generation = toolbelt.selection_generation();
         draw.voxel = if action == RectDrawAction::Cut {
             AIR
@@ -505,37 +595,63 @@ pub fn rect_draw_input(
         draw.click_finish = sketch_tool_uses_click_finish(active_tool, smart_tool);
         gesture_lock.lock(RECT_FILL_OWNER);
         tool_controller.begin_transaction(rect_preview_transaction_label(&draw));
+        let start_status_suffix =
+            rect_status_suffix(draw.start_snap_kind, RectEndpointInference::None, None);
         toolbelt.status = if smart_tool {
             format!(
-                "{} start set. Drag to any block endpoint; release to {} the exact snapped length.",
+                "{} start set.{} Drag to any block endpoint; release to {} the exact snapped length.",
                 action.label(),
+                start_status_suffix,
                 action.preview_verb()
             )
         } else if draw.pencil_line {
-            "Pencil start set. Move to a snapped endpoint on this face, click again to draw the voxel line. RMB orbits.".into()
+            format!(
+                "Pencil start set.{} Move to Endpoint/Midpoint/Face Center, or press Right/Left/Up for X/Z/Y axis lock. RMB orbits.",
+                start_status_suffix
+            )
         } else if draw.shape_workflow != SketchShapeWorkflow::Rectangle {
             format!(
-                "{} start set. Move to the snapped endpoint on this locked plane, click again to commit. RMB orbits.",
-                draw.shape_workflow.label()
+                "{} start set.{} Move to the snapped endpoint on this locked plane, click again to commit. RMB orbits.",
+                draw.shape_workflow.label(),
+                start_status_suffix
             )
         } else if draw.room_cut {
-            "Room start set. Move to size the wall/floor face, click again to hollow a livable volume.".into()
+            format!(
+                "Room start set.{} Move to size the wall/floor face, click again to hollow a livable volume.",
+                start_status_suffix
+            )
         } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
-            "Push/Pull start set. Move on the locked face plane, click again to commit.".into()
+            format!(
+                "Push/Pull start set.{} Move on the locked face plane, click again to commit.",
+                start_status_suffix
+            )
         } else {
-            "Rectangle start set. Move to a snapped endpoint, click again to build the face. Use Opening for doors/windows. RMB orbits.".into()
+            format!(
+                "Rectangle start set.{} Move to Endpoint/Midpoint/Face Center. Right/Left/Up lock X/Z/Y axes. RMB orbits.",
+                start_status_suffix
+            )
         };
     }
 
     if draw.active {
         gesture_lock.lock(RECT_FILL_OWNER);
+        draw.axis_lock = update_rect_axis_lock(&keys, draw.axis_lock);
         if rect_draw_endpoint_updates(draw.smart_gesture, mouse.pressed(MouseButton::Right)) {
             for ev in motion_evr.read() {
                 draw.motion_len += ev.delta.length();
             }
-            if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
-                draw.snap_kind = ray_face_hit_point(origin, dir, hit, prev)
-                    .and_then(|face_hit| classify_rect_face_snap(face_hit, hit, prev));
+            if draw.pencil_line && draw.axis_lock.is_some() {
+                if let Some(endpoint) =
+                    snap_pencil_endpoint_to_axis_from_ray(draw.start, draw.axis_lock, origin, dir)
+                {
+                    draw.current = endpoint;
+                    draw.current_point = endpoint.as_vec3();
+                    draw.inference = RectEndpointInference::Axis;
+                    draw.snap_kind = None;
+                }
+            } else if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
+                let input = rect_face_input_point(origin, dir, hit, prev);
+                draw.snap_kind = input.and_then(|input| input.kind);
                 let endpoint = snap_rect_endpoint_to_locked_plane_from_ray(
                     draw.start,
                     draw.normal,
@@ -546,15 +662,30 @@ pub fn rect_draw_input(
                     origin,
                     dir,
                 );
-                let (endpoint, inference) = infer_rect_endpoint_with_reference(
-                    draw.start,
-                    endpoint,
-                    draw.axis_u,
-                    draw.axis_v,
-                    draw.reference_span,
-                );
+                let endpoint = input
+                    .map(|input| {
+                        apply_face_input_point_to_cell(endpoint, input, draw.axis_u, draw.axis_v)
+                    })
+                    .unwrap_or(endpoint);
+                let endpoint = apply_axis_lock_to_endpoint(draw.start, endpoint, draw.axis_lock);
+                let (endpoint, inference) = if draw.axis_lock.is_some() {
+                    (endpoint, RectEndpointInference::Axis)
+                } else {
+                    infer_rect_endpoint_with_reference(
+                        draw.start,
+                        endpoint,
+                        draw.axis_u,
+                        draw.axis_v,
+                        draw.reference_span,
+                    )
+                };
                 draw.current = endpoint;
                 draw.inference = inference;
+                draw.current_point = input
+                    .map(|input| {
+                        project_face_point_to_locked_plane(input.point, draw.start, draw.normal)
+                    })
+                    .unwrap_or_else(|| endpoint.as_vec3());
             } else if let Some(endpoint) = snap_rect_endpoint_from_locked_plane_ray(
                 draw.start,
                 draw.normal,
@@ -563,20 +694,26 @@ pub fn rect_draw_input(
                 origin,
                 dir,
             ) {
-                let (endpoint, inference) = infer_rect_endpoint_with_reference(
-                    draw.start,
-                    endpoint,
-                    draw.axis_u,
-                    draw.axis_v,
-                    draw.reference_span,
-                );
+                let endpoint = apply_axis_lock_to_endpoint(draw.start, endpoint, draw.axis_lock);
+                let (endpoint, inference) = if draw.axis_lock.is_some() {
+                    (endpoint, RectEndpointInference::Axis)
+                } else {
+                    infer_rect_endpoint_with_reference(
+                        draw.start,
+                        endpoint,
+                        draw.axis_u,
+                        draw.axis_v,
+                        draw.reference_span,
+                    )
+                };
                 draw.current = endpoint;
                 draw.inference = inference;
+                draw.current_point = endpoint.as_vec3();
                 draw.snap_kind = None;
             }
             let raw_cells = draw_preview_cell_count(&draw);
             draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
-            let status_suffix = rect_status_suffix(draw.snap_kind, draw.inference);
+            let status_suffix = rect_status_suffix(draw.snap_kind, draw.inference, draw.axis_lock);
             let action_label = if draw.pencil_line {
                 "Pencil"
             } else if draw.room_cut {
@@ -720,11 +857,7 @@ fn commit_rect_fill(
     };
     let selected = cells.len();
     if cells.is_empty() {
-        draw.active = false;
-        draw.click_finish = false;
-        draw.pencil_line = false;
-        draw.shape_workflow = SketchShapeWorkflow::Rectangle;
-        draw.snap_kind = None;
+        clear_rect_preview(draw);
         return;
     }
 
@@ -802,16 +935,15 @@ fn commit_rect_fill(
         draw.click_finish = true;
         draw.start = chain_start;
         draw.current = chain_start;
+        draw.start_point = chain_start.as_vec3();
+        draw.current_point = draw.start_point;
         draw.motion_len = 0.0;
         draw.status_cells = 1;
         draw.inference = RectEndpointInference::None;
         draw.snap_kind = Some(RectFaceSnapKind::Endpoint);
+        draw.start_snap_kind = Some(RectFaceSnapKind::Endpoint);
     } else {
-        draw.active = false;
-        draw.click_finish = false;
-        draw.pencil_line = false;
-        draw.shape_workflow = SketchShapeWorkflow::Rectangle;
-        draw.snap_kind = None;
+        clear_rect_preview(draw);
     }
     if next_reference_span != IVec2::ZERO {
         draw.reference_span = next_reference_span;
@@ -1176,6 +1308,45 @@ fn snap_rect_endpoint_from_locked_plane_ray(
     Some(snapped)
 }
 
+fn snap_pencil_endpoint_to_axis_from_ray(
+    start: IVec3,
+    axis_lock: Option<RectAxisLock>,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+) -> Option<IVec3> {
+    let axis_lock = axis_lock?;
+    let locked_point = crate::sketch_model::closest_point_on_locked_axis_from_ray(
+        ray_origin,
+        ray_dir,
+        start.as_vec3(),
+        axis_lock.axis_vec3(),
+    )?;
+    let mut endpoint = start;
+    set_component_by_axis(
+        &mut endpoint,
+        axis_lock.axis(),
+        round_to_i32_safe(vec_component_by_axis(locked_point, axis_lock.axis())),
+    );
+    Some(endpoint)
+}
+
+fn apply_axis_lock_to_endpoint(
+    start: IVec3,
+    endpoint: IVec3,
+    axis_lock: Option<RectAxisLock>,
+) -> IVec3 {
+    let Some(axis_lock) = axis_lock else {
+        return endpoint;
+    };
+    let mut locked = start;
+    set_component_by_axis(
+        &mut locked,
+        axis_lock.axis(),
+        component_by_axis(endpoint, axis_lock.axis()),
+    );
+    locked
+}
+
 #[cfg(test)]
 fn infer_rect_endpoint(
     start: IVec3,
@@ -1348,11 +1519,26 @@ fn face_point_by_indices(
     Vec3::new(components[0], components[1], components[2])
 }
 
-fn classify_rect_face_snap(
+fn rect_face_input_point(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    hit: IVec3,
+    adjacent: IVec3,
+) -> Option<RectFaceInputPoint> {
+    let face_hit = ray_face_hit_point(ray_origin, ray_dir, hit, adjacent)?;
+    Some(
+        nearest_rect_face_input_point(face_hit, hit, adjacent).unwrap_or(RectFaceInputPoint {
+            point: face_hit,
+            kind: None,
+        }),
+    )
+}
+
+fn nearest_rect_face_input_point(
     face_hit: Vec3,
     hit: IVec3,
     adjacent: IVec3,
-) -> Option<RectFaceSnapKind> {
+) -> Option<RectFaceInputPoint> {
     let normal = adjacent - hit;
     let axis = normal_axis(normal)?;
     let plane = if component_by_index(normal, axis) > 0 {
@@ -1370,7 +1556,7 @@ fn classify_rect_face_snap(
     let um = u0 + 0.5;
     let vm = v0 + 0.5;
 
-    let mut best: Option<(RectFaceSnapKind, f32)> = None;
+    let mut best: Option<(RectFaceSnapKind, Vec3, f32)> = None;
     for (u, v, kind) in [
         (u0, v0, RectFaceSnapKind::Endpoint),
         (u0, v1, RectFaceSnapKind::Endpoint),
@@ -1384,13 +1570,60 @@ fn classify_rect_face_snap(
     ] {
         let point = face_point_by_indices(axis, plane, u_axis, u, v_axis, v);
         let distance = face_hit.distance_squared(point);
-        if best.is_none_or(|(_, best_distance)| distance < best_distance) {
-            best = Some((kind, distance));
+        if best.is_none_or(|(_, _, best_distance)| distance < best_distance) {
+            best = Some((kind, point, distance));
         }
     }
-    best.and_then(|(kind, distance)| {
-        (distance <= RECT_FACE_SNAP_RADIUS * RECT_FACE_SNAP_RADIUS).then_some(kind)
+    best.and_then(|(kind, point, distance)| {
+        (distance <= RECT_FACE_SNAP_RADIUS * RECT_FACE_SNAP_RADIUS).then_some(RectFaceInputPoint {
+            point,
+            kind: Some(kind),
+        })
     })
+}
+
+fn apply_face_input_point_to_cell(
+    mut cell: IVec3,
+    input: RectFaceInputPoint,
+    axis_u: IVec3,
+    axis_v: IVec3,
+) -> IVec3 {
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return cell;
+    }
+    set_component_by_axis(
+        &mut cell,
+        axis_u,
+        round_to_i32_safe(vec_component_by_axis(input.point, axis_u)),
+    );
+    set_component_by_axis(
+        &mut cell,
+        axis_v,
+        round_to_i32_safe(vec_component_by_axis(input.point, axis_v)),
+    );
+    cell
+}
+
+fn project_face_point_to_locked_plane(point: Vec3, start: IVec3, normal: IVec3) -> Vec3 {
+    let Some(plane_axis) = normal_axis(normal) else {
+        return point;
+    };
+    let mut projected = point;
+    match plane_axis {
+        0 => projected.x = start.x as f32,
+        1 => projected.y = start.y as f32,
+        _ => projected.z = start.z as f32,
+    }
+    projected
+}
+
+#[cfg(test)]
+fn classify_rect_face_snap(
+    face_hit: Vec3,
+    hit: IVec3,
+    adjacent: IVec3,
+) -> Option<RectFaceSnapKind> {
+    nearest_rect_face_input_point(face_hit, hit, adjacent).and_then(|input| input.kind)
 }
 
 fn round_to_i32_safe(value: f32) -> i32 {
@@ -1503,6 +1736,11 @@ fn pencil_line_cells(a: IVec3, b: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3
     let Some((axis_u, axis_v)) = plane_axes(normal) else {
         return Vec::new();
     };
+    if normal_axis(normal)
+        .is_some_and(|axis| component_by_index(a, axis) != component_by_index(b, axis))
+    {
+        return pencil_line_cells_3d(a, b, cap);
+    }
     if cap == 0 {
         return Vec::new();
     }
@@ -1540,6 +1778,38 @@ fn pencil_line_cells(a: IVec3, b: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3
         }
     }
 
+    out
+}
+
+fn pencil_line_cells_3d(a: IVec3, b: IVec3, cap: usize) -> Vec<IVec3> {
+    if cap == 0 {
+        return Vec::new();
+    }
+    let delta = b - a;
+    let steps = delta.x.abs().max(delta.y.abs()).max(delta.z.abs());
+    if steps == 0 {
+        return vec![a];
+    }
+    let mut out = Vec::with_capacity((steps as usize + 1).min(cap));
+    for index in 0..=steps {
+        let t = index as f32 / steps as f32;
+        let point = Vec3::new(
+            a.x as f32 + delta.x as f32 * t,
+            a.y as f32 + delta.y as f32 * t,
+            a.z as f32 + delta.z as f32 * t,
+        );
+        let cell = IVec3::new(
+            round_to_i32_safe(point.x),
+            round_to_i32_safe(point.y),
+            round_to_i32_safe(point.z),
+        );
+        if out.last().copied() != Some(cell) {
+            out.push(cell);
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
     out
 }
 
@@ -1736,6 +2006,61 @@ fn smart_room_cut_depth(span_u: i32, span_v: i32) -> i32 {
     (broad * 2 / 3).clamp(RECT_ROOM_CUT_MIN_DEPTH, RECT_ROOM_CUT_DEPTH_CAP)
 }
 
+fn rect_snap_marker_color(kind: Option<RectFaceSnapKind>) -> Color {
+    match kind {
+        Some(RectFaceSnapKind::Endpoint) => Color::srgb(0.2, 1.0, 0.28),
+        Some(RectFaceSnapKind::Midpoint) => Color::srgb(0.1, 0.9, 1.0),
+        Some(RectFaceSnapKind::FaceCenter) => Color::srgb(0.22, 0.48, 1.0),
+        None => Color::srgb(1.0, 0.85, 0.18),
+    }
+}
+
+fn draw_input_point_marker(
+    gizmos: &mut Gizmos,
+    point: Vec3,
+    normal: IVec3,
+    size: f32,
+    color: Color,
+) {
+    let offset = normal.as_vec3() * 0.06;
+    gizmos.cuboid(
+        Transform::from_translation(point + offset).with_scale(Vec3::splat(size)),
+        color,
+    );
+}
+
+fn draw_rect_input_point_gizmos(draw: &RectDrawState, gizmos: &mut Gizmos, pulse: f32) {
+    draw_input_point_marker(
+        gizmos,
+        draw.start_point,
+        draw.normal,
+        0.28,
+        rect_snap_marker_color(draw.start_snap_kind),
+    );
+    let current_size = if draw.snap_kind == Some(RectFaceSnapKind::Endpoint) {
+        0.26
+    } else {
+        0.22
+    };
+    draw_input_point_marker(
+        gizmos,
+        draw.current_point,
+        draw.normal,
+        current_size,
+        rect_snap_marker_color(draw.snap_kind),
+    );
+    if let Some(axis_lock) = draw.axis_lock {
+        let axis = axis_lock.axis_vec3();
+        let start = draw.start_point + draw.normal.as_vec3() * 0.10;
+        let reach = 64.0 + 16.0 * pulse;
+        gizmos.line(
+            start - axis * reach,
+            start + axis * reach,
+            axis_lock.color(),
+        );
+    }
+}
+
 pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<Time>) {
     if !draw.active {
         return;
@@ -1745,6 +2070,7 @@ pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<T
         RectDrawAction::Fill => Color::srgb(0.15 + 0.25 * pulse, 0.95, 1.0),
         RectDrawAction::Cut => Color::srgb(1.0, 0.15 + 0.25 * pulse, 0.05),
     };
+    draw_rect_input_point_gizmos(&draw, &mut gizmos, pulse);
     if draw.pencil_line || draw.shape_workflow != SketchShapeWorkflow::Rectangle {
         let cells = if draw.pencil_line {
             pencil_line_cells(draw.start, draw.current, draw.normal, 768)
@@ -2476,23 +2802,107 @@ mod tests {
         assert_eq!(
             rect_status_suffix(
                 Some(RectFaceSnapKind::Endpoint),
-                RectEndpointInference::None
+                RectEndpointInference::None,
+                None
             ),
             " Endpoint snap."
         );
         assert_eq!(
             rect_status_suffix(
                 Some(RectFaceSnapKind::Midpoint),
-                RectEndpointInference::Axis
+                RectEndpointInference::Axis,
+                None
             ),
             " Midpoint snap. Axis lock."
         );
         assert_eq!(
             rect_status_suffix(
                 Some(RectFaceSnapKind::FaceCenter),
-                RectEndpointInference::EqualLength
+                RectEndpointInference::EqualLength,
+                None
             ),
             " Face center snap. Equal-length snap."
+        );
+        assert_eq!(
+            rect_status_suffix(
+                Some(RectFaceSnapKind::Endpoint),
+                RectEndpointInference::EqualLength,
+                Some(RectAxisLock::Y)
+            ),
+            " Endpoint snap. Y height lock."
+        );
+    }
+
+    #[test]
+    fn face_input_point_returns_exact_midpoint_marker_and_cell_snap() {
+        let input = nearest_rect_face_input_point(
+            Vec3::new(10.50, 1.0, 14.03),
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+        )
+        .expect("midpoint input point");
+
+        assert_eq!(input.kind, Some(RectFaceSnapKind::Midpoint));
+        assert_eq!(input.point, Vec3::new(10.5, 1.0, 14.0));
+
+        let cell = apply_face_input_point_to_cell(IVec3::new(10, 1, 14), input, IVec3::X, IVec3::Z);
+        assert_eq!(
+            cell,
+            IVec3::new(11, 1, 14),
+            "the discrete voxel endpoint follows the visual Input Point"
+        );
+    }
+
+    #[test]
+    fn arrow_keys_toggle_sketchup_style_axis_locks() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ArrowRight);
+        assert_eq!(update_rect_axis_lock(&keys, None), Some(RectAxisLock::X));
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ArrowUp);
+        assert_eq!(update_rect_axis_lock(&keys, None), Some(RectAxisLock::Y));
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ArrowLeft);
+        assert_eq!(update_rect_axis_lock(&keys, None), Some(RectAxisLock::Z));
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ArrowDown);
+        assert_eq!(update_rect_axis_lock(&keys, Some(RectAxisLock::X)), None);
+    }
+
+    #[test]
+    fn pencil_axis_lock_projects_endpoint_from_camera_ray() {
+        let endpoint = snap_pencil_endpoint_to_axis_from_ray(
+            IVec3::ZERO,
+            Some(RectAxisLock::X),
+            Vec3::new(0.0, 10.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0).normalize(),
+        )
+        .expect("locked endpoint");
+
+        assert_eq!(endpoint, IVec3::new(10, 0, 0));
+    }
+
+    #[test]
+    fn pencil_line_cells_allows_vertical_axis_locked_line() {
+        let cells = pencil_line_cells(
+            IVec3::new(0, 10, 0),
+            IVec3::new(0, 14, 0),
+            IVec3::Y,
+            DRAW_CELL_CAP,
+        );
+
+        assert_eq!(
+            cells,
+            vec![
+                IVec3::new(0, 10, 0),
+                IVec3::new(0, 11, 0),
+                IVec3::new(0, 12, 0),
+                IVec3::new(0, 13, 0),
+                IVec3::new(0, 14, 0),
+            ]
         );
     }
 
