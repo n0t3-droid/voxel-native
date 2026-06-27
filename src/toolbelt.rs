@@ -1875,11 +1875,7 @@ fn toolbox_workflow_button(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selec
         &painter,
         cue_rect.shrink(2.0),
         cue.icon(),
-        if selected {
-            AMBER
-        } else {
-            color.linear_multiply(1.1)
-        },
+        if selected { AMBER } else { color },
     );
     painter.text(
         rect.center_bottom() - egui::vec2(0.0, 17.0),
@@ -2518,11 +2514,7 @@ fn workflow_preset_chip(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected
         &painter,
         cue_rect.shrink(2.0),
         cue.icon(),
-        if selected {
-            AMBER
-        } else {
-            color.linear_multiply(1.15)
-        },
+        if selected { AMBER } else { color },
     );
     painter.text(
         rect.min + egui::vec2(32.0, 14.0),

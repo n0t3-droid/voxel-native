@@ -810,11 +810,7 @@ fn command_row(
 
 fn action_button(ui: &mut egui::Ui, theme: ThemeSettings, accent: egui::Color32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(84.0, 26.0), egui::Sense::click());
-    let fill = if response.hovered() {
-        accent.linear_multiply(1.12)
-    } else {
-        accent
-    };
+    let fill = accent;
     let text = theme.text_on(fill);
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, egui::Rounding::same(5.0), fill);
