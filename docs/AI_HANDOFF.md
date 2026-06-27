@@ -89,6 +89,13 @@ Navigate clicks now consume that hover record and update
 transforms, openings, and bot edits that target existing semantic faces instead
 of flood-filling anonymous voxels.
 
+The first lightweight B-Rep/vector layer now lives in `src/sketch_model.rs` as
+`SketchBRepKernel`. It stores linked vertices, oriented edges, loop faces, plane
+equations, and supports the first PDF-required operations: coplanar face split
+and Push/Pull extrusion into a top face plus side faces. `SketchDocument` can
+export an existing semantic face into a B-Rep kernel, which is the bridge toward
+SketchUp-style face editing before voxel rasterization.
+
 ## Important Remaining Gaps
 
 - SketchUp equivalence is not complete. Circle, polygon, arc, and freehand now
@@ -97,11 +104,10 @@ of flood-filling anonymous voxels.
   component-aware geometry.
 - The builder still needs stronger endpoint/midpoint/face-center inference for
   all drafting tools, not only rectangle/pencil and Push/Pull.
-- The next major architecture step should be a lightweight B-Rep/vector layer
-  over the voxel rasterizer plus semantic material/transform/opening actions
-  that operate on `ToolController.selection`. That will let Pencil, Rectangle,
-  Push/Pull, Opening, Room, and bot CAD commands share one deterministic
-  modeling model and let selected `SketchEntity` records be edited directly.
+- The next major architecture step should wire the new `SketchBRepKernel` into
+  live Pencil/Rectangle/Push/Pull/Openings, then voxelize B-Rep previews/commits
+  through the existing batch edit and undo paths. Semantic material/transform/
+  opening actions should operate on `ToolController.selection`.
 - Startup can still inherit huge generated save/edit/bot state locally. Keep
   source commits separate from generated `saves/` unless deliberately testing a
   specific world.

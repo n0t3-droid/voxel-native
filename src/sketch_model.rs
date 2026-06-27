@@ -344,6 +344,320 @@ impl SketchBounds {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SketchBRepVertex {
+    pub id: SketchId,
+    pub position: Vec3,
+    pub connected_edges: BTreeSet<SketchId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchBRepEdge {
+    pub id: SketchId,
+    pub a: SketchId,
+    pub b: SketchId,
+    pub faces: BTreeSet<SketchId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SketchBRepLoopEdge {
+    pub edge: SketchId,
+    pub reversed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchBRepFace {
+    pub id: SketchId,
+    pub outer_loop: Vec<SketchBRepLoopEdge>,
+    pub normal: Vec3,
+    pub plane_d: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchBRepExtrusionResult {
+    pub source_face: SketchId,
+    pub top_face: SketchId,
+    pub side_faces: Vec<SketchId>,
+}
+
+/// Lightweight editable B-Rep graph that sits above voxel rasterization.
+///
+/// This is intentionally small: it stores stable vertices/edges/faces and the
+/// operations the PDF calls out first (coplanar face splitting and Push/Pull
+/// extrusion). Runtime tools can voxelize this graph without losing the
+/// higher-level edit handles needed for SketchUp-style workflows.
+#[derive(Debug, Clone)]
+pub struct SketchBRepKernel {
+    next_id: u64,
+    vertices: BTreeMap<SketchId, SketchBRepVertex>,
+    edges: BTreeMap<SketchId, SketchBRepEdge>,
+    faces: BTreeMap<SketchId, SketchBRepFace>,
+    vertex_lookup: BTreeMap<PlanarPointKey, SketchId>,
+    edge_lookup: BTreeMap<(u64, u64), SketchId>,
+}
+
+impl Default for SketchBRepKernel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SketchBRepKernel {
+    pub fn new() -> Self {
+        Self {
+            next_id: 1,
+            vertices: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            faces: BTreeMap::new(),
+            vertex_lookup: BTreeMap::new(),
+            edge_lookup: BTreeMap::new(),
+        }
+    }
+
+    pub fn vertices(&self) -> &BTreeMap<SketchId, SketchBRepVertex> {
+        &self.vertices
+    }
+
+    pub fn edges(&self) -> &BTreeMap<SketchId, SketchBRepEdge> {
+        &self.edges
+    }
+
+    pub fn faces(&self) -> &BTreeMap<SketchId, SketchBRepFace> {
+        &self.faces
+    }
+
+    pub fn face(&self, id: SketchId) -> Option<&SketchBRepFace> {
+        self.faces.get(&id)
+    }
+
+    pub fn add_face_from_points(
+        &mut self,
+        points: impl IntoIterator<Item = Vec3>,
+    ) -> Result<SketchId, SketchModelError> {
+        let mut points: Vec<Vec3> = points.into_iter().collect();
+        if points.len() >= 2 && points_close(points[0], *points.last().unwrap()) {
+            points.pop();
+        }
+        if points.len() < 3 {
+            return Err(SketchModelError::InvalidGeometry(
+                "B-Rep faces require at least three points",
+            ));
+        }
+        let normal = cad_polygon_normal(&points).ok_or(SketchModelError::InvalidGeometry(
+            "B-Rep face points must not be collinear",
+        ))?;
+        let plane_d = -normal.dot(points[0]);
+        let face_id = self.allocate_id();
+        let mut outer_loop = Vec::with_capacity(points.len());
+
+        for index in 0..points.len() {
+            let a = self.vertex_for_point(points[index]);
+            let b = self.vertex_for_point(points[(index + 1) % points.len()]);
+            if a == b {
+                return Err(SketchModelError::InvalidGeometry(
+                    "B-Rep face has a collapsed edge",
+                ));
+            }
+            let (edge, reversed) = self.edge_between(a, b);
+            outer_loop.push(SketchBRepLoopEdge { edge, reversed });
+        }
+
+        self.faces.insert(
+            face_id,
+            SketchBRepFace {
+                id: face_id,
+                outer_loop: outer_loop.clone(),
+                normal,
+                plane_d,
+            },
+        );
+        for loop_edge in outer_loop {
+            if let Some(edge) = self.edges.get_mut(&loop_edge.edge) {
+                edge.faces.insert(face_id);
+            }
+        }
+        Ok(face_id)
+    }
+
+    pub fn face_vertices(&self, face: SketchId) -> Result<Vec<Vec3>, SketchModelError> {
+        let face = self
+            .faces
+            .get(&face)
+            .ok_or(SketchModelError::UnknownEntity(face))?;
+        face.outer_loop
+            .iter()
+            .map(|loop_edge| {
+                let edge = self
+                    .edges
+                    .get(&loop_edge.edge)
+                    .ok_or(SketchModelError::UnknownEntity(loop_edge.edge))?;
+                let vertex_id = if loop_edge.reversed { edge.b } else { edge.a };
+                self.vertices
+                    .get(&vertex_id)
+                    .map(|vertex| vertex.position)
+                    .ok_or(SketchModelError::UnknownEntity(vertex_id))
+            })
+            .collect()
+    }
+
+    pub fn split_face_with_edge(
+        &mut self,
+        face: SketchId,
+        start: Vec3,
+        end: Vec3,
+    ) -> Result<(SketchId, SketchId), SketchModelError> {
+        let original = self
+            .faces
+            .get(&face)
+            .cloned()
+            .ok_or(SketchModelError::UnknownEntity(face))?;
+        if points_close(start, end) {
+            return Err(SketchModelError::InvalidGeometry(
+                "B-Rep split edge endpoints must differ",
+            ));
+        }
+        if !point_on_plane(start, original.normal, original.plane_d)
+            || !point_on_plane(end, original.normal, original.plane_d)
+        {
+            return Err(SketchModelError::InvalidGeometry(
+                "B-Rep split edge must be coplanar with the face",
+            ));
+        }
+
+        let mut boundary = self.face_vertices(face)?;
+        insert_boundary_point(&mut boundary, start).ok_or(SketchModelError::InvalidGeometry(
+            "B-Rep split start point must lie on the face boundary",
+        ))?;
+        insert_boundary_point(&mut boundary, end).ok_or(SketchModelError::InvalidGeometry(
+            "B-Rep split end point must lie on the face boundary",
+        ))?;
+        let start_index = find_point_index(&boundary, start).ok_or(
+            SketchModelError::InvalidGeometry("B-Rep split start point could not be resolved"),
+        )?;
+        let end_index = find_point_index(&boundary, end).ok_or(
+            SketchModelError::InvalidGeometry("B-Rep split end point could not be resolved"),
+        )?;
+        if start_index == end_index {
+            return Err(SketchModelError::InvalidGeometry(
+                "B-Rep split edge endpoints collapse to the same boundary point",
+            ));
+        }
+
+        let first_loop = polygon_path_between(&boundary, start_index, end_index);
+        let second_loop = polygon_path_between(&boundary, end_index, start_index);
+        if first_loop.len() < 3 || second_loop.len() < 3 {
+            return Err(SketchModelError::InvalidGeometry(
+                "B-Rep split edge must divide the face into two loops",
+            ));
+        }
+
+        self.remove_face(face)?;
+        let first = self.add_face_from_points(first_loop)?;
+        let second = self.add_face_from_points(second_loop)?;
+        Ok((first, second))
+    }
+
+    pub fn push_pull_face(
+        &mut self,
+        face: SketchId,
+        distance: f32,
+    ) -> Result<SketchBRepExtrusionResult, SketchModelError> {
+        let source = self
+            .faces
+            .get(&face)
+            .cloned()
+            .ok_or(SketchModelError::UnknownEntity(face))?;
+        if distance.abs() <= PLANAR_GRAPH_MIN_AREA {
+            return Err(SketchModelError::InvalidGeometry(
+                "B-Rep Push/Pull distance must be non-zero",
+            ));
+        }
+        let base = self.face_vertices(face)?;
+        let offset = source.normal * distance;
+        let top: Vec<Vec3> = base.iter().map(|point| *point + offset).collect();
+        let top_face = self.add_face_from_points(top.clone())?;
+        let mut side_faces = Vec::with_capacity(base.len());
+        for index in 0..base.len() {
+            let next = (index + 1) % base.len();
+            side_faces.push(self.add_face_from_points([
+                base[index],
+                base[next],
+                top[next],
+                top[index],
+            ])?);
+        }
+        Ok(SketchBRepExtrusionResult {
+            source_face: face,
+            top_face,
+            side_faces,
+        })
+    }
+
+    fn allocate_id(&mut self) -> SketchId {
+        let id = SketchId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    fn vertex_for_point(&mut self, point: Vec3) -> SketchId {
+        let key = PlanarPointKey::from_vec3(point);
+        if let Some(id) = self.vertex_lookup.get(&key) {
+            return *id;
+        }
+        let id = self.allocate_id();
+        self.vertices.insert(
+            id,
+            SketchBRepVertex {
+                id,
+                position: point,
+                connected_edges: BTreeSet::new(),
+            },
+        );
+        self.vertex_lookup.insert(key, id);
+        id
+    }
+
+    fn edge_between(&mut self, a: SketchId, b: SketchId) -> (SketchId, bool) {
+        let key = sorted_edge_key(a, b);
+        if let Some(edge_id) = self.edge_lookup.get(&key).copied() {
+            let edge = self.edges.get(&edge_id).expect("B-Rep edge lookup drifted");
+            return (edge_id, edge.a != a);
+        }
+
+        let id = self.allocate_id();
+        self.edges.insert(
+            id,
+            SketchBRepEdge {
+                id,
+                a,
+                b,
+                faces: BTreeSet::new(),
+            },
+        );
+        self.edge_lookup.insert(key, id);
+        if let Some(vertex) = self.vertices.get_mut(&a) {
+            vertex.connected_edges.insert(id);
+        }
+        if let Some(vertex) = self.vertices.get_mut(&b) {
+            vertex.connected_edges.insert(id);
+        }
+        (id, false)
+    }
+
+    fn remove_face(&mut self, face: SketchId) -> Result<(), SketchModelError> {
+        let old = self
+            .faces
+            .remove(&face)
+            .ok_or(SketchModelError::UnknownEntity(face))?;
+        for loop_edge in old.outer_loop {
+            if let Some(edge) = self.edges.get_mut(&loop_edge.edge) {
+                edge.faces.remove(&face);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SketchScene {
     pub id: SketchId,
     pub name: String,
@@ -993,6 +1307,7 @@ pub enum SketchModelError {
     UnknownStyle(SketchId),
     UnknownScene(SketchId),
     NotComponentInstance(SketchId),
+    InvalidGeometry(&'static str),
     InvalidCadCommand(&'static str),
 }
 
@@ -1011,6 +1326,7 @@ impl fmt::Display for SketchModelError {
             Self::NotComponentInstance(id) => {
                 write!(f, "entity {} is not a component instance", id.raw())
             }
+            Self::InvalidGeometry(reason) => write!(f, "invalid geometry: {reason}"),
             Self::InvalidCadCommand(reason) => write!(f, "invalid CAD command: {reason}"),
         }
     }
@@ -2190,6 +2506,16 @@ impl SketchDocument {
             },
             "Room hollow",
         )
+    }
+
+    pub fn brep_kernel_for_face(
+        &self,
+        face: SketchId,
+    ) -> Result<(SketchBRepKernel, SketchId), SketchModelError> {
+        let (vertices, _) = self.face_geometry(face)?;
+        let mut kernel = SketchBRepKernel::new();
+        let brep_face = kernel.add_face_from_points(vertices)?;
+        Ok((kernel, brep_face))
     }
 
     pub fn entity_inference_candidates(
@@ -3781,6 +4107,74 @@ fn cad_material_color(name: &str) -> SketchColor {
     }
 }
 
+fn sorted_edge_key(a: SketchId, b: SketchId) -> (u64, u64) {
+    let a = a.raw();
+    let b = b.raw();
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn points_close(a: Vec3, b: Vec3) -> bool {
+    a.distance_squared(b) <= 1.0e-6
+}
+
+fn point_on_plane(point: Vec3, normal: Vec3, plane_d: f32) -> bool {
+    (normal.dot(point) + plane_d).abs() <= 1.0e-3
+}
+
+fn point_on_segment(point: Vec3, a: Vec3, b: Vec3) -> bool {
+    let ab = b - a;
+    let ap = point - a;
+    let ab_len_sq = ab.length_squared();
+    if ab_len_sq <= PLANAR_GRAPH_MIN_AREA {
+        return points_close(point, a);
+    }
+    let t = ap.dot(ab) / ab_len_sq;
+    if !(-1.0e-4..=1.0001).contains(&t) {
+        return false;
+    }
+    let closest = a + ab * t.clamp(0.0, 1.0);
+    closest.distance_squared(point) <= 1.0e-6
+}
+
+fn find_point_index(points: &[Vec3], point: Vec3) -> Option<usize> {
+    points
+        .iter()
+        .position(|candidate| points_close(*candidate, point))
+}
+
+fn insert_boundary_point(points: &mut Vec<Vec3>, point: Vec3) -> Option<usize> {
+    if let Some(index) = find_point_index(points, point) {
+        return Some(index);
+    }
+    let len = points.len();
+    for index in 0..len {
+        let next = (index + 1) % len;
+        if point_on_segment(point, points[index], points[next]) {
+            let insert_at = index + 1;
+            points.insert(insert_at, point);
+            return Some(insert_at);
+        }
+    }
+    None
+}
+
+fn polygon_path_between(points: &[Vec3], from: usize, to: usize) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    let mut index = from;
+    loop {
+        out.push(points[index]);
+        if index == to {
+            break;
+        }
+        index = (index + 1) % points.len();
+    }
+    out
+}
+
 fn format_cad_number(value: f32) -> String {
     let rounded = value.round();
     if (value - rounded).abs() < 1.0e-4 {
@@ -4759,6 +5153,117 @@ mod tests {
             .links_for_face(IVec3::ZERO, IVec3::new(1, 1, 0))
             .is_empty());
         assert!(SketchVoxelFaceKey::new(IVec3::ZERO, IVec3::ZERO).is_none());
+    }
+
+    #[test]
+    fn brep_kernel_builds_linked_face_topology() {
+        let mut kernel = SketchBRepKernel::new();
+        let face = kernel
+            .add_face_from_points([
+                Vec3::ZERO,
+                Vec3::new(4.0, 0.0, 0.0),
+                Vec3::new(4.0, 3.0, 0.0),
+                Vec3::new(0.0, 3.0, 0.0),
+            ])
+            .unwrap();
+
+        assert_eq!(kernel.vertices().len(), 4);
+        assert_eq!(kernel.edges().len(), 4);
+        assert_eq!(kernel.faces().len(), 1);
+        assert_eq!(kernel.face(face).unwrap().outer_loop.len(), 4);
+        assert_eq!(kernel.face(face).unwrap().normal, Vec3::Z);
+        assert!(kernel
+            .vertices()
+            .values()
+            .all(|vertex| vertex.connected_edges.len() == 2));
+        assert!(kernel
+            .edges()
+            .values()
+            .all(|edge| edge.faces.contains(&face)));
+    }
+
+    #[test]
+    fn brep_split_face_with_coplanar_edge_replaces_face_with_two_loops() {
+        let mut kernel = SketchBRepKernel::new();
+        let face = kernel
+            .add_face_from_points([
+                Vec3::ZERO,
+                Vec3::new(4.0, 0.0, 0.0),
+                Vec3::new(4.0, 3.0, 0.0),
+                Vec3::new(0.0, 3.0, 0.0),
+            ])
+            .unwrap();
+
+        let (a, b) = kernel
+            .split_face_with_edge(face, Vec3::new(2.0, 0.0, 0.0), Vec3::new(2.0, 3.0, 0.0))
+            .unwrap();
+
+        assert!(kernel.face(face).is_none());
+        assert_eq!(kernel.faces().len(), 2);
+        assert_eq!(kernel.face_vertices(a).unwrap().len(), 4);
+        assert_eq!(kernel.face_vertices(b).unwrap().len(), 4);
+        let shared_split_edges = kernel
+            .edges()
+            .values()
+            .filter(|edge| edge.faces.contains(&a) && edge.faces.contains(&b))
+            .count();
+        assert_eq!(shared_split_edges, 1);
+        assert!(kernel
+            .vertices()
+            .values()
+            .any(|vertex| vertex.position == Vec3::new(2.0, 0.0, 0.0)));
+        assert!(kernel
+            .vertices()
+            .values()
+            .any(|vertex| vertex.position == Vec3::new(2.0, 3.0, 0.0)));
+    }
+
+    #[test]
+    fn brep_push_pull_generates_top_face_and_side_faces() {
+        let mut kernel = SketchBRepKernel::new();
+        let face = kernel
+            .add_face_from_points([
+                Vec3::ZERO,
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(2.0, 2.0, 0.0),
+                Vec3::new(0.0, 2.0, 0.0),
+            ])
+            .unwrap();
+
+        let extrusion = kernel.push_pull_face(face, 3.0).unwrap();
+
+        assert_eq!(extrusion.source_face, face);
+        assert_eq!(extrusion.side_faces.len(), 4);
+        assert_eq!(kernel.faces().len(), 6);
+        let top_vertices = kernel.face_vertices(extrusion.top_face).unwrap();
+        assert!(top_vertices.iter().all(|point| point.z == 3.0));
+        for side_face in extrusion.side_faces {
+            assert_eq!(kernel.face_vertices(side_face).unwrap().len(), 4);
+        }
+    }
+
+    #[test]
+    fn document_exports_semantic_face_into_brep_kernel() {
+        let mut doc = SketchDocument::new();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 6.0,
+                Vec3::Y * 4.0,
+                "B-Rep source face",
+            )
+            .unwrap();
+
+        let (kernel, brep_face) = doc.brep_kernel_for_face(face).unwrap();
+
+        assert_eq!(kernel.vertices().len(), 4);
+        assert_eq!(kernel.edges().len(), 4);
+        assert_eq!(
+            kernel.face_vertices(brep_face).unwrap()[2],
+            Vec3::new(6.0, 4.0, 0.0)
+        );
+        assert_eq!(kernel.face(brep_face).unwrap().normal, Vec3::Z);
     }
 
     #[test]
