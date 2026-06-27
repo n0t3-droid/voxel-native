@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use bevy::prelude::{App, Plugin, Quat, Resource, Vec3};
+use bevy::prelude::{App, IVec3, Plugin, Quat, Resource, Vec3};
 use serde::{Deserialize, Serialize};
 
 const PLANAR_GRAPH_SCALE: f32 = 1000.0;
@@ -20,7 +20,7 @@ const PLANAR_GRAPH_MAX_LOOP_VERTICES: usize = 16;
 const PLANAR_GRAPH_MIN_AREA: f32 = 1.0e-4;
 const SKETCH_DOCUMENT_SAVE_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SketchId(u64);
 
 impl SketchId {
@@ -540,6 +540,197 @@ impl SketchCadCommand {
 pub struct SketchCadCommandResult {
     pub label: String,
     pub entities: Vec<SketchId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SketchVoxelCellKey {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl SketchVoxelCellKey {
+    pub const fn new(x: i32, y: i32, z: i32) -> Self {
+        Self { x, y, z }
+    }
+
+    pub fn from_ivec3(cell: IVec3) -> Self {
+        Self::new(cell.x, cell.y, cell.z)
+    }
+
+    pub fn as_ivec3(self) -> IVec3 {
+        IVec3::new(self.x, self.y, self.z)
+    }
+}
+
+impl From<IVec3> for SketchVoxelCellKey {
+    fn from(value: IVec3) -> Self {
+        Self::from_ivec3(value)
+    }
+}
+
+impl From<SketchVoxelCellKey> for IVec3 {
+    fn from(value: SketchVoxelCellKey) -> Self {
+        value.as_ivec3()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SketchVoxelFaceKey {
+    pub cell: SketchVoxelCellKey,
+    pub normal_x: i8,
+    pub normal_y: i8,
+    pub normal_z: i8,
+}
+
+impl SketchVoxelFaceKey {
+    pub fn new(cell: IVec3, normal: IVec3) -> Option<Self> {
+        if normal_axis_index(normal).is_none() {
+            return None;
+        }
+        Some(Self {
+            cell: SketchVoxelCellKey::from_ivec3(cell),
+            normal_x: normal.x as i8,
+            normal_y: normal.y as i8,
+            normal_z: normal.z as i8,
+        })
+    }
+
+    pub fn normal(self) -> IVec3 {
+        IVec3::new(
+            self.normal_x as i32,
+            self.normal_y as i32,
+            self.normal_z as i32,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum SketchVoxelLinkRole {
+    Face,
+    Stroke,
+    Shape,
+    Extrusion,
+    Opening,
+    Room,
+    Road,
+    BotArea,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SketchVoxelLink {
+    pub role: SketchVoxelLinkRole,
+    pub entity: SketchId,
+    pub context: SketchId,
+}
+
+impl SketchVoxelLink {
+    pub const fn new(entity: SketchId, context: SketchId, role: SketchVoxelLinkRole) -> Self {
+        Self {
+            role,
+            entity,
+            context,
+        }
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SketchVoxelLinkIndex {
+    cell_links: BTreeMap<SketchVoxelCellKey, BTreeSet<SketchVoxelLink>>,
+    face_links: BTreeMap<SketchVoxelFaceKey, BTreeSet<SketchVoxelLink>>,
+}
+
+impl SketchVoxelLinkIndex {
+    pub fn clear(&mut self) {
+        self.cell_links.clear();
+        self.face_links.clear();
+    }
+
+    pub fn link_cell(&mut self, cell: IVec3, link: SketchVoxelLink) {
+        self.cell_links
+            .entry(SketchVoxelCellKey::from_ivec3(cell))
+            .or_default()
+            .insert(link);
+    }
+
+    pub fn link_cells(&mut self, cells: impl IntoIterator<Item = IVec3>, link: SketchVoxelLink) {
+        for cell in cells {
+            self.link_cell(cell, link);
+        }
+    }
+
+    pub fn link_face_cell(&mut self, cell: IVec3, normal: IVec3, link: SketchVoxelLink) -> bool {
+        let Some(face_key) = SketchVoxelFaceKey::new(cell, normal) else {
+            return false;
+        };
+        self.link_cell(cell, link);
+        self.face_links.entry(face_key).or_default().insert(link);
+        true
+    }
+
+    pub fn link_face_cells(
+        &mut self,
+        cells: impl IntoIterator<Item = IVec3>,
+        normal: IVec3,
+        link: SketchVoxelLink,
+    ) -> usize {
+        cells
+            .into_iter()
+            .filter(|cell| self.link_face_cell(*cell, normal, link))
+            .count()
+    }
+
+    pub fn links_for_cell(&self, cell: IVec3) -> Vec<SketchVoxelLink> {
+        self.cell_links
+            .get(&SketchVoxelCellKey::from_ivec3(cell))
+            .map(|links| links.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn links_for_face(&self, cell: IVec3, normal: IVec3) -> Vec<SketchVoxelLink> {
+        let Some(face_key) = SketchVoxelFaceKey::new(cell, normal) else {
+            return Vec::new();
+        };
+        self.face_links
+            .get(&face_key)
+            .map(|links| links.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn primary_face_link(&self, cell: IVec3, normal: IVec3) -> Option<SketchVoxelLink> {
+        self.links_for_face(cell, normal).into_iter().next()
+    }
+
+    pub fn hit_for_face(
+        &self,
+        cell: IVec3,
+        normal: IVec3,
+        world_point: Vec3,
+        distance: f32,
+    ) -> Option<HitRecord> {
+        let link = self.primary_face_link(cell, normal)?;
+        Some(
+            HitRecord::new(
+                link.entity,
+                std::iter::empty::<SketchId>(),
+                HitKind::Face,
+                world_point,
+                distance,
+            )
+            .with_normal(ivec3_to_vec3(normal)),
+        )
+    }
+
+    pub fn remove_entity(&mut self, entity: SketchId) {
+        for links in self.cell_links.values_mut() {
+            links.retain(|link| link.entity != entity);
+        }
+        self.cell_links.retain(|_, links| !links.is_empty());
+        for links in self.face_links.values_mut() {
+            links.retain(|link| link.entity != entity);
+        }
+        self.face_links.retain(|_, links| !links.is_empty());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3242,6 +3433,9 @@ impl HitRecord {
     }
 }
 
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct SemanticHoverHit(pub Option<HitRecord>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InferenceKind {
     Endpoint,
@@ -3449,6 +3643,24 @@ fn stable_kind_order(kind: InferenceKind) -> u8 {
 
 fn safe_normal(normal: Vec3) -> Vec3 {
     normal.try_normalize().unwrap_or(Vec3::Z)
+}
+
+fn normal_axis_index(normal: IVec3) -> Option<usize> {
+    let abs_sum = normal.x.abs() + normal.y.abs() + normal.z.abs();
+    if abs_sum != 1 {
+        return None;
+    }
+    if normal.x != 0 {
+        Some(0)
+    } else if normal.y != 0 {
+        Some(1)
+    } else {
+        Some(2)
+    }
+}
+
+fn ivec3_to_vec3(value: IVec3) -> Vec3 {
+    Vec3::new(value.x as f32, value.y as f32, value.z as f32)
 }
 
 fn plane_basis(normal: Vec3, preferred_axis: Option<Vec3>) -> (Vec3, Vec3, Vec3) {
@@ -4437,7 +4649,9 @@ impl Plugin for SketchModelPlugin {
             .init_resource::<InferenceService>()
             .init_resource::<ToolController>()
             .init_resource::<EditorToolCatalog>()
-            .init_resource::<SketchCommandRegistry>();
+            .init_resource::<SketchCommandRegistry>()
+            .init_resource::<SketchVoxelLinkIndex>()
+            .init_resource::<SemanticHoverHit>();
     }
 }
 
@@ -4454,6 +4668,63 @@ mod tests {
         assert_eq!(doc.default_tag_name(), Some("Untagged"));
         assert_eq!(doc.default_material_name(), Some("Default"));
         assert_eq!(doc.default_style_name(), Some("Modeling"));
+    }
+
+    #[test]
+    fn voxel_link_index_registers_cells_faces_and_semantic_hits() {
+        let context = SketchId::new_for_test(7);
+        let face = SketchId::new_for_test(42);
+        let extrusion = SketchId::new_for_test(43);
+        let normal = IVec3::Y;
+        let cell = IVec3::new(3, 4, 5);
+        let mut links = SketchVoxelLinkIndex::default();
+
+        assert!(links.link_face_cell(
+            cell,
+            normal,
+            SketchVoxelLink::new(face, context, SketchVoxelLinkRole::Face),
+        ));
+        links.link_cell(
+            cell + IVec3::Y,
+            SketchVoxelLink::new(extrusion, context, SketchVoxelLinkRole::Extrusion),
+        );
+
+        let face_links = links.links_for_face(cell, normal);
+        assert_eq!(face_links.len(), 1);
+        assert_eq!(face_links[0].entity, face);
+        assert_eq!(face_links[0].role, SketchVoxelLinkRole::Face);
+
+        let cell_links = links.links_for_cell(cell);
+        assert!(cell_links.iter().any(|link| link.entity == face));
+        let hit = links
+            .hit_for_face(cell, normal, Vec3::new(3.5, 5.0, 5.5), 12.0)
+            .expect("linked voxel face should become a semantic hit");
+        assert_eq!(hit.entity, face);
+        assert_eq!(hit.kind, HitKind::Face);
+        assert_eq!(hit.normal, Some(Vec3::Y));
+
+        links.remove_entity(face);
+        assert!(links.links_for_face(cell, normal).is_empty());
+        assert!(links.links_for_cell(cell + IVec3::Y).iter().any(|link| {
+            link.entity == extrusion && link.role == SketchVoxelLinkRole::Extrusion
+        }));
+    }
+
+    #[test]
+    fn voxel_link_index_rejects_malformed_face_normals() {
+        let mut links = SketchVoxelLinkIndex::default();
+        let context = SketchId::new_for_test(1);
+        let entity = SketchId::new_for_test(2);
+
+        assert!(!links.link_face_cell(
+            IVec3::ZERO,
+            IVec3::new(1, 1, 0),
+            SketchVoxelLink::new(entity, context, SketchVoxelLinkRole::Face),
+        ));
+        assert!(links
+            .links_for_face(IVec3::ZERO, IVec3::new(1, 1, 0))
+            .is_empty());
+        assert!(SketchVoxelFaceKey::new(IVec3::ZERO, IVec3::ZERO).is_none());
     }
 
     #[test]

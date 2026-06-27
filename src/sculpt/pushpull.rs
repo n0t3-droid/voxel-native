@@ -251,25 +251,51 @@ pub fn resolve_hover_face(
     state: Res<SculptState>,
     drag: Res<PushPullDrag>,
     world: Res<VoxelWorld>,
+    sketch_links: Res<crate::sketch_model::SketchVoxelLinkIndex>,
     mut hover_face: ResMut<HoverFace>,
+    mut semantic_hover: ResMut<crate::sketch_model::SemanticHoverHit>,
 ) {
     if drag.active {
         // Build a synthetic FaceRegion from the locked drag so the gizmo
         // keeps highlighting the same surface during extrusion.
-        hover_face.0 = Some(FaceRegion {
+        let region = FaceRegion {
             cells: drag.face_cells.clone(),
             voxel: drag.voxel,
             normal: drag.normal,
             clipped: false,
-        });
+        };
+        semantic_hover.0 = semantic_hover_hit_from_region(&region, &sketch_links);
+        hover_face.0 = Some(region);
         return;
     }
     let Some(hit) = state.hover else {
         hover_face.0 = None;
+        semantic_hover.0 = None;
         return;
     };
     let normal = hit.normal();
     hover_face.0 = collect_face(&world, hit.voxel, normal);
+    semantic_hover.0 = hover_face
+        .0
+        .as_ref()
+        .and_then(|region| semantic_hover_hit_from_region(region, &sketch_links));
+}
+
+fn semantic_hover_hit_from_region(
+    region: &FaceRegion,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+) -> Option<crate::sketch_model::HitRecord> {
+    let cell = *region.cells.first()?;
+    sketch_links.hit_for_face(
+        cell,
+        region.normal,
+        Vec3::new(
+            cell.x as f32 + 0.5,
+            cell.y as f32 + 0.5,
+            cell.z as f32 + 0.5,
+        ),
+        0.0,
+    )
 }
 
 pub fn reference_input(
@@ -844,6 +870,7 @@ pub fn end_drag(
     mut gesture_lock: ResMut<BuildGestureLock>,
     mut tool_controller: ResMut<crate::sketch_model::ToolController>,
     mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
 ) {
     if !drag.active {
         return;
@@ -898,10 +925,20 @@ pub fn end_drag(
         }
     }
     let n = changes.len();
+    let changed_cells: Vec<_> = changes.iter().map(|(pos, _, _)| *pos).collect();
     history.record_external(&label, changes);
     if n > 0 {
-        if let Err(error) = record_pushpull_semantics(&drag, &mut sketch_doc) {
-            warn!("sketch model: could not record push/pull semantic extrusion: {error}");
+        match record_pushpull_semantics(&drag, &mut sketch_doc) {
+            Ok(records) => register_pushpull_semantic_links(
+                &drag,
+                &changed_cells,
+                sketch_doc.active_context(),
+                &records,
+                &mut sketch_links,
+            ),
+            Err(error) => {
+                warn!("sketch model: could not record push/pull semantic extrusion: {error}");
+            }
         }
         tool_controller.begin_transaction(label.clone());
         let _ = tool_controller.commit_transaction();
@@ -915,14 +952,20 @@ pub fn end_drag(
 fn record_pushpull_semantics(
     drag: &PushPullDrag,
     sketch_doc: &mut crate::sketch_model::SketchDocument,
-) -> Result<Option<crate::sketch_model::SketchId>, crate::sketch_model::SketchModelError> {
+) -> Result<
+    Vec<(
+        crate::sketch_model::SketchId,
+        crate::sketch_model::SketchVoxelLinkRole,
+    )>,
+    crate::sketch_model::SketchModelError,
+> {
     if drag.face_cells.is_empty() || drag.last_d == 0 {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let Some((origin, axis_u, axis_v)) = pushpull_semantic_face_axes(drag) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let (_, extrusion) = sketch_doc.record_push_pull_face(
+    let (face, extrusion) = sketch_doc.record_push_pull_face(
         sketch_doc.active_context(),
         origin,
         axis_u,
@@ -930,7 +973,39 @@ fn record_pushpull_semantics(
         drag.last_d as f32,
         "Push/Pull semantic",
     )?;
-    Ok(Some(extrusion))
+    Ok(vec![
+        (face, crate::sketch_model::SketchVoxelLinkRole::Face),
+        (
+            extrusion,
+            crate::sketch_model::SketchVoxelLinkRole::Extrusion,
+        ),
+    ])
+}
+
+fn register_pushpull_semantic_links(
+    drag: &PushPullDrag,
+    changed_cells: &[IVec3],
+    context: crate::sketch_model::SketchId,
+    records: &[(
+        crate::sketch_model::SketchId,
+        crate::sketch_model::SketchVoxelLinkRole,
+    )],
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+) {
+    for (entity, role) in records {
+        let link = crate::sketch_model::SketchVoxelLink::new(*entity, context, *role);
+        match role {
+            crate::sketch_model::SketchVoxelLinkRole::Face => {
+                sketch_links.link_face_cells(drag.face_cells.iter().copied(), drag.normal, link);
+            }
+            crate::sketch_model::SketchVoxelLinkRole::Extrusion => {
+                sketch_links.link_cells(changed_cells.iter().copied(), link);
+            }
+            _ => {
+                sketch_links.link_cells(changed_cells.iter().copied(), link);
+            }
+        }
+    }
 }
 
 fn pushpull_semantic_face_axes(drag: &PushPullDrag) -> Option<(Vec3, Vec3, Vec3)> {
@@ -1301,8 +1376,14 @@ mod tests {
         };
         let mut sketch_doc = crate::sketch_model::SketchDocument::new();
 
-        let extrusion = record_pushpull_semantics(&drag, &mut sketch_doc)
-            .expect("semantic push/pull should record")
+        let records = record_pushpull_semantics(&drag, &mut sketch_doc)
+            .expect("semantic push/pull should record");
+        assert_eq!(records.len(), 2);
+        let extrusion = records
+            .iter()
+            .find_map(|(entity, role)| {
+                (*role == crate::sketch_model::SketchVoxelLinkRole::Extrusion).then_some(*entity)
+            })
             .expect("positive push/pull distance should create extrusion");
 
         let ids = sketch_doc
@@ -1313,6 +1394,9 @@ mod tests {
         assert_eq!(ids.len(), 2);
         let source_face = ids[0];
         assert_eq!(ids[1], extrusion);
+        assert!(records.iter().any(|(entity, role)| {
+            *entity == source_face && *role == crate::sketch_model::SketchVoxelLinkRole::Face
+        }));
         assert!(matches!(
             &sketch_doc.entity(source_face).unwrap().kind,
             crate::sketch_model::SketchEntityKind::Face { vertices, normal }
@@ -1325,6 +1409,28 @@ mod tests {
             crate::sketch_model::SketchEntityKind::PushPullExtrusion { source_face: got, depth, .. }
                 if *got == source_face && (*depth - 3.0).abs() < f32::EPSILON
         ));
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        register_pushpull_semantic_links(
+            &drag,
+            &[IVec3::new(0, 1, 0), IVec3::new(1, 1, 0)],
+            sketch_doc.active_context(),
+            &records,
+            &mut sketch_links,
+        );
+        assert!(sketch_links
+            .links_for_face(IVec3::ZERO, IVec3::Y)
+            .iter()
+            .any(|link| {
+                link.entity == source_face
+                    && link.role == crate::sketch_model::SketchVoxelLinkRole::Face
+            }));
+        assert!(sketch_links
+            .links_for_cell(IVec3::new(0, 1, 0))
+            .iter()
+            .any(|link| {
+                link.entity == extrusion
+                    && link.role == crate::sketch_model::SketchVoxelLinkRole::Extrusion
+            }));
 
         let undone = sketch_doc
             .undo_last()
@@ -1338,6 +1444,38 @@ mod tests {
             .expect("redo pushpull semantic batch");
         assert_eq!(redone.entity_count, 2);
         assert!(ids.iter().all(|id| sketch_doc.entity(*id).is_some()));
+    }
+
+    #[test]
+    fn semantic_hover_hit_uses_voxel_link_index() {
+        let stone = Voxel::from(BlockType::Stone);
+        let face = crate::sketch_model::SketchId::new_for_test(20);
+        let context = crate::sketch_model::SketchId::new_for_test(2);
+        let cell = IVec3::new(4, 5, 6);
+        let normal = IVec3::Y;
+        let mut links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        links.link_face_cell(
+            cell,
+            normal,
+            crate::sketch_model::SketchVoxelLink::new(
+                face,
+                context,
+                crate::sketch_model::SketchVoxelLinkRole::Face,
+            ),
+        );
+        let region = FaceRegion {
+            cells: vec![cell],
+            voxel: stone,
+            normal,
+            clipped: false,
+        };
+
+        let hit = semantic_hover_hit_from_region(&region, &links).expect("semantic hover hit");
+
+        assert_eq!(hit.entity, face);
+        assert_eq!(hit.kind, crate::sketch_model::HitKind::Face);
+        assert_eq!(hit.world_point, Vec3::new(4.5, 5.5, 6.5));
+        assert_eq!(hit.normal, Some(Vec3::Y));
     }
 
     #[test]

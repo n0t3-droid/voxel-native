@@ -331,6 +331,7 @@ pub fn rect_draw_input(
     mut history: ResMut<BuilderHistory>,
     mut tool_controller: ResMut<crate::sketch_model::ToolController>,
     mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
     builder: Res<BuilderState>,
     windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
     cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
@@ -443,6 +444,7 @@ pub fn rect_draw_input(
             &mut toolbelt,
             &mut tool_controller,
             &mut sketch_doc,
+            &mut sketch_links,
         );
         gesture_lock.release(RECT_FILL_OWNER);
         motion_evr.clear();
@@ -626,6 +628,7 @@ pub fn rect_draw_input(
                 &mut toolbelt,
                 &mut tool_controller,
                 &mut sketch_doc,
+                &mut sketch_links,
             );
             gesture_lock.release(RECT_FILL_OWNER);
         }
@@ -683,6 +686,7 @@ fn commit_rect_fill(
     toolbelt: &mut ToolbeltState,
     tool_controller: &mut crate::sketch_model::ToolController,
     sketch_doc: &mut crate::sketch_model::SketchDocument,
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
 ) {
     let should_chain_pencil = draw.pencil_line && draw.action == RectDrawAction::Fill;
     let chain_start = draw.current;
@@ -736,6 +740,7 @@ fn commit_rect_fill(
     world.finish_edit_batch(batch);
     let changed = changes.len();
     if changed > 0 {
+        let changed_cells: Vec<_> = changes.iter().map(|(pos, _, _)| *pos).collect();
         let label = if draw.room_cut {
             format!("Smart room hollow {} cells", changed)
         } else if draw.pencil_line {
@@ -748,7 +753,16 @@ fn commit_rect_fill(
             format!("{} {} cells", draw.action.history_label(), changed)
         };
         history.record_external(label.clone(), changes);
-        record_rect_semantics(draw, sketch_doc);
+        match record_rect_semantics(draw, sketch_doc) {
+            Ok(records) => register_rect_semantic_links(
+                draw,
+                &changed_cells,
+                sketch_doc.active_context(),
+                &records,
+                sketch_links,
+            ),
+            Err(error) => warn!("sketch model: could not record draw semantic entity: {error}"),
+        }
         tool_controller.begin_transaction(label);
         let _ = tool_controller.commit_transaction();
         toolbelt.status = if should_chain_pencil {
@@ -807,15 +821,23 @@ fn commit_rect_fill(
 fn record_rect_semantics(
     draw: &RectDrawState,
     sketch_doc: &mut crate::sketch_model::SketchDocument,
-) {
-    let result = if draw.pencil_line && draw.action == RectDrawAction::Fill {
-        sketch_doc
-            .draw_pencil_line(
-                sketch_doc.active_context(),
-                ivec3_as_vec3(draw.start),
-                ivec3_as_vec3(draw.current),
-            )
-            .map(|_| ())
+) -> Result<
+    Vec<(
+        crate::sketch_model::SketchId,
+        crate::sketch_model::SketchVoxelLinkRole,
+    )>,
+    crate::sketch_model::SketchModelError,
+> {
+    if draw.pencil_line && draw.action == RectDrawAction::Fill {
+        let edge = sketch_doc.draw_pencil_line(
+            sketch_doc.active_context(),
+            ivec3_as_vec3(draw.start),
+            ivec3_as_vec3(draw.current),
+        )?;
+        Ok(vec![(
+            edge,
+            crate::sketch_model::SketchVoxelLinkRole::Stroke,
+        )])
     } else if draw.action == RectDrawAction::Fill
         && draw.shape_workflow != SketchShapeWorkflow::Rectangle
     {
@@ -837,9 +859,10 @@ fn record_rect_semantics(
             Ok(face) => face,
             Err(error) => {
                 warn!("sketch model: could not record rectangle semantic face: {error}");
-                return;
+                return Err(error);
             }
         };
+        let mut records = vec![(face, crate::sketch_model::SketchVoxelLinkRole::Face)];
         if draw.action == RectDrawAction::Cut {
             if draw.room_cut {
                 let depth = smart_room_cut_depth(
@@ -850,39 +873,45 @@ fn record_rect_semantics(
                         - component_by_axis(draw.start, draw.axis_v))
                     .abs(),
                 ) as f32;
-                sketch_doc.create_hollow_room(face, 1.0, depth).map(|_| ())
+                let room = sketch_doc.create_hollow_room(face, 1.0, depth)?;
+                records.push((room, crate::sketch_model::SketchVoxelLinkRole::Room));
             } else {
                 let center = origin + (axis_u + axis_v) * 0.5;
                 let size = axis_u.abs() + axis_v.abs();
-                sketch_doc
-                    .cut_opening_through_face(face, center, size, RECT_CUT_DEPTH_CAP as f32)
-                    .map(|_| ())
+                let opening = sketch_doc.cut_opening_through_face(
+                    face,
+                    center,
+                    size,
+                    RECT_CUT_DEPTH_CAP as f32,
+                )?;
+                records.push((opening, crate::sketch_model::SketchVoxelLinkRole::Opening));
             }
-        } else {
-            Ok(())
         }
-    };
-
-    if let Err(error) = result {
-        warn!("sketch model: could not record draw semantic entity: {error}");
+        Ok(records)
     }
 }
 
 fn record_shape_semantics(
     draw: &RectDrawState,
     sketch_doc: &mut crate::sketch_model::SketchDocument,
-) -> Result<(), crate::sketch_model::SketchModelError> {
+) -> Result<
+    Vec<(
+        crate::sketch_model::SketchId,
+        crate::sketch_model::SketchVoxelLinkRole,
+    )>,
+    crate::sketch_model::SketchModelError,
+> {
     let context = sketch_doc.active_context();
     let center = ivec3_as_vec3(draw.start);
     let normal = draw.normal.as_vec3();
     let radius = sketch_shape_radius(draw.start, draw.current, draw.axis_u, draw.axis_v) as f32;
-    match draw.shape_workflow {
+    let (entity, role) = match draw.shape_workflow {
         SketchShapeWorkflow::Circle => sketch_doc
             .draw_circle_face(context, center, normal, radius, 24, "Circle face")
-            .map(|_| ()),
+            .map(|entity| (entity, crate::sketch_model::SketchVoxelLinkRole::Shape)),
         SketchShapeWorkflow::Polygon => sketch_doc
             .draw_polygon_face(context, center, normal, radius, 6, "Polygon face")
-            .map(|_| ()),
+            .map(|entity| (entity, crate::sketch_model::SketchVoxelLinkRole::Shape)),
         SketchShapeWorkflow::Arc => sketch_doc
             .draw_arc_curve(
                 context,
@@ -894,15 +923,39 @@ fn record_shape_semantics(
                 16,
                 "Arc curve",
             )
-            .map(|_| ()),
+            .map(|entity| (entity, crate::sketch_model::SketchVoxelLinkRole::Stroke)),
         SketchShapeWorkflow::Freehand => sketch_doc
             .draw_freehand_curve(
                 context,
                 [ivec3_as_vec3(draw.start), ivec3_as_vec3(draw.current)],
                 "Freehand stroke",
             )
-            .map(|_| ()),
-        SketchShapeWorkflow::Rectangle => Ok(()),
+            .map(|entity| (entity, crate::sketch_model::SketchVoxelLinkRole::Stroke)),
+        SketchShapeWorkflow::Rectangle => {
+            return Ok(Vec::new());
+        }
+    }?;
+    Ok(vec![(entity, role)])
+}
+
+fn register_rect_semantic_links(
+    draw: &RectDrawState,
+    changed_cells: &[IVec3],
+    context: crate::sketch_model::SketchId,
+    records: &[(
+        crate::sketch_model::SketchId,
+        crate::sketch_model::SketchVoxelLinkRole,
+    )],
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+) {
+    let expose_face = draw.action == RectDrawAction::Fill;
+    for (entity, role) in records {
+        let link = crate::sketch_model::SketchVoxelLink::new(*entity, context, *role);
+        if expose_face {
+            sketch_links.link_face_cells(changed_cells.iter().copied(), draw.normal, link);
+        } else {
+            sketch_links.link_cells(changed_cells.iter().copied(), link);
+        }
     }
 }
 
@@ -1956,6 +2009,7 @@ mod tests {
         let mut toolbelt = ToolbeltState::default();
         let mut tool_controller = crate::sketch_model::ToolController::default();
         let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
 
         commit_rect_fill(
             &mut draw,
@@ -1964,6 +2018,7 @@ mod tests {
             &mut toolbelt,
             &mut tool_controller,
             &mut sketch_doc,
+            &mut sketch_links,
         );
 
         assert!(draw.active, "pencil should remain armed for the next edge");
@@ -1986,6 +2041,13 @@ mod tests {
             crate::sketch_model::SketchEntityKind::Edge { a, b }
                 if *a == Vec3::new(0.0, 4.0, 0.0) && *b == Vec3::new(3.0, 4.0, 0.0)
         ));
+        assert!(sketch_links
+            .links_for_face(IVec3::new(0, 4, 0), IVec3::Y)
+            .iter()
+            .any(|link| {
+                link.entity == semantic_edge
+                    && link.role == crate::sketch_model::SketchVoxelLinkRole::Stroke
+            }));
     }
 
     #[test]
@@ -2007,6 +2069,7 @@ mod tests {
         let mut toolbelt = ToolbeltState::default();
         let mut tool_controller = crate::sketch_model::ToolController::default();
         let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
 
         commit_rect_fill(
             &mut draw,
@@ -2015,6 +2078,7 @@ mod tests {
             &mut toolbelt,
             &mut tool_controller,
             &mut sketch_doc,
+            &mut sketch_links,
         );
 
         assert!(!draw.active);
@@ -2039,6 +2103,13 @@ mod tests {
                     Vec3::new(0.0, 4.0, 2.0),
                 ] && *normal == Vec3::NEG_Y
         ));
+        assert!(sketch_links
+            .links_for_face(IVec3::new(0, 4, 0), IVec3::Y)
+            .iter()
+            .any(|link| {
+                link.entity == semantic_face
+                    && link.role == crate::sketch_model::SketchVoxelLinkRole::Face
+            }));
     }
 
     #[test]
@@ -2064,6 +2135,7 @@ mod tests {
         let mut toolbelt = ToolbeltState::default();
         let mut tool_controller = crate::sketch_model::ToolController::default();
         let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
 
         commit_rect_fill(
             &mut opening,
@@ -2072,6 +2144,7 @@ mod tests {
             &mut toolbelt,
             &mut tool_controller,
             &mut sketch_doc,
+            &mut sketch_links,
         );
 
         let ids = sketch_doc
@@ -2084,6 +2157,23 @@ mod tests {
             crate::sketch_model::SketchEntityKind::Opening { through_depth, .. }
                 if (*through_depth - RECT_CUT_DEPTH_CAP as f32).abs() < f32::EPSILON
         )));
+        let opening_id = ids
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &sketch_doc.entity(*id).unwrap().kind,
+                    crate::sketch_model::SketchEntityKind::Opening { .. }
+                )
+            })
+            .expect("semantic opening id");
+        assert!(sketch_links
+            .links_for_cell(IVec3::new(1, 1, 0))
+            .iter()
+            .any(|link| {
+                link.entity == opening_id
+                    && link.role == crate::sketch_model::SketchVoxelLinkRole::Opening
+            }));
 
         let mut room = RectDrawState::default();
         room.active = true;
@@ -2104,6 +2194,7 @@ mod tests {
             &mut toolbelt,
             &mut tool_controller,
             &mut sketch_doc,
+            &mut sketch_links,
         );
 
         let ids = sketch_doc
