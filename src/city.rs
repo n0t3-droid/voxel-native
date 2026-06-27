@@ -496,7 +496,7 @@ impl BuildingStyle {
             BuildingStyle::Residential => BlockType::Wood,
             BuildingStyle::Commercial => BlockType::Limestone,
             BuildingStyle::Industrial => BlockType::Stone,
-            BuildingStyle::Tower => BlockType::Stone,
+            BuildingStyle::Tower => BlockType::ShipHullDark,
         }
     }
     pub fn floor_block(self) -> BlockType {
@@ -504,24 +504,24 @@ impl BuildingStyle {
             BuildingStyle::Residential => BlockType::Wood,
             BuildingStyle::Commercial => BlockType::Limestone,
             BuildingStyle::Industrial => BlockType::Gravel,
-            BuildingStyle::Tower => BlockType::MossStone,
+            BuildingStyle::Tower => BlockType::ShipHullAlloy,
         }
     }
     pub fn roof(self) -> BlockType {
         match self {
-            BuildingStyle::Residential => BlockType::RedStone,
-            BuildingStyle::Commercial => BlockType::Snow,
+            BuildingStyle::Residential => BlockType::Grass,
+            BuildingStyle::Commercial => BlockType::NeonMagenta,
             BuildingStyle::Industrial => BlockType::Basalt,
-            BuildingStyle::Tower => BlockType::MossStone,
+            BuildingStyle::Tower => BlockType::CockpitGlass,
         }
     }
     /// Suggested floor count range `(min, max)` per style.
     pub fn default_floors(self) -> (u8, u8) {
         match self {
-            BuildingStyle::Residential => (3, 6),
-            BuildingStyle::Commercial => (4, 10),
-            BuildingStyle::Industrial => (2, 4),
-            BuildingStyle::Tower => (10, 18),
+            BuildingStyle::Residential => (4, 12),
+            BuildingStyle::Commercial => (15, 35),
+            BuildingStyle::Industrial => (3, 8),
+            BuildingStyle::Tower => (30, 80),
         }
     }
     pub fn gizmo_color(self) -> Color {

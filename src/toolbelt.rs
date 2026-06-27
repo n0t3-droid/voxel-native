@@ -455,6 +455,21 @@ impl ToolbeltState {
             && self.active_workflow == Some(BuildWorkflowPreset::Pencil)
     }
 
+    pub(crate) fn drafting_shape_workflow(&self) -> Option<BuildWorkflowPreset> {
+        (self.live && !self.palette_open && self.tool == ToolbeltTool::DrawRect)
+            .then_some(self.active_workflow)
+            .flatten()
+            .filter(|workflow| {
+                matches!(
+                    workflow,
+                    BuildWorkflowPreset::Circle
+                        | BuildWorkflowPreset::Polygon
+                        | BuildWorkflowPreset::Arc
+                        | BuildWorkflowPreset::Freehand
+                )
+            })
+    }
+
     pub fn opening_workflow_active(&self) -> bool {
         self.live
             && !self.palette_open
@@ -782,10 +797,14 @@ enum ToolboxSelection {
 }
 
 impl ToolboxSelection {
-    const ORDER: [Self; 13] = [
+    const ORDER: [Self; 17] = [
         Self::Tool(ToolbeltTool::Navigate),
         Self::Workflow(BuildWorkflowPreset::Pencil),
         Self::Workflow(BuildWorkflowPreset::Sketch),
+        Self::Workflow(BuildWorkflowPreset::Circle),
+        Self::Workflow(BuildWorkflowPreset::Polygon),
+        Self::Workflow(BuildWorkflowPreset::Arc),
+        Self::Workflow(BuildWorkflowPreset::Freehand),
         Self::Workflow(BuildWorkflowPreset::PushPull),
         Self::Workflow(BuildWorkflowPreset::Room),
         Self::Workflow(BuildWorkflowPreset::Opening),
@@ -809,6 +828,10 @@ enum HistoryCommand {
 pub(crate) enum BuildWorkflowPreset {
     Pencil,
     Sketch,
+    Circle,
+    Polygon,
+    Arc,
+    Freehand,
     Room,
     Opening,
     PushPull,
@@ -865,9 +888,13 @@ impl ToolActionHint {
 }
 
 impl BuildWorkflowPreset {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 16] = [
         Self::Pencil,
         Self::Sketch,
+        Self::Circle,
+        Self::Polygon,
+        Self::Arc,
+        Self::Freehand,
         Self::PushPull,
         Self::Room,
         Self::Opening,
@@ -879,9 +906,13 @@ impl BuildWorkflowPreset {
         Self::Skyline,
         Self::Spacecraft,
     ];
-    const TOOLBOX: [Self; 9] = [
+    const TOOLBOX: [Self; 13] = [
         Self::Pencil,
         Self::Sketch,
+        Self::Circle,
+        Self::Polygon,
+        Self::Arc,
+        Self::Freehand,
         Self::ModernHouse,
         Self::PushPull,
         Self::Room,
@@ -894,6 +925,10 @@ impl BuildWorkflowPreset {
         match self {
             Self::Pencil => "PENCIL",
             Self::Sketch => "RECTANGLE",
+            Self::Circle => "CIRCLE",
+            Self::Polygon => "POLYGON",
+            Self::Arc => "ARC",
+            Self::Freehand => "FREEHAND",
             Self::Room => "ROOM",
             Self::Opening => "OPENING",
             Self::PushPull => "PUSH/PULL",
@@ -911,6 +946,10 @@ impl BuildWorkflowPreset {
         match self {
             Self::Pencil => Icon::Pipette,
             Self::Sketch => Icon::Grid,
+            Self::Circle => Icon::Magnet,
+            Self::Polygon => Icon::Cube,
+            Self::Arc => Icon::Wand,
+            Self::Freehand => Icon::Brush,
             Self::Room => Icon::Open,
             Self::Opening => Icon::Eraser,
             Self::PushPull => Icon::Move,
@@ -928,6 +967,10 @@ impl BuildWorkflowPreset {
         match self {
             Self::Pencil => ToolbeltTool::DrawRect,
             Self::Sketch => ToolbeltTool::DrawRect,
+            Self::Circle => ToolbeltTool::DrawRect,
+            Self::Polygon => ToolbeltTool::DrawRect,
+            Self::Arc => ToolbeltTool::DrawRect,
+            Self::Freehand => ToolbeltTool::DrawRect,
             Self::Room => ToolbeltTool::DrawRect,
             Self::Opening => ToolbeltTool::DrawRect,
             Self::PushPull => ToolbeltTool::Sculpt,
@@ -945,6 +988,10 @@ impl BuildWorkflowPreset {
         match self {
             Self::Pencil => Some(IVec3::new(1, 1, 1)),
             Self::Sketch => Some(IVec3::new(4, 1, 1)),
+            Self::Circle => Some(IVec3::new(6, 1, 6)),
+            Self::Polygon => Some(IVec3::new(6, 1, 6)),
+            Self::Arc => Some(IVec3::new(1, 1, 1)),
+            Self::Freehand => Some(IVec3::new(1, 1, 1)),
             Self::Room => Some(IVec3::new(8, 1, 1)),
             Self::Opening => Some(IVec3::new(2, 3, 1)),
             Self::PushPull => Some(IVec3::ONE),
@@ -959,6 +1006,10 @@ impl BuildWorkflowPreset {
         match self {
             Self::Pencil => Some(BlockType::Limestone),
             Self::Sketch => Some(BlockType::Stone),
+            Self::Circle => Some(BlockType::Limestone),
+            Self::Polygon => Some(BlockType::Limestone),
+            Self::Arc => Some(BlockType::Limestone),
+            Self::Freehand => Some(BlockType::Limestone),
             Self::Room => Some(BlockType::Limestone),
             Self::Opening => Some(BlockType::Limestone),
             Self::PushPull => Some(BlockType::Limestone),
@@ -976,6 +1027,10 @@ impl BuildWorkflowPreset {
         match self {
             Self::Pencil => "Pencil workflow: click a snapped start point, move to an endpoint, click again; lines chain from the last endpoint. RMB orbits; Ctrl+Z undo.".into(),
             Self::Sketch => "Rectangle workflow: click a snapped start point, move to the opposite corner, click again. Floors, roofs, and wall faces build; Opening cuts doors/windows. RMB orbits.".into(),
+            Self::Circle => "Circle workflow: click a snapped center, move to the radius endpoint, click again to place a filled circular face on the locked plane. RMB orbits.".into(),
+            Self::Polygon => "Polygon workflow: click a snapped center, move to the radius endpoint, click again to place a hex face on the locked plane. RMB orbits.".into(),
+            Self::Arc => "Arc workflow: click a snapped center, move to the radius endpoint, click again to trace a curved guide/edge on the locked plane. RMB orbits.".into(),
+            Self::Freehand => "Freehand workflow: click a snapped start, move to the endpoint, click again to place a quick drawn voxel stroke. RMB orbits.".into(),
             Self::Room => "Room workflow: click two snapped wall/floor corners to hollow livable depth behind the selected face. RMB orbits.".into(),
             Self::Opening => "Opening workflow: click two snapped door/window corners on the locked face plane; the cut drills through wall thickness. RMB orbits.".into(),
             Self::PushPull => "Push/Pull workflow: click a face, move to choose extrusion depth, click again to commit. RMB orbits.".into(),
@@ -993,6 +1048,10 @@ impl BuildWorkflowPreset {
         match self {
             Self::Pencil => "Draw connected voxel edges and wall lines like SketchUp's pencil.",
             Self::Sketch => "One click switches to rectangle sketching and a flat 4x1 brush.",
+            Self::Circle => "Draw a circular face on the locked floor, wall, or roof plane.",
+            Self::Polygon => "Draw a six-sided polygon face without leaving Sketch Editor.",
+            Self::Arc => "Trace a curved edge on the locked plane for rounded details.",
+            Self::Freehand => "Draw a quick freehand-style voxel stroke on the locked plane.",
             Self::Room => {
                 "One click switches to direct room hollowing: click two corners to carve usable interior space."
             }
@@ -1022,6 +1081,10 @@ impl BuildWorkflowPreset {
         match self {
             Self::Pencil => egui::Color32::from_rgb(255, 205, 92),
             Self::Sketch => egui::Color32::from_rgb(80, 170, 255),
+            Self::Circle => egui::Color32::from_rgb(110, 230, 255),
+            Self::Polygon => egui::Color32::from_rgb(160, 220, 255),
+            Self::Arc => egui::Color32::from_rgb(255, 210, 120),
+            Self::Freehand => egui::Color32::from_rgb(255, 190, 150),
             Self::Room => egui::Color32::from_rgb(80, 235, 190),
             Self::Opening => egui::Color32::from_rgb(255, 92, 112),
             Self::PushPull => egui::Color32::from_rgb(110, 210, 255),
@@ -1148,6 +1211,10 @@ fn editor_tool_for_workflow(preset: BuildWorkflowPreset) -> crate::sketch_model:
     match preset {
         BuildWorkflowPreset::Pencil => crate::sketch_model::EditorToolId::Pencil,
         BuildWorkflowPreset::Sketch => crate::sketch_model::EditorToolId::Rectangle,
+        BuildWorkflowPreset::Circle => crate::sketch_model::EditorToolId::Circle,
+        BuildWorkflowPreset::Polygon => crate::sketch_model::EditorToolId::Polygon,
+        BuildWorkflowPreset::Arc => crate::sketch_model::EditorToolId::Arc,
+        BuildWorkflowPreset::Freehand => crate::sketch_model::EditorToolId::Freehand,
         BuildWorkflowPreset::ModernHouse => crate::sketch_model::EditorToolId::House,
         BuildWorkflowPreset::PushPull => crate::sketch_model::EditorToolId::PushPull,
         BuildWorkflowPreset::Room => crate::sketch_model::EditorToolId::Room,
@@ -1588,6 +1655,10 @@ fn workflow_toolbox_label(preset: BuildWorkflowPreset) -> &'static str {
     match preset {
         BuildWorkflowPreset::Pencil => "PENCIL",
         BuildWorkflowPreset::Sketch => "RECT",
+        BuildWorkflowPreset::Circle => "CIRC",
+        BuildWorkflowPreset::Polygon => "POLY",
+        BuildWorkflowPreset::Arc => "ARC",
+        BuildWorkflowPreset::Freehand => "FREE",
         BuildWorkflowPreset::PushPull => "PUSH",
         BuildWorkflowPreset::Room => "ROOM",
         BuildWorkflowPreset::Opening => "OPEN",
@@ -2426,6 +2497,44 @@ mod tests {
     }
 
     #[test]
+    fn drafting_shape_workflows_route_through_shared_tool_controller() {
+        let mut toolbelt = ToolbeltState::default();
+        let mut mode = ModeContext::default();
+        let mut builder = BuilderState::default();
+        let mut controller = crate::sketch_model::ToolController::default();
+
+        for (preset, expected) in [
+            (
+                BuildWorkflowPreset::Circle,
+                crate::sketch_model::EditorToolId::Circle,
+            ),
+            (
+                BuildWorkflowPreset::Polygon,
+                crate::sketch_model::EditorToolId::Polygon,
+            ),
+            (
+                BuildWorkflowPreset::Arc,
+                crate::sketch_model::EditorToolId::Arc,
+            ),
+            (
+                BuildWorkflowPreset::Freehand,
+                crate::sketch_model::EditorToolId::Freehand,
+            ),
+        ] {
+            apply_toolbox_selection(
+                ToolboxSelection::Workflow(preset),
+                &mut toolbelt,
+                &mut mode,
+                &mut builder,
+                &mut controller,
+                crate::sketch_model::SketchId::new_for_test(4),
+            );
+            assert_eq!(controller.active_tool(), expected);
+            assert_eq!(toolbelt.active_workflow(), Some(preset));
+        }
+    }
+
+    #[test]
     fn mouse_wheel_cycles_editor_tools_without_clicking() {
         assert_eq!(
             toolbox_wheel_selection(
@@ -2672,6 +2781,10 @@ mod tests {
             [
                 BuildWorkflowPreset::Pencil,
                 BuildWorkflowPreset::Sketch,
+                BuildWorkflowPreset::Circle,
+                BuildWorkflowPreset::Polygon,
+                BuildWorkflowPreset::Arc,
+                BuildWorkflowPreset::Freehand,
                 BuildWorkflowPreset::ModernHouse,
                 BuildWorkflowPreset::PushPull,
                 BuildWorkflowPreset::Room,

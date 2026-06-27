@@ -30,14 +30,27 @@ handoff unless a later task explicitly needs a reproducible save.
   up.
 - Bot-city work was changed toward manual area/command control, lower startup
   visual load, and fewer high-detail idle bot rigs.
+- The current follow-up adds toolbox exposure and voxel preview/commit routing
+  for Circle, Polygon, Arc, and Freehand drafting workflows. These route through
+  `ToolController` and write semantic sketch entities instead of being only
+  placeholder catalog entries.
+- Startup pressure now scans a much smaller dirty-mesh candidate window, and
+  crowded bot saves scan project queues through a smaller rotating window.
+- The CAD Copilot note from the user points toward a future deterministic
+  "intent-to-action" layer: bots should emit structured CAD commands into the
+  same editor/tool pipeline, not place raw voxels or rely on live cloud AI.
 
 ## Important Remaining Gaps
 
-- SketchUp equivalence is not complete. Circle, polygon, arc, and freehand
-  exist semantically in `sketch_model`, but still need full toolbox exposure,
-  voxel preview/commit routing, and polished UI feedback.
+- SketchUp equivalence is not complete. Circle, polygon, arc, and freehand now
+  have toolbox routing and voxel commits, but arcs/freehand are still simple
+  first-pass raster tools and need real curve editing, face splitting, and
+  component-aware geometry.
 - The builder still needs stronger endpoint/midpoint/face-center inference for
   all drafting tools, not only rectangle/pencil and Push/Pull.
+- The next major architecture step should be a lightweight B-Rep/vector layer
+  over the voxel rasterizer so Pencil, Rectangle, Push/Pull, Opening, Room, and
+  bot CAD commands can share one deterministic modeling model.
 - Startup can still inherit huge generated save/edit/bot state locally. Keep
   source commits separate from generated `saves/` unless deliberately testing a
   specific world.

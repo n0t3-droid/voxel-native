@@ -189,6 +189,7 @@ fn spawn_sun(mut commands: Commands, settings: Res<WorldSettings>) {
             cascade_shadow_config: cascades,
             ..default()
         },
+        bevy::pbr::VolumetricLight,
         Sun,
     ));
 

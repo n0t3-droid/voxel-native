@@ -4846,12 +4846,14 @@ fn bot_project_slice_budget(frame_budget: usize, open_projects: usize) -> usize 
 }
 
 fn bot_project_scan_budget(open_projects: usize) -> usize {
-    if open_projects <= DEFAULT_MAX_ACTIVE_PROJECTS {
-        96
+    if open_projects == 0 {
+        0
+    } else if open_projects <= DEFAULT_MAX_ACTIVE_PROJECTS {
+        64
     } else if open_projects <= MAX_ACTIVE_PROJECTS_LIMIT {
-        128
+        48
     } else {
-        160
+        32
     }
 }
 
@@ -16945,6 +16947,16 @@ mod tests {
 
         budget.render_distance = 41;
         assert!(bot_frame_edit_budget(&budget, 2) > 0);
+    }
+
+    #[test]
+    fn bot_project_scan_budget_is_small_for_crowded_saves() {
+        let scan = bot_project_scan_budget(MAX_ACTIVE_PROJECTS_LIMIT + 50);
+
+        assert!(
+            scan <= 48,
+            "crowded bot saves should scan a small rotating window, not {scan} projects in one frame"
+        );
     }
 
     #[test]

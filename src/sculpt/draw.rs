@@ -17,7 +17,7 @@ use crate::builder::{BuilderHistory, BuilderState};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::player::Player;
 use crate::sculpt::raycast::dda_voxel;
-use crate::toolbelt::{ToolbeltState, ToolbeltTool};
+use crate::toolbelt::{BuildWorkflowPreset, ToolbeltState, ToolbeltTool};
 use crate::world::{VoxelWorld, WorldEditBatch};
 
 const DRAW_REACH: f32 = 128.0;
@@ -46,6 +46,7 @@ pub struct RectDrawState {
     smart_gesture: bool,
     room_cut: bool,
     pencil_line: bool,
+    shape_workflow: SketchShapeWorkflow,
     inference: RectEndpointInference,
     snap_kind: Option<RectFaceSnapKind>,
     tool_generation: u64,
@@ -59,6 +60,16 @@ enum RectDrawAction {
     #[default]
     Fill,
     Cut,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SketchShapeWorkflow {
+    #[default]
+    Rectangle,
+    Circle,
+    Polygon,
+    Arc,
+    Freehand,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -140,6 +151,38 @@ impl RectDrawAction {
         match self {
             Self::Fill => "build",
             Self::Cut => "cut",
+        }
+    }
+}
+
+impl SketchShapeWorkflow {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Rectangle => "Rectangle",
+            Self::Circle => "Circle",
+            Self::Polygon => "Polygon",
+            Self::Arc => "Arc",
+            Self::Freehand => "Freehand",
+        }
+    }
+
+    fn preview_label(self) -> &'static str {
+        match self {
+            Self::Rectangle => "Smart Build",
+            Self::Circle => "Circle",
+            Self::Polygon => "Polygon",
+            Self::Arc => "Arc",
+            Self::Freehand => "Freehand",
+        }
+    }
+
+    fn history_label(self) -> &'static str {
+        match self {
+            Self::Rectangle => "Smart endpoint build",
+            Self::Circle => "Circle face",
+            Self::Polygon => "Polygon face",
+            Self::Arc => "Arc curve",
+            Self::Freehand => "Freehand stroke",
         }
     }
 }
@@ -230,6 +273,16 @@ fn sketch_tool_uses_click_finish(active_tool: ToolbeltTool, smart_tool: bool) ->
     !smart_tool && matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
 }
 
+fn active_shape_workflow(toolbelt: &ToolbeltState) -> SketchShapeWorkflow {
+    match toolbelt.drafting_shape_workflow() {
+        Some(BuildWorkflowPreset::Circle) => SketchShapeWorkflow::Circle,
+        Some(BuildWorkflowPreset::Polygon) => SketchShapeWorkflow::Polygon,
+        Some(BuildWorkflowPreset::Arc) => SketchShapeWorkflow::Arc,
+        Some(BuildWorkflowPreset::Freehand) => SketchShapeWorkflow::Freehand,
+        _ => SketchShapeWorkflow::Rectangle,
+    }
+}
+
 fn rect_should_commit_on_start_intent(intent: RectStartIntent, draw: &RectDrawState) -> bool {
     draw.active
         && draw.click_finish
@@ -287,6 +340,7 @@ pub fn rect_draw_input(
             draw.active = false;
             draw.click_finish = false;
             draw.pencil_line = false;
+            draw.shape_workflow = SketchShapeWorkflow::Rectangle;
             draw.snap_kind = None;
             tool_controller
                 .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolSwitch);
@@ -300,6 +354,7 @@ pub fn rect_draw_input(
         draw.active = false;
         draw.click_finish = false;
         draw.pencil_line = false;
+        draw.shape_workflow = SketchShapeWorkflow::Rectangle;
         draw.snap_kind = None;
         tool_controller
             .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolboxClick);
@@ -331,6 +386,7 @@ pub fn rect_draw_input(
         draw.active = false;
         draw.click_finish = false;
         draw.pencil_line = false;
+        draw.shape_workflow = SketchShapeWorkflow::Rectangle;
         draw.snap_kind = None;
         tool_controller.cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
         gesture_lock.release(RECT_FILL_OWNER);
@@ -410,6 +466,11 @@ pub fn rect_draw_input(
             && pencil_workflow
             && start_intent.fill
             && !start_intent.cut;
+        let shape_workflow = if pencil_line || start_intent.cut {
+            SketchShapeWorkflow::Rectangle
+        } else {
+            active_shape_workflow(&toolbelt)
+        };
         let action = if pencil_line {
             RectDrawAction::Fill
         } else {
@@ -428,6 +489,7 @@ pub fn rect_draw_input(
         draw.smart_gesture = smart_tool;
         draw.room_cut = action == RectDrawAction::Cut && start_intent.room_cut;
         draw.pencil_line = pencil_line;
+        draw.shape_workflow = shape_workflow;
         draw.inference = RectEndpointInference::None;
         draw.snap_kind = ray_face_hit_point(origin, dir, hit, prev)
             .and_then(|face_hit| classify_rect_face_snap(face_hit, hit, prev));
@@ -449,6 +511,11 @@ pub fn rect_draw_input(
             )
         } else if draw.pencil_line {
             "Pencil start set. Move to a snapped endpoint on this face, click again to draw the voxel line. RMB orbits.".into()
+        } else if draw.shape_workflow != SketchShapeWorkflow::Rectangle {
+            format!(
+                "{} start set. Move to the snapped endpoint on this locked plane, click again to commit. RMB orbits.",
+                draw.shape_workflow.label()
+            )
         } else if draw.room_cut {
             "Room start set. Move to size the wall/floor face, click again to hollow a livable volume.".into()
         } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
@@ -512,6 +579,8 @@ pub fn rect_draw_input(
                 "Pencil"
             } else if draw.room_cut {
                 "Smart Room Hollow"
+            } else if draw.action == RectDrawAction::Fill {
+                draw.shape_workflow.preview_label()
             } else {
                 draw.action.label()
             };
@@ -578,6 +647,8 @@ fn rect_preview_transaction_label(draw: &RectDrawState) -> &'static str {
         "Room preview"
     } else if draw.action == RectDrawAction::Cut {
         "Opening preview"
+    } else if draw.shape_workflow != SketchShapeWorkflow::Rectangle {
+        draw.shape_workflow.history_label()
     } else {
         "Rectangle preview"
     }
@@ -621,7 +692,13 @@ fn commit_rect_fill(
         RectDrawAction::Fill if draw.pencil_line => {
             pencil_line_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP)
         }
-        RectDrawAction::Fill => rect_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP),
+        RectDrawAction::Fill => sketch_shape_cells(
+            draw.shape_workflow,
+            draw.start,
+            draw.current,
+            draw.normal,
+            DRAW_CELL_CAP,
+        ),
         RectDrawAction::Cut if draw.room_cut => rect_room_cut_cells_through_solid(
             world,
             draw.start,
@@ -642,6 +719,7 @@ fn commit_rect_fill(
         draw.active = false;
         draw.click_finish = false;
         draw.pencil_line = false;
+        draw.shape_workflow = SketchShapeWorkflow::Rectangle;
         draw.snap_kind = None;
         return;
     }
@@ -662,6 +740,10 @@ fn commit_rect_fill(
             format!("Smart room hollow {} cells", changed)
         } else if draw.pencil_line {
             format!("Pencil line {} cells", changed)
+        } else if draw.action == RectDrawAction::Fill
+            && draw.shape_workflow != SketchShapeWorkflow::Rectangle
+        {
+            format!("{} {} cells", draw.shape_workflow.history_label(), changed)
         } else {
             format!("{} {} cells", draw.action.history_label(), changed)
         };
@@ -681,6 +763,8 @@ fn commit_rect_fill(
                     "Pencil line"
                 } else if draw.room_cut {
                     "Smart Room Hollow"
+                } else if draw.action == RectDrawAction::Fill {
+                    draw.shape_workflow.preview_label()
                 } else {
                     draw.action.label()
                 },
@@ -712,6 +796,7 @@ fn commit_rect_fill(
         draw.active = false;
         draw.click_finish = false;
         draw.pencil_line = false;
+        draw.shape_workflow = SketchShapeWorkflow::Rectangle;
         draw.snap_kind = None;
     }
     if next_reference_span != IVec2::ZERO {
@@ -731,6 +816,10 @@ fn record_rect_semantics(
                 ivec3_as_vec3(draw.current),
             )
             .map(|_| ())
+    } else if draw.action == RectDrawAction::Fill
+        && draw.shape_workflow != SketchShapeWorkflow::Rectangle
+    {
+        record_shape_semantics(draw, sketch_doc)
     } else {
         let (origin, axis_u, axis_v) = semantic_rect_axes(draw);
         let face_label = if draw.action == RectDrawAction::Cut {
@@ -776,6 +865,44 @@ fn record_rect_semantics(
 
     if let Err(error) = result {
         warn!("sketch model: could not record draw semantic entity: {error}");
+    }
+}
+
+fn record_shape_semantics(
+    draw: &RectDrawState,
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+) -> Result<(), crate::sketch_model::SketchModelError> {
+    let context = sketch_doc.active_context();
+    let center = ivec3_as_vec3(draw.start);
+    let normal = draw.normal.as_vec3();
+    let radius = sketch_shape_radius(draw.start, draw.current, draw.axis_u, draw.axis_v) as f32;
+    match draw.shape_workflow {
+        SketchShapeWorkflow::Circle => sketch_doc
+            .draw_circle_face(context, center, normal, radius, 24, "Circle face")
+            .map(|_| ()),
+        SketchShapeWorkflow::Polygon => sketch_doc
+            .draw_polygon_face(context, center, normal, radius, 6, "Polygon face")
+            .map(|_| ()),
+        SketchShapeWorkflow::Arc => sketch_doc
+            .draw_arc_curve(
+                context,
+                center,
+                normal,
+                radius,
+                draw.axis_u.as_vec3(),
+                std::f32::consts::FRAC_PI_2,
+                16,
+                "Arc curve",
+            )
+            .map(|_| ()),
+        SketchShapeWorkflow::Freehand => sketch_doc
+            .draw_freehand_curve(
+                context,
+                [ivec3_as_vec3(draw.start), ivec3_as_vec3(draw.current)],
+                "Freehand stroke",
+            )
+            .map(|_| ()),
+        SketchShapeWorkflow::Rectangle => Ok(()),
     }
 }
 
@@ -1261,6 +1388,17 @@ fn rect_cell_count(a: IVec3, b: IVec3, normal: IVec3) -> usize {
 fn draw_preview_cell_count(draw: &RectDrawState) -> usize {
     if draw.pencil_line {
         pencil_line_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP).len()
+    } else if draw.action == RectDrawAction::Fill
+        && draw.shape_workflow != SketchShapeWorkflow::Rectangle
+    {
+        sketch_shape_cells(
+            draw.shape_workflow,
+            draw.start,
+            draw.current,
+            draw.normal,
+            DRAW_CELL_CAP,
+        )
+        .len()
     } else {
         rect_cell_count(draw.start, draw.current, draw.normal)
     }
@@ -1352,6 +1490,128 @@ fn pencil_line_cells(a: IVec3, b: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3
     out
 }
 
+fn sketch_shape_cells(
+    shape: SketchShapeWorkflow,
+    a: IVec3,
+    b: IVec3,
+    normal: IVec3,
+    cap: usize,
+) -> Vec<IVec3> {
+    match shape {
+        SketchShapeWorkflow::Rectangle => rect_cells(a, b, normal, cap),
+        SketchShapeWorkflow::Circle => circle_disc_cells(a, b, normal, cap),
+        SketchShapeWorkflow::Polygon => hex_polygon_cells(a, b, normal, cap),
+        SketchShapeWorkflow::Arc => arc_trace_cells(a, b, normal, cap),
+        SketchShapeWorkflow::Freehand => pencil_line_cells(a, b, normal, cap),
+    }
+}
+
+fn sketch_shape_radius(a: IVec3, b: IVec3, axis_u: IVec3, axis_v: IVec3) -> i32 {
+    let du = (component_by_axis(b, axis_u) - component_by_axis(a, axis_u)).abs();
+    let dv = (component_by_axis(b, axis_v) - component_by_axis(a, axis_v)).abs();
+    du.max(dv).max(1)
+}
+
+fn capped_shape_radius(a: IVec3, b: IVec3, axis_u: IVec3, axis_v: IVec3, cap: usize) -> i32 {
+    let preview_limit = (cap as f32).sqrt().ceil() as i32 + 1;
+    sketch_shape_radius(a, b, axis_u, axis_v)
+        .min(preview_limit.max(1))
+        .min(96)
+}
+
+fn circle_disc_cells(center: IVec3, edge: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3> {
+    let Some((axis_u, axis_v)) = plane_axes(normal) else {
+        return Vec::new();
+    };
+    if cap == 0 {
+        return Vec::new();
+    }
+    let radius = capped_shape_radius(center, edge, axis_u, axis_v, cap);
+    let r2 = radius * radius;
+    let approx = (radius as usize)
+        .saturating_mul(radius as usize)
+        .saturating_mul(4)
+        .max(1)
+        .min(cap);
+    let mut out = Vec::with_capacity(approx);
+    for u in -radius..=radius {
+        for v in -radius..=radius {
+            if u * u + v * v > r2 {
+                continue;
+            }
+            let mut p = center;
+            set_component_by_axis(&mut p, axis_u, component_by_axis(center, axis_u) + u);
+            set_component_by_axis(&mut p, axis_v, component_by_axis(center, axis_v) + v);
+            out.push(p);
+            if out.len() >= cap {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn hex_polygon_cells(center: IVec3, edge: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3> {
+    let Some((axis_u, axis_v)) = plane_axes(normal) else {
+        return Vec::new();
+    };
+    if cap == 0 {
+        return Vec::new();
+    }
+    let radius = capped_shape_radius(center, edge, axis_u, axis_v, cap);
+    let approx = (radius as usize)
+        .saturating_mul(radius as usize)
+        .saturating_mul(3)
+        .max(1)
+        .min(cap);
+    let mut out = Vec::with_capacity(approx);
+    for u in -radius..=radius {
+        for v in -radius..=radius {
+            if u.abs() > radius || v.abs() > radius || (u + v).abs() > radius {
+                continue;
+            }
+            let mut p = center;
+            set_component_by_axis(&mut p, axis_u, component_by_axis(center, axis_u) + u);
+            set_component_by_axis(&mut p, axis_v, component_by_axis(center, axis_v) + v);
+            out.push(p);
+            if out.len() >= cap {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn arc_trace_cells(center: IVec3, edge: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3> {
+    let Some((axis_u, axis_v)) = plane_axes(normal) else {
+        return Vec::new();
+    };
+    if cap == 0 {
+        return Vec::new();
+    }
+    let radius = capped_shape_radius(center, edge, axis_u, axis_v, cap) as f32;
+    let samples = ((radius as usize) * 4).clamp(8, 48);
+    let cu = component_by_axis(center, axis_u);
+    let cv = component_by_axis(center, axis_v);
+    let mut out = Vec::with_capacity(samples.min(cap));
+    for idx in 0..=samples {
+        let t = idx as f32 / samples as f32;
+        let angle = t * std::f32::consts::FRAC_PI_2;
+        let u = cu + round_to_i32_safe(angle.cos() * radius);
+        let v = cv + round_to_i32_safe(angle.sin() * radius);
+        let mut p = center;
+        set_component_by_axis(&mut p, axis_u, u);
+        set_component_by_axis(&mut p, axis_v, v);
+        if !out.contains(&p) {
+            out.push(p);
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+    out
+}
+
 fn rect_cut_cells_through_solid(
     world: &VoxelWorld,
     a: IVec3,
@@ -1432,8 +1692,19 @@ pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<T
         RectDrawAction::Fill => Color::srgb(0.15 + 0.25 * pulse, 0.95, 1.0),
         RectDrawAction::Cut => Color::srgb(1.0, 0.15 + 0.25 * pulse, 0.05),
     };
-    if draw.pencil_line {
-        for cell in pencil_line_cells(draw.start, draw.current, draw.normal, 768) {
+    if draw.pencil_line || draw.shape_workflow != SketchShapeWorkflow::Rectangle {
+        let cells = if draw.pencil_line {
+            pencil_line_cells(draw.start, draw.current, draw.normal, 768)
+        } else {
+            sketch_shape_cells(
+                draw.shape_workflow,
+                draw.start,
+                draw.current,
+                draw.normal,
+                768,
+            )
+        };
+        for cell in cells {
             let center = cell.as_vec3() + Vec3::splat(0.5);
             gizmos.cuboid(
                 Transform::from_translation(center).with_scale(Vec3::splat(1.04)),
@@ -1518,6 +1789,72 @@ mod tests {
         assert_eq!(cells.last().copied(), Some(IVec3::new(3, 7, 12)));
         assert!(cells.iter().all(|p| p.x == 3));
         assert!(cells.len() >= 5);
+    }
+
+    #[test]
+    fn circle_cells_create_disc_on_locked_floor_plane() {
+        let center = IVec3::new(0, 10, 0);
+        let cells = sketch_shape_cells(
+            SketchShapeWorkflow::Circle,
+            center,
+            IVec3::new(3, 10, 0),
+            IVec3::Y,
+            DRAW_CELL_CAP,
+        );
+
+        assert!(cells.contains(&center));
+        assert!(cells.contains(&IVec3::new(3, 10, 0)));
+        assert!(!cells.contains(&IVec3::new(4, 10, 0)));
+        assert!(cells.iter().all(|p| p.y == 10));
+        assert!(cells.len() > 20);
+    }
+
+    #[test]
+    fn polygon_cells_create_hex_footprint_on_locked_floor_plane() {
+        let center = IVec3::new(0, 10, 0);
+        let cells = sketch_shape_cells(
+            SketchShapeWorkflow::Polygon,
+            center,
+            IVec3::new(4, 10, 0),
+            IVec3::Y,
+            DRAW_CELL_CAP,
+        );
+
+        assert!(cells.contains(&center));
+        assert!(cells.iter().all(|p| p.y == 10));
+        assert!(cells.len() > 24);
+        assert!(
+            cells.len() < 64,
+            "hex footprint should not become a filled square"
+        );
+    }
+
+    #[test]
+    fn arc_and_freehand_cells_stay_on_locked_plane_without_filling_area() {
+        let center = IVec3::new(0, 10, 0);
+        let arc = sketch_shape_cells(
+            SketchShapeWorkflow::Arc,
+            center,
+            IVec3::new(4, 10, 0),
+            IVec3::Y,
+            DRAW_CELL_CAP,
+        );
+        let freehand = sketch_shape_cells(
+            SketchShapeWorkflow::Freehand,
+            center,
+            IVec3::new(4, 10, 0),
+            IVec3::Y,
+            DRAW_CELL_CAP,
+        );
+
+        assert!(arc.iter().all(|p| p.y == 10));
+        assert!(freehand.iter().all(|p| p.y == 10));
+        assert!(arc.len() > 4);
+        assert_eq!(
+            freehand,
+            pencil_line_cells(center, IVec3::new(4, 10, 0), IVec3::Y, DRAW_CELL_CAP)
+        );
+        assert!(arc.len() < 20, "arc should trace a curve, not fill a face");
     }
 
     #[test]

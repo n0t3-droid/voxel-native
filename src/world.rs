@@ -1684,17 +1684,18 @@ fn dirty_mesh_candidate_scan_budget(
     }
     let pressure = pressure.clamp(0.0, 1.25);
     let multiplier = if pressure >= 0.85 {
-        32
+        20
     } else if pressure >= 0.55 {
         48
     } else {
         96
     };
-    let budget = schedule_budget
-        .max(1)
-        .saturating_mul(multiplier)
-        .max(max_in_flight.saturating_mul(2))
-        .max(64);
+    let floor = if pressure >= 0.85 {
+        32
+    } else {
+        max_in_flight.saturating_mul(2).max(64)
+    };
+    let budget = schedule_budget.max(1).saturating_mul(multiplier).max(floor);
     budget.min(dirty_total)
 }
 
@@ -1972,7 +1973,17 @@ mod tests {
         let budget = dirty_mesh_candidate_scan_budget(10_000, 4, 80, 1.0);
 
         assert!(budget < 10_000);
-        assert_eq!(budget, 160);
+        assert_eq!(budget, 80);
+    }
+
+    #[test]
+    fn dirty_mesh_candidate_scan_budget_stays_tiny_under_startup_pressure() {
+        let budget = dirty_mesh_candidate_scan_budget(25_000, 4, 80, 1.0);
+
+        assert!(
+            budget <= 80,
+            "startup pressure should not spend the frame scanning {budget} dirty chunks"
+        );
     }
 
     #[test]
