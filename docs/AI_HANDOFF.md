@@ -36,9 +36,49 @@ handoff unless a later task explicitly needs a reproducible save.
   placeholder catalog entries.
 - Startup pressure now scans a much smaller dirty-mesh candidate window, and
   crowded bot saves scan project queues through a smaller rotating window.
-- The CAD Copilot note from the user points toward a future deterministic
-  "intent-to-action" layer: bots should emit structured CAD commands into the
-  same editor/tool pipeline, not place raw voxels or rely on live cloud AI.
+- The CAD Copilot note from the user is now represented in
+  `src/sketch_model.rs` as `SketchCadCommand` / `SketchCadTool` plus
+  `SketchDocument::execute_cad_command`. Bots or another AI can emit a strict
+  semantic command recipe for `ROAD`, `ROOM`, `PENCIL`, `RECTANGLE`,
+  `PUSH_PULL`, `OPENING`, `CIRCLE`, `POLYGON`, `ARC`, `FREEHAND`, and
+  `BOT_AREA` without placing raw voxels or relying on live cloud AI.
+
+## CAD Copilot Command Contract
+
+The command layer is serializable and intentionally close to the user's
+provided JSON recipe. Example shape:
+
+```json
+[
+  {
+    "tool": "ROAD",
+    "material": "GlowStone",
+    "width": 3.0,
+    "points": [
+      { "x": -15.2, "y": 4.0, "z": 22.1 },
+      { "x": -5.0, "y": 4.0, "z": 10.5 },
+      { "x": 12.4, "y": 4.5, "z": -2.3 }
+    ]
+  },
+  {
+    "tool": "ROOM",
+    "material": "Limestone",
+    "height": 4.0,
+    "width": 0.35,
+    "points": [
+      { "x": -7.0, "y": 4.0, "z": 12.0 },
+      { "x": -3.0, "y": 4.0, "z": 12.0 },
+      { "x": -3.0, "y": 4.0, "z": 8.0 },
+      { "x": -7.0, "y": 4.0, "z": 8.0 }
+    ]
+  }
+]
+```
+
+Each command creates semantic `SketchEntity` records and one undo batch per
+bot/user intent. Roads are stored as semantic freehand curves with CAD
+metadata, rooms create both a shell face and a room entity, and targeted
+`PUSH_PULL` / `OPENING` commands operate against a semantic face id.
 
 ## Important Remaining Gaps
 
@@ -49,8 +89,10 @@ handoff unless a later task explicitly needs a reproducible save.
 - The builder still needs stronger endpoint/midpoint/face-center inference for
   all drafting tools, not only rectangle/pencil and Push/Pull.
 - The next major architecture step should be a lightweight B-Rep/vector layer
-  over the voxel rasterizer so Pencil, Rectangle, Push/Pull, Opening, Room, and
-  bot CAD commands can share one deterministic modeling model.
+  over the voxel rasterizer plus a voxel-to-`SketchId` link index. That will let
+  Pencil, Rectangle, Push/Pull, Opening, Room, and bot CAD commands share one
+  deterministic modeling model and let runtime picking return semantic
+  `HitRecord`s.
 - Startup can still inherit huge generated save/edit/bot state locally. Keep
   source commits separate from generated `saves/` unless deliberately testing a
   specific world.

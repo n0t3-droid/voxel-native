@@ -352,6 +352,196 @@ pub struct SketchScene {
     pub visible_tags: BTreeMap<SketchId, bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SketchCadTool {
+    #[serde(alias = "LINE")]
+    Pencil,
+    #[serde(alias = "RECT")]
+    Rectangle,
+    Circle,
+    Polygon,
+    Arc,
+    Freehand,
+    #[serde(alias = "PUSH", alias = "PUSH_PULL")]
+    PushPull,
+    Opening,
+    Room,
+    Road,
+    #[serde(alias = "CITY_AREA")]
+    BotArea,
+}
+
+impl SketchCadTool {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pencil => "PENCIL",
+            Self::Rectangle => "RECTANGLE",
+            Self::Circle => "CIRCLE",
+            Self::Polygon => "POLYGON",
+            Self::Arc => "ARC",
+            Self::Freehand => "FREEHAND",
+            Self::PushPull => "PUSH_PULL",
+            Self::Opening => "OPENING",
+            Self::Room => "ROOM",
+            Self::Road => "ROAD",
+            Self::BotArea => "BOT_AREA",
+        }
+    }
+
+    pub const fn default_label(self) -> &'static str {
+        match self {
+            Self::Pencil => "CAD pencil",
+            Self::Rectangle => "CAD rectangle",
+            Self::Circle => "CAD circle",
+            Self::Polygon => "CAD polygon",
+            Self::Arc => "CAD arc",
+            Self::Freehand => "CAD freehand",
+            Self::PushPull => "CAD push/pull",
+            Self::Opening => "CAD opening",
+            Self::Room => "CAD room",
+            Self::Road => "CAD road",
+            Self::BotArea => "CAD bot area",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SketchCadPoint {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl From<Vec3> for SketchCadPoint {
+    fn from(value: Vec3) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            z: value.z,
+        }
+    }
+}
+
+impl From<SketchCadPoint> for Vec3 {
+    fn from(value: SketchCadPoint) -> Self {
+        Self::new(value.x, value.y, value.z)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchCadCommand {
+    pub tool: SketchCadTool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segments: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sides: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep_radians: Option<f32>,
+    #[serde(default)]
+    pub points: Vec<SketchCadPoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl SketchCadCommand {
+    pub fn new(tool: SketchCadTool) -> Self {
+        Self {
+            tool,
+            material: None,
+            width: None,
+            height: None,
+            depth: None,
+            target: None,
+            segments: None,
+            sides: None,
+            sweep_radians: None,
+            points: Vec::new(),
+            label: None,
+        }
+    }
+
+    pub fn with_material(mut self, material: impl Into<String>) -> Self {
+        self.material = Some(material.into());
+        self
+    }
+
+    pub fn with_width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self
+    }
+
+    pub fn with_height(mut self, height: f32) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    pub fn with_depth(mut self, depth: f32) -> Self {
+        self.depth = Some(depth);
+        self
+    }
+
+    pub fn with_target(mut self, target: SketchId) -> Self {
+        self.target = Some(target.raw());
+        self
+    }
+
+    pub fn with_segments(mut self, segments: usize) -> Self {
+        self.segments = Some(segments);
+        self
+    }
+
+    pub fn with_sides(mut self, sides: usize) -> Self {
+        self.sides = Some(sides);
+        self
+    }
+
+    pub fn with_sweep_radians(mut self, sweep_radians: f32) -> Self {
+        self.sweep_radians = Some(sweep_radians);
+        self
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn with_points(mut self, points: impl IntoIterator<Item = Vec3>) -> Self {
+        self.points = points.into_iter().map(SketchCadPoint::from).collect();
+        self
+    }
+
+    fn points_vec3(&self) -> Vec<Vec3> {
+        self.points.iter().copied().map(Vec3::from).collect()
+    }
+
+    fn label_or_default(&self) -> String {
+        self.label
+            .clone()
+            .unwrap_or_else(|| self.tool.default_label().to_string())
+    }
+
+    fn target_id(&self) -> Option<SketchId> {
+        self.target.map(SketchId)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchCadCommandResult {
+    pub label: String,
+    pub entities: Vec<SketchId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SketchDocumentSnapshot {
     pub version: u32,
@@ -612,6 +802,7 @@ pub enum SketchModelError {
     UnknownStyle(SketchId),
     UnknownScene(SketchId),
     NotComponentInstance(SketchId),
+    InvalidCadCommand(&'static str),
 }
 
 impl fmt::Display for SketchModelError {
@@ -629,6 +820,7 @@ impl fmt::Display for SketchModelError {
             Self::NotComponentInstance(id) => {
                 write!(f, "entity {} is not a component instance", id.raw())
             }
+            Self::InvalidCadCommand(reason) => write!(f, "invalid CAD command: {reason}"),
         }
     }
 }
@@ -1126,6 +1318,330 @@ impl SketchDocument {
             .map(String::as_str))
     }
 
+    pub fn material_by_name(&self, name: &str) -> Option<SketchId> {
+        self.materials
+            .iter()
+            .find(|(_, material)| material.name.eq_ignore_ascii_case(name))
+            .map(|(id, _)| *id)
+    }
+
+    pub fn execute_cad_commands(
+        &mut self,
+        context: SketchId,
+        commands: &[SketchCadCommand],
+    ) -> Result<Vec<SketchCadCommandResult>, SketchModelError> {
+        commands
+            .iter()
+            .map(|command| self.execute_cad_command(context, command))
+            .collect()
+    }
+
+    pub fn execute_cad_command(
+        &mut self,
+        context: SketchId,
+        command: &SketchCadCommand,
+    ) -> Result<SketchCadCommandResult, SketchModelError> {
+        if !self.contexts.contains_key(&context) {
+            return Err(SketchModelError::UnknownContext(context));
+        }
+
+        let label = command.label_or_default();
+        let points = command.points_vec3();
+        let mut created = Vec::new();
+        let mut result_entities = Vec::new();
+
+        match command.tool {
+            SketchCadTool::Pencil => {
+                if points.len() < 2 {
+                    return Err(SketchModelError::InvalidCadCommand(
+                        "PENCIL requires at least two points",
+                    ));
+                }
+                for segment in points.windows(2) {
+                    self.add_cad_entity(
+                        context,
+                        SketchEntityKind::Edge {
+                            a: segment[0],
+                            b: segment[1],
+                        },
+                        command,
+                        &mut created,
+                        &mut result_entities,
+                    )?;
+                }
+            }
+            SketchCadTool::Rectangle => {
+                let (vertices, normal) = cad_rectangle_face(&points)?;
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::Face { vertices, normal },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+            SketchCadTool::Circle => {
+                if points.len() < 2 {
+                    return Err(SketchModelError::InvalidCadCommand(
+                        "CIRCLE requires center and radius point",
+                    ));
+                }
+                let center = points[0];
+                let radius_vector = points[1] - center;
+                let radius = radius_vector.length().max(PLANAR_GRAPH_MIN_AREA);
+                let normal = cad_polygon_normal(&points).unwrap_or(Vec3::Y);
+                let segments = command.segments.unwrap_or(32).max(8);
+                let vertices = radial_points(center, normal, radius, segments, Some(radius_vector));
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::CircleFace {
+                        center,
+                        normal: safe_normal(normal),
+                        radius,
+                        segments,
+                        vertices,
+                    },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+            SketchCadTool::Polygon => {
+                if points.len() < 2 {
+                    return Err(SketchModelError::InvalidCadCommand(
+                        "POLYGON requires center and radius point",
+                    ));
+                }
+                let center = points[0];
+                let radius_vector = points[1] - center;
+                let radius = radius_vector.length().max(PLANAR_GRAPH_MIN_AREA);
+                let normal = cad_polygon_normal(&points).unwrap_or(Vec3::Y);
+                let sides = command.sides.unwrap_or(6).max(3);
+                let vertices = radial_points(center, normal, radius, sides, Some(radius_vector));
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::PolygonFace {
+                        center,
+                        normal: safe_normal(normal),
+                        radius,
+                        sides,
+                        vertices,
+                    },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+            SketchCadTool::Arc => {
+                if points.len() < 2 {
+                    return Err(SketchModelError::InvalidCadCommand(
+                        "ARC requires center and start point",
+                    ));
+                }
+                let center = points[0];
+                let start_direction = points[1] - center;
+                let radius = start_direction.length().max(PLANAR_GRAPH_MIN_AREA);
+                let normal = cad_polygon_normal(&points).unwrap_or(Vec3::Y);
+                let sweep_radians = command.sweep_radians.unwrap_or(std::f32::consts::FRAC_PI_2);
+                let segments = command.segments.unwrap_or(12).max(1);
+                let (axis_u, axis_v, normal) = plane_basis(normal, Some(start_direction));
+                let arc_points = (0..=segments)
+                    .map(|index| {
+                        let t = index as f32 / segments as f32;
+                        let angle = sweep_radians * t;
+                        center + (axis_u * angle.cos() + axis_v * angle.sin()) * radius
+                    })
+                    .collect();
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::ArcCurve {
+                        center,
+                        normal,
+                        radius,
+                        start_direction: axis_u,
+                        sweep_radians,
+                        points: arc_points,
+                    },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+            SketchCadTool::Freehand | SketchCadTool::Road => {
+                if points.len() < 2 {
+                    return Err(SketchModelError::InvalidCadCommand(
+                        "curve commands require at least two points",
+                    ));
+                }
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::FreehandCurve { points },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+            SketchCadTool::PushPull => {
+                let target = command
+                    .target_id()
+                    .ok_or(SketchModelError::InvalidCadCommand(
+                        "PUSH_PULL requires target face",
+                    ))?;
+                let (base_vertices, normal) = self.face_geometry(target)?;
+                let depth = command.depth.or(command.height).unwrap_or(1.0);
+                let offset = normal * depth;
+                let top_vertices: Vec<_> = base_vertices
+                    .iter()
+                    .map(|vertex| *vertex + offset)
+                    .collect();
+                let bounds = SketchBounds::from_points(
+                    base_vertices
+                        .iter()
+                        .copied()
+                        .chain(top_vertices.iter().copied()),
+                )
+                .unwrap_or(SketchBounds {
+                    min: Vec3::ZERO,
+                    max: Vec3::ZERO,
+                });
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::PushPullExtrusion {
+                        source_face: target,
+                        base_vertices,
+                        top_vertices,
+                        normal,
+                        depth,
+                        bounds,
+                    },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+            SketchCadTool::Opening => {
+                let target = command
+                    .target_id()
+                    .ok_or(SketchModelError::InvalidCadCommand(
+                        "OPENING requires target face",
+                    ))?;
+                let center = *points.first().ok_or(SketchModelError::InvalidCadCommand(
+                    "OPENING requires a center point",
+                ))?;
+                let (_, normal) = self.face_geometry(target)?;
+                let width = command
+                    .width
+                    .unwrap_or(2.0)
+                    .abs()
+                    .max(PLANAR_GRAPH_MIN_AREA);
+                let height = command
+                    .height
+                    .unwrap_or(width)
+                    .abs()
+                    .max(PLANAR_GRAPH_MIN_AREA);
+                let through_depth = command
+                    .depth
+                    .unwrap_or(1.0)
+                    .abs()
+                    .max(PLANAR_GRAPH_MIN_AREA);
+                let size = cad_opening_size(normal, width, height);
+                let bounds =
+                    SketchBounds::from_center_size(center, size).extruded(normal, through_depth);
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::Opening {
+                        host: target,
+                        center,
+                        size,
+                        normal,
+                        through_depth,
+                        bounds,
+                    },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+            SketchCadTool::Room => {
+                if points.len() < 3 {
+                    return Err(SketchModelError::InvalidCadCommand(
+                        "ROOM requires a closed polygon footprint",
+                    ));
+                }
+                let normal = cad_polygon_normal(&points).unwrap_or(Vec3::Y);
+                let shell = self.add_cad_entity(
+                    context,
+                    SketchEntityKind::Face {
+                        vertices: points.clone(),
+                        normal,
+                    },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+                let room_depth = command
+                    .height
+                    .or(command.depth)
+                    .unwrap_or(3.0)
+                    .abs()
+                    .max(PLANAR_GRAPH_MIN_AREA);
+                let wall_thickness = command
+                    .width
+                    .unwrap_or(0.35)
+                    .abs()
+                    .max(PLANAR_GRAPH_MIN_AREA);
+                let face_bounds = SketchBounds::from_points(points).unwrap_or(SketchBounds {
+                    min: Vec3::ZERO,
+                    max: Vec3::ZERO,
+                });
+                let shell_bounds = face_bounds.extruded(normal, room_depth);
+                let interior_bounds = shell_bounds.inset(wall_thickness);
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::Room {
+                        shell,
+                        shell_bounds,
+                        interior_bounds,
+                        wall_thickness,
+                    },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+            SketchCadTool::BotArea => {
+                if points.len() < 3 {
+                    return Err(SketchModelError::InvalidCadCommand(
+                        "BOT_AREA requires at least three points",
+                    ));
+                }
+                let normal = cad_polygon_normal(&points).unwrap_or(Vec3::Y);
+                self.add_cad_entity(
+                    context,
+                    SketchEntityKind::Face {
+                        vertices: points,
+                        normal,
+                    },
+                    command,
+                    &mut created,
+                    &mut result_entities,
+                )?;
+            }
+        }
+
+        if created.is_empty() {
+            return Err(SketchModelError::InvalidCadCommand(
+                "command did not create semantic entities",
+            ));
+        }
+
+        self.record_created_entities(label.clone(), created.iter().copied())?;
+        Ok(SketchCadCommandResult {
+            label,
+            entities: result_entities,
+        })
+    }
+
     pub fn add_entity_to_active(
         &mut self,
         kind: SketchEntityKind,
@@ -1157,6 +1673,67 @@ impl SketchDocument {
             .push(id);
         self.undo_generation += 1;
         Ok(id)
+    }
+
+    fn add_cad_entity(
+        &mut self,
+        context: SketchId,
+        kind: SketchEntityKind,
+        command: &SketchCadCommand,
+        created: &mut Vec<(SketchId, SketchId)>,
+        result_entities: &mut Vec<SketchId>,
+    ) -> Result<SketchId, SketchModelError> {
+        let id = self.add_entity(context, kind)?;
+        self.apply_cad_entity_metadata(id, command)?;
+        created.push((context, id));
+        result_entities.push(id);
+        Ok(id)
+    }
+
+    fn apply_cad_entity_metadata(
+        &mut self,
+        entity: SketchId,
+        command: &SketchCadCommand,
+    ) -> Result<(), SketchModelError> {
+        let material = command
+            .material
+            .as_deref()
+            .map(|name| self.ensure_material_named(name))
+            .transpose()?;
+        let entity = self
+            .entities
+            .get_mut(&entity)
+            .ok_or(SketchModelError::UnknownEntity(entity))?;
+        if let Some(material) = material {
+            entity.material = Some(material);
+        }
+
+        let attributes = entity.attributes.entry("cad".to_string()).or_default();
+        attributes.insert("tool".to_string(), command.tool.as_str().to_string());
+        attributes.insert("label".to_string(), command.label_or_default());
+        if let Some(material) = command.material.as_deref() {
+            attributes.insert("material".to_string(), material.to_string());
+        }
+        if let Some(width) = command.width {
+            attributes.insert("width".to_string(), format_cad_number(width));
+        }
+        if let Some(height) = command.height {
+            attributes.insert("height".to_string(), format_cad_number(height));
+        }
+        if let Some(depth) = command.depth {
+            attributes.insert("depth".to_string(), format_cad_number(depth));
+        }
+        if let Some(target) = command.target {
+            attributes.insert("target".to_string(), target.to_string());
+        }
+        Ok(())
+    }
+
+    fn ensure_material_named(&mut self, name: &str) -> Result<SketchId, SketchModelError> {
+        if let Some(id) = self.material_by_name(name) {
+            return Ok(id);
+        }
+        self.create_material(name.to_string(), cad_material_color(name))
     }
 
     pub fn draw_pencil_line(
@@ -2905,6 +3482,99 @@ fn radial_points(
             center + (axis_u * angle.cos() + axis_v * angle.sin()) * radius
         })
         .collect()
+}
+
+fn cad_rectangle_face(points: &[Vec3]) -> Result<(Vec<Vec3>, Vec3), SketchModelError> {
+    match points {
+        [a, b, ..] if points.len() == 2 => {
+            let delta = *b - *a;
+            if delta.length_squared() <= PLANAR_GRAPH_MIN_AREA {
+                return Err(SketchModelError::InvalidCadCommand(
+                    "RECTANGLE points must not be identical",
+                ));
+            }
+            let (axis_u, axis_v) = if delta.y.abs() > PLANAR_GRAPH_MIN_AREA
+                && delta.z.abs() <= PLANAR_GRAPH_MIN_AREA
+            {
+                (Vec3::X * delta.x, Vec3::Y * delta.y)
+            } else if delta.y.abs() > PLANAR_GRAPH_MIN_AREA
+                && delta.x.abs() <= PLANAR_GRAPH_MIN_AREA
+            {
+                (Vec3::Z * delta.z, Vec3::Y * delta.y)
+            } else {
+                (Vec3::X * delta.x, Vec3::Z * delta.z)
+            };
+            let vertices = vec![*a, *a + axis_u, *a + axis_u + axis_v, *a + axis_v];
+            let normal = safe_normal(axis_u.cross(axis_v));
+            Ok((vertices, normal))
+        }
+        _ if points.len() >= 3 => {
+            let normal = cad_polygon_normal(points).ok_or(SketchModelError::InvalidCadCommand(
+                "RECTANGLE polygon points must not be collinear",
+            ))?;
+            let vertices = if points.len() >= 4 {
+                points[..4].to_vec()
+            } else {
+                points.to_vec()
+            };
+            Ok((vertices, normal))
+        }
+        _ => Err(SketchModelError::InvalidCadCommand(
+            "RECTANGLE requires two diagonal points or a polygon",
+        )),
+    }
+}
+
+fn cad_polygon_normal(points: &[Vec3]) -> Option<Vec3> {
+    if points.len() < 3 {
+        return None;
+    }
+    let origin = points[0];
+    for index in 1..points.len().saturating_sub(1) {
+        let normal = (points[index] - origin).cross(points[index + 1] - origin);
+        if normal.length_squared() > PLANAR_GRAPH_MIN_AREA {
+            return Some(safe_normal(normal));
+        }
+    }
+    None
+}
+
+fn cad_opening_size(normal: Vec3, width: f32, height: f32) -> Vec3 {
+    let normal = safe_normal(normal);
+    if normal.y.abs() > normal.x.abs().max(normal.z.abs()) {
+        Vec3::new(width, 0.0, height)
+    } else if normal.x.abs() > normal.z.abs() {
+        Vec3::new(0.0, width, height)
+    } else {
+        Vec3::new(width, height, 0.0)
+    }
+}
+
+fn cad_material_color(name: &str) -> SketchColor {
+    match name.to_ascii_lowercase().as_str() {
+        "glowstone" | "glow_stone" | "glow" => SketchColor::rgb(255, 198, 138),
+        "limestone" | "stone" => SketchColor::rgb(210, 205, 184),
+        "glass" | "liquidglass" | "liquid_glass" => SketchColor::rgba(140, 220, 255, 170),
+        "road" | "asphalt" => SketchColor::rgb(42, 45, 52),
+        "metal" | "steel" => SketchColor::rgb(150, 160, 166),
+        "wood" => SketchColor::rgb(145, 99, 58),
+        _ => SketchColor::rgb(190, 205, 210),
+    }
+}
+
+fn format_cad_number(value: f32) -> String {
+    let rounded = value.round();
+    if (value - rounded).abs() < 1.0e-4 {
+        return (rounded as i64).to_string();
+    }
+    let mut formatted = format!("{value:.4}");
+    while formatted.contains('.') && formatted.ends_with('0') {
+        formatted.pop();
+    }
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    formatted
 }
 
 fn push_face_inference_candidates(
@@ -4849,5 +5519,167 @@ mod tests {
 
         assert_eq!(faces.len(), 2);
         assert_eq!(face_vertex_counts, vec![3, 3]);
+    }
+
+    #[test]
+    fn cad_command_protocol_executes_road_and_room_as_semantic_batches() {
+        let mut doc = SketchDocument::new();
+
+        let road = SketchCadCommand::new(SketchCadTool::Road)
+            .with_material("GlowStone")
+            .with_width(3.0)
+            .with_label("Bot road")
+            .with_points([
+                Vec3::new(-15.2, 4.0, 22.1),
+                Vec3::new(-5.0, 4.0, 10.5),
+                Vec3::new(12.4, 4.5, -2.3),
+            ]);
+        let road_result = doc
+            .execute_cad_command(doc.active_context(), &road)
+            .expect("road command should execute");
+
+        assert_eq!(road_result.label, "Bot road");
+        assert_eq!(road_result.entities.len(), 1);
+        let road_id = road_result.entities[0];
+        assert!(matches!(
+            &doc.entity(road_id).unwrap().kind,
+            SketchEntityKind::FreehandCurve { points } if points.len() == 3
+        ));
+        assert_eq!(
+            doc.entity_attribute(road_id, "cad", "tool").unwrap(),
+            Some("ROAD")
+        );
+        assert_eq!(
+            doc.entity_attribute(road_id, "cad", "width").unwrap(),
+            Some("3")
+        );
+
+        let room = SketchCadCommand::new(SketchCadTool::Room)
+            .with_material("Limestone")
+            .with_height(4.0)
+            .with_width(0.35)
+            .with_label("Bot room")
+            .with_points([
+                Vec3::new(-7.0, 4.0, 12.0),
+                Vec3::new(-3.0, 4.0, 12.0),
+                Vec3::new(-3.0, 4.0, 8.0),
+                Vec3::new(-7.0, 4.0, 8.0),
+            ]);
+        let room_result = doc
+            .execute_cad_command(doc.active_context(), &room)
+            .expect("room command should execute");
+
+        assert_eq!(room_result.label, "Bot room");
+        assert_eq!(room_result.entities.len(), 2);
+        let room_id = *room_result
+            .entities
+            .iter()
+            .find(|id| {
+                matches!(
+                    doc.entity(**id).unwrap().kind,
+                    SketchEntityKind::Room { .. }
+                )
+            })
+            .expect("room command should return room entity");
+        let SketchEntityKind::Room {
+            shell,
+            wall_thickness,
+            shell_bounds,
+            interior_bounds,
+        } = &doc.entity(room_id).unwrap().kind
+        else {
+            panic!("room entity should be semantic");
+        };
+        assert!(room_result.entities.contains(shell));
+        assert!((*wall_thickness - 0.35).abs() < f32::EPSILON);
+        assert!(interior_bounds.size().x < shell_bounds.size().x);
+        assert_eq!(
+            doc.entity_attribute(room_id, "cad", "tool").unwrap(),
+            Some("ROOM")
+        );
+
+        assert_eq!(doc.undo_count(), 2);
+        assert_eq!(doc.undo_last().unwrap().label, "Bot room");
+        assert!(doc.entity(room_id).is_none());
+        assert!(doc.entity(road_id).is_some());
+        assert_eq!(doc.undo_last().unwrap().label, "Bot road");
+        assert!(doc.entity(road_id).is_none());
+    }
+
+    #[test]
+    fn cad_command_protocol_groups_pencil_segments_into_one_undo_batch() {
+        let mut doc = SketchDocument::new();
+        let pencil = SketchCadCommand::new(SketchCadTool::Pencil)
+            .with_label("Bot pencil path")
+            .with_points([Vec3::ZERO, Vec3::X * 4.0, Vec3::new(4.0, 3.0, 0.0)]);
+
+        let result = doc
+            .execute_cad_command(doc.active_context(), &pencil)
+            .expect("pencil command should execute");
+
+        assert_eq!(result.entities.len(), 2);
+        assert!(result
+            .entities
+            .iter()
+            .all(|id| matches!(doc.entity(*id).unwrap().kind, SketchEntityKind::Edge { .. })));
+        assert_eq!(doc.undo_count(), 1);
+        assert_eq!(doc.undo_last().unwrap().entity_count, 2);
+        assert!(result.entities.iter().all(|id| doc.entity(*id).is_none()));
+    }
+
+    #[test]
+    fn cad_command_protocol_targets_pushpull_and_opening_semantics() {
+        let mut doc = SketchDocument::new();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 6.0,
+                Vec3::Z * 4.0,
+                "Wall",
+            )
+            .unwrap();
+
+        let push = SketchCadCommand::new(SketchCadTool::PushPull)
+            .with_target(face)
+            .with_depth(2.5)
+            .with_label("Bot push");
+        let push_result = doc
+            .execute_cad_command(doc.active_context(), &push)
+            .expect("push command should execute");
+        let extrusion = push_result.entities[0];
+        assert!(matches!(
+            &doc.entity(extrusion).unwrap().kind,
+            SketchEntityKind::PushPullExtrusion {
+                source_face,
+                depth,
+                ..
+            } if *source_face == face && (*depth - 2.5).abs() < f32::EPSILON
+        ));
+
+        let opening = SketchCadCommand::new(SketchCadTool::Opening)
+            .with_target(face)
+            .with_width(2.0)
+            .with_height(3.0)
+            .with_depth(0.8)
+            .with_points([Vec3::new(3.0, 0.0, 1.5)])
+            .with_label("Bot opening");
+        let opening_result = doc
+            .execute_cad_command(doc.active_context(), &opening)
+            .expect("opening command should execute");
+        assert!(matches!(
+            &doc.entity(opening_result.entities[0]).unwrap().kind,
+            SketchEntityKind::Opening {
+                host,
+                through_depth,
+                ..
+            } if *host == face && (*through_depth - 0.8).abs() < f32::EPSILON
+        ));
+
+        let bad = SketchCadCommand::new(SketchCadTool::PushPull).with_depth(1.0);
+        assert!(matches!(
+            doc.execute_cad_command(doc.active_context(), &bad),
+            Err(SketchModelError::InvalidCadCommand(_))
+        ));
     }
 }
