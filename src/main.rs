@@ -26,6 +26,7 @@ mod sculpt;
 mod selection;
 mod settings;
 mod ships;
+mod sketch_model;
 mod sky;
 mod terrain;
 mod textures;
@@ -41,6 +42,18 @@ use bevy::prelude::*;
 use bevy::render::settings::{Backends, InstanceFlags, RenderCreation, WgpuSettings};
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::render::RenderPlugin;
+use bevy::utils::Duration;
+use bevy::winit::{UpdateMode, WinitSettings};
+
+const MENU_LOW_POWER_INTERVAL: Duration = Duration::from_millis(250);
+const PAUSED_LOW_POWER_INTERVAL: Duration = Duration::from_millis(125);
+const UNFOCUSED_LOW_POWER_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopPolicy {
+    Continuous,
+    ReactiveLowPower(Duration),
+}
 
 fn main() {
     configure_render_environment();
@@ -102,6 +115,9 @@ fn main() {
             plugins
         })
         .insert_resource(ClearColor(Color::srgb(0.53, 0.80, 0.98)))
+        .insert_resource(winit_settings_for_loop_policy(loop_policy_for_game_state(
+            &menu::GameState::MainMenu,
+        )))
         // MSAA off: on integrated GPUs (e.g. Vega 8 in Ryzen 5700G)
         // 4x MSAA on HDR (Rgba16Float) buffers quadruples bandwidth and
         // cuts FPS by 30–50%. With the greedy-mesh block-aligned UVs and
@@ -109,6 +125,7 @@ fn main() {
         // back can set Msaa::Sample2 in High graphics mode.
         .insert_resource(Msaa::Off)
         .add_plugins(agent_control::AgentControlPlugin)
+        .add_plugins(sketch_model::SketchModelPlugin)
         .add_plugins(ambient::AmbientPlugin)
         .add_plugins((
             settings::SettingsPlugin,
@@ -135,8 +152,41 @@ fn main() {
         .add_plugins(toolbelt::ToolbeltPlugin)
         .add_plugins(commands::CommandDeckPlugin)
         .add_plugins(sculpt::SculptPlugin)
+        .add_systems(Update, sync_winit_loop_with_game_state)
         .add_systems(Startup, print_controls)
         .run();
+}
+
+fn loop_policy_for_game_state(state: &menu::GameState) -> LoopPolicy {
+    match state {
+        menu::GameState::MainMenu => LoopPolicy::ReactiveLowPower(MENU_LOW_POWER_INTERVAL),
+        menu::GameState::Paused => LoopPolicy::ReactiveLowPower(PAUSED_LOW_POWER_INTERVAL),
+        menu::GameState::InGame => LoopPolicy::Continuous,
+    }
+}
+
+fn winit_settings_for_loop_policy(policy: LoopPolicy) -> WinitSettings {
+    let focused_mode = match policy {
+        LoopPolicy::Continuous => UpdateMode::Continuous,
+        LoopPolicy::ReactiveLowPower(wait) => UpdateMode::reactive_low_power(wait),
+    };
+
+    WinitSettings {
+        focused_mode,
+        unfocused_mode: UpdateMode::reactive_low_power(UNFOCUSED_LOW_POWER_INTERVAL),
+    }
+}
+
+fn sync_winit_loop_with_game_state(
+    state: Res<State<menu::GameState>>,
+    mut settings: ResMut<WinitSettings>,
+) {
+    let desired = winit_settings_for_loop_policy(loop_policy_for_game_state(state.get()));
+    if settings.focused_mode != desired.focused_mode
+        || settings.unfocused_mode != desired.unfocused_mode
+    {
+        *settings = desired;
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -193,27 +243,85 @@ fn append_env_filter(name: &str, filter: &str) {
 }
 
 fn print_controls() {
-    info!("-------- Voxel-Native Controls (Minecraft-style) --------");
-    info!("  WASD         : move");
-    info!("  Space        : jump / fly up  (double-tap = toggle fly)");
-    info!("  F            : toggle fly");
-    info!("  Ctrl         : sprint");
-    info!("  W W (double) : sprint (empfohlen, da Windows Ctrl abfangen kann)");
-    info!("  Shift        : fly down / sneak");
-    info!("  1-0          : Creative Build tools (default mode)");
-    info!("  E            : open inventory");
-    info!("  F3           : Creative Build / terrain editing (weapons holstered)");
-    info!("  F7           : enter Build Live instantly");
-    info!("  F8           : arm or holster weapons explicitly");
-    info!("  Tab          : show/hide Build Studio picker");
-    info!("  Q / E        : cycle Build Studio tools while building");
-    info!("  F1 / Ctrl+P  : command deck / searchable controls");
-    info!("  H            : enter nearby shuttle cockpit (or LMB)");
-    info!("  Inventar     : Shuttle KI-Gefecht optional (Drohnen aus bis du es einschaltest)");
-    info!("  ESC          : pause menu / close overlay");
-    info!("  Shift+F3     : toggle debug overlay");
-    info!("  F2           : screenshot");
-    info!("  F5           : save world + settings");
-    info!("  LMB          : capture mouse");
-    info!("---------------------------------------------------------");
+    for line in control_lines() {
+        info!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printed_controls_do_not_advertise_old_build_function_keys() {
+        let controls = control_lines().join("\n");
+        for token in ["F1", "F3", "F7", "F8", "Tab", "1-0", "Q / E"] {
+            assert!(
+                !controls.contains(token),
+                "startup controls still advertise old key workflow: {token}"
+            );
+        }
+        assert!(controls.contains("Toolbox"));
+        assert!(controls.contains("Pencil"));
+    }
+
+    #[test]
+    fn main_menu_uses_reactive_low_power_loop_policy() {
+        assert_eq!(
+            loop_policy_for_game_state(&menu::GameState::MainMenu),
+            LoopPolicy::ReactiveLowPower(MENU_LOW_POWER_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn paused_uses_reactive_low_power_loop_policy() {
+        assert_eq!(
+            loop_policy_for_game_state(&menu::GameState::Paused),
+            LoopPolicy::ReactiveLowPower(PAUSED_LOW_POWER_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn gameplay_uses_continuous_loop_policy() {
+        assert_eq!(
+            loop_policy_for_game_state(&menu::GameState::InGame),
+            LoopPolicy::Continuous
+        );
+    }
+
+    #[test]
+    fn idle_winit_settings_ignore_raw_device_motion() {
+        let settings =
+            winit_settings_for_loop_policy(LoopPolicy::ReactiveLowPower(MENU_LOW_POWER_INTERVAL));
+
+        assert_eq!(
+            settings.focused_mode,
+            UpdateMode::reactive_low_power(MENU_LOW_POWER_INTERVAL)
+        );
+        assert_eq!(
+            settings.unfocused_mode,
+            UpdateMode::reactive_low_power(UNFOCUSED_LOW_POWER_INTERVAL)
+        );
+    }
+}
+
+fn control_lines() -> Vec<&'static str> {
+    vec![
+        "-------- Voxel-Native Controls (Sketch Editor) --------",
+        "  WASD         : move",
+        "  Space        : jump / fly up  (double-tap = toggle fly)",
+        "  F            : toggle fly",
+        "  Ctrl         : sprint",
+        "  W W (double) : sprint (recommended when Windows intercepts Ctrl)",
+        "  Shift        : fly down / sneak",
+        "  Toolbox      : select Pencil, Rectangle, Push/Pull, Room, Opening, Road, Bot Area",
+        "  Pencil       : click endpoint to endpoint; lines chain from the last point",
+        "  Rectangle    : click two snapped corners for floors, roofs, walls, windows, doors",
+        "  Push/Pull    : click a face, move to depth, click again to commit",
+        "  RMB          : orbit while drawing without deleting blocks",
+        "  LMB          : draw, select, pull, or commit the active toolbox action",
+        "  Save         : use the editor/menu save button",
+        "  ESC          : pause menu / close overlay",
+        "-------------------------------------------------------",
+    ]
 }

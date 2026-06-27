@@ -21,7 +21,7 @@ use crate::mode::ModeContext;
 use crate::player::Player;
 use crate::player::PlayerProgressScratch;
 use crate::settings::{self, ActiveWorld, WorldMeta, WorldSettings};
-use crate::theme::{command_frame, draw_neural_backdrop, metric_pill, CYAN, TEXT};
+use crate::theme::{command_frame, metric_pill, CYAN, TEXT};
 use crate::world::{ChunkStreamer, VoxelWorld};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -195,11 +195,10 @@ fn draw_main_menu(
 ) {
     let ctx = contexts.ctx_mut();
     let screen = ctx.screen_rect();
-    // Drive animations from egui's internal time (wall-clock seconds).
+    // Keep the first screen cheap: no forced repaint loop while the user is
+    // reading or deciding which world to open.
     let t_anim = ctx.input(|i| i.time) as f32;
-    ctx.request_repaint(); // keep backdrop animated
-
-    draw_neural_backdrop(ctx, settings.theme, t_anim);
+    draw_stable_start_backdrop(ctx, settings.theme);
     let painter = ctx.layer_painter(egui::LayerId::background());
     let theme = settings.theme;
     let primary = theme.color.primary();
@@ -229,7 +228,7 @@ fn draw_main_menu(
     painter.text(
         egui::pos2(title_pos.x, title_pos.y + 50.0),
         egui::Align2::CENTER_CENTER,
-        "// COMMAND DECK // RUST + BEVY + WGPU // ZERO BROWSER TAX",
+        "Sketch-first voxel engine // fast worlds // calm startup",
         egui::FontId::monospace(15.0),
         dim,
     );
@@ -277,22 +276,22 @@ fn draw_main_menu(
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
-                        egui::RichText::new("LIQUID GLASS ENGINE")
+                        egui::RichText::new("SKETCH ENGINE")
                             .size(23.0)
                             .color(primary)
                             .strong()
                             .monospace(),
                     );
                     ui.label(
-                        egui::RichText::new("Starten, fliegen, bauen - mit smarter Konfiguration.")
+                        egui::RichText::new("Continue a world or start a clean build session.")
                             .size(11.0)
                             .color(dim)
                             .monospace(),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    metric_pill(ui, theme, "WORLDS", &worlds.len().to_string());
-                    metric_pill(ui, theme, "SEED", &format!("{:08X}", settings.seed));
+                    metric_pill(ui, theme, "SAVED", &worlds.len().to_string());
+                    metric_pill(ui, theme, "READY", "EDITOR");
                 });
             });
             crate::ui_kit::compact_separator(ui, theme);
@@ -305,7 +304,7 @@ fn draw_main_menu(
                             ui,
                             Icon::Resume,
                             "Continue",
-                            &format!("{}  seed {}", meta.name, meta.seed),
+                            &format!("{}  Sketch Editor ready", meta.name),
                             false,
                             theme,
                         )
@@ -337,23 +336,19 @@ fn draw_main_menu(
 
             crate::ui_kit::surface_panel(ui, theme, |ui| {
                 ui.horizontal(|ui| {
-                    crate::ui_kit::status_chip(ui, Icon::New, "NEW WORLD", "seed + name", theme);
+                    crate::ui_kit::status_chip(ui, Icon::New, "NEW WORLD", "instant start", theme);
                     ui.add(
                         egui::TextEdit::singleline(&mut form.name)
                             .hint_text(auto_world_name(&worlds))
-                            .desired_width(190.0),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.seed_text)
-                            .hint_text("Seed")
-                            .desired_width(86.0),
+                            .desired_width(260.0),
                     );
                     if crate::ui_kit::icon_square(ui, Icon::Seed, false, theme, "Random seed")
                         .clicked()
                     {
                         form.seed_text = rand_seed().to_string();
                     }
-                    if crate::ui_kit::icon_action(ui, Icon::Play, "Start", false, theme).clicked() {
+                    if crate::ui_kit::icon_action(ui, Icon::Play, "Create", false, theme).clicked()
+                    {
                         let seed = form
                             .seed_text
                             .parse::<u32>()
@@ -377,7 +372,13 @@ fn draw_main_menu(
             });
 
             ui.add_space(10.0);
-            crate::ui_kit::status_chip(ui, Icon::Open, "WORLDS", &worlds.len().to_string(), theme);
+            crate::ui_kit::status_chip(
+                ui,
+                Icon::Open,
+                "SAVED WORLDS",
+                &worlds.len().to_string(),
+                theme,
+            );
             if worlds.is_empty() {
                 ui.label(
                     egui::RichText::new("Noch keine Welten gespeichert.")
@@ -401,8 +402,8 @@ fn draw_main_menu(
                                     crate::ui_kit::status_chip(
                                         ui,
                                         Icon::Seed,
-                                        "SEED",
-                                        &meta.seed.to_string(),
+                                        "READY",
+                                        "Build",
                                         theme,
                                     );
                                     ui.with_layout(
@@ -472,6 +473,62 @@ fn draw_main_menu(
             });
             ui.add_space(4.0);
         });
+}
+
+fn draw_stable_start_backdrop(ctx: &egui::Context, theme: crate::theme::ThemeSettings) {
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let primary = theme.color.primary();
+    let dim = theme.color.dim();
+
+    painter.rect_filled(screen, 0.0, egui::Color32::from_rgb(8, 13, 18));
+
+    let horizon = screen.top() + screen.height() * 0.62;
+    let top = egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, horizon));
+    painter.rect_filled(top, 0.0, egui::Color32::from_rgb(12, 22, 30));
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(screen.left(), horizon), screen.max),
+        0.0,
+        egui::Color32::from_rgb(5, 8, 12),
+    );
+
+    for i in 0..6 {
+        let y = horizon + i as f32 * 42.0;
+        let alpha = (70_i32 - i * 9).max(18) as u8;
+        painter.line_segment(
+            [egui::pos2(screen.left(), y), egui::pos2(screen.right(), y)],
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(primary.r(), primary.g(), primary.b(), alpha),
+            ),
+        );
+    }
+
+    for i in -5..=5 {
+        let x = screen.center().x + i as f32 * screen.width() / 10.0;
+        painter.line_segment(
+            [
+                egui::pos2(screen.center().x, horizon),
+                egui::pos2(x, screen.bottom()),
+            ],
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(dim.r(), dim.g(), dim.b(), 40),
+            ),
+        );
+    }
+
+    let vignette = egui::Color32::from_black_alpha(96);
+    painter.rect_filled(
+        egui::Rect::from_min_max(screen.min, egui::pos2(screen.left() + 120.0, screen.max.y)),
+        0.0,
+        vignette,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(screen.right() - 120.0, screen.min.y), screen.max),
+        0.0,
+        vignette,
+    );
 }
 
 // ============================ Pause / Inventory ===========================
@@ -557,6 +614,18 @@ fn draw_inventory_menu(
         &mut mode,
         &mut brain,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn main_menu_does_not_force_continuous_repaint() {
+        let source = include_str!("menu.rs");
+        assert!(
+            !source.contains(concat!("request_", "repaint();")),
+            "main menu should not force an every-frame repaint; startup/menu must idle cheaply"
+        );
+    }
 }
 
 fn draw_pause_main(

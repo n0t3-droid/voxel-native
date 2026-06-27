@@ -356,7 +356,7 @@ fn update_stats_text(
     buf.clear();
     let _ = write!(
         buf,
-        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nSKETCH LMB draw face  RMB cut  G push/pull  Tab tools  F1 deck  ESC pause",
+        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nEDITOR LMB draw/open  RMB orbit  toolbox workflows  ESC pause",
         governor.profile.label(),
         governor.intent.label(),
         governor.quality.label(),
@@ -499,7 +499,7 @@ fn draw_neon_combat_hud(
     } else if biome.is_neon_showcase() {
         "Neon-Biom  |  Bloom+Sat aktiv — Spitzen leuchten stärker"
     } else {
-        "F5 Speichern  |  F1 Command Deck"
+        "Save from menu  |  Command Deck available"
     };
     if profile != HudProfile::Focused {
         hud_text(
@@ -814,26 +814,22 @@ fn workflow_steps_for_profile(profile: HudProfile) -> Vec<WorkflowStep> {
             icon: Icon::Move,
         },
         WorkflowStep {
-            label: "BUILD",
+            label: "EDITOR",
             key: "LMB/RMB",
             icon: Icon::ModeBuild,
         },
-        WorkflowStep {
-            label: "CITY",
-            key: "6-9",
-            icon: Icon::City,
-        },
-        WorkflowStep {
-            label: "BOTS",
-            key: "F1",
-            icon: Icon::Wand,
-        },
-        WorkflowStep {
-            label: "SAVE",
-            key: "F5",
-            icon: Icon::Save,
-        },
     ]
+}
+
+fn workflow_steps_for_context(
+    profile: HudProfile,
+    mode: Option<&crate::mode::ModeContext>,
+) -> Vec<WorkflowStep> {
+    if mode.is_some_and(|mode| mode.is_build()) {
+        Vec::new()
+    } else {
+        workflow_steps_for_profile(profile)
+    }
 }
 
 fn active_workflow_label(mode: Option<&crate::mode::ModeContext>) -> &'static str {
@@ -869,7 +865,8 @@ fn draw_workflow_rail(
     if *state.get() != crate::menu::GameState::InGame {
         return;
     }
-    let steps = workflow_steps_for_profile(settings.hud_profile);
+    let mode_ref = mode.as_deref();
+    let steps = workflow_steps_for_context(settings.hud_profile, mode_ref);
     if steps.is_empty() {
         return;
     }
@@ -880,7 +877,6 @@ fn draw_workflow_rail(
         egui::Id::new("workflow_rail"),
     ));
     let colors = settings.theme.semantic();
-    let mode_ref = mode.as_deref();
     let active = active_workflow_label(mode_ref);
     let rail_w = (steps.len() as f32 * 88.0 + 20.0).min(screen.width() - 44.0);
     let rail_y = if mode_ref.map(|m| m.is_build()).unwrap_or(false) {
@@ -962,12 +958,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guided_workflow_exposes_the_core_engine_loop() {
+    fn guided_workflow_no_longer_exposes_function_key_workflow() {
         let steps = workflow_steps_for_profile(HudProfile::Guided);
         let labels: Vec<&str> = steps.iter().map(|step| step.label).collect();
-        assert_eq!(labels, vec!["MOVE", "BUILD", "CITY", "BOTS", "SAVE"]);
+        assert_eq!(labels, vec!["MOVE", "EDITOR"]);
         assert!(steps.iter().any(|step| step.key == "LMB/RMB"));
-        assert!(steps.iter().any(|step| step.key == "F1"));
+        assert!(steps.iter().all(|step| {
+            !matches!(step.key, "F1" | "F5" | "F7" | "F8" | "6-9") && !step.key.contains('F')
+        }));
+    }
+
+    #[test]
+    fn build_editor_mode_hides_duplicate_workflow_rail() {
+        let mut mode = crate::mode::ModeContext::default();
+        mode.mode = crate::mode::ActiveMode::BuildLive {
+            tool: ToolbeltTool::DrawRect,
+        };
+
+        assert!(workflow_steps_for_context(HudProfile::Guided, Some(&mode)).is_empty());
     }
 
     #[test]
@@ -1076,7 +1084,7 @@ pub struct HintBanner;
 fn spawn_hint(mut commands: Commands) {
     commands.spawn((
         TextBundle::from_section(
-            "LMB START -> ENDPOINT: BUILD  //  RMB: CUT  //  TAB: TOOLS",
+            "CLICK START -> ENDPOINT -> CLICK FINISH  //  RMB ORBIT  //  TOOLBOX WORKFLOWS",
             TextStyle {
                 font_size: 16.0,
                 color: Color::srgba(0.72, 1.0, 0.80, 0.98),

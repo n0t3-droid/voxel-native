@@ -378,6 +378,7 @@ pub fn command_frame(theme: ThemeSettings) -> egui::Frame {
 /// Animated full-screen hacker backdrop: gradient, perspective grid,
 /// scanlines and deterministic data rain. No textures, no allocations
 /// outside the small formatted data glyph strings.
+#[allow(dead_code)]
 pub fn draw_neural_backdrop(ctx: &egui::Context, theme: ThemeSettings, time: f32) {
     let screen = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::background());

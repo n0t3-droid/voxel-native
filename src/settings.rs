@@ -506,13 +506,13 @@ impl WorldSettings {
             WorldModeCard::FastLaptop => {
                 self.neurocore_enabled = true;
                 self.runtime_profile = RuntimeProfile::LowSpec;
-                self.render_distance = 24;
+                self.render_distance = 22;
                 self.vertical_chunks = 6;
-                self.chunks_per_frame = 18;
-                self.meshes_per_frame = 16;
-                self.mesh_applies_per_frame = 8;
-                self.max_in_flight_terrain = 96;
-                self.max_in_flight_meshes = 80;
+                self.chunks_per_frame = 5;
+                self.meshes_per_frame = 5;
+                self.mesh_applies_per_frame = 3;
+                self.max_in_flight_terrain = 56;
+                self.max_in_flight_meshes = 40;
                 self.target_fps = 60.0;
                 self.graphics = GraphicsMode::Fast;
             }
@@ -1130,5 +1130,19 @@ mod tests {
         assert_eq!(settings.runtime_profile, RuntimeProfile::Cinematic);
         assert!(settings.render_distance >= 56);
         assert!(settings.mesh_applies_per_frame <= 8);
+    }
+
+    #[test]
+    fn fast_laptop_preset_prefers_frame_pacing_over_chunk_flooding() {
+        let mut settings = WorldSettings::default();
+        settings.apply_world_mode_card(WorldModeCard::FastLaptop);
+
+        assert!(settings.render_distance <= 24);
+        assert!(settings.vertical_chunks <= 6);
+        assert!(settings.chunks_per_frame <= 6);
+        assert!(settings.meshes_per_frame <= 6);
+        assert!(settings.mesh_applies_per_frame <= 4);
+        assert!(settings.max_in_flight_terrain <= 64);
+        assert!(settings.max_in_flight_meshes <= 48);
     }
 }

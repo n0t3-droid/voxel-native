@@ -2,10 +2,11 @@
 //!
 //! This is the "I draw a square and it becomes blocks" tool the builder
 //! needs before the heavier transform-gizmo phases are worth anything:
-//! hold LMB on a face, drag the crosshair to a block endpoint on the locked
-//! plane, release to fill it with the active builder block. In the default
-//! sketch builder, RMB is reserved for camera orbit; Ctrl+LMB cuts an
-//! opening and Shift+LMB clears room depth. Esc cancels the active preview.
+//! click a face to set a snapped start point, move the cursor to preview the
+//! endpoint on the locked plane, then click again to commit. In the default
+//! sketch builder, RMB is reserved for camera orbit; dedicated toolbox
+//! workflows handle openings and room hollowing without forcing key chords.
+//! Esc cancels the active preview.
 //! Undo/redo uses the shared builder history.
 
 use bevy::input::mouse::MouseMotion;
@@ -28,6 +29,7 @@ const RECT_FILL_OWNER: &str = "Sketch Draw";
 const RECT_AXIS_JITTER: i32 = 1;
 const RECT_AXIS_RATIO: f32 = 3.0;
 const RECT_EQUAL_LENGTH_TOLERANCE: i32 = 2;
+const RECT_FACE_SNAP_RADIUS: f32 = 0.24;
 
 #[derive(Resource, Default)]
 pub struct RectDrawState {
@@ -43,7 +45,10 @@ pub struct RectDrawState {
     button: RectDragButton,
     smart_gesture: bool,
     room_cut: bool,
+    pencil_line: bool,
     inference: RectEndpointInference,
+    snap_kind: Option<RectFaceSnapKind>,
+    tool_generation: u64,
     reference_span: IVec2,
     voxel: Voxel,
     status_cells: usize,
@@ -65,6 +70,13 @@ enum RectEndpointInference {
     ReferenceLength,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RectFaceSnapKind {
+    Endpoint,
+    Midpoint,
+    FaceCenter,
+}
+
 impl RectEndpointInference {
     fn status_suffix(self) -> &'static str {
         match self {
@@ -74,6 +86,39 @@ impl RectEndpointInference {
             Self::ReferenceLength => " Reference length snap.",
         }
     }
+}
+
+impl RectFaceSnapKind {
+    fn status_suffix(self) -> &'static str {
+        match rect_face_snap_inference_kind(self) {
+            crate::sketch_model::InferenceKind::Endpoint => " Endpoint snap.",
+            crate::sketch_model::InferenceKind::Midpoint => " Midpoint snap.",
+            crate::sketch_model::InferenceKind::FaceCenter => " Face center snap.",
+            _ => " Snap.",
+        }
+    }
+}
+
+fn rect_face_snap_inference_kind(
+    snap_kind: RectFaceSnapKind,
+) -> crate::sketch_model::InferenceKind {
+    match snap_kind {
+        RectFaceSnapKind::Endpoint => crate::sketch_model::InferenceKind::Endpoint,
+        RectFaceSnapKind::Midpoint => crate::sketch_model::InferenceKind::Midpoint,
+        RectFaceSnapKind::FaceCenter => crate::sketch_model::InferenceKind::FaceCenter,
+    }
+}
+
+fn rect_status_suffix(
+    snap_kind: Option<RectFaceSnapKind>,
+    inference: RectEndpointInference,
+) -> String {
+    let mut suffix = String::new();
+    if let Some(snap_kind) = snap_kind {
+        suffix.push_str(snap_kind.status_suffix());
+    }
+    suffix.push_str(inference.status_suffix());
+    suffix
 }
 
 impl RectDrawAction {
@@ -129,6 +174,7 @@ fn rect_start_intent(
     right_just: bool,
     ctrl: bool,
     shift: bool,
+    opening_workflow: bool,
     room_workflow: bool,
 ) -> RectStartIntent {
     let smart_tool = matches!(
@@ -136,8 +182,10 @@ fn rect_start_intent(
         ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
     );
     let sketch_tool = active_tool == ToolbeltTool::DrawRect;
-    let room_cut = sketch_tool && left_just && !ctrl && (shift || room_workflow);
-    let modifier_cut = sketch_tool && left_just && (ctrl || shift || room_workflow);
+    let room_cut =
+        sketch_tool && left_just && !ctrl && !opening_workflow && (shift || room_workflow);
+    let opening_cut = sketch_tool && left_just && opening_workflow;
+    let modifier_cut = sketch_tool && left_just && (ctrl || shift || room_workflow || opening_cut);
     let brush_cut = active_tool == ToolbeltTool::BrushCut && left_just;
     let smart_right_cut = smart_tool && right_just;
     let cut = modifier_cut || brush_cut || smart_right_cut;
@@ -157,13 +205,10 @@ fn rect_start_intent(
 
 fn rect_action_for_start_intent(
     intent: RectStartIntent,
-    active_tool: ToolbeltTool,
-    normal: IVec3,
+    _active_tool: ToolbeltTool,
+    _normal: IVec3,
 ) -> RectDrawAction {
     if intent.cut {
-        return RectDrawAction::Cut;
-    }
-    if active_tool == ToolbeltTool::DrawRect && intent.fill && normal.y == 0 {
         return RectDrawAction::Cut;
     }
     RectDrawAction::Fill
@@ -179,6 +224,33 @@ fn shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
 
 fn ctrl_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
+}
+
+fn sketch_tool_uses_click_finish(active_tool: ToolbeltTool, smart_tool: bool) -> bool {
+    !smart_tool && matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
+}
+
+fn rect_should_commit_on_start_intent(intent: RectStartIntent, draw: &RectDrawState) -> bool {
+    draw.active
+        && draw.click_finish
+        && matches!(intent.button, RectDragButton::Left)
+        && (intent.fill || intent.cut)
+}
+
+fn rect_should_commit_on_release(draw: &RectDrawState) -> bool {
+    draw.active && !draw.click_finish
+}
+
+fn rect_should_cancel_for_tool_selection(draw: &RectDrawState, current_generation: u64) -> bool {
+    draw.active && draw.tool_generation != current_generation
+}
+
+fn rect_should_ignore_world_click_for_editor_ui(
+    pointer_over_editor_ui: bool,
+    left_just: bool,
+    right_just: bool,
+) -> bool {
+    pointer_over_editor_ui && (left_just || right_just)
 }
 
 fn draw_rect_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, draw: &RectDrawState) -> bool {
@@ -199,10 +271,13 @@ pub fn rect_draw_input(
     mut motion_evr: EventReader<MouseMotion>,
     mode: Res<ModeContext>,
     mut toolbelt: ResMut<ToolbeltState>,
+    ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
     mut draw: ResMut<RectDrawState>,
     mut gesture_lock: ResMut<BuildGestureLock>,
     mut world: ResMut<VoxelWorld>,
     mut history: ResMut<BuilderHistory>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
     builder: Res<BuilderState>,
     windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
     cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
@@ -211,8 +286,27 @@ pub fn rect_draw_input(
         if draw.active {
             draw.active = false;
             draw.click_finish = false;
+            draw.pencil_line = false;
+            draw.snap_kind = None;
+            tool_controller
+                .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolSwitch);
         }
         gesture_lock.release(RECT_FILL_OWNER);
+        motion_evr.clear();
+        return;
+    }
+
+    if rect_should_cancel_for_tool_selection(&draw, toolbelt.selection_generation()) {
+        draw.active = false;
+        draw.click_finish = false;
+        draw.pencil_line = false;
+        draw.snap_kind = None;
+        tool_controller
+            .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolboxClick);
+        gesture_lock.release(RECT_FILL_OWNER);
+        toolbelt.status =
+            "Sketch operation cancelled. Toolbox switched tools; click a new snapped start point."
+                .into();
         motion_evr.clear();
         return;
     }
@@ -222,12 +316,26 @@ pub fn rect_draw_input(
         active_tool,
         ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
     );
+    if rect_should_ignore_world_click_for_editor_ui(
+        ui_focus
+            .as_deref()
+            .is_some_and(|focus| focus.pointer_over_editor_ui),
+        mouse.just_pressed(MouseButton::Left),
+        mouse.just_pressed(MouseButton::Right),
+    ) {
+        motion_evr.clear();
+        return;
+    }
 
     if keys.just_pressed(KeyCode::Escape) && draw.active {
         draw.active = false;
         draw.click_finish = false;
+        draw.pencil_line = false;
+        draw.snap_kind = None;
+        tool_controller.cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
         gesture_lock.release(RECT_FILL_OWNER);
-        toolbelt.status = "Smart Build cancelled. LMB starts a new snapped build point.".into();
+        toolbelt.status =
+            "Smart Build cancelled. Click a snapped start point to draw again.".into();
         motion_evr.clear();
         return;
     }
@@ -260,17 +368,26 @@ pub fn rect_draw_input(
         return;
     };
 
+    let pencil_workflow = toolbelt.pencil_workflow_active();
     let start_intent = rect_start_intent(
         active_tool,
         mouse.just_pressed(MouseButton::Left),
         mouse.just_pressed(MouseButton::Right),
         ctrl_pressed(&keys),
         shift_pressed(&keys),
+        toolbelt.opening_workflow_active(),
         toolbelt.room_workflow_active(),
     );
 
-    if start_intent.fill && draw.active && draw.click_finish {
-        commit_rect_fill(&mut draw, &mut world, &mut history, &mut toolbelt);
+    if rect_should_commit_on_start_intent(start_intent, &draw) {
+        commit_rect_fill(
+            &mut draw,
+            &mut world,
+            &mut history,
+            &mut toolbelt,
+            &mut tool_controller,
+            &mut sketch_doc,
+        );
         gesture_lock.release(RECT_FILL_OWNER);
         motion_evr.clear();
         return;
@@ -289,9 +406,15 @@ pub fn rect_draw_input(
             motion_evr.clear();
             return;
         };
-        let action = rect_action_for_start_intent(start_intent, active_tool, normal);
-        let auto_opening =
-            action == RectDrawAction::Cut && start_intent.fill && !start_intent.cut && !smart_tool;
+        let pencil_line = active_tool == ToolbeltTool::DrawRect
+            && pencil_workflow
+            && start_intent.fill
+            && !start_intent.cut;
+        let action = if pencil_line {
+            RectDrawAction::Fill
+        } else {
+            rect_action_for_start_intent(start_intent, active_tool, normal)
+        };
         draw.active = true;
         let start = rect_start_cell_from_ray(action, hit, prev, axis_u, axis_v, origin, dir);
         draw.start = start;
@@ -304,29 +427,34 @@ pub fn rect_draw_input(
         draw.button = start_intent.button;
         draw.smart_gesture = smart_tool;
         draw.room_cut = action == RectDrawAction::Cut && start_intent.room_cut;
+        draw.pencil_line = pencil_line;
         draw.inference = RectEndpointInference::None;
+        draw.snap_kind = ray_face_hit_point(origin, dir, hit, prev)
+            .and_then(|face_hit| classify_rect_face_snap(face_hit, hit, prev));
+        draw.tool_generation = toolbelt.selection_generation();
         draw.voxel = if action == RectDrawAction::Cut {
             AIR
         } else {
             builder.block.into()
         };
         draw.status_cells = 1;
-        draw.click_finish = false;
+        draw.click_finish = sketch_tool_uses_click_finish(active_tool, smart_tool);
         gesture_lock.lock(RECT_FILL_OWNER);
+        tool_controller.begin_transaction(rect_preview_transaction_label(&draw));
         toolbelt.status = if smart_tool {
             format!(
                 "{} start set. Drag to any block endpoint; release to {} the exact snapped length.",
                 action.label(),
                 action.preview_verb()
             )
+        } else if draw.pencil_line {
+            "Pencil start set. Move to a snapped endpoint on this face, click again to draw the voxel line. RMB orbits.".into()
         } else if draw.room_cut {
-            "Smart Room Hollow start set. Drag the wall/floor face; release clears a livable volume behind it.".into()
-        } else if auto_opening {
-            "Sketch Opening start set. Drag a door/window rectangle; release cuts through the wall. RMB orbits.".into()
+            "Room start set. Move to size the wall/floor face, click again to hollow a livable volume.".into()
         } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
-            "Quick Fill start set. Keep Alt held while starting; drag to fill, LMB commits.".into()
+            "Push/Pull start set. Move on the locked face plane, click again to commit.".into()
         } else {
-            "Sketch Draw start set. Drag endpoint, release to build. Hold RMB to orbit; Ctrl+LMB cuts, Shift+LMB hollows.".into()
+            "Rectangle start set. Move to a snapped endpoint, click again to build the face. Use Opening for doors/windows. RMB orbits.".into()
         };
     }
 
@@ -337,6 +465,8 @@ pub fn rect_draw_input(
                 draw.motion_len += ev.delta.length();
             }
             if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
+                draw.snap_kind = ray_face_hit_point(origin, dir, hit, prev)
+                    .and_then(|face_hit| classify_rect_face_snap(face_hit, hit, prev));
                 let endpoint = snap_rect_endpoint_to_locked_plane_from_ray(
                     draw.start,
                     draw.normal,
@@ -373,50 +503,83 @@ pub fn rect_draw_input(
                 );
                 draw.current = endpoint;
                 draw.inference = inference;
+                draw.snap_kind = None;
             }
-            let raw_cells = rect_cell_count(draw.start, draw.current, draw.normal);
+            let raw_cells = draw_preview_cell_count(&draw);
             draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
-            let action_label = if draw.room_cut {
+            let status_suffix = rect_status_suffix(draw.snap_kind, draw.inference);
+            let action_label = if draw.pencil_line {
+                "Pencil"
+            } else if draw.room_cut {
                 "Smart Room Hollow"
             } else {
                 draw.action.label()
             };
             toolbelt.status = if raw_cells > DRAW_CELL_CAP {
                 format!(
-                    "{} preview capped: {} of {} cells.{} Release commits, Esc cancels.",
+                    "{} preview capped: {} of {} snapped cells.{} {}",
                     action_label,
                     DRAW_CELL_CAP,
                     raw_cells,
-                    draw.inference.status_suffix()
+                    status_suffix,
+                    rect_commit_hint(&draw)
                 )
             } else {
                 format!(
-                    "{} preview: {} cells snapped to endpoint.{} Release commits, Esc cancels.",
+                    "{} preview: {} snapped cells.{} {}",
                     action_label,
                     draw.status_cells,
-                    draw.inference.status_suffix()
+                    status_suffix,
+                    rect_commit_hint(&draw)
                 )
             };
         } else {
             motion_evr.clear();
             toolbelt.status =
-                "Sketch Draw orbiting: endpoint held. Release RMB to continue snapping, LMB release commits."
+                "Sketch Draw orbiting: endpoint held. Release RMB to continue snapping; click commits."
                     .into();
         }
     } else {
         motion_evr.clear();
     }
 
-    if draw.button.just_released(&mouse) && draw.active && !draw.click_finish {
+    if draw.button.just_released(&mouse) && rect_should_commit_on_release(&draw) {
         if !draw.smart_gesture && draw.motion_len < 4.0 && draw.status_cells <= 1 {
             draw.click_finish = true;
             toolbelt.status =
-                "Sketch Draw anchor set. Move to grow line/face, LMB commits, RMB orbits, Esc cancels."
+                "Sketch Draw anchor set. Move to grow line/face, click commits, RMB orbits, Esc cancels."
                     .into();
         } else {
-            commit_rect_fill(&mut draw, &mut world, &mut history, &mut toolbelt);
+            commit_rect_fill(
+                &mut draw,
+                &mut world,
+                &mut history,
+                &mut toolbelt,
+                &mut tool_controller,
+                &mut sketch_doc,
+            );
             gesture_lock.release(RECT_FILL_OWNER);
         }
+    }
+}
+
+fn rect_commit_hint(draw: &RectDrawState) -> &'static str {
+    if draw.click_finish {
+        "Click again to commit, Esc cancels."
+    } else {
+        "Release commits, Esc cancels."
+    }
+}
+
+fn rect_preview_transaction_label(draw: &RectDrawState) -> &'static str {
+    if draw.pencil_line {
+        "Pencil preview"
+    } else if draw.room_cut {
+        "Room preview"
+    } else if draw.action == RectDrawAction::Cut {
+        "Opening preview"
+    } else {
+        "Rectangle preview"
     }
 }
 
@@ -447,10 +610,17 @@ fn commit_rect_fill(
     world: &mut VoxelWorld,
     history: &mut BuilderHistory,
     toolbelt: &mut ToolbeltState,
+    tool_controller: &mut crate::sketch_model::ToolController,
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
 ) {
+    let should_chain_pencil = draw.pencil_line && draw.action == RectDrawAction::Fill;
+    let chain_start = draw.current;
     let next_reference_span =
         rect_reference_span(draw.start, draw.current, draw.axis_u, draw.axis_v);
     let cells = match draw.action {
+        RectDrawAction::Fill if draw.pencil_line => {
+            pencil_line_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP)
+        }
         RectDrawAction::Fill => rect_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP),
         RectDrawAction::Cut if draw.room_cut => rect_room_cut_cells_through_solid(
             world,
@@ -471,6 +641,8 @@ fn commit_rect_fill(
     if cells.is_empty() {
         draw.active = false;
         draw.click_finish = false;
+        draw.pencil_line = false;
+        draw.snap_kind = None;
         return;
     }
 
@@ -488,32 +660,140 @@ fn commit_rect_fill(
     if changed > 0 {
         let label = if draw.room_cut {
             format!("Smart room hollow {} cells", changed)
+        } else if draw.pencil_line {
+            format!("Pencil line {} cells", changed)
         } else {
             format!("{} {} cells", draw.action.history_label(), changed)
         };
-        history.record_external(label, changes);
-        toolbelt.status = format!(
-            "{} committed: {} selected, {} changed cells. Ctrl+Z undo, Ctrl+Y redo.",
-            if draw.room_cut {
-                "Smart Room Hollow"
-            } else {
-                draw.action.label()
-            },
-            selected,
-            changed
-        );
+        history.record_external(label.clone(), changes);
+        record_rect_semantics(draw, sketch_doc);
+        tool_controller.begin_transaction(label);
+        let _ = tool_controller.commit_transaction();
+        toolbelt.status = if should_chain_pencil {
+            format!(
+                "Pencil line committed: {} selected, {} changed cells. Next endpoint starts from {},{},{}.",
+                selected, changed, chain_start.x, chain_start.y, chain_start.z
+            )
+        } else {
+            format!(
+                "{} committed: {} selected, {} changed cells. Ctrl+Z undo, Ctrl+Y redo.",
+                if draw.pencil_line {
+                    "Pencil line"
+                } else if draw.room_cut {
+                    "Smart Room Hollow"
+                } else {
+                    draw.action.label()
+                },
+                selected,
+                changed
+            )
+        };
     } else {
         toolbelt.status = format!(
             "{} selected {} cells but made no changes because the area already matched.",
-            draw.action.label(),
+            if draw.pencil_line {
+                "Pencil line"
+            } else {
+                draw.action.label()
+            },
             selected
         );
     }
-    draw.active = false;
-    draw.click_finish = false;
+    if should_chain_pencil {
+        draw.active = true;
+        draw.click_finish = true;
+        draw.start = chain_start;
+        draw.current = chain_start;
+        draw.motion_len = 0.0;
+        draw.status_cells = 1;
+        draw.inference = RectEndpointInference::None;
+        draw.snap_kind = Some(RectFaceSnapKind::Endpoint);
+    } else {
+        draw.active = false;
+        draw.click_finish = false;
+        draw.pencil_line = false;
+        draw.snap_kind = None;
+    }
     if next_reference_span != IVec2::ZERO {
         draw.reference_span = next_reference_span;
     }
+}
+
+fn record_rect_semantics(
+    draw: &RectDrawState,
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+) {
+    let result = if draw.pencil_line && draw.action == RectDrawAction::Fill {
+        sketch_doc
+            .draw_pencil_line(
+                sketch_doc.active_context(),
+                ivec3_as_vec3(draw.start),
+                ivec3_as_vec3(draw.current),
+            )
+            .map(|_| ())
+    } else {
+        let (origin, axis_u, axis_v) = semantic_rect_axes(draw);
+        let face_label = if draw.action == RectDrawAction::Cut {
+            "Opening face"
+        } else {
+            "Rectangle face"
+        };
+        let face = match sketch_doc.draw_rectangle_face(
+            sketch_doc.active_context(),
+            origin,
+            axis_u,
+            axis_v,
+            face_label,
+        ) {
+            Ok(face) => face,
+            Err(error) => {
+                warn!("sketch model: could not record rectangle semantic face: {error}");
+                return;
+            }
+        };
+        if draw.action == RectDrawAction::Cut {
+            if draw.room_cut {
+                let depth = smart_room_cut_depth(
+                    (component_by_axis(draw.current, draw.axis_u)
+                        - component_by_axis(draw.start, draw.axis_u))
+                    .abs(),
+                    (component_by_axis(draw.current, draw.axis_v)
+                        - component_by_axis(draw.start, draw.axis_v))
+                    .abs(),
+                ) as f32;
+                sketch_doc.create_hollow_room(face, 1.0, depth).map(|_| ())
+            } else {
+                let center = origin + (axis_u + axis_v) * 0.5;
+                let size = axis_u.abs() + axis_v.abs();
+                sketch_doc
+                    .cut_opening_through_face(face, center, size, RECT_CUT_DEPTH_CAP as f32)
+                    .map(|_| ())
+            }
+        } else {
+            Ok(())
+        }
+    };
+
+    if let Err(error) = result {
+        warn!("sketch model: could not record draw semantic entity: {error}");
+    }
+}
+
+fn semantic_rect_axes(draw: &RectDrawState) -> (Vec3, Vec3, Vec3) {
+    let origin = ivec3_as_vec3(draw.start);
+    let span_u =
+        component_by_axis(draw.current, draw.axis_u) - component_by_axis(draw.start, draw.axis_u);
+    let span_v =
+        component_by_axis(draw.current, draw.axis_v) - component_by_axis(draw.start, draw.axis_v);
+    (
+        origin,
+        draw.axis_u.as_vec3() * span_u as f32,
+        draw.axis_v.as_vec3() * span_v as f32,
+    )
+}
+
+fn ivec3_as_vec3(value: IVec3) -> Vec3 {
+    Vec3::new(value.x as f32, value.y as f32, value.z as f32)
 }
 
 fn normal_axis(normal: IVec3) -> Option<usize> {
@@ -873,6 +1153,66 @@ fn vec_component_by_index(v: Vec3, index: usize) -> f32 {
     }
 }
 
+fn face_point_by_indices(
+    axis: usize,
+    plane: f32,
+    u_axis: usize,
+    u: f32,
+    v_axis: usize,
+    v: f32,
+) -> Vec3 {
+    let mut components = [0.0; 3];
+    components[axis] = plane;
+    components[u_axis] = u;
+    components[v_axis] = v;
+    Vec3::new(components[0], components[1], components[2])
+}
+
+fn classify_rect_face_snap(
+    face_hit: Vec3,
+    hit: IVec3,
+    adjacent: IVec3,
+) -> Option<RectFaceSnapKind> {
+    let normal = adjacent - hit;
+    let axis = normal_axis(normal)?;
+    let plane = if component_by_index(normal, axis) > 0 {
+        component_by_index(hit, axis) as f32 + 1.0
+    } else {
+        component_by_index(hit, axis) as f32
+    };
+    let axes: Vec<usize> = (0..3).filter(|component| *component != axis).collect();
+    let u_axis = axes[0];
+    let v_axis = axes[1];
+    let u0 = component_by_index(hit, u_axis) as f32;
+    let v0 = component_by_index(hit, v_axis) as f32;
+    let u1 = u0 + 1.0;
+    let v1 = v0 + 1.0;
+    let um = u0 + 0.5;
+    let vm = v0 + 0.5;
+
+    let mut best: Option<(RectFaceSnapKind, f32)> = None;
+    for (u, v, kind) in [
+        (u0, v0, RectFaceSnapKind::Endpoint),
+        (u0, v1, RectFaceSnapKind::Endpoint),
+        (u1, v0, RectFaceSnapKind::Endpoint),
+        (u1, v1, RectFaceSnapKind::Endpoint),
+        (um, v0, RectFaceSnapKind::Midpoint),
+        (um, v1, RectFaceSnapKind::Midpoint),
+        (u0, vm, RectFaceSnapKind::Midpoint),
+        (u1, vm, RectFaceSnapKind::Midpoint),
+        (um, vm, RectFaceSnapKind::FaceCenter),
+    ] {
+        let point = face_point_by_indices(axis, plane, u_axis, u, v_axis, v);
+        let distance = face_hit.distance_squared(point);
+        if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+            best = Some((kind, distance));
+        }
+    }
+    best.and_then(|(kind, distance)| {
+        (distance <= RECT_FACE_SNAP_RADIUS * RECT_FACE_SNAP_RADIUS).then_some(kind)
+    })
+}
+
 fn round_to_i32_safe(value: f32) -> i32 {
     if !value.is_finite() {
         return 0;
@@ -918,6 +1258,14 @@ fn rect_cell_count(a: IVec3, b: IVec3, normal: IVec3) -> usize {
     }
 }
 
+fn draw_preview_cell_count(draw: &RectDrawState) -> usize {
+    if draw.pencil_line {
+        pencil_line_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP).len()
+    } else {
+        rect_cell_count(draw.start, draw.current, draw.normal)
+    }
+}
+
 fn rect_cells(a: IVec3, b: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3> {
     let Some(axis) = normal_axis(normal) else {
         return Vec::new();
@@ -957,6 +1305,50 @@ fn rect_cells(a: IVec3, b: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3> {
             }
         }
     }
+    out
+}
+
+fn pencil_line_cells(a: IVec3, b: IVec3, normal: IVec3, cap: usize) -> Vec<IVec3> {
+    let Some((axis_u, axis_v)) = plane_axes(normal) else {
+        return Vec::new();
+    };
+    if cap == 0 {
+        return Vec::new();
+    }
+
+    let au = component_by_axis(a, axis_u);
+    let av = component_by_axis(a, axis_v);
+    let bu = component_by_axis(b, axis_u);
+    let bv = component_by_axis(b, axis_v);
+    let mut u = au;
+    let mut v = av;
+    let du = (bu - au).abs();
+    let dv = -(bv - av).abs();
+    let su = (bu - au).signum();
+    let sv = (bv - av).signum();
+    let mut err = du + dv;
+    let expected = (du.max(-dv) as usize + 1).min(cap);
+    let mut out = Vec::with_capacity(expected);
+
+    loop {
+        let mut p = a;
+        set_component_by_axis(&mut p, axis_u, u);
+        set_component_by_axis(&mut p, axis_v, v);
+        out.push(p);
+        if out.len() >= cap || (u == bu && v == bv) {
+            break;
+        }
+        let e2 = err * 2;
+        if e2 >= dv {
+            err += dv;
+            u += su;
+        }
+        if e2 <= du {
+            err += du;
+            v += sv;
+        }
+    }
+
     out
 }
 
@@ -1040,6 +1432,16 @@ pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<T
         RectDrawAction::Fill => Color::srgb(0.15 + 0.25 * pulse, 0.95, 1.0),
         RectDrawAction::Cut => Color::srgb(1.0, 0.15 + 0.25 * pulse, 0.05),
     };
+    if draw.pencil_line {
+        for cell in pencil_line_cells(draw.start, draw.current, draw.normal, 768) {
+            let center = cell.as_vec3() + Vec3::splat(0.5);
+            gizmos.cuboid(
+                Transform::from_translation(center).with_scale(Vec3::splat(1.04)),
+                color,
+            );
+        }
+        return;
+    }
     let (lo, hi) = rect_bounds(draw.start, draw.current);
     let center = (lo.as_vec3() + hi.as_vec3()) * 0.5 + Vec3::splat(0.5);
     let mut scale = (hi - lo + IVec3::ONE).as_vec3();
@@ -1083,6 +1485,303 @@ mod tests {
     }
 
     #[test]
+    fn pencil_line_cells_draws_single_voxel_line_on_floor_plane() {
+        let cells = pencil_line_cells(
+            IVec3::new(0, 10, 0),
+            IVec3::new(4, 10, 0),
+            IVec3::Y,
+            DRAW_CELL_CAP,
+        );
+
+        assert_eq!(
+            cells,
+            vec![
+                IVec3::new(0, 10, 0),
+                IVec3::new(1, 10, 0),
+                IVec3::new(2, 10, 0),
+                IVec3::new(3, 10, 0),
+                IVec3::new(4, 10, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn pencil_line_cells_stays_on_locked_wall_plane() {
+        let cells = pencil_line_cells(
+            IVec3::new(3, 4, 8),
+            IVec3::new(3, 7, 12),
+            IVec3::X,
+            DRAW_CELL_CAP,
+        );
+
+        assert_eq!(cells.first().copied(), Some(IVec3::new(3, 4, 8)));
+        assert_eq!(cells.last().copied(), Some(IVec3::new(3, 7, 12)));
+        assert!(cells.iter().all(|p| p.x == 3));
+        assert!(cells.len() >= 5);
+    }
+
+    #[test]
+    fn sketchup_style_pencil_waits_for_second_click_after_start() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = sketch_tool_uses_click_finish(ToolbeltTool::DrawRect, false);
+
+        assert!(!rect_should_commit_on_release(&draw));
+
+        let second_click = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(rect_should_commit_on_start_intent(second_click, &draw));
+    }
+
+    #[test]
+    fn opening_workflow_second_click_commits_cut_not_only_fill() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = true;
+
+        let second_click = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            false,
+            false,
+            true,
+            false,
+        );
+
+        assert!(second_click.cut);
+        assert!(rect_should_commit_on_start_intent(second_click, &draw));
+    }
+
+    #[test]
+    fn right_mouse_orbit_never_finishes_active_sketch_preview() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = true;
+
+        let orbit = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        assert!(!rect_should_commit_on_start_intent(orbit, &draw));
+        assert!(!orbit.cut);
+    }
+
+    #[test]
+    fn active_sketch_preview_cancels_when_toolbox_selection_changes() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = true;
+        draw.tool_generation = 4;
+
+        assert!(rect_should_cancel_for_tool_selection(&draw, 5));
+        assert!(!rect_should_cancel_for_tool_selection(&draw, 4));
+    }
+
+    #[test]
+    fn smart_brush_gestures_keep_hold_release_commit() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = sketch_tool_uses_click_finish(ToolbeltTool::BrushPlace, true);
+
+        assert!(rect_should_commit_on_release(&draw));
+    }
+
+    #[test]
+    fn committed_pencil_line_chains_from_last_endpoint_like_sketchup_line_tool() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = true;
+        draw.pencil_line = true;
+        draw.action = RectDrawAction::Fill;
+        draw.start = IVec3::new(0, 4, 0);
+        draw.current = IVec3::new(3, 4, 0);
+        draw.normal = IVec3::Y;
+        draw.axis_u = IVec3::X;
+        draw.axis_v = IVec3::Z;
+        draw.voxel = Voxel::from(BlockType::Limestone);
+
+        let mut world = VoxelWorld::new();
+        let mut history = BuilderHistory::default();
+        let mut toolbelt = ToolbeltState::default();
+        let mut tool_controller = crate::sketch_model::ToolController::default();
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+
+        commit_rect_fill(
+            &mut draw,
+            &mut world,
+            &mut history,
+            &mut toolbelt,
+            &mut tool_controller,
+            &mut sketch_doc,
+        );
+
+        assert!(draw.active, "pencil should remain armed for the next edge");
+        assert!(draw.click_finish);
+        assert_eq!(draw.start, IVec3::new(3, 4, 0));
+        assert_eq!(draw.current, IVec3::new(3, 4, 0));
+        assert!(toolbelt.status.contains("Next endpoint"));
+        assert!(tool_controller
+            .last_transaction_label()
+            .is_some_and(|label| label.starts_with("Pencil line")));
+        let semantic_edge = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .last()
+            .copied()
+            .expect("semantic pencil edge");
+        assert!(matches!(
+            &sketch_doc.entity(semantic_edge).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::new(0.0, 4.0, 0.0) && *b == Vec3::new(3.0, 4.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn committed_rectangle_finishes_operation_instead_of_chaining() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = true;
+        draw.pencil_line = false;
+        draw.action = RectDrawAction::Fill;
+        draw.start = IVec3::new(0, 4, 0);
+        draw.current = IVec3::new(3, 4, 2);
+        draw.normal = IVec3::Y;
+        draw.axis_u = IVec3::X;
+        draw.axis_v = IVec3::Z;
+        draw.voxel = Voxel::from(BlockType::Stone);
+
+        let mut world = VoxelWorld::new();
+        let mut history = BuilderHistory::default();
+        let mut toolbelt = ToolbeltState::default();
+        let mut tool_controller = crate::sketch_model::ToolController::default();
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+
+        commit_rect_fill(
+            &mut draw,
+            &mut world,
+            &mut history,
+            &mut toolbelt,
+            &mut tool_controller,
+            &mut sketch_doc,
+        );
+
+        assert!(!draw.active);
+        assert!(!draw.click_finish);
+        assert!(tool_controller
+            .last_transaction_label()
+            .is_some_and(|label| label.starts_with("Smart endpoint build")));
+        let semantic_face = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .last()
+            .copied()
+            .expect("semantic rectangle face");
+        assert!(matches!(
+            &sketch_doc.entity(semantic_face).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Face { vertices, normal }
+                if vertices == &vec![
+                    Vec3::new(0.0, 4.0, 0.0),
+                    Vec3::new(3.0, 4.0, 0.0),
+                    Vec3::new(3.0, 4.0, 2.0),
+                    Vec3::new(0.0, 4.0, 2.0),
+                ] && *normal == Vec3::NEG_Y
+        ));
+    }
+
+    #[test]
+    fn committed_opening_and_room_write_semantic_house_entities() {
+        let mut world = VoxelWorld::new();
+        for x in 0..=4 {
+            for y in 0..=3 {
+                world.edit_set_voxel(x, y, 0, Voxel::from(BlockType::Stone));
+            }
+        }
+        let mut opening = RectDrawState::default();
+        opening.active = true;
+        opening.click_finish = true;
+        opening.action = RectDrawAction::Cut;
+        opening.start = IVec3::new(1, 1, 0);
+        opening.current = IVec3::new(2, 2, 0);
+        opening.normal = IVec3::Z;
+        opening.axis_u = IVec3::X;
+        opening.axis_v = IVec3::Y;
+        opening.voxel = AIR;
+
+        let mut history = BuilderHistory::default();
+        let mut toolbelt = ToolbeltState::default();
+        let mut tool_controller = crate::sketch_model::ToolController::default();
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+
+        commit_rect_fill(
+            &mut opening,
+            &mut world,
+            &mut history,
+            &mut toolbelt,
+            &mut tool_controller,
+            &mut sketch_doc,
+        );
+
+        let ids = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .clone();
+        assert!(ids.iter().any(|id| matches!(
+            &sketch_doc.entity(*id).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Opening { through_depth, .. }
+                if (*through_depth - RECT_CUT_DEPTH_CAP as f32).abs() < f32::EPSILON
+        )));
+
+        let mut room = RectDrawState::default();
+        room.active = true;
+        room.click_finish = true;
+        room.action = RectDrawAction::Cut;
+        room.room_cut = true;
+        room.start = IVec3::new(0, 0, 0);
+        room.current = IVec3::new(4, 3, 0);
+        room.normal = IVec3::Z;
+        room.axis_u = IVec3::X;
+        room.axis_v = IVec3::Y;
+        room.voxel = AIR;
+
+        commit_rect_fill(
+            &mut room,
+            &mut world,
+            &mut history,
+            &mut toolbelt,
+            &mut tool_controller,
+            &mut sketch_doc,
+        );
+
+        let ids = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .clone();
+        assert!(ids.iter().any(|id| matches!(
+            &sketch_doc.entity(*id).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Room { wall_thickness, .. }
+                if (*wall_thickness - 1.0).abs() < f32::EPSILON
+        )));
+    }
+
+    #[test]
     fn default_build_tool_accepts_smart_endpoint_fill() {
         let mode = ModeContext::default();
         let keys = ButtonInput::<KeyCode>::default();
@@ -1093,7 +1792,15 @@ mod tests {
 
     #[test]
     fn sketch_right_mouse_is_reserved_for_orbit_not_cut() {
-        let intent = rect_start_intent(ToolbeltTool::DrawRect, false, true, false, false, false);
+        let intent = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+        );
 
         assert!(
             !intent.cut && !intent.fill,
@@ -1111,6 +1818,19 @@ mod tests {
     }
 
     #[test]
+    fn sketch_draw_ignores_world_clicks_over_editor_toolbox() {
+        assert!(rect_should_ignore_world_click_for_editor_ui(
+            true, true, false
+        ));
+        assert!(rect_should_ignore_world_click_for_editor_ui(
+            true, false, true
+        ));
+        assert!(!rect_should_ignore_world_click_for_editor_ui(
+            false, true, false
+        ));
+    }
+
+    #[test]
     fn smart_right_mouse_cut_keeps_endpoint_tracking() {
         assert!(
             rect_draw_endpoint_updates(true, true),
@@ -1120,30 +1840,62 @@ mod tests {
 
     #[test]
     fn sketch_modifier_left_mouse_selects_cut_and_room_cut() {
-        let cut = rect_start_intent(ToolbeltTool::DrawRect, true, false, true, false, false);
+        let cut = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+        );
         assert!(cut.cut);
         assert!(!cut.room_cut);
         assert_eq!(cut.button, RectDragButton::Left);
 
-        let room = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, true, false);
+        let room = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+        );
         assert!(room.cut);
         assert!(room.room_cut);
         assert_eq!(room.button, RectDragButton::Left);
     }
 
     #[test]
-    fn plain_sketch_left_mouse_opens_vertical_wall_faces() {
-        let intent = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, false, false);
+    fn plain_sketch_left_mouse_draws_on_vertical_wall_faces() {
+        let intent = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
 
         assert_eq!(
             rect_action_for_start_intent(intent, ToolbeltTool::DrawRect, IVec3::X),
-            RectDrawAction::Cut
+            RectDrawAction::Fill
         );
     }
 
     #[test]
     fn plain_sketch_left_mouse_still_builds_on_floor_faces() {
-        let intent = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, false, false);
+        let intent = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
 
         assert_eq!(
             rect_action_for_start_intent(intent, ToolbeltTool::DrawRect, IVec3::Y),
@@ -1153,7 +1905,15 @@ mod tests {
 
     #[test]
     fn room_workflow_left_mouse_hollows_without_modifier() {
-        let room = rect_start_intent(ToolbeltTool::DrawRect, true, false, false, false, true);
+        let room = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+        );
 
         assert!(room.cut);
         assert!(room.room_cut);
@@ -1161,8 +1921,34 @@ mod tests {
     }
 
     #[test]
+    fn opening_workflow_left_mouse_cuts_without_modifier() {
+        let opening = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            false,
+            false,
+            true,
+            false,
+        );
+
+        assert!(opening.cut);
+        assert!(!opening.fill);
+        assert!(!opening.room_cut);
+        assert_eq!(opening.button, RectDragButton::Left);
+    }
+
+    #[test]
     fn ctrl_left_mouse_cuts_openings_even_inside_room_workflow() {
-        let cut = rect_start_intent(ToolbeltTool::DrawRect, true, false, true, false, true);
+        let cut = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            true,
+            false,
+            false,
+            true,
+        );
 
         assert!(cut.cut);
         assert!(!cut.room_cut);
@@ -1214,6 +2000,88 @@ mod tests {
         );
 
         assert_eq!(snapped, IVec3::new(11, 1, 14));
+    }
+
+    #[test]
+    fn rect_face_hit_classifies_endpoint_midpoint_and_face_center_targets() {
+        let endpoint = classify_rect_face_snap(
+            Vec3::new(10.03, 1.0, 14.04),
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+        )
+        .expect("endpoint snap");
+        assert_eq!(endpoint, RectFaceSnapKind::Endpoint);
+
+        let midpoint = classify_rect_face_snap(
+            Vec3::new(10.50, 1.0, 14.03),
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+        )
+        .expect("midpoint snap");
+        assert_eq!(midpoint, RectFaceSnapKind::Midpoint);
+
+        let center = classify_rect_face_snap(
+            Vec3::new(10.50, 1.0, 14.50),
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+        )
+        .expect("face center snap");
+        assert_eq!(center, RectFaceSnapKind::FaceCenter);
+    }
+
+    #[test]
+    fn rect_face_hit_does_not_report_snap_when_between_reference_points() {
+        let snap = classify_rect_face_snap(
+            Vec3::new(10.24, 1.0, 14.31),
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+        );
+
+        assert_eq!(
+            snap, None,
+            "snap labels should appear only near an endpoint, midpoint, or face center"
+        );
+    }
+
+    #[test]
+    fn rect_status_suffix_reports_snap_target_and_inference() {
+        assert_eq!(
+            rect_status_suffix(
+                Some(RectFaceSnapKind::Endpoint),
+                RectEndpointInference::None
+            ),
+            " Endpoint snap."
+        );
+        assert_eq!(
+            rect_status_suffix(
+                Some(RectFaceSnapKind::Midpoint),
+                RectEndpointInference::Axis
+            ),
+            " Midpoint snap. Axis lock."
+        );
+        assert_eq!(
+            rect_status_suffix(
+                Some(RectFaceSnapKind::FaceCenter),
+                RectEndpointInference::EqualLength
+            ),
+            " Face center snap. Equal-length snap."
+        );
+    }
+
+    #[test]
+    fn rect_face_snap_uses_shared_inference_kinds_and_tooltips() {
+        assert_eq!(
+            rect_face_snap_inference_kind(RectFaceSnapKind::Endpoint),
+            crate::sketch_model::InferenceKind::Endpoint
+        );
+        assert_eq!(
+            rect_face_snap_inference_kind(RectFaceSnapKind::Midpoint).tooltip(),
+            "Midpoint"
+        );
+        assert_eq!(
+            rect_face_snap_inference_kind(RectFaceSnapKind::FaceCenter).tooltip(),
+            "Face center"
+        );
     }
 
     #[test]

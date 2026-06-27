@@ -560,7 +560,7 @@ fn draw_header(ui: &mut egui::Ui, state: &mut EditorState, theme: crate::theme::
     ui.horizontal(|ui| {
         crate::ui_kit::status_chip(ui, state.tab.icon(), "TAB", state.tab.label(), theme);
         crate::ui_kit::status_chip(ui, Icon::Hud, "STYLE", style_label, theme);
-        crate::ui_kit::status_chip(ui, Icon::Help, "KEYS", "Alt+1-0 / PgUp PgDn", theme);
+        crate::ui_kit::status_chip(ui, Icon::Help, "TOOLS", "sidebar tabs / page step", theme);
     });
     // Tiny inline close "x" so the panel still has a visible close.
     ui.horizontal(|ui| {
@@ -1370,7 +1370,7 @@ fn draw_system_tab(
             pause.paused = true;
         }
         ui.label(
-            egui::RichText::new("F6 togglen (ueberall)")
+            egui::RichText::new("Pause toggle available")
                 .size(11.0)
                 .color(egui::Color32::from_gray(160))
                 .monospace(),
@@ -1566,14 +1566,12 @@ fn draw_system_tab(
     ui.add_space(6.0);
     section_heading(ui, "HINWEISE");
     ui.label(
-        egui::RichText::new(
-            "WASD bewegen  //  Space springen  //  W-Doppeltipp/Ctrl Sprint  //  F Fliegen  //  1-9 Hotbar",
-        )
-        .size(12.0)
-        .color(egui::Color32::from_gray(190)),
+        egui::RichText::new(editor_navigation_hint())
+            .size(12.0)
+            .color(egui::Color32::from_gray(190)),
     );
     ui.label(
-        egui::RichText::new("F3 Editor  //  F2 Screenshot  //  F5 Speichern  //  ESC zu")
+        egui::RichText::new(editor_action_hint())
             .size(12.0)
             .color(egui::Color32::from_gray(190)),
     );
@@ -1661,6 +1659,36 @@ fn draw_footer(ui: &mut egui::Ui, state: &mut EditorState, settings: &mut WorldS
             }
         });
     });
+}
+
+fn editor_navigation_hint() -> &'static str {
+    "WASD bewegen  //  Space springen  //  Doppeltipp-W sprintet  //  F fliegt  //  Maus fuer Blick und Sketch-Orbit"
+}
+
+fn editor_action_hint() -> &'static str {
+    "Toolbox waehlt Werkzeuge  //  Pencil/Rect/Push arbeiten direkt im Spiel  //  Save button speichert  //  ESC schliesst"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_hints_are_mouse_first_without_function_keys() {
+        let hints = [editor_navigation_hint(), editor_action_hint()];
+
+        for hint in hints {
+            assert!(
+                !["F1", "F2", "F3", "F5", "F7", "F8", "Tab", "1-9", "1-0"]
+                    .iter()
+                    .any(|token| hint.contains(token)),
+                "editor hint still advertises old key workflow: {hint}"
+            );
+        }
+
+        assert!(editor_action_hint().contains("Toolbox"));
+        assert!(editor_action_hint().contains("Save"));
+    }
 }
 
 fn handle_regen(

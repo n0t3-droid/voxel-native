@@ -669,7 +669,7 @@ fn live_builder_input(
     if !mode.is_build_live() {
         live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
-            toolbelt.status = "Build picker is open. Choose a tool or press Tab to hide the picker before building.".into();
+            toolbelt.status = build_drawer_blocked_status().into();
         }
         return;
     }
@@ -705,16 +705,14 @@ fn live_builder_input(
     if !cursor_locked {
         live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
-            toolbelt.status =
-                "Build Live needs mouse capture. Click the game view once, then use LMB/RMB."
-                    .into();
+            toolbelt.status = build_cursor_capture_status().into();
         }
         return;
     }
     let Ok(cam_tf) = cam_q.get_single() else {
         live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
-            toolbelt.status = "Build Live could not find the player camera this frame.".into();
+            toolbelt.status = build_camera_missing_status().into();
         }
         return;
     };
@@ -790,6 +788,18 @@ fn live_builder_input(
             toolbelt.status = state.status.clone();
         }
     }
+}
+
+fn build_drawer_blocked_status() -> &'static str {
+    "Sketch Editor drawer is open. Pick a Toolbox action or close the drawer before drawing."
+}
+
+fn build_cursor_capture_status() -> &'static str {
+    "Sketch Editor needs the game view. Click the game view once, then use the Toolbox action."
+}
+
+fn build_camera_missing_status() -> &'static str {
+    "Sketch Editor game view could not find the player camera this frame."
 }
 
 fn oriented_live_brush(base: IVec3, normal: IVec3) -> IVec3 {
@@ -1616,5 +1626,18 @@ mod tests {
         assert!(!live_brush_should_stamp(&mut flow, Some(c), 0.0, false));
         assert!(!live_brush_should_stamp(&mut flow, None, 0.016, false));
         assert!(live_brush_should_stamp(&mut flow, Some(c), 0.0, true));
+    }
+
+    #[test]
+    fn builder_statuses_are_toolbox_first_not_old_build_live() {
+        for status in [
+            build_drawer_blocked_status(),
+            build_cursor_capture_status(),
+            build_camera_missing_status(),
+        ] {
+            assert!(!status.contains("Build Live"));
+            assert!(!status.contains("Tab"));
+            assert!(status.contains("Toolbox") || status.contains("game view"));
+        }
     }
 }

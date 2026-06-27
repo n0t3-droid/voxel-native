@@ -39,7 +39,8 @@ const DEFAULT_MAX_ACTIVE_PROJECTS: usize = 3;
 const AUTONOMY_BURST_ACTIVE_PROJECTS: usize = 5;
 const MAX_ACTIVE_PROJECTS_LIMIT: usize = 48;
 const MAX_CREW_BOTS_PER_PROJECT: usize = 32;
-const COMPANION_WORKERS_PER_LEADER: u8 = 4;
+const MAX_COMPANION_TEAM: usize = 4;
+const COMPANION_WORKERS_PER_LEADER: u8 = 0;
 const VISIBLE_MESSAGE_COOLDOWN: f32 = 10.0;
 const CONVERSATION_INTERVAL: f32 = 14.0;
 const BOT_MEET_DISTANCE: f32 = 58.0;
@@ -52,9 +53,9 @@ const BOT_SHIP_EDIT_RADIUS: f32 = 14.0;
 const BOT_SHIP_PROJECT_MARGIN: f32 = 32.0;
 const BOT_MAX_FRAME_EDITS: usize = 128;
 const BOT_MAX_PROJECT_SLICE_EDITS: usize = 48;
-const COMPANION_FOLLOW_DEFAULT: f32 = 3.2;
-const COMPANION_FOLLOW_MIN: f32 = 1.25;
-const COMPANION_FOLLOW_MAX: f32 = 22.0;
+const COMPANION_FOLLOW_DEFAULT: f32 = 8.0;
+const COMPANION_FOLLOW_MIN: f32 = 5.0;
+const COMPANION_FOLLOW_MAX: f32 = 28.0;
 const COMPANION_FOLLOW_STEP: f32 = 2.25;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -885,53 +886,11 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
             "Architect online. I watch skyline rhythm, facades, setbacks, and plazas.",
         ),
         (
-            "Mona",
-            BotRole::Planner,
-            Vec3::new(5.5, 1.7, -7.5),
-            3_u8,
-            "Planner online. I maintain the build spreadsheet and city priorities.",
-        ),
-        (
             "Kai",
             BotRole::RoadCrew,
-            Vec3::new(-8.0, 1.6, -2.0),
-            4_u8,
+            Vec3::new(5.5, 1.7, -7.5),
+            3_u8,
             "Road crew online. I connect blocks before buildings sprawl.",
-        ),
-        (
-            "Lina",
-            BotRole::Surveyor,
-            Vec3::new(8.0, 1.6, -2.0),
-            5_u8,
-            "Surveyor online. I scan terrain, slopes, loaded chunks, and build risk.",
-        ),
-        (
-            "Iris",
-            BotRole::CompanionGuide,
-            Vec3::new(-10.0, 1.8, 5.0),
-            6_u8,
-            "Guide online. I keep close formation and route you through active builds.",
-        ),
-        (
-            "Orion",
-            BotRole::CompanionMaker,
-            Vec3::new(10.0, 1.8, 5.0),
-            7_u8,
-            "Maker online. I assist heavy builds and emergency repairs.",
-        ),
-        (
-            "Noah",
-            BotRole::RepairTech,
-            Vec3::new(-6.5, 1.8, 3.0),
-            8_u8,
-            "Systems tech online. I handle lights, utilities, and maintenance details.",
-        ),
-        (
-            "Ava",
-            BotRole::ParkKeeper,
-            Vec3::new(6.5, 1.8, 3.0),
-            9_u8,
-            "Landscape lead online. I keep the city breathable with parks and waterfronts.",
         ),
     ];
     let core_names: HashSet<&'static str> = specs.iter().map(|(name, _, _, _, _)| *name).collect();
@@ -997,9 +956,25 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
         save.agents.push(bot);
     }
 
+    save.agents
+        .sort_by_key(|bot| (!bot.companion, bot.companion_order, bot.id));
+    let mut companion_seen = 0usize;
+    save.agents.retain(|bot| {
+        if !bot.companion {
+            return true;
+        }
+        companion_seen += 1;
+        companion_seen <= MAX_COMPANION_TEAM
+    });
+
     let mut existing_ids: HashSet<u64> = save.agents.iter().map(|bot| bot.id).collect();
     for mut bot in existing {
-        if core_names.contains(bot.name.as_str()) || existing_ids.contains(&bot.id) {
+        if core_names.contains(bot.name.as_str())
+            || existing_ids.contains(&bot.id)
+            || bot.companion
+            || bot.swarm_leader_id.is_some()
+            || bot.current_task.is_none()
+        {
             continue;
         }
         bot.memory.preferred_follow_distance = bot
@@ -2287,8 +2262,34 @@ fn spawn_missing_bot_entities(
         if existing.contains(&bot.id) {
             continue;
         }
+        if !bot_should_spawn_visual(bot) {
+            continue;
+        }
         spawn_bot_entity(&mut commands, &mut meshes, &mut materials, &mut cache, bot);
     }
+}
+
+fn bot_should_spawn_visual(bot: &BotAgent) -> bool {
+    bot.companion || bot.current_task.is_some()
+}
+
+fn bot_agent_index(save: &BotWorldSave) -> AHashMap<u64, usize> {
+    save.agents
+        .iter()
+        .enumerate()
+        .map(|(idx, bot)| (bot.id, idx))
+        .collect()
+}
+
+fn bot_by_id<'a>(
+    save: &'a BotWorldSave,
+    index: &AHashMap<u64, usize>,
+    id: u64,
+) -> Option<&'a BotAgent> {
+    index
+        .get(&id)
+        .and_then(|idx| save.agents.get(*idx))
+        .filter(|bot| bot.id == id)
 }
 
 fn spawn_bot_entity(
@@ -2788,19 +2789,6 @@ fn spawn_bot_entity(
                     base_scale: Vec3::splat(0.95),
                 },
             ));
-
-            // Soft role light for personality.
-            c.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: role_color,
-                    intensity: 320_000.0,
-                    range: 26.0,
-                    shadows_enabled: false,
-                    ..default()
-                },
-                transform: Transform::from_translation(Vec3::new(0.0, 1.4, 0.0)),
-                ..default()
-            });
         });
 }
 
@@ -3150,19 +3138,6 @@ fn spawn_aura_companion(
                     ..default()
                 });
             }
-
-            // Soft cyan glow.
-            c.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: Color::srgb(0.55, 0.92, 1.0),
-                    intensity: 580_000.0,
-                    range: 36.0,
-                    shadows_enabled: false,
-                    ..default()
-                },
-                transform: Transform::from_translation(Vec3::new(0.0, -0.2, 0.0)),
-                ..default()
-            });
         });
 }
 
@@ -3515,19 +3490,6 @@ fn spawn_bolt_companion(
                     ..default()
                 });
             }
-
-            // Warm under-glow.
-            c.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: Color::srgb(1.0, 0.78, 0.45),
-                    intensity: 520_000.0,
-                    range: 32.0,
-                    shadows_enabled: false,
-                    ..default()
-                },
-                transform: Transform::from_translation(Vec3::new(0.0, -0.2, 0.0)),
-                ..default()
-            });
         });
 }
 
@@ -3662,11 +3624,11 @@ fn companion_aura_shell_material(
     }
     // Star Wars gritty realistic imperial white/grey
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.55, 0.55, 0.55),
+        base_color: Color::srgb(0.34, 0.36, 0.37),
         emissive: LinearRgba::rgb(0.01, 0.01, 0.01),
-        metallic: 0.85,
-        perceptual_roughness: 0.65,
-        reflectance: 0.3,
+        metallic: 0.95,
+        perceptual_roughness: 0.76,
+        reflectance: 0.18,
         ..default()
     });
     cache.mat_aura_shell = Some(h.clone());
@@ -3682,11 +3644,11 @@ fn companion_bolt_shell_material(
     }
     // Star Wars realistic rusted astromech yellow/orange.
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.48, 0.35, 0.10),
+        base_color: Color::srgb(0.30, 0.27, 0.18),
         emissive: LinearRgba::rgb(0.02, 0.01, 0.0),
-        metallic: 0.9,
-        perceptual_roughness: 0.8,
-        reflectance: 0.2,
+        metallic: 0.94,
+        perceptual_roughness: 0.84,
+        reflectance: 0.16,
         ..default()
     });
     cache.mat_bolt_shell = Some(h.clone());
@@ -3721,8 +3683,8 @@ fn companion_iris_blue_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.55, 0.85, 1.0),
-        emissive: LinearRgba::rgb(2.0, 7.0, 11.0),
+        base_color: Color::srgb(0.25, 0.55, 0.72),
+        emissive: LinearRgba::rgb(0.9, 3.2, 5.4),
         metallic: 0.0,
         perceptual_roughness: 0.05,
         ..default()
@@ -3739,8 +3701,8 @@ fn companion_iris_amber_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.85, 0.45),
-        emissive: LinearRgba::rgb(9.0, 5.5, 1.5),
+        base_color: Color::srgb(0.82, 0.55, 0.25),
+        emissive: LinearRgba::rgb(4.5, 2.6, 0.8),
         metallic: 0.0,
         perceptual_roughness: 0.05,
         ..default()
@@ -3813,8 +3775,8 @@ fn companion_antenna_tip_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.8, 0.6),
-        emissive: LinearRgba::rgb(8.0, 5.0, 2.0),
+        base_color: Color::srgb(0.85, 0.56, 0.32),
+        emissive: LinearRgba::rgb(3.5, 2.0, 0.8),
         metallic: 0.0,
         perceptual_roughness: 0.05,
         ..default()
@@ -3863,8 +3825,8 @@ fn companion_hover_ring_aura_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.4, 0.85, 1.0, 0.65),
-        emissive: LinearRgba::rgb(1.5, 5.0, 7.0),
+        base_color: Color::srgba(0.20, 0.62, 0.78, 0.50),
+        emissive: LinearRgba::rgb(0.8, 2.8, 4.2),
         alpha_mode: AlphaMode::Add,
         unlit: true,
         ..default()
@@ -3881,8 +3843,8 @@ fn companion_hover_ring_bolt_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.7, 0.35, 0.65),
-        emissive: LinearRgba::rgb(7.0, 4.0, 1.5),
+        base_color: Color::srgba(0.72, 0.46, 0.22, 0.50),
+        emissive: LinearRgba::rgb(3.4, 1.9, 0.7),
         alpha_mode: AlphaMode::Add,
         unlit: true,
         ..default()
@@ -3935,8 +3897,8 @@ fn companion_iris_highlight_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 1.0, 1.0),
-        emissive: LinearRgba::rgb(8.0, 8.0, 8.0),
+        base_color: Color::srgb(0.62, 0.70, 0.72),
+        emissive: LinearRgba::rgb(1.2, 1.5, 1.6),
         unlit: true,
         ..default()
     });
@@ -9946,11 +9908,15 @@ fn apply_companion_command(
 ) {
     let order = bot.companion_order as f32;
     let angle = order * std::f32::consts::TAU / 10.0 - std::f32::consts::FRAC_PI_2;
-    let radius = 4.5 + (bot.companion_order / 5) as f32 * 2.0;
+    let radius = bot
+        .memory
+        .preferred_follow_distance
+        .clamp(COMPANION_FOLLOW_MIN, COMPANION_FOLLOW_MAX)
+        + (bot.companion_order / 4) as f32 * 3.0;
     let formation = player_pos
         + Vec3::new(
             angle.cos() * radius,
-            4.6 + (bot.companion_order % 3) as f32 * 0.45,
+            5.2 + (bot.companion_order % 3) as f32 * 0.55,
             angle.sin() * radius,
         );
     match command {
@@ -10318,8 +10284,9 @@ fn animate_worker_bots(
 ) {
     let elapsed = time.elapsed_seconds();
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
+    let bot_index = bot_agent_index(&brain.save);
     for (part, mut tf) in &mut parts {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == part.bot_id) else {
+        let Some(bot) = bot_by_id(&brain.save, &bot_index, part.bot_id) else {
             continue;
         };
         if bot.companion {
@@ -10619,6 +10586,7 @@ fn sync_bot_visuals(
     let elapsed = time.elapsed_seconds();
     let dt = time.delta_seconds().clamp(0.0, 0.1);
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
+    let bot_index = bot_agent_index(&brain.save);
 
     // Per-bot world rotation cache so head/iris systems can transform world
     // vectors into local space (used for eye tracking + head tilt direction).
@@ -10626,7 +10594,7 @@ fn sync_bot_visuals(
     let mut bot_pos: HashMap<u64, Vec3> = HashMap::new();
 
     for (entity, mut transform) in &mut bot_q {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == entity.id) else {
+        let Some(bot) = bot_by_id(&brain.save, &bot_index, entity.id) else {
             continue;
         };
         let p = vec3_from_arr(bot.position);
@@ -10739,7 +10707,7 @@ fn sync_bot_visuals(
 
     // Head tilt — pitch toward the look target a few degrees.
     for (head, mut tf) in &mut head_q {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == head.bot_id) else {
+        let Some(bot) = bot_by_id(&brain.save, &bot_index, head.bot_id) else {
             continue;
         };
         let Some(world_rot) = bot_world_rot.get(&head.bot_id).copied() else {
@@ -10775,7 +10743,7 @@ fn sync_bot_visuals(
 
     // Iris tracking + blink. Each bot blinks on its own deterministic phase.
     for (iris, mut tf) in &mut iris_q {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == iris.bot_id) else {
+        let Some(bot) = bot_by_id(&brain.save, &bot_index, iris.bot_id) else {
             continue;
         };
         let Some(world_rot) = bot_world_rot.get(&iris.bot_id).copied() else {
@@ -10822,7 +10790,7 @@ fn sync_bot_visuals(
     // active companion mode. Each `CompanionMoodLight` has its OWN material so
     // mutating one doesn't affect the other companion.
     for mood in &mood_q {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == mood.bot_id) else {
+        let Some(bot) = bot_by_id(&brain.save, &bot_index, mood.bot_id) else {
             continue;
         };
         let Some(mat) = materials.get_mut(&mood.mat) else {
@@ -13241,6 +13209,126 @@ mod tests {
             .iter()
             .filter(|bot| bot.companion)
             .all(|bot| bot.companion_mode == BotCompanionMode::AwaitingInstruction));
+    }
+
+    #[test]
+    fn v2_normalization_keeps_companion_team_small_and_removes_idle_helper_swarm() {
+        let world = VoxelWorld::new();
+        let mut save = BotWorldSave::seed("Manual", Vec3::new(0.0, 90.0, 0.0), &world);
+        save.version = 2;
+        for idx in 0..24 {
+            let mut bot = test_bot(100 + idx, &format!("Old Swarm {idx}"), BotRole::Builder);
+            bot.companion = false;
+            bot.swarm_leader_id = Some(1);
+            bot.swarm_index = (idx % 4 + 1) as u8;
+            bot.current_task = None;
+            save.agents.push(bot);
+        }
+
+        save.normalize();
+
+        assert!(
+            save.agents.iter().filter(|bot| bot.companion).count() <= MAX_COMPANION_TEAM,
+            "normalization should not recreate the old huge companion crowd"
+        );
+        assert!(
+            save.agents
+                .iter()
+                .all(|bot| bot.swarm_leader_id.is_none() || bot.current_task.is_some()),
+            "idle helper drones should not survive normalization as visible crowd actors"
+        );
+    }
+
+    #[test]
+    fn idle_swarm_helpers_are_not_spawned_as_visible_robot_rigs() {
+        let mut bot = test_bot(7, "Helper", BotRole::Builder);
+        bot.swarm_leader_id = Some(1);
+        bot.swarm_index = 2;
+        bot.current_task = None;
+
+        assert!(!bot_should_spawn_visual(&bot));
+
+        bot.current_task = Some(BotTask {
+            task_type: BotTaskKind::BuildTower,
+            project_id: 42,
+            label: "Build".into(),
+            progress: 0.0,
+        });
+
+        assert!(bot_should_spawn_visual(&bot));
+    }
+
+    #[test]
+    fn parked_idle_worker_bots_do_not_spawn_high_detail_rigs() {
+        let bot = test_bot(11, "Parked Worker", BotRole::Builder);
+
+        assert!(
+            !bot_should_spawn_visual(&bot),
+            "startup should not spawn every saved idle worker as an animated high-detail rig"
+        );
+    }
+
+    #[test]
+    fn companions_and_commanded_workers_stay_visible() {
+        let mut companion = test_bot(12, "Iris", BotRole::CompanionGuide);
+        companion.companion = true;
+        companion.companion_order = 0;
+        assert!(bot_should_spawn_visual(&companion));
+
+        let mut active = test_bot(13, "Builder", BotRole::Builder);
+        active.current_task = Some(BotTask {
+            task_type: BotTaskKind::BuildTower,
+            project_id: 99,
+            label: "Build".into(),
+            progress: 0.0,
+        });
+        assert!(bot_should_spawn_visual(&active));
+    }
+
+    #[test]
+    fn bot_agent_index_resolves_visual_parts_by_id() {
+        let mut save = BotWorldSave::default();
+        save.agents.push(test_bot(9, "Nine", BotRole::Builder));
+        save.agents.push(test_bot(2, "Two", BotRole::Architect));
+
+        let index = bot_agent_index(&save);
+
+        assert_eq!(
+            bot_by_id(&save, &index, 2).map(|bot| bot.name.as_str()),
+            Some("Two")
+        );
+        assert_eq!(
+            bot_by_id(&save, &index, 9).map(|bot| bot.name.as_str()),
+            Some("Nine")
+        );
+        assert!(bot_by_id(&save, &index, 99).is_none());
+    }
+
+    #[test]
+    fn companion_shell_materials_read_as_serious_brushed_metal() {
+        let mut cache = BotVisualCache::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+
+        let aura = companion_aura_shell_material(&mut cache, &mut materials);
+        let bolt = companion_bolt_shell_material(&mut cache, &mut materials);
+        let aura = materials.get(&aura).unwrap();
+        let bolt = materials.get(&bolt).unwrap();
+
+        assert!(aura.metallic >= 0.9);
+        assert!(aura.perceptual_roughness >= 0.72);
+        assert_eq!(aura.base_color, Color::srgb(0.34, 0.36, 0.37));
+        assert!(bolt.metallic >= 0.9);
+        assert!(bolt.perceptual_roughness >= 0.78);
+        assert_eq!(bolt.base_color, Color::srgb(0.30, 0.27, 0.18));
+    }
+
+    #[test]
+    fn bot_rigs_are_emissive_only_and_do_not_spawn_point_lights() {
+        let source = include_str!("bots.rs");
+        assert!(
+            !source.contains(concat!("Point", "LightBundle")),
+            "robot proximity should not add live point lights; use emissive mesh parts for glow"
+        );
     }
 
     #[test]

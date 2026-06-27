@@ -1,0 +1,4853 @@
+//! SketchUp-style semantic editor model.
+//!
+//! This module is intentionally separate from the voxel storage. The engine
+//! stays voxel-native for terrain, runtime edits, booleans, and meshing, while
+//! editor tools can now share a semantic document spine: contexts, entities,
+//! component definitions/instances, selection, picking hits, inference hints,
+//! and transactions.
+
+#![allow(dead_code)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
+
+use bevy::prelude::{App, Plugin, Quat, Resource, Vec3};
+use serde::{Deserialize, Serialize};
+
+const PLANAR_GRAPH_SCALE: f32 = 1000.0;
+const PLANAR_GRAPH_MAX_LOOP_VERTICES: usize = 16;
+const PLANAR_GRAPH_MIN_AREA: f32 = 1.0e-4;
+const SKETCH_DOCUMENT_SAVE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SketchId(u64);
+
+impl SketchId {
+    #[cfg(test)]
+    pub const fn new_for_test(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SketchTransform {
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PlanarPointKey {
+    x: i64,
+    y: i64,
+    z: i64,
+}
+
+impl PlanarPointKey {
+    fn from_vec3(point: Vec3) -> Self {
+        Self {
+            x: (point.x * PLANAR_GRAPH_SCALE).round() as i64,
+            y: (point.y * PLANAR_GRAPH_SCALE).round() as i64,
+            z: (point.z * PLANAR_GRAPH_SCALE).round() as i64,
+        }
+    }
+}
+
+impl SketchTransform {
+    pub fn identity() -> Self {
+        Self {
+            translation: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
+    }
+
+    pub fn from_translation(translation: Vec3) -> Self {
+        Self {
+            translation,
+            ..Self::identity()
+        }
+    }
+}
+
+impl Default for SketchTransform {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+pub type AttributeStore = BTreeMap<String, BTreeMap<String, String>>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SketchEntityKind {
+    Vertex {
+        point: Vec3,
+    },
+    Edge {
+        a: Vec3,
+        b: Vec3,
+    },
+    Face {
+        vertices: Vec<Vec3>,
+        normal: Vec3,
+    },
+    CircleFace {
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        segments: usize,
+        vertices: Vec<Vec3>,
+    },
+    PolygonFace {
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        sides: usize,
+        vertices: Vec<Vec3>,
+    },
+    ArcCurve {
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        start_direction: Vec3,
+        sweep_radians: f32,
+        points: Vec<Vec3>,
+    },
+    FreehandCurve {
+        points: Vec<Vec3>,
+    },
+    PushPullExtrusion {
+        source_face: SketchId,
+        base_vertices: Vec<Vec3>,
+        top_vertices: Vec<Vec3>,
+        normal: Vec3,
+        depth: f32,
+        bounds: SketchBounds,
+    },
+    Opening {
+        host: SketchId,
+        center: Vec3,
+        size: Vec3,
+        normal: Vec3,
+        through_depth: f32,
+        bounds: SketchBounds,
+    },
+    Room {
+        shell: SketchId,
+        shell_bounds: SketchBounds,
+        interior_bounds: SketchBounds,
+        wall_thickness: f32,
+    },
+    Group {
+        context: SketchId,
+    },
+    ComponentInstance {
+        definition: SketchId,
+        transform: SketchTransform,
+    },
+    GuidePoint {
+        point: Vec3,
+    },
+    GuideLine {
+        origin: Vec3,
+        direction: Vec3,
+    },
+    SectionPlane {
+        origin: Vec3,
+        normal: Vec3,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchEntity {
+    pub id: SketchId,
+    pub kind: SketchEntityKind,
+    pub visible: bool,
+    pub locked: bool,
+    pub material: Option<SketchId>,
+    pub tag: Option<SketchId>,
+    pub attributes: AttributeStore,
+}
+
+impl SketchEntity {
+    fn new(
+        id: SketchId,
+        kind: SketchEntityKind,
+        material: Option<SketchId>,
+        tag: Option<SketchId>,
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            visible: true,
+            locked: false,
+            material,
+            tag,
+            attributes: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchContext {
+    pub id: SketchId,
+    pub parent: Option<SketchId>,
+    pub local_to_parent: SketchTransform,
+    pub entities: Vec<SketchId>,
+}
+
+impl SketchContext {
+    fn root(id: SketchId) -> Self {
+        Self {
+            id,
+            parent: None,
+            local_to_parent: SketchTransform::default(),
+            entities: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComponentDefinition {
+    pub id: SketchId,
+    pub name: String,
+    pub context: SketchId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl SketchColor {
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self::rgba(r, g, b, 255)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchMaterial {
+    pub id: SketchId,
+    pub name: String,
+    pub color: SketchColor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchTag {
+    pub id: SketchId,
+    pub name: String,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchStyle {
+    pub id: SketchId,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchCamera {
+    pub eye: Vec3,
+    pub target: Vec3,
+    pub up: Vec3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SketchBounds {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl SketchBounds {
+    pub fn from_points(points: impl IntoIterator<Item = Vec3>) -> Option<Self> {
+        let mut iter = points.into_iter();
+        let first = iter.next()?;
+        let mut bounds = Self {
+            min: first,
+            max: first,
+        };
+        for point in iter {
+            bounds.include(point);
+        }
+        Some(bounds)
+    }
+
+    pub fn from_center_size(center: Vec3, size: Vec3) -> Self {
+        let half = size.abs() * 0.5;
+        Self {
+            min: center - half,
+            max: center + half,
+        }
+    }
+
+    pub fn size(self) -> Vec3 {
+        self.max - self.min
+    }
+
+    fn include(&mut self, point: Vec3) {
+        self.min = self.min.min(point);
+        self.max = self.max.max(point);
+    }
+
+    fn extruded(self, normal: Vec3, depth: f32) -> Self {
+        let offset = normal.try_normalize().unwrap_or(Vec3::Z) * depth;
+        let mut bounds = self;
+        for corner in [
+            self.min,
+            self.max,
+            Vec3::new(self.min.x, self.min.y, self.max.z),
+            Vec3::new(self.min.x, self.max.y, self.min.z),
+            Vec3::new(self.max.x, self.min.y, self.min.z),
+            Vec3::new(self.min.x, self.max.y, self.max.z),
+            Vec3::new(self.max.x, self.min.y, self.max.z),
+            Vec3::new(self.max.x, self.max.y, self.min.z),
+        ] {
+            bounds.include(corner + offset);
+        }
+        bounds
+    }
+
+    fn inset(self, amount: f32) -> Self {
+        let amount = amount.max(0.0);
+        let mut min = self.min;
+        let mut max = self.max;
+        for axis in 0..3 {
+            let size = component_by_index_vec3(max, axis) - component_by_index_vec3(min, axis);
+            if size > amount * 2.0 {
+                let min_component = component_by_index_vec3(min, axis);
+                let max_component = component_by_index_vec3(max, axis);
+                set_component_by_index_vec3(&mut min, axis, min_component + amount);
+                set_component_by_index_vec3(&mut max, axis, max_component - amount);
+            }
+        }
+        Self { min, max }
+    }
+
+    fn translated(self, delta: Vec3) -> Self {
+        Self {
+            min: self.min + delta,
+            max: self.max + delta,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SketchScene {
+    pub id: SketchId,
+    pub name: String,
+    pub camera: Option<SketchCamera>,
+    pub style: Option<SketchId>,
+    pub visible_tags: BTreeMap<SketchId, bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchDocumentSnapshot {
+    pub version: u32,
+    pub id: u64,
+    pub root_context: u64,
+    pub active_context: u64,
+    pub default_tag: u64,
+    pub default_material: u64,
+    pub default_style: u64,
+    pub active_style: u64,
+    pub active_scene: Option<u64>,
+    pub next_id: u64,
+    pub contexts: Vec<SketchContextSnapshot>,
+    pub entities: Vec<SketchEntitySnapshot>,
+    pub definitions: Vec<ComponentDefinitionSnapshot>,
+    pub materials: Vec<SketchMaterialSnapshot>,
+    pub tags: Vec<SketchTagSnapshot>,
+    pub styles: Vec<SketchStyleSnapshot>,
+    pub scenes: Vec<SketchSceneSnapshot>,
+    pub attributes: AttributeStore,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchContextSnapshot {
+    pub id: u64,
+    pub parent: Option<u64>,
+    pub local_to_parent: SketchTransformSnapshot,
+    pub entities: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentDefinitionSnapshot {
+    pub id: u64,
+    pub name: String,
+    pub context: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SketchMaterialSnapshot {
+    pub id: u64,
+    pub name: String,
+    pub color: SketchColorSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SketchColorSnapshot {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SketchTagSnapshot {
+    pub id: u64,
+    pub name: String,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SketchStyleSnapshot {
+    pub id: u64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchSceneSnapshot {
+    pub id: u64,
+    pub name: String,
+    pub camera: Option<SketchCameraSnapshot>,
+    pub style: Option<u64>,
+    pub visible_tags: BTreeMap<u64, bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchCameraSnapshot {
+    pub eye: [f32; 3],
+    pub target: [f32; 3],
+    pub up: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchEntitySnapshot {
+    pub id: u64,
+    pub kind: SketchEntityKindSnapshot,
+    pub visible: bool,
+    pub locked: bool,
+    pub material: Option<u64>,
+    pub tag: Option<u64>,
+    pub attributes: AttributeStore,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SketchEntityKindSnapshot {
+    Vertex {
+        point: [f32; 3],
+    },
+    Edge {
+        a: [f32; 3],
+        b: [f32; 3],
+    },
+    Face {
+        vertices: Vec<[f32; 3]>,
+        normal: [f32; 3],
+    },
+    CircleFace {
+        center: [f32; 3],
+        normal: [f32; 3],
+        radius: f32,
+        segments: usize,
+        vertices: Vec<[f32; 3]>,
+    },
+    PolygonFace {
+        center: [f32; 3],
+        normal: [f32; 3],
+        radius: f32,
+        sides: usize,
+        vertices: Vec<[f32; 3]>,
+    },
+    ArcCurve {
+        center: [f32; 3],
+        normal: [f32; 3],
+        radius: f32,
+        start_direction: [f32; 3],
+        sweep_radians: f32,
+        points: Vec<[f32; 3]>,
+    },
+    FreehandCurve {
+        points: Vec<[f32; 3]>,
+    },
+    PushPullExtrusion {
+        source_face: u64,
+        base_vertices: Vec<[f32; 3]>,
+        top_vertices: Vec<[f32; 3]>,
+        normal: [f32; 3],
+        depth: f32,
+        bounds: SketchBoundsSnapshot,
+    },
+    Opening {
+        host: u64,
+        center: [f32; 3],
+        size: [f32; 3],
+        normal: [f32; 3],
+        through_depth: f32,
+        bounds: SketchBoundsSnapshot,
+    },
+    Room {
+        shell: u64,
+        shell_bounds: SketchBoundsSnapshot,
+        interior_bounds: SketchBoundsSnapshot,
+        wall_thickness: f32,
+    },
+    Group {
+        context: u64,
+    },
+    ComponentInstance {
+        definition: u64,
+        transform: SketchTransformSnapshot,
+    },
+    GuidePoint {
+        point: [f32; 3],
+    },
+    GuideLine {
+        origin: [f32; 3],
+        direction: [f32; 3],
+    },
+    SectionPlane {
+        origin: [f32; 3],
+        normal: [f32; 3],
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchTransformSnapshot {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchBoundsSnapshot {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SketchSnapshotError {
+    Serialize(ron::Error),
+    Deserialize(ron::error::SpannedError),
+    UnsupportedVersion(u32),
+}
+
+impl fmt::Display for SketchSnapshotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Serialize(error) => write!(f, "failed to serialize sketch document: {error}"),
+            Self::Deserialize(error) => write!(f, "failed to deserialize sketch document: {error}"),
+            Self::UnsupportedVersion(version) => {
+                write!(f, "unsupported sketch document save version {version}")
+            }
+        }
+    }
+}
+
+impl Error for SketchSnapshotError {}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SketchEntityRecord {
+    context: SketchId,
+    entity: SketchEntity,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum SketchEditChange {
+    Created(SketchEntityRecord),
+    Modified {
+        context: SketchId,
+        before: SketchEntity,
+        after: SketchEntity,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SketchEditBatch {
+    label: String,
+    changes: Vec<SketchEditChange>,
+}
+
+impl SketchEditBatch {
+    fn new(label: impl Into<String>, changes: Vec<SketchEditChange>) -> Self {
+        Self {
+            label: label.into(),
+            changes,
+        }
+    }
+
+    fn summary(&self) -> SketchEditSummary {
+        SketchEditSummary {
+            label: self.label.clone(),
+            entity_count: self.changes.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchEditSummary {
+    pub label: String,
+    pub entity_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SketchModelError {
+    UnknownContext(SketchId),
+    UnknownDefinition(SketchId),
+    UnknownEntity(SketchId),
+    UnknownMaterial(SketchId),
+    UnknownTag(SketchId),
+    UnknownStyle(SketchId),
+    UnknownScene(SketchId),
+    NotComponentInstance(SketchId),
+}
+
+impl fmt::Display for SketchModelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownContext(id) => write!(f, "unknown sketch context {}", id.raw()),
+            Self::UnknownDefinition(id) => {
+                write!(f, "unknown component definition {}", id.raw())
+            }
+            Self::UnknownEntity(id) => write!(f, "unknown sketch entity {}", id.raw()),
+            Self::UnknownMaterial(id) => write!(f, "unknown material {}", id.raw()),
+            Self::UnknownTag(id) => write!(f, "unknown tag {}", id.raw()),
+            Self::UnknownStyle(id) => write!(f, "unknown style {}", id.raw()),
+            Self::UnknownScene(id) => write!(f, "unknown scene {}", id.raw()),
+            Self::NotComponentInstance(id) => {
+                write!(f, "entity {} is not a component instance", id.raw())
+            }
+        }
+    }
+}
+
+impl Error for SketchModelError {}
+
+#[derive(Resource, Debug, Clone)]
+pub struct SketchDocument {
+    id: SketchId,
+    root_context: SketchId,
+    active_context: SketchId,
+    default_tag: SketchId,
+    default_material: SketchId,
+    default_style: SketchId,
+    active_style: SketchId,
+    active_scene: Option<SketchId>,
+    next_id: u64,
+    contexts: BTreeMap<SketchId, SketchContext>,
+    entities: BTreeMap<SketchId, SketchEntity>,
+    definitions: BTreeMap<SketchId, ComponentDefinition>,
+    materials: BTreeMap<SketchId, SketchMaterial>,
+    tags: BTreeMap<SketchId, SketchTag>,
+    styles: BTreeMap<SketchId, SketchStyle>,
+    scenes: BTreeMap<SketchId, SketchScene>,
+    attributes: AttributeStore,
+    undo_stack: Vec<SketchEditBatch>,
+    redo_stack: Vec<SketchEditBatch>,
+    pub undo_generation: u64,
+}
+
+impl Default for SketchDocument {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SketchDocument {
+    pub fn new() -> Self {
+        let id = SketchId(1);
+        let root_context = SketchId(2);
+        let default_tag = SketchId(3);
+        let default_material = SketchId(4);
+        let default_style = SketchId(5);
+
+        let mut contexts = BTreeMap::new();
+        contexts.insert(root_context, SketchContext::root(root_context));
+
+        let mut tags = BTreeMap::new();
+        tags.insert(
+            default_tag,
+            SketchTag {
+                id: default_tag,
+                name: "Untagged".into(),
+                visible: true,
+            },
+        );
+
+        let mut materials = BTreeMap::new();
+        materials.insert(
+            default_material,
+            SketchMaterial {
+                id: default_material,
+                name: "Default".into(),
+                color: SketchColor::rgb(255, 255, 255),
+            },
+        );
+
+        let mut styles = BTreeMap::new();
+        styles.insert(
+            default_style,
+            SketchStyle {
+                id: default_style,
+                name: "Modeling".into(),
+            },
+        );
+
+        Self {
+            id,
+            root_context,
+            active_context: root_context,
+            default_tag,
+            default_material,
+            default_style,
+            active_style: default_style,
+            active_scene: None,
+            next_id: 6,
+            contexts,
+            entities: BTreeMap::new(),
+            definitions: BTreeMap::new(),
+            materials,
+            tags,
+            styles,
+            scenes: BTreeMap::new(),
+            attributes: BTreeMap::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            undo_generation: 0,
+        }
+    }
+
+    pub fn id(&self) -> SketchId {
+        self.id
+    }
+
+    pub fn root_context(&self) -> SketchId {
+        self.root_context
+    }
+
+    pub fn active_context(&self) -> SketchId {
+        self.active_context
+    }
+
+    pub fn context(&self, id: SketchId) -> Option<&SketchContext> {
+        self.contexts.get(&id)
+    }
+
+    pub fn entity(&self, id: SketchId) -> Option<&SketchEntity> {
+        self.entities.get(&id)
+    }
+
+    pub fn material(&self, id: SketchId) -> Option<&SketchMaterial> {
+        self.materials.get(&id)
+    }
+
+    pub fn tag(&self, id: SketchId) -> Option<&SketchTag> {
+        self.tags.get(&id)
+    }
+
+    pub fn style(&self, id: SketchId) -> Option<&SketchStyle> {
+        self.styles.get(&id)
+    }
+
+    pub fn scene(&self, id: SketchId) -> Option<&SketchScene> {
+        self.scenes.get(&id)
+    }
+
+    pub fn active_style(&self) -> SketchId {
+        self.active_style
+    }
+
+    pub fn active_scene(&self) -> Option<SketchId> {
+        self.active_scene
+    }
+
+    pub fn to_stable_snapshot(&self) -> SketchDocumentSnapshot {
+        SketchDocumentSnapshot {
+            version: SKETCH_DOCUMENT_SAVE_VERSION,
+            id: self.id.raw(),
+            root_context: self.root_context.raw(),
+            active_context: self.active_context.raw(),
+            default_tag: self.default_tag.raw(),
+            default_material: self.default_material.raw(),
+            default_style: self.default_style.raw(),
+            active_style: self.active_style.raw(),
+            active_scene: self.active_scene.map(SketchId::raw),
+            next_id: self.next_id,
+            contexts: self.contexts.values().map(snapshot_context).collect(),
+            entities: self.entities.values().map(snapshot_entity).collect(),
+            definitions: self.definitions.values().map(snapshot_definition).collect(),
+            materials: self.materials.values().map(snapshot_material).collect(),
+            tags: self.tags.values().map(snapshot_tag).collect(),
+            styles: self.styles.values().map(snapshot_style).collect(),
+            scenes: self.scenes.values().map(snapshot_scene).collect(),
+            attributes: self.attributes.clone(),
+        }
+    }
+
+    pub fn to_stable_ron(&self) -> Result<String, SketchSnapshotError> {
+        ron::ser::to_string_pretty(
+            &self.to_stable_snapshot(),
+            ron::ser::PrettyConfig::default(),
+        )
+        .map_err(SketchSnapshotError::Serialize)
+    }
+
+    pub fn from_stable_ron(text: &str) -> Result<Self, SketchSnapshotError> {
+        let snapshot: SketchDocumentSnapshot =
+            ron::from_str(text).map_err(SketchSnapshotError::Deserialize)?;
+        Self::from_stable_snapshot(snapshot)
+    }
+
+    pub fn from_stable_snapshot(
+        snapshot: SketchDocumentSnapshot,
+    ) -> Result<Self, SketchSnapshotError> {
+        if snapshot.version != SKETCH_DOCUMENT_SAVE_VERSION {
+            return Err(SketchSnapshotError::UnsupportedVersion(snapshot.version));
+        }
+
+        let contexts = snapshot
+            .contexts
+            .into_iter()
+            .map(|context| (SketchId(context.id), restore_context(context)))
+            .collect();
+        let entities = snapshot
+            .entities
+            .into_iter()
+            .map(|entity| (SketchId(entity.id), restore_entity(entity)))
+            .collect();
+        let definitions = snapshot
+            .definitions
+            .into_iter()
+            .map(|definition| (SketchId(definition.id), restore_definition(definition)))
+            .collect();
+        let materials = snapshot
+            .materials
+            .into_iter()
+            .map(|material| (SketchId(material.id), restore_material(material)))
+            .collect();
+        let tags = snapshot
+            .tags
+            .into_iter()
+            .map(|tag| (SketchId(tag.id), restore_tag(tag)))
+            .collect();
+        let styles = snapshot
+            .styles
+            .into_iter()
+            .map(|style| (SketchId(style.id), restore_style(style)))
+            .collect();
+        let scenes = snapshot
+            .scenes
+            .into_iter()
+            .map(|scene| (SketchId(scene.id), restore_scene(scene)))
+            .collect();
+
+        Ok(Self {
+            id: SketchId(snapshot.id),
+            root_context: SketchId(snapshot.root_context),
+            active_context: SketchId(snapshot.active_context),
+            default_tag: SketchId(snapshot.default_tag),
+            default_material: SketchId(snapshot.default_material),
+            default_style: SketchId(snapshot.default_style),
+            active_style: SketchId(snapshot.active_style),
+            active_scene: snapshot.active_scene.map(SketchId),
+            next_id: snapshot.next_id,
+            contexts,
+            entities,
+            definitions,
+            materials,
+            tags,
+            styles,
+            scenes,
+            attributes: snapshot.attributes,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            undo_generation: 0,
+        })
+    }
+
+    pub fn default_tag_name(&self) -> Option<&str> {
+        self.tags
+            .get(&self.default_tag)
+            .map(|tag| tag.name.as_str())
+    }
+
+    pub fn default_material_name(&self) -> Option<&str> {
+        self.materials
+            .get(&self.default_material)
+            .map(|material| material.name.as_str())
+    }
+
+    pub fn default_material(&self) -> SketchId {
+        self.default_material
+    }
+
+    pub fn default_style_name(&self) -> Option<&str> {
+        self.styles
+            .get(&self.default_style)
+            .map(|style| style.name.as_str())
+    }
+
+    pub fn create_material(
+        &mut self,
+        name: impl Into<String>,
+        color: SketchColor,
+    ) -> Result<SketchId, SketchModelError> {
+        let id = self.allocate_id();
+        self.materials.insert(
+            id,
+            SketchMaterial {
+                id,
+                name: name.into(),
+                color,
+            },
+        );
+        self.undo_generation += 1;
+        Ok(id)
+    }
+
+    pub fn create_tag(&mut self, name: impl Into<String>) -> Result<SketchId, SketchModelError> {
+        let id = self.allocate_id();
+        self.tags.insert(
+            id,
+            SketchTag {
+                id,
+                name: name.into(),
+                visible: true,
+            },
+        );
+        self.undo_generation += 1;
+        Ok(id)
+    }
+
+    pub fn create_style(&mut self, name: impl Into<String>) -> Result<SketchId, SketchModelError> {
+        let id = self.allocate_id();
+        self.styles.insert(
+            id,
+            SketchStyle {
+                id,
+                name: name.into(),
+            },
+        );
+        self.undo_generation += 1;
+        Ok(id)
+    }
+
+    pub fn assign_entity_material(
+        &mut self,
+        entity: SketchId,
+        material: SketchId,
+    ) -> Result<(), SketchModelError> {
+        if !self.materials.contains_key(&material) {
+            return Err(SketchModelError::UnknownMaterial(material));
+        }
+        let entity = self
+            .entities
+            .get_mut(&entity)
+            .ok_or(SketchModelError::UnknownEntity(entity))?;
+        entity.material = Some(material);
+        self.undo_generation += 1;
+        Ok(())
+    }
+
+    pub fn assign_entity_tag(
+        &mut self,
+        entity: SketchId,
+        tag: SketchId,
+    ) -> Result<(), SketchModelError> {
+        if !self.tags.contains_key(&tag) {
+            return Err(SketchModelError::UnknownTag(tag));
+        }
+        let entity = self
+            .entities
+            .get_mut(&entity)
+            .ok_or(SketchModelError::UnknownEntity(entity))?;
+        entity.tag = Some(tag);
+        self.undo_generation += 1;
+        Ok(())
+    }
+
+    pub fn set_tag_visibility(
+        &mut self,
+        tag: SketchId,
+        visible: bool,
+    ) -> Result<(), SketchModelError> {
+        let tag = self
+            .tags
+            .get_mut(&tag)
+            .ok_or(SketchModelError::UnknownTag(tag))?;
+        tag.visible = visible;
+        self.undo_generation += 1;
+        Ok(())
+    }
+
+    pub fn tag_visible(&self, tag: SketchId) -> Result<bool, SketchModelError> {
+        self.tags
+            .get(&tag)
+            .map(|tag| tag.visible)
+            .ok_or(SketchModelError::UnknownTag(tag))
+    }
+
+    pub fn entity_effective_visible(&self, entity: SketchId) -> Result<bool, SketchModelError> {
+        let entity = self
+            .entities
+            .get(&entity)
+            .ok_or(SketchModelError::UnknownEntity(entity))?;
+        let tag_visible = entity
+            .tag
+            .map(|tag| self.tag_visible(tag))
+            .transpose()?
+            .unwrap_or(true);
+        Ok(entity.visible && tag_visible)
+    }
+
+    pub fn set_active_style(&mut self, style: SketchId) -> Result<(), SketchModelError> {
+        if !self.styles.contains_key(&style) {
+            return Err(SketchModelError::UnknownStyle(style));
+        }
+        self.active_style = style;
+        self.undo_generation += 1;
+        Ok(())
+    }
+
+    pub fn capture_scene(
+        &mut self,
+        name: impl Into<String>,
+        camera: Option<SketchCamera>,
+    ) -> Result<SketchId, SketchModelError> {
+        let id = self.allocate_id();
+        let visible_tags = self
+            .tags
+            .iter()
+            .map(|(id, tag)| (*id, tag.visible))
+            .collect();
+        self.scenes.insert(
+            id,
+            SketchScene {
+                id,
+                name: name.into(),
+                camera,
+                style: Some(self.active_style),
+                visible_tags,
+            },
+        );
+        self.undo_generation += 1;
+        Ok(id)
+    }
+
+    pub fn apply_scene(&mut self, scene: SketchId) -> Result<(), SketchModelError> {
+        let scene_record = self
+            .scenes
+            .get(&scene)
+            .cloned()
+            .ok_or(SketchModelError::UnknownScene(scene))?;
+        for (tag, visible) in scene_record.visible_tags {
+            if let Some(tag) = self.tags.get_mut(&tag) {
+                tag.visible = visible;
+            }
+        }
+        if let Some(style) = scene_record.style {
+            if !self.styles.contains_key(&style) {
+                return Err(SketchModelError::UnknownStyle(style));
+            }
+            self.active_style = style;
+        }
+        self.active_scene = Some(scene);
+        self.undo_generation += 1;
+        Ok(())
+    }
+
+    pub fn set_model_attribute(
+        &mut self,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), SketchModelError> {
+        self.attributes
+            .entry(namespace.into())
+            .or_default()
+            .insert(key.into(), value.into());
+        self.undo_generation += 1;
+        Ok(())
+    }
+
+    pub fn model_attribute(&self, namespace: &str, key: &str) -> Option<&str> {
+        self.attributes
+            .get(namespace)
+            .and_then(|attrs| attrs.get(key))
+            .map(String::as_str)
+    }
+
+    pub fn set_entity_attribute(
+        &mut self,
+        entity: SketchId,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), SketchModelError> {
+        let entity = self
+            .entities
+            .get_mut(&entity)
+            .ok_or(SketchModelError::UnknownEntity(entity))?;
+        entity
+            .attributes
+            .entry(namespace.into())
+            .or_default()
+            .insert(key.into(), value.into());
+        self.undo_generation += 1;
+        Ok(())
+    }
+
+    pub fn entity_attribute(
+        &self,
+        entity: SketchId,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<&str>, SketchModelError> {
+        let entity = self
+            .entities
+            .get(&entity)
+            .ok_or(SketchModelError::UnknownEntity(entity))?;
+        Ok(entity
+            .attributes
+            .get(namespace)
+            .and_then(|attrs| attrs.get(key))
+            .map(String::as_str))
+    }
+
+    pub fn add_entity_to_active(
+        &mut self,
+        kind: SketchEntityKind,
+    ) -> Result<SketchId, SketchModelError> {
+        self.add_entity(self.active_context, kind)
+    }
+
+    pub fn add_entity(
+        &mut self,
+        context: SketchId,
+        kind: SketchEntityKind,
+    ) -> Result<SketchId, SketchModelError> {
+        if !self.contexts.contains_key(&context) {
+            return Err(SketchModelError::UnknownContext(context));
+        }
+
+        let id = self.allocate_id();
+        let entity = SketchEntity::new(
+            id,
+            kind,
+            Some(self.default_material),
+            Some(self.default_tag),
+        );
+        self.entities.insert(id, entity);
+        self.contexts
+            .get_mut(&context)
+            .expect("context was checked above")
+            .entities
+            .push(id);
+        self.undo_generation += 1;
+        Ok(id)
+    }
+
+    pub fn draw_pencil_line(
+        &mut self,
+        context: SketchId,
+        a: Vec3,
+        b: Vec3,
+    ) -> Result<SketchId, SketchModelError> {
+        self.add_entity_with_history(context, SketchEntityKind::Edge { a, b }, "Pencil line")
+    }
+
+    pub fn draw_rectangle_face(
+        &mut self,
+        context: SketchId,
+        origin: Vec3,
+        axis_u: Vec3,
+        axis_v: Vec3,
+        label: impl Into<String>,
+    ) -> Result<SketchId, SketchModelError> {
+        let normal = axis_u.cross(axis_v).try_normalize().unwrap_or(Vec3::Z);
+        let vertices = vec![
+            origin,
+            origin + axis_u,
+            origin + axis_u + axis_v,
+            origin + axis_v,
+        ];
+        self.add_entity_with_history(context, SketchEntityKind::Face { vertices, normal }, label)
+    }
+
+    pub fn draw_circle_face(
+        &mut self,
+        context: SketchId,
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        segments: usize,
+        label: impl Into<String>,
+    ) -> Result<SketchId, SketchModelError> {
+        let normal = safe_normal(normal);
+        let radius = radius.abs().max(PLANAR_GRAPH_MIN_AREA);
+        let segments = segments.max(3);
+        let vertices = radial_points(center, normal, radius, segments, None);
+        self.add_entity_with_history(
+            context,
+            SketchEntityKind::CircleFace {
+                center,
+                normal,
+                radius,
+                segments,
+                vertices,
+            },
+            label,
+        )
+    }
+
+    pub fn draw_polygon_face(
+        &mut self,
+        context: SketchId,
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        sides: usize,
+        label: impl Into<String>,
+    ) -> Result<SketchId, SketchModelError> {
+        let normal = safe_normal(normal);
+        let radius = radius.abs().max(PLANAR_GRAPH_MIN_AREA);
+        let sides = sides.max(3);
+        let vertices = radial_points(center, normal, radius, sides, None);
+        self.add_entity_with_history(
+            context,
+            SketchEntityKind::PolygonFace {
+                center,
+                normal,
+                radius,
+                sides,
+                vertices,
+            },
+            label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_arc_curve(
+        &mut self,
+        context: SketchId,
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        start_direction: Vec3,
+        sweep_radians: f32,
+        segments: usize,
+        label: impl Into<String>,
+    ) -> Result<SketchId, SketchModelError> {
+        let normal = safe_normal(normal);
+        let radius = radius.abs().max(PLANAR_GRAPH_MIN_AREA);
+        let segments = segments.max(1);
+        let (axis_u, axis_v, _) = plane_basis(normal, Some(start_direction));
+        let points = (0..=segments)
+            .map(|index| {
+                let t = index as f32 / segments as f32;
+                let angle = sweep_radians * t;
+                center + (axis_u * angle.cos() + axis_v * angle.sin()) * radius
+            })
+            .collect();
+        self.add_entity_with_history(
+            context,
+            SketchEntityKind::ArcCurve {
+                center,
+                normal,
+                radius,
+                start_direction: axis_u,
+                sweep_radians,
+                points,
+            },
+            label,
+        )
+    }
+
+    pub fn draw_freehand_curve(
+        &mut self,
+        context: SketchId,
+        points: impl IntoIterator<Item = Vec3>,
+        label: impl Into<String>,
+    ) -> Result<SketchId, SketchModelError> {
+        let points: Vec<Vec3> = points.into_iter().collect();
+        self.add_entity_with_history(context, SketchEntityKind::FreehandCurve { points }, label)
+    }
+
+    pub fn push_pull_face(
+        &mut self,
+        face: SketchId,
+        depth: f32,
+    ) -> Result<SketchId, SketchModelError> {
+        let (base_vertices, normal) = self.face_geometry(face)?;
+        let offset = normal * depth;
+        let top_vertices: Vec<_> = base_vertices
+            .iter()
+            .map(|vertex| *vertex + offset)
+            .collect();
+        let bounds = SketchBounds::from_points(
+            base_vertices
+                .iter()
+                .copied()
+                .chain(top_vertices.iter().copied()),
+        )
+        .unwrap_or(SketchBounds {
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+        });
+        self.add_entity_with_history(
+            self.active_context,
+            SketchEntityKind::PushPullExtrusion {
+                source_face: face,
+                base_vertices,
+                top_vertices,
+                normal,
+                depth,
+                bounds,
+            },
+            "Push/Pull",
+        )
+    }
+
+    pub fn record_push_pull_face(
+        &mut self,
+        context: SketchId,
+        origin: Vec3,
+        axis_u: Vec3,
+        axis_v: Vec3,
+        depth: f32,
+        label: impl Into<String>,
+    ) -> Result<(SketchId, SketchId), SketchModelError> {
+        if !self.contexts.contains_key(&context) {
+            return Err(SketchModelError::UnknownContext(context));
+        }
+        let normal = axis_u.cross(axis_v).try_normalize().unwrap_or(Vec3::Z);
+        let base_vertices = vec![
+            origin,
+            origin + axis_u,
+            origin + axis_u + axis_v,
+            origin + axis_v,
+        ];
+        let face = self.add_entity(
+            context,
+            SketchEntityKind::Face {
+                vertices: base_vertices.clone(),
+                normal,
+            },
+        )?;
+        let offset = normal * depth;
+        let top_vertices: Vec<_> = base_vertices
+            .iter()
+            .map(|vertex| *vertex + offset)
+            .collect();
+        let bounds = SketchBounds::from_points(
+            base_vertices
+                .iter()
+                .copied()
+                .chain(top_vertices.iter().copied()),
+        )
+        .unwrap_or(SketchBounds {
+            min: origin,
+            max: origin,
+        });
+        let extrusion = self.add_entity(
+            context,
+            SketchEntityKind::PushPullExtrusion {
+                source_face: face,
+                base_vertices,
+                top_vertices,
+                normal,
+                depth,
+                bounds,
+            },
+        )?;
+        self.record_created_entities(label, [(context, face), (context, extrusion)])?;
+        Ok((face, extrusion))
+    }
+
+    pub fn cut_opening_through_face(
+        &mut self,
+        host: SketchId,
+        center: Vec3,
+        size: Vec3,
+        through_depth: f32,
+    ) -> Result<SketchId, SketchModelError> {
+        let (_, normal) = self.face_geometry(host)?;
+        let bounds = SketchBounds::from_center_size(center, size).extruded(normal, through_depth);
+        self.add_entity_with_history(
+            self.active_context,
+            SketchEntityKind::Opening {
+                host,
+                center,
+                size,
+                normal,
+                through_depth,
+                bounds,
+            },
+            "Opening cut",
+        )
+    }
+
+    pub fn create_hollow_room(
+        &mut self,
+        shell: SketchId,
+        wall_thickness: f32,
+        room_depth: f32,
+    ) -> Result<SketchId, SketchModelError> {
+        let (vertices, normal) = self.face_geometry(shell)?;
+        let face_bounds = SketchBounds::from_points(vertices).unwrap_or(SketchBounds {
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+        });
+        let shell_bounds = face_bounds.extruded(normal, room_depth);
+        let interior_bounds = shell_bounds.inset(wall_thickness);
+        self.add_entity_with_history(
+            self.active_context,
+            SketchEntityKind::Room {
+                shell,
+                shell_bounds,
+                interior_bounds,
+                wall_thickness,
+            },
+            "Room hollow",
+        )
+    }
+
+    pub fn entity_inference_candidates(
+        &self,
+        entity: SketchId,
+    ) -> Result<Vec<InferenceCandidate>, SketchModelError> {
+        let entity = self
+            .entities
+            .get(&entity)
+            .ok_or(SketchModelError::UnknownEntity(entity))?;
+        let mut candidates = Vec::new();
+        match &entity.kind {
+            SketchEntityKind::Edge { a, b } => {
+                let edge_direction = (*b - *a).try_normalize();
+                candidates.push(InferenceCandidate::new(
+                    InferenceKind::Endpoint,
+                    *a,
+                    1.0,
+                    InferenceKind::Endpoint.tooltip(),
+                ));
+                candidates.push(InferenceCandidate::new(
+                    InferenceKind::Endpoint,
+                    *b,
+                    1.0,
+                    InferenceKind::Endpoint.tooltip(),
+                ));
+                candidates.push(InferenceCandidate::new(
+                    InferenceKind::Midpoint,
+                    (*a + *b) * 0.5,
+                    0.92,
+                    InferenceKind::Midpoint.tooltip(),
+                ));
+                if let Some(direction) = edge_direction {
+                    candidates.push(
+                        InferenceCandidate::new(
+                            InferenceKind::OnEdge,
+                            (*a + *b) * 0.5,
+                            0.74,
+                            InferenceKind::OnEdge.tooltip(),
+                        )
+                        .with_direction(direction),
+                    );
+                }
+            }
+            SketchEntityKind::Face { vertices, normal } => {
+                push_face_inference_candidates(vertices, *normal, &mut candidates);
+            }
+            SketchEntityKind::CircleFace {
+                vertices, normal, ..
+            }
+            | SketchEntityKind::PolygonFace {
+                vertices, normal, ..
+            } => {
+                push_face_inference_candidates(vertices, *normal, &mut candidates);
+            }
+            SketchEntityKind::ArcCurve { points, normal, .. } => {
+                push_curve_inference_candidates(points, false, Some(*normal), &mut candidates);
+            }
+            SketchEntityKind::FreehandCurve { points } => {
+                push_curve_inference_candidates(points, false, None, &mut candidates);
+            }
+            _ => {}
+        }
+        Ok(InferenceService::ranked(candidates))
+    }
+
+    pub fn undo_count(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub fn redo_count(&self) -> usize {
+        self.redo_stack.len()
+    }
+
+    pub fn undo_last(&mut self) -> Option<SketchEditSummary> {
+        let batch = self.undo_stack.pop()?;
+        let summary = batch.summary();
+        for change in batch.changes.iter().rev() {
+            match change {
+                SketchEditChange::Created(record) => self.remove_entity_record(record),
+                SketchEditChange::Modified {
+                    context, before, ..
+                } => {
+                    self.restore_entity_in_context(*context, before);
+                }
+            }
+        }
+        self.redo_stack.push(batch);
+        self.undo_generation += 1;
+        Some(summary)
+    }
+
+    pub fn redo_last(&mut self) -> Option<SketchEditSummary> {
+        let batch = self.redo_stack.pop()?;
+        let summary = batch.summary();
+        for change in &batch.changes {
+            match change {
+                SketchEditChange::Created(record) => self.restore_entity_record(record),
+                SketchEditChange::Modified { context, after, .. } => {
+                    self.restore_entity_in_context(*context, after);
+                }
+            }
+        }
+        self.undo_stack.push(batch);
+        self.undo_generation += 1;
+        Some(summary)
+    }
+
+    pub fn move_selection(
+        &mut self,
+        selection: &SelectionSet,
+        delta: Vec3,
+        label: impl Into<String>,
+    ) -> Result<SketchEditSummary, SketchModelError> {
+        let label = label.into();
+        let mut changes = Vec::with_capacity(selection.len());
+
+        for entity_id in selection.ordered() {
+            let context = self.context_for_entity(*entity_id)?;
+            let before = self
+                .entities
+                .get(entity_id)
+                .cloned()
+                .ok_or(SketchModelError::UnknownEntity(*entity_id))?;
+            let mut after = before.clone();
+            translate_entity_kind(&mut after.kind, delta);
+            changes.push(SketchEditChange::Modified {
+                context,
+                before,
+                after,
+            });
+        }
+
+        let batch = SketchEditBatch::new(label, changes);
+        let summary = batch.summary();
+        if summary.entity_count == 0 {
+            return Ok(summary);
+        }
+
+        for change in &batch.changes {
+            if let SketchEditChange::Modified { context, after, .. } = change {
+                self.restore_entity_in_context(*context, after);
+            }
+        }
+        self.undo_stack.push(batch);
+        self.redo_stack.clear();
+        self.undo_generation += 1;
+        Ok(summary)
+    }
+
+    pub fn copy_selection_linear_array(
+        &mut self,
+        selection: &SelectionSet,
+        delta: Vec3,
+        copy_count: usize,
+        label: impl Into<String>,
+    ) -> Result<Vec<SketchId>, SketchModelError> {
+        let originals = self.selected_entity_records(selection)?;
+        if originals.is_empty() || copy_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut created_ids = Vec::with_capacity(originals.len() * copy_count);
+        let mut changes = Vec::with_capacity(originals.len() * copy_count);
+        for step in 1..=copy_count {
+            let mut id_map = BTreeMap::new();
+            for record in &originals {
+                id_map.insert(record.entity.id, self.allocate_id());
+            }
+
+            for record in &originals {
+                let mut entity = record.entity.clone();
+                let new_id = id_map[&entity.id];
+                entity.id = new_id;
+                translate_entity_kind(&mut entity.kind, delta * step as f32);
+                remap_entity_references(&mut entity.kind, &id_map);
+                created_ids.push(new_id);
+                changes.push(SketchEditChange::Created(SketchEntityRecord {
+                    context: record.context,
+                    entity,
+                }));
+            }
+        }
+
+        let batch = SketchEditBatch::new(label, changes);
+        for change in &batch.changes {
+            if let SketchEditChange::Created(record) = change {
+                self.restore_entity_record(record);
+            }
+        }
+        self.undo_stack.push(batch);
+        self.redo_stack.clear();
+        self.undo_generation += 1;
+        Ok(created_ids)
+    }
+
+    pub fn reconstruct_planar_faces(
+        &mut self,
+        context: SketchId,
+        normal: Vec3,
+    ) -> Result<Vec<SketchId>, SketchModelError> {
+        if !self.contexts.contains_key(&context) {
+            return Err(SketchModelError::UnknownContext(context));
+        }
+        let normal = normal.try_normalize().unwrap_or(Vec3::Z);
+        let loops = self.detect_planar_face_loops(context, normal)?;
+        let mut faces = Vec::with_capacity(loops.len());
+        for vertices in loops {
+            let face = self.add_entity(context, SketchEntityKind::Face { vertices, normal })?;
+            faces.push(face);
+        }
+        Ok(faces)
+    }
+
+    fn add_entity_with_history(
+        &mut self,
+        context: SketchId,
+        kind: SketchEntityKind,
+        label: impl Into<String>,
+    ) -> Result<SketchId, SketchModelError> {
+        let id = self.add_entity(context, kind)?;
+        self.record_created_entities(label, [(context, id)])?;
+        Ok(id)
+    }
+
+    fn record_created_entities(
+        &mut self,
+        label: impl Into<String>,
+        entities: impl IntoIterator<Item = (SketchId, SketchId)>,
+    ) -> Result<(), SketchModelError> {
+        let mut changes = Vec::new();
+        for (context, entity) in entities {
+            if !self.contexts.contains_key(&context) {
+                return Err(SketchModelError::UnknownContext(context));
+            }
+            let entity_record = self
+                .entities
+                .get(&entity)
+                .cloned()
+                .ok_or(SketchModelError::UnknownEntity(entity))?;
+            changes.push(SketchEditChange::Created(SketchEntityRecord {
+                context,
+                entity: entity_record,
+            }));
+        }
+        self.undo_stack.push(SketchEditBatch::new(label, changes));
+        self.redo_stack.clear();
+        Ok(())
+    }
+
+    fn selected_entity_records(
+        &self,
+        selection: &SelectionSet,
+    ) -> Result<Vec<SketchEntityRecord>, SketchModelError> {
+        let mut records = Vec::with_capacity(selection.len());
+        for entity_id in selection.ordered() {
+            let context = self.context_for_entity(*entity_id)?;
+            let entity = self
+                .entities
+                .get(entity_id)
+                .cloned()
+                .ok_or(SketchModelError::UnknownEntity(*entity_id))?;
+            records.push(SketchEntityRecord { context, entity });
+        }
+        Ok(records)
+    }
+
+    fn context_for_entity(&self, entity: SketchId) -> Result<SketchId, SketchModelError> {
+        if !self.entities.contains_key(&entity) {
+            return Err(SketchModelError::UnknownEntity(entity));
+        }
+        self.contexts
+            .iter()
+            .find_map(|(context_id, context)| {
+                context.entities.contains(&entity).then_some(*context_id)
+            })
+            .ok_or(SketchModelError::UnknownEntity(entity))
+    }
+
+    fn remove_entity_record(&mut self, record: &SketchEntityRecord) {
+        self.entities.remove(&record.entity.id);
+        if let Some(context) = self.contexts.get_mut(&record.context) {
+            context.entities.retain(|id| *id != record.entity.id);
+        }
+    }
+
+    fn restore_entity_record(&mut self, record: &SketchEntityRecord) {
+        self.entities
+            .insert(record.entity.id, record.entity.clone());
+        if let Some(context) = self.contexts.get_mut(&record.context) {
+            if !context.entities.contains(&record.entity.id) {
+                context.entities.push(record.entity.id);
+            }
+        }
+    }
+
+    fn restore_entity_in_context(&mut self, context: SketchId, entity: &SketchEntity) {
+        self.entities.insert(entity.id, entity.clone());
+        if let Some(context) = self.contexts.get_mut(&context) {
+            if !context.entities.contains(&entity.id) {
+                context.entities.push(entity.id);
+            }
+        }
+    }
+
+    fn face_geometry(&self, face: SketchId) -> Result<(Vec<Vec3>, Vec3), SketchModelError> {
+        match self.entities.get(&face) {
+            Some(SketchEntity {
+                kind: SketchEntityKind::Face { vertices, normal },
+                ..
+            }) => Ok((vertices.clone(), *normal)),
+            Some(SketchEntity {
+                kind:
+                    SketchEntityKind::CircleFace {
+                        vertices, normal, ..
+                    }
+                    | SketchEntityKind::PolygonFace {
+                        vertices, normal, ..
+                    },
+                ..
+            }) => Ok((vertices.clone(), *normal)),
+            _ => Err(SketchModelError::UnknownEntity(face)),
+        }
+    }
+
+    fn detect_planar_face_loops(
+        &self,
+        context: SketchId,
+        normal: Vec3,
+    ) -> Result<Vec<Vec<Vec3>>, SketchModelError> {
+        let context = self
+            .contexts
+            .get(&context)
+            .ok_or(SketchModelError::UnknownContext(context))?;
+        let mut points: BTreeMap<PlanarPointKey, Vec3> = BTreeMap::new();
+        let mut adjacency: BTreeMap<PlanarPointKey, BTreeSet<PlanarPointKey>> = BTreeMap::new();
+        let mut edges: BTreeSet<(PlanarPointKey, PlanarPointKey)> = BTreeSet::new();
+
+        for entity_id in &context.entities {
+            let Some(SketchEntity {
+                kind: SketchEntityKind::Edge { a, b },
+                visible: true,
+                locked: false,
+                ..
+            }) = self.entities.get(entity_id)
+            else {
+                continue;
+            };
+            let a_key = PlanarPointKey::from_vec3(*a);
+            let b_key = PlanarPointKey::from_vec3(*b);
+            if a_key == b_key {
+                continue;
+            }
+            points.entry(a_key).or_insert(*a);
+            points.entry(b_key).or_insert(*b);
+            adjacency.entry(a_key).or_default().insert(b_key);
+            adjacency.entry(b_key).or_default().insert(a_key);
+            edges.insert(normalized_edge(a_key, b_key));
+        }
+
+        let mut canonical_cycles: BTreeSet<Vec<PlanarPointKey>> = BTreeSet::new();
+        for start in points.keys().copied() {
+            let mut path = vec![start];
+            collect_planar_cycles(start, start, &adjacency, &mut path, &mut canonical_cycles);
+        }
+
+        let mut loops = Vec::new();
+        for cycle in canonical_cycles {
+            if planar_cycle_has_chord(&cycle, &edges) {
+                continue;
+            }
+            let Some(vertices) = orient_planar_cycle(cycle, &points, normal) else {
+                continue;
+            };
+            loops.push(vertices);
+        }
+        loops.sort_by(|a, b| {
+            planar_loop_area_abs(a, normal)
+                .total_cmp(&planar_loop_area_abs(b, normal))
+                .then_with(|| a.len().cmp(&b.len()))
+        });
+        Ok(loops)
+    }
+
+    pub fn create_component_definition(
+        &mut self,
+        name: impl Into<String>,
+    ) -> Result<SketchId, SketchModelError> {
+        let context_id = self.allocate_id();
+        self.contexts
+            .insert(context_id, SketchContext::root(context_id));
+        let definition_id = self.allocate_id();
+        self.definitions.insert(
+            definition_id,
+            ComponentDefinition {
+                id: definition_id,
+                name: name.into(),
+                context: context_id,
+            },
+        );
+        self.undo_generation += 1;
+        Ok(definition_id)
+    }
+
+    pub fn add_component_instance(
+        &mut self,
+        definition: SketchId,
+        transform: SketchTransform,
+    ) -> Result<SketchId, SketchModelError> {
+        if !self.definitions.contains_key(&definition) {
+            return Err(SketchModelError::UnknownDefinition(definition));
+        }
+        self.add_entity_to_active(SketchEntityKind::ComponentInstance {
+            definition,
+            transform,
+        })
+    }
+
+    pub fn component_definition_for_instance(&self, instance: SketchId) -> Option<SketchId> {
+        match &self.entities.get(&instance)?.kind {
+            SketchEntityKind::ComponentInstance { definition, .. } => Some(*definition),
+            _ => None,
+        }
+    }
+
+    pub fn make_unique_instance(
+        &mut self,
+        instance: SketchId,
+    ) -> Result<SketchId, SketchModelError> {
+        let old_definition_id = self
+            .component_definition_for_instance(instance)
+            .ok_or(SketchModelError::NotComponentInstance(instance))?;
+        let old_definition = self
+            .definitions
+            .get(&old_definition_id)
+            .cloned()
+            .ok_or(SketchModelError::UnknownDefinition(old_definition_id))?;
+        let old_entity_ids = self
+            .contexts
+            .get(&old_definition.context)
+            .ok_or(SketchModelError::UnknownContext(old_definition.context))?
+            .entities
+            .clone();
+
+        let new_context_id = self.allocate_id();
+        let mut new_context = SketchContext::root(new_context_id);
+        for old_entity_id in old_entity_ids {
+            if let Some(old_entity) = self.entities.get(&old_entity_id).cloned() {
+                let new_entity_id = self.allocate_id();
+                let mut entity = old_entity;
+                entity.id = new_entity_id;
+                self.entities.insert(new_entity_id, entity);
+                new_context.entities.push(new_entity_id);
+            }
+        }
+        self.contexts.insert(new_context_id, new_context);
+
+        let new_definition_id = self.allocate_id();
+        self.definitions.insert(
+            new_definition_id,
+            ComponentDefinition {
+                id: new_definition_id,
+                name: format!("{} unique", old_definition.name),
+                context: new_context_id,
+            },
+        );
+
+        let entity = self
+            .entities
+            .get_mut(&instance)
+            .ok_or(SketchModelError::UnknownEntity(instance))?;
+        match &mut entity.kind {
+            SketchEntityKind::ComponentInstance { definition, .. } => {
+                *definition = new_definition_id;
+            }
+            _ => return Err(SketchModelError::NotComponentInstance(instance)),
+        }
+        self.undo_generation += 1;
+        Ok(new_definition_id)
+    }
+
+    fn allocate_id(&mut self) -> SketchId {
+        let id = SketchId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+}
+
+fn snapshot_context(context: &SketchContext) -> SketchContextSnapshot {
+    SketchContextSnapshot {
+        id: context.id.raw(),
+        parent: context.parent.map(SketchId::raw),
+        local_to_parent: snapshot_transform(context.local_to_parent),
+        entities: context.entities.iter().map(|id| id.raw()).collect(),
+    }
+}
+
+fn restore_context(snapshot: SketchContextSnapshot) -> SketchContext {
+    SketchContext {
+        id: SketchId(snapshot.id),
+        parent: snapshot.parent.map(SketchId),
+        local_to_parent: restore_transform(snapshot.local_to_parent),
+        entities: snapshot.entities.into_iter().map(SketchId).collect(),
+    }
+}
+
+fn snapshot_definition(definition: &ComponentDefinition) -> ComponentDefinitionSnapshot {
+    ComponentDefinitionSnapshot {
+        id: definition.id.raw(),
+        name: definition.name.clone(),
+        context: definition.context.raw(),
+    }
+}
+
+fn restore_definition(snapshot: ComponentDefinitionSnapshot) -> ComponentDefinition {
+    ComponentDefinition {
+        id: SketchId(snapshot.id),
+        name: snapshot.name,
+        context: SketchId(snapshot.context),
+    }
+}
+
+fn snapshot_material(material: &SketchMaterial) -> SketchMaterialSnapshot {
+    SketchMaterialSnapshot {
+        id: material.id.raw(),
+        name: material.name.clone(),
+        color: SketchColorSnapshot {
+            r: material.color.r,
+            g: material.color.g,
+            b: material.color.b,
+            a: material.color.a,
+        },
+    }
+}
+
+fn restore_material(snapshot: SketchMaterialSnapshot) -> SketchMaterial {
+    SketchMaterial {
+        id: SketchId(snapshot.id),
+        name: snapshot.name,
+        color: SketchColor {
+            r: snapshot.color.r,
+            g: snapshot.color.g,
+            b: snapshot.color.b,
+            a: snapshot.color.a,
+        },
+    }
+}
+
+fn snapshot_tag(tag: &SketchTag) -> SketchTagSnapshot {
+    SketchTagSnapshot {
+        id: tag.id.raw(),
+        name: tag.name.clone(),
+        visible: tag.visible,
+    }
+}
+
+fn restore_tag(snapshot: SketchTagSnapshot) -> SketchTag {
+    SketchTag {
+        id: SketchId(snapshot.id),
+        name: snapshot.name,
+        visible: snapshot.visible,
+    }
+}
+
+fn snapshot_style(style: &SketchStyle) -> SketchStyleSnapshot {
+    SketchStyleSnapshot {
+        id: style.id.raw(),
+        name: style.name.clone(),
+    }
+}
+
+fn restore_style(snapshot: SketchStyleSnapshot) -> SketchStyle {
+    SketchStyle {
+        id: SketchId(snapshot.id),
+        name: snapshot.name,
+    }
+}
+
+fn snapshot_scene(scene: &SketchScene) -> SketchSceneSnapshot {
+    SketchSceneSnapshot {
+        id: scene.id.raw(),
+        name: scene.name.clone(),
+        camera: scene.camera.as_ref().map(snapshot_camera),
+        style: scene.style.map(SketchId::raw),
+        visible_tags: scene
+            .visible_tags
+            .iter()
+            .map(|(tag, visible)| (tag.raw(), *visible))
+            .collect(),
+    }
+}
+
+fn restore_scene(snapshot: SketchSceneSnapshot) -> SketchScene {
+    SketchScene {
+        id: SketchId(snapshot.id),
+        name: snapshot.name,
+        camera: snapshot.camera.map(restore_camera),
+        style: snapshot.style.map(SketchId),
+        visible_tags: snapshot
+            .visible_tags
+            .into_iter()
+            .map(|(tag, visible)| (SketchId(tag), visible))
+            .collect(),
+    }
+}
+
+fn snapshot_camera(camera: &SketchCamera) -> SketchCameraSnapshot {
+    SketchCameraSnapshot {
+        eye: snapshot_vec3(camera.eye),
+        target: snapshot_vec3(camera.target),
+        up: snapshot_vec3(camera.up),
+    }
+}
+
+fn restore_camera(snapshot: SketchCameraSnapshot) -> SketchCamera {
+    SketchCamera {
+        eye: restore_vec3(snapshot.eye),
+        target: restore_vec3(snapshot.target),
+        up: restore_vec3(snapshot.up),
+    }
+}
+
+fn snapshot_entity(entity: &SketchEntity) -> SketchEntitySnapshot {
+    SketchEntitySnapshot {
+        id: entity.id.raw(),
+        kind: snapshot_entity_kind(&entity.kind),
+        visible: entity.visible,
+        locked: entity.locked,
+        material: entity.material.map(SketchId::raw),
+        tag: entity.tag.map(SketchId::raw),
+        attributes: entity.attributes.clone(),
+    }
+}
+
+fn restore_entity(snapshot: SketchEntitySnapshot) -> SketchEntity {
+    SketchEntity {
+        id: SketchId(snapshot.id),
+        kind: restore_entity_kind(snapshot.kind),
+        visible: snapshot.visible,
+        locked: snapshot.locked,
+        material: snapshot.material.map(SketchId),
+        tag: snapshot.tag.map(SketchId),
+        attributes: snapshot.attributes,
+    }
+}
+
+fn snapshot_entity_kind(kind: &SketchEntityKind) -> SketchEntityKindSnapshot {
+    match kind {
+        SketchEntityKind::Vertex { point } => SketchEntityKindSnapshot::Vertex {
+            point: snapshot_vec3(*point),
+        },
+        SketchEntityKind::Edge { a, b } => SketchEntityKindSnapshot::Edge {
+            a: snapshot_vec3(*a),
+            b: snapshot_vec3(*b),
+        },
+        SketchEntityKind::Face { vertices, normal } => SketchEntityKindSnapshot::Face {
+            vertices: vertices.iter().copied().map(snapshot_vec3).collect(),
+            normal: snapshot_vec3(*normal),
+        },
+        SketchEntityKind::CircleFace {
+            center,
+            normal,
+            radius,
+            segments,
+            vertices,
+        } => SketchEntityKindSnapshot::CircleFace {
+            center: snapshot_vec3(*center),
+            normal: snapshot_vec3(*normal),
+            radius: *radius,
+            segments: *segments,
+            vertices: vertices.iter().copied().map(snapshot_vec3).collect(),
+        },
+        SketchEntityKind::PolygonFace {
+            center,
+            normal,
+            radius,
+            sides,
+            vertices,
+        } => SketchEntityKindSnapshot::PolygonFace {
+            center: snapshot_vec3(*center),
+            normal: snapshot_vec3(*normal),
+            radius: *radius,
+            sides: *sides,
+            vertices: vertices.iter().copied().map(snapshot_vec3).collect(),
+        },
+        SketchEntityKind::ArcCurve {
+            center,
+            normal,
+            radius,
+            start_direction,
+            sweep_radians,
+            points,
+        } => SketchEntityKindSnapshot::ArcCurve {
+            center: snapshot_vec3(*center),
+            normal: snapshot_vec3(*normal),
+            radius: *radius,
+            start_direction: snapshot_vec3(*start_direction),
+            sweep_radians: *sweep_radians,
+            points: points.iter().copied().map(snapshot_vec3).collect(),
+        },
+        SketchEntityKind::FreehandCurve { points } => SketchEntityKindSnapshot::FreehandCurve {
+            points: points.iter().copied().map(snapshot_vec3).collect(),
+        },
+        SketchEntityKind::PushPullExtrusion {
+            source_face,
+            base_vertices,
+            top_vertices,
+            normal,
+            depth,
+            bounds,
+        } => SketchEntityKindSnapshot::PushPullExtrusion {
+            source_face: source_face.raw(),
+            base_vertices: base_vertices.iter().copied().map(snapshot_vec3).collect(),
+            top_vertices: top_vertices.iter().copied().map(snapshot_vec3).collect(),
+            normal: snapshot_vec3(*normal),
+            depth: *depth,
+            bounds: snapshot_bounds(*bounds),
+        },
+        SketchEntityKind::Opening {
+            host,
+            center,
+            size,
+            normal,
+            through_depth,
+            bounds,
+        } => SketchEntityKindSnapshot::Opening {
+            host: host.raw(),
+            center: snapshot_vec3(*center),
+            size: snapshot_vec3(*size),
+            normal: snapshot_vec3(*normal),
+            through_depth: *through_depth,
+            bounds: snapshot_bounds(*bounds),
+        },
+        SketchEntityKind::Room {
+            shell,
+            shell_bounds,
+            interior_bounds,
+            wall_thickness,
+        } => SketchEntityKindSnapshot::Room {
+            shell: shell.raw(),
+            shell_bounds: snapshot_bounds(*shell_bounds),
+            interior_bounds: snapshot_bounds(*interior_bounds),
+            wall_thickness: *wall_thickness,
+        },
+        SketchEntityKind::Group { context } => SketchEntityKindSnapshot::Group {
+            context: context.raw(),
+        },
+        SketchEntityKind::ComponentInstance {
+            definition,
+            transform,
+        } => SketchEntityKindSnapshot::ComponentInstance {
+            definition: definition.raw(),
+            transform: snapshot_transform(*transform),
+        },
+        SketchEntityKind::GuidePoint { point } => SketchEntityKindSnapshot::GuidePoint {
+            point: snapshot_vec3(*point),
+        },
+        SketchEntityKind::GuideLine { origin, direction } => SketchEntityKindSnapshot::GuideLine {
+            origin: snapshot_vec3(*origin),
+            direction: snapshot_vec3(*direction),
+        },
+        SketchEntityKind::SectionPlane { origin, normal } => {
+            SketchEntityKindSnapshot::SectionPlane {
+                origin: snapshot_vec3(*origin),
+                normal: snapshot_vec3(*normal),
+            }
+        }
+    }
+}
+
+fn restore_entity_kind(snapshot: SketchEntityKindSnapshot) -> SketchEntityKind {
+    match snapshot {
+        SketchEntityKindSnapshot::Vertex { point } => SketchEntityKind::Vertex {
+            point: restore_vec3(point),
+        },
+        SketchEntityKindSnapshot::Edge { a, b } => SketchEntityKind::Edge {
+            a: restore_vec3(a),
+            b: restore_vec3(b),
+        },
+        SketchEntityKindSnapshot::Face { vertices, normal } => SketchEntityKind::Face {
+            vertices: vertices.into_iter().map(restore_vec3).collect(),
+            normal: restore_vec3(normal),
+        },
+        SketchEntityKindSnapshot::CircleFace {
+            center,
+            normal,
+            radius,
+            segments,
+            vertices,
+        } => SketchEntityKind::CircleFace {
+            center: restore_vec3(center),
+            normal: restore_vec3(normal),
+            radius,
+            segments,
+            vertices: vertices.into_iter().map(restore_vec3).collect(),
+        },
+        SketchEntityKindSnapshot::PolygonFace {
+            center,
+            normal,
+            radius,
+            sides,
+            vertices,
+        } => SketchEntityKind::PolygonFace {
+            center: restore_vec3(center),
+            normal: restore_vec3(normal),
+            radius,
+            sides,
+            vertices: vertices.into_iter().map(restore_vec3).collect(),
+        },
+        SketchEntityKindSnapshot::ArcCurve {
+            center,
+            normal,
+            radius,
+            start_direction,
+            sweep_radians,
+            points,
+        } => SketchEntityKind::ArcCurve {
+            center: restore_vec3(center),
+            normal: restore_vec3(normal),
+            radius,
+            start_direction: restore_vec3(start_direction),
+            sweep_radians,
+            points: points.into_iter().map(restore_vec3).collect(),
+        },
+        SketchEntityKindSnapshot::FreehandCurve { points } => SketchEntityKind::FreehandCurve {
+            points: points.into_iter().map(restore_vec3).collect(),
+        },
+        SketchEntityKindSnapshot::PushPullExtrusion {
+            source_face,
+            base_vertices,
+            top_vertices,
+            normal,
+            depth,
+            bounds,
+        } => SketchEntityKind::PushPullExtrusion {
+            source_face: SketchId(source_face),
+            base_vertices: base_vertices.into_iter().map(restore_vec3).collect(),
+            top_vertices: top_vertices.into_iter().map(restore_vec3).collect(),
+            normal: restore_vec3(normal),
+            depth,
+            bounds: restore_bounds(bounds),
+        },
+        SketchEntityKindSnapshot::Opening {
+            host,
+            center,
+            size,
+            normal,
+            through_depth,
+            bounds,
+        } => SketchEntityKind::Opening {
+            host: SketchId(host),
+            center: restore_vec3(center),
+            size: restore_vec3(size),
+            normal: restore_vec3(normal),
+            through_depth,
+            bounds: restore_bounds(bounds),
+        },
+        SketchEntityKindSnapshot::Room {
+            shell,
+            shell_bounds,
+            interior_bounds,
+            wall_thickness,
+        } => SketchEntityKind::Room {
+            shell: SketchId(shell),
+            shell_bounds: restore_bounds(shell_bounds),
+            interior_bounds: restore_bounds(interior_bounds),
+            wall_thickness,
+        },
+        SketchEntityKindSnapshot::Group { context } => SketchEntityKind::Group {
+            context: SketchId(context),
+        },
+        SketchEntityKindSnapshot::ComponentInstance {
+            definition,
+            transform,
+        } => SketchEntityKind::ComponentInstance {
+            definition: SketchId(definition),
+            transform: restore_transform(transform),
+        },
+        SketchEntityKindSnapshot::GuidePoint { point } => SketchEntityKind::GuidePoint {
+            point: restore_vec3(point),
+        },
+        SketchEntityKindSnapshot::GuideLine { origin, direction } => SketchEntityKind::GuideLine {
+            origin: restore_vec3(origin),
+            direction: restore_vec3(direction),
+        },
+        SketchEntityKindSnapshot::SectionPlane { origin, normal } => {
+            SketchEntityKind::SectionPlane {
+                origin: restore_vec3(origin),
+                normal: restore_vec3(normal),
+            }
+        }
+    }
+}
+
+fn snapshot_transform(transform: SketchTransform) -> SketchTransformSnapshot {
+    SketchTransformSnapshot {
+        translation: snapshot_vec3(transform.translation),
+        rotation: [
+            transform.rotation.x,
+            transform.rotation.y,
+            transform.rotation.z,
+            transform.rotation.w,
+        ],
+        scale: snapshot_vec3(transform.scale),
+    }
+}
+
+fn restore_transform(snapshot: SketchTransformSnapshot) -> SketchTransform {
+    SketchTransform {
+        translation: restore_vec3(snapshot.translation),
+        rotation: Quat::from_xyzw(
+            snapshot.rotation[0],
+            snapshot.rotation[1],
+            snapshot.rotation[2],
+            snapshot.rotation[3],
+        ),
+        scale: restore_vec3(snapshot.scale),
+    }
+}
+
+fn snapshot_bounds(bounds: SketchBounds) -> SketchBoundsSnapshot {
+    SketchBoundsSnapshot {
+        min: snapshot_vec3(bounds.min),
+        max: snapshot_vec3(bounds.max),
+    }
+}
+
+fn restore_bounds(snapshot: SketchBoundsSnapshot) -> SketchBounds {
+    SketchBounds {
+        min: restore_vec3(snapshot.min),
+        max: restore_vec3(snapshot.max),
+    }
+}
+
+fn translate_entity_kind(kind: &mut SketchEntityKind, delta: Vec3) {
+    match kind {
+        SketchEntityKind::Vertex { point } => *point += delta,
+        SketchEntityKind::Edge { a, b } => {
+            *a += delta;
+            *b += delta;
+        }
+        SketchEntityKind::Face { vertices, .. } => {
+            translate_points(vertices, delta);
+        }
+        SketchEntityKind::CircleFace {
+            center, vertices, ..
+        }
+        | SketchEntityKind::PolygonFace {
+            center, vertices, ..
+        } => {
+            *center += delta;
+            translate_points(vertices, delta);
+        }
+        SketchEntityKind::ArcCurve { center, points, .. } => {
+            *center += delta;
+            translate_points(points, delta);
+        }
+        SketchEntityKind::FreehandCurve { points } => {
+            translate_points(points, delta);
+        }
+        SketchEntityKind::PushPullExtrusion {
+            base_vertices,
+            top_vertices,
+            bounds,
+            ..
+        } => {
+            translate_points(base_vertices, delta);
+            translate_points(top_vertices, delta);
+            *bounds = bounds.translated(delta);
+        }
+        SketchEntityKind::Opening { center, bounds, .. } => {
+            *center += delta;
+            *bounds = bounds.translated(delta);
+        }
+        SketchEntityKind::Room {
+            shell_bounds,
+            interior_bounds,
+            ..
+        } => {
+            *shell_bounds = shell_bounds.translated(delta);
+            *interior_bounds = interior_bounds.translated(delta);
+        }
+        SketchEntityKind::Group { .. } => {}
+        SketchEntityKind::ComponentInstance { transform, .. } => {
+            transform.translation += delta;
+        }
+        SketchEntityKind::GuidePoint { point } => *point += delta,
+        SketchEntityKind::GuideLine { origin, .. } => *origin += delta,
+        SketchEntityKind::SectionPlane { origin, .. } => *origin += delta,
+    }
+}
+
+fn translate_points(points: &mut [Vec3], delta: Vec3) {
+    for point in points {
+        *point += delta;
+    }
+}
+
+fn remap_entity_references(kind: &mut SketchEntityKind, id_map: &BTreeMap<SketchId, SketchId>) {
+    match kind {
+        SketchEntityKind::PushPullExtrusion { source_face, .. } => {
+            if let Some(mapped) = id_map.get(source_face) {
+                *source_face = *mapped;
+            }
+        }
+        SketchEntityKind::Opening { host, .. } => {
+            if let Some(mapped) = id_map.get(host) {
+                *host = *mapped;
+            }
+        }
+        SketchEntityKind::Room { shell, .. } => {
+            if let Some(mapped) = id_map.get(shell) {
+                *shell = *mapped;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn snapshot_vec3(value: Vec3) -> [f32; 3] {
+    [value.x, value.y, value.z]
+}
+
+fn restore_vec3(snapshot: [f32; 3]) -> Vec3 {
+    Vec3::new(snapshot[0], snapshot[1], snapshot[2])
+}
+
+fn component_by_index_vec3(v: Vec3, axis: usize) -> f32 {
+    match axis {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+
+fn set_component_by_index_vec3(v: &mut Vec3, axis: usize, value: f32) {
+    match axis {
+        0 => v.x = value,
+        1 => v.y = value,
+        _ => v.z = value,
+    }
+}
+
+fn normalized_edge(a: PlanarPointKey, b: PlanarPointKey) -> (PlanarPointKey, PlanarPointKey) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn collect_planar_cycles(
+    start: PlanarPointKey,
+    current: PlanarPointKey,
+    adjacency: &BTreeMap<PlanarPointKey, BTreeSet<PlanarPointKey>>,
+    path: &mut Vec<PlanarPointKey>,
+    cycles: &mut BTreeSet<Vec<PlanarPointKey>>,
+) {
+    let Some(neighbours) = adjacency.get(&current) else {
+        return;
+    };
+    for next in neighbours {
+        if *next == start && path.len() >= 3 {
+            cycles.insert(canonical_cycle(path));
+            continue;
+        }
+        if path.len() >= PLANAR_GRAPH_MAX_LOOP_VERTICES || path.contains(next) {
+            continue;
+        }
+        path.push(*next);
+        collect_planar_cycles(start, *next, adjacency, path, cycles);
+        path.pop();
+    }
+}
+
+fn canonical_cycle(path: &[PlanarPointKey]) -> Vec<PlanarPointKey> {
+    let forward = minimal_cycle_rotation(path.iter().copied().collect());
+    let reverse = minimal_cycle_rotation(path.iter().rev().copied().collect());
+    forward.min(reverse)
+}
+
+fn minimal_cycle_rotation(cycle: Vec<PlanarPointKey>) -> Vec<PlanarPointKey> {
+    let mut best = cycle.clone();
+    for shift in 1..cycle.len() {
+        let rotated: Vec<_> = cycle[shift..]
+            .iter()
+            .chain(cycle[..shift].iter())
+            .copied()
+            .collect();
+        if rotated < best {
+            best = rotated;
+        }
+    }
+    best
+}
+
+fn planar_cycle_has_chord(
+    cycle: &[PlanarPointKey],
+    edges: &BTreeSet<(PlanarPointKey, PlanarPointKey)>,
+) -> bool {
+    for i in 0..cycle.len() {
+        for j in (i + 1)..cycle.len() {
+            if j == i + 1 || (i == 0 && j == cycle.len() - 1) {
+                continue;
+            }
+            if edges.contains(&normalized_edge(cycle[i], cycle[j])) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn orient_planar_cycle(
+    cycle: Vec<PlanarPointKey>,
+    points: &BTreeMap<PlanarPointKey, Vec3>,
+    normal: Vec3,
+) -> Option<Vec<Vec3>> {
+    let mut vertices: Vec<Vec3> = cycle
+        .into_iter()
+        .map(|key| points.get(&key).copied())
+        .collect::<Option<Vec<_>>>()?;
+    let signed_area = planar_loop_signed_area(&vertices, normal);
+    if signed_area.abs() < PLANAR_GRAPH_MIN_AREA {
+        return None;
+    }
+    if signed_area < 0.0 {
+        vertices.reverse();
+    }
+    Some(vertices)
+}
+
+fn planar_loop_area_abs(vertices: &[Vec3], normal: Vec3) -> f32 {
+    planar_loop_signed_area(vertices, normal).abs()
+}
+
+fn planar_loop_signed_area(vertices: &[Vec3], normal: Vec3) -> f32 {
+    let drop_axis = dominant_axis(normal);
+    let mut sum = 0.0;
+    for i in 0..vertices.len() {
+        let a = project_planar_point(vertices[i], drop_axis);
+        let b = project_planar_point(vertices[(i + 1) % vertices.len()], drop_axis);
+        sum += a.x * b.y - b.x * a.y;
+    }
+    sum * 0.5
+}
+
+fn dominant_axis(normal: Vec3) -> usize {
+    let abs = normal.abs();
+    if abs.x >= abs.y && abs.x >= abs.z {
+        0
+    } else if abs.y >= abs.z {
+        1
+    } else {
+        2
+    }
+}
+
+fn project_planar_point(point: Vec3, drop_axis: usize) -> Vec3 {
+    match drop_axis {
+        0 => Vec3::new(point.y, point.z, 0.0),
+        1 => Vec3::new(point.x, point.z, 0.0),
+        _ => Vec3::new(point.x, point.y, 0.0),
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SelectionSet {
+    ordered: Vec<SketchId>,
+}
+
+impl SelectionSet {
+    pub fn select(&mut self, id: SketchId) {
+        if !self.ordered.contains(&id) {
+            self.ordered.push(id);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.ordered.clear();
+    }
+
+    pub fn contains(&self, id: SketchId) -> bool {
+        self.ordered.contains(&id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.ordered.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ordered.is_empty()
+    }
+
+    pub fn ordered(&self) -> &[SketchId] {
+        &self.ordered
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitKind {
+    Vertex,
+    Edge,
+    Face,
+    Instance,
+    Guide,
+    SectionPlane,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HitRecord {
+    pub entity: SketchId,
+    pub instance_path: Vec<SketchId>,
+    pub kind: HitKind,
+    pub world_point: Vec3,
+    pub distance: f32,
+    pub normal: Option<Vec3>,
+}
+
+impl HitRecord {
+    pub fn new(
+        entity: SketchId,
+        instance_path: impl IntoIterator<Item = SketchId>,
+        kind: HitKind,
+        world_point: Vec3,
+        distance: f32,
+    ) -> Self {
+        Self {
+            entity,
+            instance_path: instance_path.into_iter().collect(),
+            kind,
+            world_point,
+            distance,
+            normal: None,
+        }
+    }
+
+    pub fn with_normal(mut self, normal: Vec3) -> Self {
+        self.normal = Some(normal);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InferenceKind {
+    Endpoint,
+    Midpoint,
+    FaceCenter,
+    OnEdge,
+    OnFace,
+    AxisX,
+    AxisY,
+    AxisZ,
+    Parallel,
+    Perpendicular,
+    FromPoint,
+    Intersection,
+}
+
+impl InferenceKind {
+    const fn priority(self) -> u8 {
+        match self {
+            Self::Endpoint => 100,
+            Self::Intersection => 95,
+            Self::Midpoint => 90,
+            Self::FaceCenter => 80,
+            Self::OnEdge => 70,
+            Self::AxisX | Self::AxisY | Self::AxisZ => 65,
+            Self::Parallel | Self::Perpendicular => 60,
+            Self::FromPoint => 50,
+            Self::OnFace => 20,
+        }
+    }
+
+    pub const fn tooltip(self) -> &'static str {
+        match self {
+            Self::Endpoint => "Endpoint",
+            Self::Midpoint => "Midpoint",
+            Self::FaceCenter => "Face center",
+            Self::OnEdge => "On edge",
+            Self::OnFace => "On face",
+            Self::AxisX => "Red axis",
+            Self::AxisY => "Green axis",
+            Self::AxisZ => "Blue axis",
+            Self::Parallel => "Parallel",
+            Self::Perpendicular => "Perpendicular",
+            Self::FromPoint => "From point",
+            Self::Intersection => "Intersection",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InferenceCandidate {
+    pub kind: InferenceKind,
+    pub point: Vec3,
+    pub direction: Option<Vec3>,
+    pub plane_normal: Option<Vec3>,
+    pub strength: f32,
+    pub tooltip: String,
+}
+
+impl InferenceCandidate {
+    pub fn new(
+        kind: InferenceKind,
+        point: Vec3,
+        strength: f32,
+        tooltip: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            point,
+            direction: None,
+            plane_normal: None,
+            strength,
+            tooltip: tooltip.into(),
+        }
+    }
+
+    pub fn with_direction(mut self, direction: Vec3) -> Self {
+        self.direction = Some(direction);
+        self
+    }
+
+    pub fn with_plane_normal(mut self, plane_normal: Vec3) -> Self {
+        self.plane_normal = Some(plane_normal);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InferenceLock {
+    kind: InferenceKind,
+    anchor: Vec3,
+    direction: Option<Vec3>,
+    plane_normal: Option<Vec3>,
+}
+
+impl InferenceLock {
+    pub fn axis(kind: InferenceKind, anchor: Vec3) -> Option<Self> {
+        let direction = match kind {
+            InferenceKind::AxisX => Vec3::X,
+            InferenceKind::AxisY => Vec3::Y,
+            InferenceKind::AxisZ => Vec3::Z,
+            _ => return None,
+        };
+        Some(Self {
+            kind,
+            anchor,
+            direction: Some(direction),
+            plane_normal: None,
+        })
+    }
+
+    pub fn from_point(anchor: Vec3, direction: Vec3) -> Option<Self> {
+        let direction = direction.try_normalize()?;
+        Some(Self {
+            kind: InferenceKind::FromPoint,
+            anchor,
+            direction: Some(direction),
+            plane_normal: None,
+        })
+    }
+
+    pub fn plane(kind: InferenceKind, anchor: Vec3, plane_normal: Vec3) -> Option<Self> {
+        if !matches!(kind, InferenceKind::OnFace | InferenceKind::FaceCenter) {
+            return None;
+        }
+        let plane_normal = plane_normal.try_normalize()?;
+        Some(Self {
+            kind,
+            anchor,
+            direction: None,
+            plane_normal: Some(plane_normal),
+        })
+    }
+
+    pub fn apply(self, raw_point: Vec3) -> InferenceCandidate {
+        let point = if let Some(plane_normal) = self.plane_normal {
+            raw_point - plane_normal * (raw_point - self.anchor).dot(plane_normal)
+        } else if let Some(direction) = self.direction {
+            self.anchor + direction * (raw_point - self.anchor).dot(direction)
+        } else {
+            self.anchor
+        };
+        let mut candidate = InferenceCandidate::new(
+            self.kind,
+            point,
+            1.0,
+            format!("{} locked", self.kind.tooltip()),
+        );
+        if let Some(direction) = self.direction {
+            candidate = candidate.with_direction(direction);
+        }
+        if let Some(plane_normal) = self.plane_normal {
+            candidate = candidate.with_plane_normal(plane_normal);
+        }
+        candidate
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct InferenceService;
+
+impl InferenceService {
+    pub fn best(
+        candidates: impl IntoIterator<Item = InferenceCandidate>,
+    ) -> Option<InferenceCandidate> {
+        let mut ranked: Vec<_> = candidates.into_iter().collect();
+        Self::rank(&mut ranked);
+        ranked.into_iter().next()
+    }
+
+    pub fn ranked(
+        candidates: impl IntoIterator<Item = InferenceCandidate>,
+    ) -> Vec<InferenceCandidate> {
+        let mut ranked: Vec<_> = candidates.into_iter().collect();
+        Self::rank(&mut ranked);
+        ranked
+    }
+
+    fn rank(candidates: &mut [InferenceCandidate]) {
+        candidates.sort_by(|a, b| {
+            b.strength
+                .total_cmp(&a.strength)
+                .then_with(|| b.kind.priority().cmp(&a.kind.priority()))
+                .then_with(|| stable_kind_order(a.kind).cmp(&stable_kind_order(b.kind)))
+        });
+    }
+}
+
+fn stable_kind_order(kind: InferenceKind) -> u8 {
+    match kind {
+        InferenceKind::Endpoint => 0,
+        InferenceKind::Midpoint => 1,
+        InferenceKind::FaceCenter => 2,
+        InferenceKind::OnEdge => 3,
+        InferenceKind::OnFace => 4,
+        InferenceKind::AxisX => 5,
+        InferenceKind::AxisY => 6,
+        InferenceKind::AxisZ => 7,
+        InferenceKind::Parallel => 8,
+        InferenceKind::Perpendicular => 9,
+        InferenceKind::FromPoint => 10,
+        InferenceKind::Intersection => 11,
+    }
+}
+
+fn safe_normal(normal: Vec3) -> Vec3 {
+    normal.try_normalize().unwrap_or(Vec3::Z)
+}
+
+fn plane_basis(normal: Vec3, preferred_axis: Option<Vec3>) -> (Vec3, Vec3, Vec3) {
+    let normal = safe_normal(normal);
+    let axis_u = preferred_axis
+        .and_then(|axis| (axis - normal * axis.dot(normal)).try_normalize())
+        .unwrap_or_else(|| {
+            let fallback = if normal.z.abs() < 0.9 {
+                Vec3::Z
+            } else {
+                Vec3::Y
+            };
+            normal.cross(fallback).try_normalize().unwrap_or(Vec3::X)
+        });
+    let axis_v = normal.cross(axis_u).try_normalize().unwrap_or(Vec3::Y);
+    (axis_u, axis_v, normal)
+}
+
+fn radial_points(
+    center: Vec3,
+    normal: Vec3,
+    radius: f32,
+    count: usize,
+    preferred_axis: Option<Vec3>,
+) -> Vec<Vec3> {
+    let count = count.max(3);
+    let (axis_u, axis_v, _) = plane_basis(normal, preferred_axis);
+    (0..count)
+        .map(|index| {
+            let angle = std::f32::consts::TAU * index as f32 / count as f32;
+            center + (axis_u * angle.cos() + axis_v * angle.sin()) * radius
+        })
+        .collect()
+}
+
+fn push_face_inference_candidates(
+    vertices: &[Vec3],
+    normal: Vec3,
+    candidates: &mut Vec<InferenceCandidate>,
+) {
+    let normal = safe_normal(normal);
+    for vertex in vertices {
+        candidates.push(
+            InferenceCandidate::new(
+                InferenceKind::Endpoint,
+                *vertex,
+                1.0,
+                InferenceKind::Endpoint.tooltip(),
+            )
+            .with_plane_normal(normal),
+        );
+    }
+    push_curve_inference_candidates(vertices, true, Some(normal), candidates);
+    if !vertices.is_empty() {
+        let center = vertices
+            .iter()
+            .copied()
+            .fold(Vec3::ZERO, |acc, vertex| acc + vertex)
+            / vertices.len() as f32;
+        candidates.push(
+            InferenceCandidate::new(
+                InferenceKind::FaceCenter,
+                center,
+                0.86,
+                InferenceKind::FaceCenter.tooltip(),
+            )
+            .with_plane_normal(normal),
+        );
+        candidates.push(
+            InferenceCandidate::new(
+                InferenceKind::OnFace,
+                center,
+                0.42,
+                InferenceKind::OnFace.tooltip(),
+            )
+            .with_plane_normal(normal),
+        );
+    }
+}
+
+fn push_curve_inference_candidates(
+    points: &[Vec3],
+    closed: bool,
+    plane_normal: Option<Vec3>,
+    candidates: &mut Vec<InferenceCandidate>,
+) {
+    if points.is_empty() {
+        return;
+    }
+    let plane_normal = plane_normal.map(safe_normal);
+    if !closed {
+        for point in [points[0], points[points.len() - 1]] {
+            let mut candidate = InferenceCandidate::new(
+                InferenceKind::Endpoint,
+                point,
+                1.0,
+                InferenceKind::Endpoint.tooltip(),
+            );
+            if let Some(normal) = plane_normal {
+                candidate = candidate.with_plane_normal(normal);
+            }
+            candidates.push(candidate);
+        }
+    }
+
+    let segment_count = if closed {
+        points.len()
+    } else {
+        points.len().saturating_sub(1)
+    };
+    for index in 0..segment_count {
+        let a = points[index];
+        let b = points[(index + 1) % points.len()];
+        let midpoint = (a + b) * 0.5;
+        let mut midpoint_candidate = InferenceCandidate::new(
+            InferenceKind::Midpoint,
+            midpoint,
+            0.92,
+            InferenceKind::Midpoint.tooltip(),
+        );
+        if let Some(normal) = plane_normal {
+            midpoint_candidate = midpoint_candidate.with_plane_normal(normal);
+        }
+        candidates.push(midpoint_candidate);
+
+        if let Some(direction) = (b - a).try_normalize() {
+            let mut edge_candidate = InferenceCandidate::new(
+                InferenceKind::OnEdge,
+                midpoint,
+                0.74,
+                InferenceKind::OnEdge.tooltip(),
+            )
+            .with_direction(direction);
+            if let Some(normal) = plane_normal {
+                edge_candidate = edge_candidate.with_plane_normal(normal);
+            }
+            candidates.push(edge_candidate);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EditorToolId {
+    Select,
+    Pencil,
+    Rectangle,
+    Circle,
+    Polygon,
+    Arc,
+    Freehand,
+    House,
+    PushPull,
+    Room,
+    CutOpening,
+    Road,
+    BotArea,
+    Material,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorToolPhase {
+    Idle,
+    Previewing,
+    Committed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorToolDefinition {
+    pub id: EditorToolId,
+    pub label: &'static str,
+    pub begin_hint: &'static str,
+    pub preview_hint: &'static str,
+    pub commit_label: &'static str,
+    pub cancel_hint: &'static str,
+    pub uses_inference: bool,
+    pub supports_typed_measurement: bool,
+}
+
+impl EditorToolDefinition {
+    const fn new(
+        id: EditorToolId,
+        label: &'static str,
+        begin_hint: &'static str,
+        preview_hint: &'static str,
+        commit_label: &'static str,
+        cancel_hint: &'static str,
+        uses_inference: bool,
+        supports_typed_measurement: bool,
+    ) -> Self {
+        Self {
+            id,
+            label,
+            begin_hint,
+            preview_hint,
+            commit_label,
+            cancel_hint,
+            uses_inference,
+            supports_typed_measurement,
+        }
+    }
+}
+
+#[derive(Resource, Debug, Clone)]
+pub struct EditorToolCatalog {
+    definitions: Vec<EditorToolDefinition>,
+}
+
+impl Default for EditorToolCatalog {
+    fn default() -> Self {
+        Self {
+            definitions: vec![
+                editor_tool_definition(EditorToolId::Select),
+                editor_tool_definition(EditorToolId::Pencil),
+                editor_tool_definition(EditorToolId::Rectangle),
+                editor_tool_definition(EditorToolId::Circle),
+                editor_tool_definition(EditorToolId::Polygon),
+                editor_tool_definition(EditorToolId::Arc),
+                editor_tool_definition(EditorToolId::Freehand),
+                editor_tool_definition(EditorToolId::House),
+                editor_tool_definition(EditorToolId::PushPull),
+                editor_tool_definition(EditorToolId::Room),
+                editor_tool_definition(EditorToolId::CutOpening),
+                editor_tool_definition(EditorToolId::Road),
+                editor_tool_definition(EditorToolId::BotArea),
+                editor_tool_definition(EditorToolId::Material),
+            ],
+        }
+    }
+}
+
+impl EditorToolCatalog {
+    pub fn definition(&self, id: EditorToolId) -> Option<&EditorToolDefinition> {
+        self.definitions
+            .iter()
+            .find(|definition| definition.id == id)
+    }
+
+    pub fn definitions(&self) -> &[EditorToolDefinition] {
+        &self.definitions
+    }
+}
+
+fn editor_tool_definition(tool: EditorToolId) -> EditorToolDefinition {
+    match tool {
+        EditorToolId::Select => EditorToolDefinition::new(
+            tool,
+            "SELECT",
+            "Select or inspect faces, edges, rooms, roads, and components.",
+            "Hover geometry to inspect entity, component, material, and snap references.",
+            "Selection",
+            "Selection preview cancelled.",
+            true,
+            false,
+        ),
+        EditorToolId::Pencil => EditorToolDefinition::new(
+            tool,
+            "PENCIL",
+            "Click an endpoint, midpoint, face center, or grid point to start a voxel line.",
+            "Move to a snapped endpoint or axis inference; click to commit the line.",
+            "Pencil line",
+            "Pencil line cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::Rectangle => EditorToolDefinition::new(
+            tool,
+            "RECTANGLE",
+            "Click a start corner on floor, wall, roof, or side plane.",
+            "Move to a snapped opposite corner; click to commit a face.",
+            "Rectangle face",
+            "Rectangle preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::Circle => EditorToolDefinition::new(
+            tool,
+            "CIRCLE",
+            "Click a center point on a locked face plane, then move to set radius.",
+            "Move through endpoint, midpoint, axis, or typed-radius inference; click to commit.",
+            "Circle face",
+            "Circle preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::Polygon => EditorToolDefinition::new(
+            tool,
+            "POLYGON",
+            "Click a center point on a locked plane, then move to set polygon radius.",
+            "Move through snap references or type side count/radius before committing.",
+            "Polygon face",
+            "Polygon preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::Arc => EditorToolDefinition::new(
+            tool,
+            "ARC",
+            "Click an arc center/start reference on a face plane.",
+            "Move through endpoint, midpoint, and tangent references to shape the arc.",
+            "Arc curve",
+            "Arc preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::Freehand => EditorToolDefinition::new(
+            tool,
+            "FREEHAND",
+            "Press and drag on a locked sketch plane to collect a freehand curve.",
+            "Smooth sampled points into selectable curve segments with midpoint inference.",
+            "Freehand curve",
+            "Freehand preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::House => EditorToolDefinition::new(
+            tool,
+            "HOUSE",
+            "Start a guided house: draw footprint, pull walls, cut openings, hollow room.",
+            "Follow the current house stage; toolbox clicks safely switch steps.",
+            "House step",
+            "House step cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::PushPull => EditorToolDefinition::new(
+            tool,
+            "PUSH/PULL",
+            "Click a face, then move the mouse to choose wall, roof, or floor depth.",
+            "Move along the face normal with endpoint/midpoint/face-center references.",
+            "Push/Pull",
+            "Push/Pull preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::Room => EditorToolDefinition::new(
+            tool,
+            "ROOM",
+            "Click a solid shell face or footprint to create livable hollow space.",
+            "Preview interior bounds while preserving the wall shell thickness.",
+            "Room hollow",
+            "Room hollow preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::CutOpening => EditorToolDefinition::new(
+            tool,
+            "OPENING",
+            "Click a wall face to place a door or window opening.",
+            "Drag snapped width and height on the wall face; click to cut through wall thickness.",
+            "Opening cut",
+            "Opening preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::Road => EditorToolDefinition::new(
+            tool,
+            "ROAD",
+            "Click road endpoints to create editable road components.",
+            "Move to a branch, curve, bridge, or roundabout endpoint; click to commit.",
+            "Road component",
+            "Road preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::BotArea => EditorToolDefinition::new(
+            tool,
+            "BOT AREA",
+            "Click two corners to mark the exact city area bots may build inside.",
+            "Preview the bounded city zone so bots stay under player command.",
+            "Bot city area",
+            "Bot area preview cancelled.",
+            true,
+            true,
+        ),
+        EditorToolId::Material => EditorToolDefinition::new(
+            tool,
+            "MATERIAL",
+            "Pick a style/material for the selected component or active tool.",
+            "Hover/select a component to preview material assignment.",
+            "Material style",
+            "Material preview cancelled.",
+            false,
+            false,
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HouseBuildStage {
+    Footprint,
+    PullWalls,
+    CutOpenings,
+    HollowRoom,
+    RoofAndDetails,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HouseWorkflowGuide {
+    pub stage: HouseBuildStage,
+    pub material: SketchId,
+}
+
+impl HouseWorkflowGuide {
+    pub fn status(self) -> &'static str {
+        match self.stage {
+            HouseBuildStage::Footprint => {
+                "HOUSE: Footprint first. Draw Rectangle/Pencil, then Push/Pull walls, Opening cuts, Room hollow, roof/floor details."
+            }
+            HouseBuildStage::PullWalls => {
+                "HOUSE: Push/Pull the footprint into walls or roof massing; Esc cancels and RMB only orbits."
+            }
+            HouseBuildStage::CutOpenings => {
+                "HOUSE: Opening cuts doors/windows through wall thickness from the selected face."
+            }
+            HouseBuildStage::HollowRoom => {
+                "HOUSE: Room hollows a usable interior while preserving the outer shell."
+            }
+            HouseBuildStage::RoofAndDetails => {
+                "HOUSE: Add roof/floor detail, material style, and component cleanup."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorCancelReason {
+    Escape,
+    ToolSwitch,
+    ToolboxClick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolInputEffect {
+    OrbitOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolTransaction {
+    pub label: String,
+    pub touched: Vec<SketchId>,
+}
+
+impl ToolTransaction {
+    fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            touched: Vec::new(),
+        }
+    }
+}
+
+#[derive(Resource, Debug, Clone)]
+pub struct ToolController {
+    active_tool: EditorToolId,
+    tool_phase: EditorToolPhase,
+    selection: SelectionSet,
+    inference_lock: Option<InferenceLock>,
+    preview_generation: u64,
+    open_transaction: Option<ToolTransaction>,
+    last_transaction_label: Option<String>,
+    last_cancelled_transaction_label: Option<String>,
+    active_tool_label: &'static str,
+    active_tool_hint: String,
+    house_guide: Option<HouseWorkflowGuide>,
+}
+
+impl Default for ToolController {
+    fn default() -> Self {
+        let definition = editor_tool_definition(EditorToolId::Select);
+        Self {
+            active_tool: EditorToolId::Select,
+            tool_phase: EditorToolPhase::Idle,
+            selection: SelectionSet::default(),
+            inference_lock: None,
+            preview_generation: 0,
+            open_transaction: None,
+            last_transaction_label: None,
+            last_cancelled_transaction_label: None,
+            active_tool_label: definition.label,
+            active_tool_hint: definition.begin_hint.to_owned(),
+            house_guide: None,
+        }
+    }
+}
+
+impl ToolController {
+    pub fn active_tool(&self) -> EditorToolId {
+        self.active_tool
+    }
+
+    pub fn tool_phase(&self) -> EditorToolPhase {
+        self.tool_phase
+    }
+
+    pub fn active_tool_label(&self) -> &'static str {
+        self.active_tool_label
+    }
+
+    pub fn active_tool_hint(&self) -> &str {
+        self.active_tool_hint.as_str()
+    }
+
+    pub fn activate(&mut self, tool: EditorToolId) {
+        if self.active_tool != tool {
+            self.cancel_open_transaction_for_lifecycle();
+            self.active_tool = tool;
+            self.inference_lock = None;
+            self.open_transaction = None;
+            self.tool_phase = EditorToolPhase::Idle;
+            if tool != EditorToolId::House {
+                self.house_guide = None;
+            }
+            self.sync_lifecycle_from_definition();
+            self.preview_generation += 1;
+        }
+    }
+
+    pub fn start_house_workflow(&mut self, material: SketchId) {
+        self.activate(EditorToolId::House);
+        self.house_guide = Some(HouseWorkflowGuide {
+            stage: HouseBuildStage::Footprint,
+            material,
+        });
+        if let Some(guide) = self.house_guide {
+            self.active_tool_hint = guide.status().to_owned();
+        }
+        self.tool_phase = EditorToolPhase::Idle;
+        self.preview_generation += 1;
+    }
+
+    pub fn house_guide(&self) -> Option<HouseWorkflowGuide> {
+        self.house_guide
+    }
+
+    pub fn selection(&self) -> &SelectionSet {
+        &self.selection
+    }
+
+    pub fn selection_mut(&mut self) -> &mut SelectionSet {
+        &mut self.selection
+    }
+
+    pub fn preview_generation(&self) -> u64 {
+        self.preview_generation
+    }
+
+    pub fn inference_lock(&self) -> Option<InferenceLock> {
+        self.inference_lock
+    }
+
+    pub fn lock_inference(&mut self, inference_lock: InferenceLock) {
+        let tooltip = inference_lock.apply(inference_lock.anchor).tooltip;
+        self.inference_lock = Some(inference_lock);
+        self.active_tool_hint = format!("{tooltip}. {}", self.active_tool_hint);
+        self.preview_generation += 1;
+    }
+
+    pub fn project_locked_inference(&self, raw_point: Vec3) -> Option<InferenceCandidate> {
+        self.inference_lock.map(|lock| lock.apply(raw_point))
+    }
+
+    pub fn begin_transaction(&mut self, label: impl Into<String>) {
+        let definition = editor_tool_definition(self.active_tool);
+        self.open_transaction = Some(ToolTransaction::new(label));
+        self.tool_phase = EditorToolPhase::Previewing;
+        self.active_tool_label = definition.label;
+        self.active_tool_hint = definition.preview_hint.to_owned();
+    }
+
+    pub fn open_transaction_label(&self) -> Option<&str> {
+        self.open_transaction
+            .as_ref()
+            .map(|transaction| transaction.label.as_str())
+    }
+
+    pub fn last_transaction_label(&self) -> Option<&str> {
+        self.last_transaction_label.as_deref()
+    }
+
+    pub fn last_cancelled_transaction_label(&self) -> Option<&str> {
+        self.last_cancelled_transaction_label.as_deref()
+    }
+
+    pub fn touch_entity(&mut self, id: SketchId) {
+        if let Some(transaction) = &mut self.open_transaction {
+            if !transaction.touched.contains(&id) {
+                transaction.touched.push(id);
+            }
+        }
+    }
+
+    pub fn commit_transaction(&mut self) -> Option<ToolTransaction> {
+        let committed = self.open_transaction.take()?;
+        let definition = editor_tool_definition(self.active_tool);
+        self.last_transaction_label = Some(committed.label.clone());
+        self.tool_phase = EditorToolPhase::Committed;
+        self.active_tool_label = definition.label;
+        self.active_tool_hint = format!(
+            "{} committed: {}.",
+            definition.commit_label, committed.label
+        );
+        self.preview_generation += 1;
+        Some(committed)
+    }
+
+    pub fn cancel_transaction(&mut self) {
+        if self.cancel_open_transaction_for_lifecycle() {
+            self.preview_generation += 1;
+        }
+    }
+
+    pub fn cancel_active_operation(&mut self, _reason: EditorCancelReason) -> bool {
+        let had_operation = self.cancel_open_transaction_for_lifecycle();
+        if had_operation {
+            self.preview_generation += 1;
+        }
+        had_operation
+    }
+
+    pub fn handle_right_mouse_orbit(&self) -> ToolInputEffect {
+        ToolInputEffect::OrbitOnly
+    }
+
+    fn cancel_open_transaction_for_lifecycle(&mut self) -> bool {
+        let Some(transaction) = self.open_transaction.take() else {
+            return false;
+        };
+        let definition = editor_tool_definition(self.active_tool);
+        self.last_cancelled_transaction_label = Some(transaction.label);
+        self.tool_phase = EditorToolPhase::Cancelled;
+        self.active_tool_label = definition.label;
+        self.active_tool_hint = definition.cancel_hint.to_owned();
+        true
+    }
+
+    fn sync_lifecycle_from_definition(&mut self) {
+        let definition = editor_tool_definition(self.active_tool);
+        self.active_tool_label = definition.label;
+        self.active_tool_hint = definition.begin_hint.to_owned();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SketchRegistryError {
+    DuplicateId(String),
+    UnknownExtension(String),
+}
+
+impl fmt::Display for SketchRegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateId(id) => write!(f, "duplicate sketch registry id {id}"),
+            Self::UnknownExtension(id) => write!(f, "unknown sketch extension {id}"),
+        }
+    }
+}
+
+impl Error for SketchRegistryError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchExtensionManifest {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+}
+
+impl SketchExtensionManifest {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            version: version.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchToolDescriptor {
+    pub id: String,
+    pub label: String,
+    pub editor_tool: EditorToolId,
+    pub extension: Option<String>,
+}
+
+impl SketchToolDescriptor {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        editor_tool: EditorToolId,
+        extension: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            editor_tool,
+            extension,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchCommandDescriptor {
+    pub id: String,
+    pub label: String,
+    pub tool: Option<EditorToolId>,
+    pub extension: Option<String>,
+}
+
+impl SketchCommandDescriptor {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        tool: Option<EditorToolId>,
+        extension: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            tool,
+            extension,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchIoFormat {
+    pub extension: String,
+    pub label: String,
+    pub preserves_semantics: bool,
+}
+
+impl SketchIoFormat {
+    pub fn new(
+        extension: impl Into<String>,
+        label: impl Into<String>,
+        preserves_semantics: bool,
+    ) -> Self {
+        Self {
+            extension: extension.into(),
+            label: label.into(),
+            preserves_semantics,
+        }
+    }
+}
+
+#[derive(Resource, Debug, Clone)]
+pub struct SketchCommandRegistry {
+    extensions: BTreeMap<String, SketchExtensionManifest>,
+    tools: BTreeMap<String, SketchToolDescriptor>,
+    commands: BTreeMap<String, SketchCommandDescriptor>,
+    importers: BTreeMap<String, SketchIoFormat>,
+    exporters: BTreeMap<String, SketchIoFormat>,
+}
+
+impl Default for SketchCommandRegistry {
+    fn default() -> Self {
+        let mut registry = Self::empty();
+        for (id, label, tool) in [
+            ("editor.select", "Select", EditorToolId::Select),
+            ("editor.pencil", "Pencil", EditorToolId::Pencil),
+            ("editor.rectangle", "Rectangle", EditorToolId::Rectangle),
+            ("editor.circle", "Circle", EditorToolId::Circle),
+            ("editor.polygon", "Polygon", EditorToolId::Polygon),
+            ("editor.arc", "Arc", EditorToolId::Arc),
+            ("editor.freehand", "Freehand", EditorToolId::Freehand),
+            ("editor.house", "House", EditorToolId::House),
+            ("editor.push_pull", "Push/Pull", EditorToolId::PushPull),
+            ("editor.room", "Room", EditorToolId::Room),
+            ("editor.opening", "Opening", EditorToolId::CutOpening),
+            ("editor.road", "Road", EditorToolId::Road),
+            ("editor.bot_area", "Bot Area", EditorToolId::BotArea),
+            ("editor.material", "Material", EditorToolId::Material),
+        ] {
+            registry
+                .register_tool(SketchToolDescriptor::new(id, label, tool, None))
+                .expect("built-in tool ids are unique");
+            registry
+                .register_command(SketchCommandDescriptor::new(id, label, Some(tool), None))
+                .expect("built-in command ids are unique");
+        }
+        for format in [
+            SketchIoFormat::new("gltf", "glTF scene", true),
+            SketchIoFormat::new("dae", "COLLADA scene", true),
+            SketchIoFormat::new("obj", "OBJ mesh", false),
+            SketchIoFormat::new("stl", "STL mesh", false),
+        ] {
+            registry
+                .register_importer(format.clone())
+                .expect("built-in importer ids are unique");
+            registry
+                .register_exporter(format)
+                .expect("built-in exporter ids are unique");
+        }
+        registry
+    }
+}
+
+impl SketchCommandRegistry {
+    pub fn empty() -> Self {
+        Self {
+            extensions: BTreeMap::new(),
+            tools: BTreeMap::new(),
+            commands: BTreeMap::new(),
+            importers: BTreeMap::new(),
+            exporters: BTreeMap::new(),
+        }
+    }
+
+    pub fn register_extension(
+        &mut self,
+        extension: SketchExtensionManifest,
+    ) -> Result<(), SketchRegistryError> {
+        if self.extensions.contains_key(&extension.id) {
+            return Err(SketchRegistryError::DuplicateId(extension.id));
+        }
+        self.extensions.insert(extension.id.clone(), extension);
+        Ok(())
+    }
+
+    pub fn extension(&self, id: &str) -> Option<&SketchExtensionManifest> {
+        self.extensions.get(id)
+    }
+
+    pub fn register_tool(&mut self, tool: SketchToolDescriptor) -> Result<(), SketchRegistryError> {
+        self.check_extension(tool.extension.as_deref())?;
+        if self.tools.contains_key(&tool.id) {
+            return Err(SketchRegistryError::DuplicateId(tool.id));
+        }
+        self.tools.insert(tool.id.clone(), tool);
+        Ok(())
+    }
+
+    pub fn tool(&self, id: &str) -> Option<&SketchToolDescriptor> {
+        self.tools.get(id)
+    }
+
+    pub fn register_command(
+        &mut self,
+        command: SketchCommandDescriptor,
+    ) -> Result<(), SketchRegistryError> {
+        self.check_extension(command.extension.as_deref())?;
+        if self.commands.contains_key(&command.id) {
+            return Err(SketchRegistryError::DuplicateId(command.id));
+        }
+        self.commands.insert(command.id.clone(), command);
+        Ok(())
+    }
+
+    pub fn command(&self, id: &str) -> Option<&SketchCommandDescriptor> {
+        self.commands.get(id)
+    }
+
+    pub fn register_importer(&mut self, format: SketchIoFormat) -> Result<(), SketchRegistryError> {
+        if self.importers.contains_key(&format.extension) {
+            return Err(SketchRegistryError::DuplicateId(format.extension));
+        }
+        self.importers.insert(format.extension.clone(), format);
+        Ok(())
+    }
+
+    pub fn importer(&self, extension: &str) -> Option<&SketchIoFormat> {
+        self.importers.get(extension)
+    }
+
+    pub fn register_exporter(&mut self, format: SketchIoFormat) -> Result<(), SketchRegistryError> {
+        if self.exporters.contains_key(&format.extension) {
+            return Err(SketchRegistryError::DuplicateId(format.extension));
+        }
+        self.exporters.insert(format.extension.clone(), format);
+        Ok(())
+    }
+
+    pub fn exporter(&self, extension: &str) -> Option<&SketchIoFormat> {
+        self.exporters.get(extension)
+    }
+
+    fn check_extension(&self, extension: Option<&str>) -> Result<(), SketchRegistryError> {
+        if let Some(extension) = extension {
+            if !self.extensions.contains_key(extension) {
+                return Err(SketchRegistryError::UnknownExtension(extension.to_owned()));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct SketchModelPlugin;
+
+impl Plugin for SketchModelPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SketchDocument>()
+            .init_resource::<InferenceService>()
+            .init_resource::<ToolController>()
+            .init_resource::<EditorToolCatalog>()
+            .init_resource::<SketchCommandRegistry>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_bootstraps_root_context_and_side_tables() {
+        let doc = SketchDocument::new();
+
+        assert_eq!(doc.root_context(), doc.active_context());
+        assert!(doc.context(doc.root_context()).is_some());
+        assert_eq!(doc.default_tag_name(), Some("Untagged"));
+        assert_eq!(doc.default_material_name(), Some("Default"));
+        assert_eq!(doc.default_style_name(), Some("Modeling"));
+    }
+
+    #[test]
+    fn document_creates_entities_inside_active_context() {
+        let mut doc = SketchDocument::new();
+        let edge = doc
+            .add_entity_to_active(SketchEntityKind::Edge {
+                a: Vec3::ZERO,
+                b: Vec3::X,
+            })
+            .unwrap();
+
+        assert!(doc.entity(edge).is_some());
+        assert_eq!(
+            doc.context(doc.active_context()).unwrap().entities,
+            vec![edge]
+        );
+    }
+
+    #[test]
+    fn component_definition_instances_share_definition_until_make_unique() {
+        let mut doc = SketchDocument::new();
+        let definition = doc.create_component_definition("Window Bay").unwrap();
+        let first = doc
+            .add_component_instance(definition, SketchTransform::from_translation(Vec3::X))
+            .unwrap();
+        let second = doc
+            .add_component_instance(definition, SketchTransform::from_translation(Vec3::Y))
+            .unwrap();
+
+        assert_eq!(
+            doc.component_definition_for_instance(first),
+            Some(definition)
+        );
+        assert_eq!(
+            doc.component_definition_for_instance(second),
+            Some(definition)
+        );
+
+        let unique = doc.make_unique_instance(second).unwrap();
+
+        assert_ne!(unique, definition);
+        assert_eq!(
+            doc.component_definition_for_instance(first),
+            Some(definition)
+        );
+        assert_eq!(doc.component_definition_for_instance(second), Some(unique));
+    }
+
+    #[test]
+    fn move_selection_translates_loose_geometry_and_instances_with_undo() {
+        let mut doc = SketchDocument::new();
+        let line = doc
+            .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::X * 4.0)
+            .unwrap();
+        let definition = doc.create_component_definition("Window Bay").unwrap();
+        let instance = doc
+            .add_component_instance(definition, SketchTransform::from_translation(Vec3::Y))
+            .unwrap();
+        let mut selection = SelectionSet::default();
+        selection.select(line);
+        selection.select(instance);
+
+        let moved = doc
+            .move_selection(&selection, Vec3::new(2.0, 3.0, 4.0), "Move selection")
+            .unwrap();
+
+        assert_eq!(moved.label, "Move selection");
+        assert_eq!(moved.entity_count, 2);
+        assert!(matches!(
+            &doc.entity(line).unwrap().kind,
+            SketchEntityKind::Edge { a, b }
+                if *a == Vec3::new(2.0, 3.0, 4.0) && *b == Vec3::new(6.0, 3.0, 4.0)
+        ));
+        assert!(matches!(
+            &doc.entity(instance).unwrap().kind,
+            SketchEntityKind::ComponentInstance { definition: got, transform }
+                if *got == definition
+                    && transform.translation == Vec3::new(2.0, 4.0, 4.0)
+        ));
+
+        let undone = doc.undo_last().expect("undo move");
+        assert_eq!(undone.label, "Move selection");
+        assert!(matches!(
+            &doc.entity(line).unwrap().kind,
+            SketchEntityKind::Edge { a, b } if *a == Vec3::ZERO && *b == Vec3::X * 4.0
+        ));
+        assert!(matches!(
+            &doc.entity(instance).unwrap().kind,
+            SketchEntityKind::ComponentInstance { transform, .. }
+                if transform.translation == Vec3::Y
+        ));
+
+        let redone = doc.redo_last().expect("redo move");
+        assert_eq!(redone.entity_count, 2);
+        assert!(matches!(
+            &doc.entity(line).unwrap().kind,
+            SketchEntityKind::Edge { a, .. } if *a == Vec3::new(2.0, 3.0, 4.0)
+        ));
+    }
+
+    #[test]
+    fn copy_selection_creates_linear_array_and_shared_component_definitions() {
+        let mut doc = SketchDocument::new();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 4.0,
+                Vec3::Y * 3.0,
+                "Room face",
+            )
+            .unwrap();
+        let extrusion = doc.push_pull_face(face, 3.0).unwrap();
+        let definition = doc.create_component_definition("Glass Door").unwrap();
+        let instance = doc
+            .add_component_instance(definition, SketchTransform::from_translation(Vec3::Z))
+            .unwrap();
+        let mut selection = SelectionSet::default();
+        selection.select(face);
+        selection.select(extrusion);
+        selection.select(instance);
+
+        let copies = doc
+            .copy_selection_linear_array(&selection, Vec3::new(10.0, 0.0, 0.0), 2, "Array copy")
+            .unwrap();
+
+        assert_eq!(copies.len(), 6);
+        assert_eq!(doc.undo_count(), 3);
+        let first_face_copy = copies[0];
+        let first_extrusion_copy = copies[1];
+        let first_instance_copy = copies[2];
+        assert!(matches!(
+            &doc.entity(first_face_copy).unwrap().kind,
+            SketchEntityKind::Face { vertices, .. } if vertices[0] == Vec3::X * 10.0
+        ));
+        assert!(matches!(
+            &doc.entity(first_extrusion_copy).unwrap().kind,
+            SketchEntityKind::PushPullExtrusion { source_face, base_vertices, .. }
+                if *source_face == first_face_copy && base_vertices[0] == Vec3::X * 10.0
+        ));
+        assert!(matches!(
+            &doc.entity(first_instance_copy).unwrap().kind,
+            SketchEntityKind::ComponentInstance { definition: got, transform }
+                if *got == definition && transform.translation == Vec3::new(10.0, 0.0, 1.0)
+        ));
+
+        let undone = doc.undo_last().expect("undo array");
+        assert_eq!(undone.label, "Array copy");
+        assert_eq!(undone.entity_count, 6);
+        assert!(copies.iter().all(|id| doc.entity(*id).is_none()));
+
+        let redone = doc.redo_last().expect("redo array");
+        assert_eq!(redone.entity_count, 6);
+        assert!(copies.iter().all(|id| doc.entity(*id).is_some()));
+    }
+
+    #[test]
+    fn selection_set_preserves_order_and_avoids_duplicates() {
+        let a = SketchId::new_for_test(10);
+        let b = SketchId::new_for_test(20);
+        let mut selection = SelectionSet::default();
+
+        selection.select(a);
+        selection.select(b);
+        selection.select(a);
+
+        assert_eq!(selection.ordered(), &[a, b]);
+        assert!(selection.contains(a));
+        assert_eq!(selection.len(), 2);
+    }
+
+    #[test]
+    fn inference_service_prefers_endpoint_over_weaker_face_hit() {
+        let endpoint = InferenceCandidate::new(
+            InferenceKind::Endpoint,
+            Vec3::new(1.0, 2.0, 3.0),
+            0.85,
+            "Endpoint",
+        );
+        let face = InferenceCandidate::new(
+            InferenceKind::OnFace,
+            Vec3::new(1.2, 2.0, 3.0),
+            0.40,
+            "On Face",
+        );
+
+        let best = InferenceService::best([face, endpoint]).unwrap();
+
+        assert_eq!(best.kind, InferenceKind::Endpoint);
+        assert_eq!(best.tooltip, "Endpoint");
+    }
+
+    #[test]
+    fn inference_lock_projects_raw_points_to_locked_axis() {
+        let lock =
+            InferenceLock::axis(InferenceKind::AxisX, Vec3::new(1.0, 2.0, 3.0)).expect("axis lock");
+
+        let candidate = lock.apply(Vec3::new(6.0, 9.0, -4.0));
+
+        assert_eq!(candidate.kind, InferenceKind::AxisX);
+        assert_eq!(candidate.point, Vec3::new(6.0, 2.0, 3.0));
+        assert_eq!(candidate.direction, Some(Vec3::X));
+        assert_eq!(candidate.tooltip, "Red axis locked");
+    }
+
+    #[test]
+    fn inference_lock_projects_from_reference_point_direction() {
+        let lock =
+            InferenceLock::from_point(Vec3::new(2.0, 2.0, 0.0), Vec3::Y).expect("from-point lock");
+
+        let candidate = lock.apply(Vec3::new(9.0, 8.0, 3.0));
+
+        assert_eq!(candidate.kind, InferenceKind::FromPoint);
+        assert_eq!(candidate.point, Vec3::new(2.0, 8.0, 0.0));
+        assert_eq!(candidate.direction, Some(Vec3::Y));
+        assert_eq!(candidate.tooltip, "From point locked");
+    }
+
+    #[test]
+    fn inference_lock_rejects_zero_reference_direction() {
+        assert_eq!(InferenceLock::from_point(Vec3::ZERO, Vec3::ZERO), None);
+    }
+
+    #[test]
+    fn inference_lock_projects_raw_points_to_locked_face_plane() {
+        let lock = InferenceLock::plane(InferenceKind::OnFace, Vec3::new(0.0, 5.0, 0.0), Vec3::Y)
+            .expect("face-plane lock");
+
+        let candidate = lock.apply(Vec3::new(3.0, 9.0, -2.0));
+
+        assert_eq!(candidate.kind, InferenceKind::OnFace);
+        assert_eq!(candidate.point, Vec3::new(3.0, 5.0, -2.0));
+        assert_eq!(candidate.plane_normal, Some(Vec3::Y));
+        assert_eq!(candidate.tooltip, "On face locked");
+    }
+
+    #[test]
+    fn inference_lock_rejects_zero_plane_normal() {
+        assert_eq!(
+            InferenceLock::plane(InferenceKind::OnFace, Vec3::ZERO, Vec3::ZERO),
+            None
+        );
+    }
+
+    #[test]
+    fn face_inference_candidates_include_on_face_and_on_edge_hints() {
+        let mut doc = SketchDocument::new();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 4.0,
+                Vec3::Y * 3.0,
+                "Rectangle",
+            )
+            .unwrap();
+
+        let candidates = doc.entity_inference_candidates(face).unwrap();
+        let kinds: BTreeSet<_> = candidates.iter().map(|candidate| candidate.kind).collect();
+        let on_face = candidates
+            .iter()
+            .find(|candidate| candidate.kind == InferenceKind::OnFace)
+            .expect("on-face candidate");
+        let on_edge = candidates
+            .iter()
+            .find(|candidate| candidate.kind == InferenceKind::OnEdge)
+            .expect("on-edge candidate");
+
+        assert!(kinds.contains(&InferenceKind::OnFace));
+        assert!(kinds.contains(&InferenceKind::OnEdge));
+        assert_eq!(on_face.point, Vec3::new(2.0, 1.5, 0.0));
+        assert_eq!(on_face.plane_normal, Some(Vec3::Z));
+        assert_eq!(on_edge.direction, Some(Vec3::X));
+        assert_eq!(on_edge.plane_normal, Some(Vec3::Z));
+    }
+
+    #[test]
+    fn tool_controller_clears_inference_lock_when_switching_tools() {
+        let mut controller = ToolController::default();
+        controller.activate(EditorToolId::Pencil);
+        let lock = InferenceLock::axis(InferenceKind::AxisY, Vec3::ZERO).expect("axis lock");
+
+        controller.lock_inference(lock);
+        assert_eq!(controller.inference_lock(), Some(lock));
+        controller.begin_transaction("Pencil preview");
+        assert_eq!(controller.inference_lock(), Some(lock));
+
+        controller.activate(EditorToolId::Rectangle);
+
+        assert_eq!(controller.active_tool(), EditorToolId::Rectangle);
+        assert_eq!(controller.inference_lock(), None);
+    }
+
+    #[test]
+    fn tool_controller_projects_points_through_locked_inference() {
+        let mut controller = ToolController::default();
+        controller.activate(EditorToolId::Pencil);
+        controller.begin_transaction("Pencil preview");
+        let lock =
+            InferenceLock::from_point(Vec3::new(3.0, 0.0, 3.0), Vec3::Z).expect("from-point lock");
+
+        controller.lock_inference(lock);
+        let projected = controller
+            .project_locked_inference(Vec3::new(9.0, 4.0, 10.0))
+            .expect("projected lock candidate");
+
+        assert_eq!(projected.kind, InferenceKind::FromPoint);
+        assert_eq!(projected.point, Vec3::new(3.0, 0.0, 10.0));
+        assert!(controller.active_tool_hint().contains("From point locked"));
+    }
+
+    #[test]
+    fn hit_record_keeps_instance_path_for_nested_picks() {
+        let root = SketchId::new_for_test(1);
+        let nested = SketchId::new_for_test(2);
+        let face = SketchId::new_for_test(3);
+        let hit = HitRecord::new(
+            face,
+            [root, nested],
+            HitKind::Face,
+            Vec3::new(4.0, 5.0, 6.0),
+            12.0,
+        );
+
+        assert_eq!(hit.entity, face);
+        assert_eq!(hit.instance_path, vec![root, nested]);
+        assert_eq!(hit.kind, HitKind::Face);
+    }
+
+    #[test]
+    fn tool_controller_transactions_group_touched_entities() {
+        let a = SketchId::new_for_test(1);
+        let b = SketchId::new_for_test(2);
+        let mut controller = ToolController::default();
+
+        controller.activate(EditorToolId::Pencil);
+        controller.begin_transaction("Draw wall");
+        controller.touch_entity(a);
+        controller.touch_entity(b);
+        controller.touch_entity(a);
+        let committed = controller.commit_transaction().unwrap();
+
+        assert_eq!(controller.active_tool(), EditorToolId::Pencil);
+        assert_eq!(committed.label, "Draw wall");
+        assert_eq!(committed.touched, vec![a, b]);
+        assert_eq!(controller.last_transaction_label(), Some("Draw wall"));
+    }
+
+    #[test]
+    fn tool_controller_exposes_open_transaction_label_for_status_ui() {
+        let mut controller = ToolController::default();
+
+        assert_eq!(controller.open_transaction_label(), None);
+        controller.begin_transaction("House footprint");
+
+        assert_eq!(controller.open_transaction_label(), Some("House footprint"));
+    }
+
+    #[test]
+    fn default_editor_tool_catalog_exposes_lifecycle_for_house_builder_tools() {
+        let catalog = EditorToolCatalog::default();
+
+        for tool in [
+            EditorToolId::Select,
+            EditorToolId::Pencil,
+            EditorToolId::Rectangle,
+            EditorToolId::House,
+            EditorToolId::PushPull,
+            EditorToolId::Room,
+            EditorToolId::CutOpening,
+            EditorToolId::Road,
+            EditorToolId::BotArea,
+            EditorToolId::Material,
+        ] {
+            let definition = catalog.definition(tool).expect("built-in editor tool");
+            assert_eq!(definition.id, tool);
+            assert!(!definition.label.is_empty());
+            assert!(!definition.begin_hint.is_empty());
+            assert!(!definition.preview_hint.is_empty());
+            assert!(!definition.commit_label.is_empty());
+            assert!(!definition.cancel_hint.is_empty());
+        }
+
+        let pencil = catalog.definition(EditorToolId::Pencil).unwrap();
+        assert!(pencil.uses_inference);
+        assert!(pencil.supports_typed_measurement);
+        assert_eq!(pencil.label, "PENCIL");
+
+        let opening = catalog.definition(EditorToolId::CutOpening).unwrap();
+        assert!(opening.preview_hint.contains("wall"));
+        assert!(opening.commit_label.contains("Opening"));
+    }
+
+    #[test]
+    fn tool_controller_lifecycle_tracks_preview_commit_and_cancel() {
+        let mut controller = ToolController::default();
+
+        controller.activate(EditorToolId::Pencil);
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Idle);
+        assert_eq!(controller.active_tool_label(), "PENCIL");
+        assert!(controller.active_tool_hint().contains("endpoint"));
+
+        controller.begin_transaction("Pencil line");
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Previewing);
+        assert_eq!(controller.open_transaction_label(), Some("Pencil line"));
+        assert!(controller.active_tool_hint().contains("snapped"));
+
+        let committed = controller.commit_transaction().expect("commit");
+        assert_eq!(committed.label, "Pencil line");
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Committed);
+        assert_eq!(controller.last_transaction_label(), Some("Pencil line"));
+        assert!(controller.active_tool_hint().contains("Pencil line"));
+
+        controller.begin_transaction("Rectangle preview");
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Previewing);
+        assert!(controller.cancel_active_operation(EditorCancelReason::Escape));
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Cancelled);
+        assert_eq!(
+            controller.last_cancelled_transaction_label(),
+            Some("Rectangle preview")
+        );
+        assert!(controller.active_tool_hint().contains("cancel"));
+    }
+
+    #[test]
+    fn tool_switch_cancels_active_preview_and_resets_new_tool_lifecycle() {
+        let mut controller = ToolController::default();
+
+        controller.activate(EditorToolId::Rectangle);
+        controller.begin_transaction("Rectangle preview");
+        controller.activate(EditorToolId::PushPull);
+
+        assert_eq!(controller.active_tool(), EditorToolId::PushPull);
+        assert_eq!(controller.open_transaction_label(), None);
+        assert_eq!(
+            controller.last_cancelled_transaction_label(),
+            Some("Rectangle preview")
+        );
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Idle);
+        assert_eq!(controller.active_tool_label(), "PUSH/PULL");
+        assert!(controller.active_tool_hint().contains("face"));
+    }
+
+    #[test]
+    fn inference_kind_provides_shared_sketchup_tooltips() {
+        assert_eq!(InferenceKind::Endpoint.tooltip(), "Endpoint");
+        assert_eq!(InferenceKind::Midpoint.tooltip(), "Midpoint");
+        assert_eq!(InferenceKind::FaceCenter.tooltip(), "Face center");
+    }
+
+    #[test]
+    fn tags_materials_styles_and_scenes_are_first_class_side_tables() {
+        let mut doc = SketchDocument::new();
+        let wall = doc
+            .add_entity_to_active(SketchEntityKind::Face {
+                vertices: vec![Vec3::ZERO, Vec3::X, Vec3::X + Vec3::Y],
+                normal: Vec3::Z,
+            })
+            .unwrap();
+        let facade = doc.create_tag("Facade").unwrap();
+        let glass = doc
+            .create_material("Blue glass", SketchColor::rgba(80, 190, 255, 180))
+            .unwrap();
+        let style = doc.create_style("Blueprint glass").unwrap();
+
+        doc.assign_entity_tag(wall, facade).unwrap();
+        doc.assign_entity_material(wall, glass).unwrap();
+        doc.set_active_style(style).unwrap();
+        doc.set_tag_visibility(facade, false).unwrap();
+
+        assert_eq!(doc.entity(wall).unwrap().tag, Some(facade));
+        assert_eq!(doc.entity(wall).unwrap().material, Some(glass));
+        assert_eq!(doc.material(glass).unwrap().color.a, 180);
+        assert_eq!(doc.active_style(), style);
+        assert!(!doc.entity_effective_visible(wall).unwrap());
+        assert_eq!(
+            doc.context(doc.active_context()).unwrap().entities,
+            vec![wall],
+            "tags control visibility, not geometric ownership"
+        );
+
+        let scene = doc
+            .capture_scene(
+                "Facade hidden",
+                Some(SketchCamera {
+                    eye: Vec3::new(4.0, 5.0, 6.0),
+                    target: Vec3::ZERO,
+                    up: Vec3::Y,
+                }),
+            )
+            .unwrap();
+        doc.set_tag_visibility(facade, true).unwrap();
+        doc.apply_scene(scene).unwrap();
+
+        assert_eq!(doc.active_scene(), Some(scene));
+        assert!(!doc.tag_visible(facade).unwrap());
+        assert_eq!(doc.active_style(), style);
+    }
+
+    #[test]
+    fn stable_scene_style_snapshot_roundtrips_presentation_state() {
+        let mut doc = SketchDocument::new();
+        let facade = doc.create_tag("Facade").unwrap();
+        let glass = doc
+            .create_material("Blue glass", SketchColor::rgba(80, 190, 255, 180))
+            .unwrap();
+        let style = doc.create_style("Blueprint glass").unwrap();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 8.0,
+                Vec3::Y * 4.0,
+                "Saved wall face",
+            )
+            .unwrap();
+        doc.assign_entity_tag(face, facade).unwrap();
+        doc.assign_entity_material(face, glass).unwrap();
+        doc.set_active_style(style).unwrap();
+        doc.set_tag_visibility(facade, false).unwrap();
+        doc.set_model_attribute("voxel_native", "presentation", "scene_style")
+            .unwrap();
+        let scene = doc
+            .capture_scene(
+                "Facade hidden",
+                Some(SketchCamera {
+                    eye: Vec3::new(10.0, 7.0, 12.0),
+                    target: Vec3::new(2.0, 0.0, 1.0),
+                    up: Vec3::Y,
+                }),
+            )
+            .unwrap();
+        doc.set_tag_visibility(facade, true).unwrap();
+        doc.apply_scene(scene).unwrap();
+
+        let ron = doc.to_stable_ron().expect("stable RON");
+
+        assert!(ron.contains("version: 1"));
+        assert!(ron.contains("Blueprint glass"));
+        assert!(ron.contains("Facade hidden"));
+        assert!(ron.contains("Blue glass"));
+
+        let restored = SketchDocument::from_stable_ron(&ron).expect("restore stable RON");
+
+        assert_eq!(restored.active_scene(), Some(scene));
+        assert_eq!(restored.active_style(), style);
+        assert_eq!(restored.default_tag_name(), Some("Untagged"));
+        assert_eq!(
+            restored.model_attribute("voxel_native", "presentation"),
+            Some("scene_style")
+        );
+        assert!(!restored.tag_visible(facade).unwrap());
+        assert_eq!(restored.entity(face).unwrap().material, Some(glass));
+        assert_eq!(
+            restored.scene(scene).unwrap().camera.as_ref().unwrap().eye,
+            Vec3::new(10.0, 7.0, 12.0)
+        );
+    }
+
+    #[test]
+    fn attributes_are_namespaced_for_model_and_entity_metadata() {
+        let mut doc = SketchDocument::new();
+        let entity = doc
+            .add_entity_to_active(SketchEntityKind::Edge {
+                a: Vec3::ZERO,
+                b: Vec3::X,
+            })
+            .unwrap();
+
+        doc.set_model_attribute("voxel_native", "kernel", "dual")
+            .unwrap();
+        doc.set_entity_attribute(entity, "city_builder", "role", "window_bay")
+            .unwrap();
+
+        assert_eq!(doc.model_attribute("voxel_native", "kernel"), Some("dual"));
+        assert_eq!(
+            doc.entity_attribute(entity, "city_builder", "role")
+                .unwrap(),
+            Some("window_bay")
+        );
+    }
+
+    #[test]
+    fn extension_registry_exposes_commands_tools_and_io_formats() {
+        let mut registry = SketchCommandRegistry::empty();
+        let extension =
+            SketchExtensionManifest::new("voxel_native.arch", "Voxel Architecture Tools", "0.1.0");
+        registry.register_extension(extension.clone()).unwrap();
+        registry
+            .register_tool(SketchToolDescriptor::new(
+                "voxel_native.arch.line",
+                "Line",
+                EditorToolId::Pencil,
+                Some(extension.id.clone()),
+            ))
+            .unwrap();
+        registry
+            .register_command(SketchCommandDescriptor::new(
+                "voxel_native.arch.draw_line",
+                "Draw Line",
+                Some(EditorToolId::Pencil),
+                Some(extension.id.clone()),
+            ))
+            .unwrap();
+        registry
+            .register_importer(SketchIoFormat::new("gltf", "glTF scene", true))
+            .unwrap();
+        registry
+            .register_exporter(SketchIoFormat::new("obj", "OBJ mesh", false))
+            .unwrap();
+
+        assert_eq!(
+            registry.tool("voxel_native.arch.line").unwrap().editor_tool,
+            EditorToolId::Pencil
+        );
+        assert_eq!(
+            registry
+                .command("voxel_native.arch.draw_line")
+                .unwrap()
+                .tool,
+            Some(EditorToolId::Pencil)
+        );
+        assert!(registry.importer("gltf").unwrap().preserves_semantics);
+        assert!(!registry.exporter("obj").unwrap().preserves_semantics);
+    }
+
+    #[test]
+    fn default_registry_seeds_builtin_editor_tools_and_neutral_io_strategy() {
+        let registry = SketchCommandRegistry::default();
+
+        assert_eq!(
+            registry.command("editor.pencil").unwrap().tool,
+            Some(EditorToolId::Pencil)
+        );
+        assert_eq!(
+            registry.tool("editor.push_pull").unwrap().editor_tool,
+            EditorToolId::PushPull
+        );
+        assert!(registry.importer("gltf").unwrap().preserves_semantics);
+        assert!(!registry.exporter("stl").unwrap().preserves_semantics);
+    }
+
+    #[test]
+    fn tool_controller_house_workflow_sets_guided_stage_and_material() {
+        let wall_material = SketchId::new_for_test(42);
+        let mut controller = ToolController::default();
+
+        controller.start_house_workflow(wall_material);
+
+        let guide = controller.house_guide().expect("house guide");
+        assert_eq!(controller.active_tool(), EditorToolId::House);
+        assert_eq!(guide.stage, HouseBuildStage::Footprint);
+        assert_eq!(guide.material, wall_material);
+        assert!(guide.status().contains("Footprint"));
+        assert!(guide.status().contains("Opening"));
+    }
+
+    #[test]
+    fn escape_cancels_active_editor_operation_but_right_mouse_only_orbits() {
+        let mut controller = ToolController::default();
+        controller.activate(EditorToolId::Rectangle);
+        controller.begin_transaction("Rectangle preview");
+        let before_orbit = controller.preview_generation();
+
+        assert_eq!(
+            controller.handle_right_mouse_orbit(),
+            ToolInputEffect::OrbitOnly
+        );
+        assert_eq!(
+            controller.open_transaction_label(),
+            Some("Rectangle preview")
+        );
+        assert_eq!(controller.preview_generation(), before_orbit);
+
+        assert!(controller.cancel_active_operation(EditorCancelReason::Escape));
+        assert_eq!(controller.open_transaction_label(), None);
+        assert!(controller.preview_generation() > before_orbit);
+    }
+
+    #[test]
+    fn rectangle_faces_support_floor_roof_and_vertical_wall_planes() {
+        let mut doc = SketchDocument::new();
+
+        let floor = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 8.0,
+                Vec3::Y * 6.0,
+                "Rectangle floor",
+            )
+            .unwrap();
+        let wall = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::Z * 4.0,
+                Vec3::Y * 6.0,
+                "Rectangle wall",
+            )
+            .unwrap();
+
+        let SketchEntityKind::Face {
+            normal: floor_normal,
+            ..
+        } = &doc.entity(floor).unwrap().kind
+        else {
+            panic!("floor should be a face");
+        };
+        let SketchEntityKind::Face {
+            vertices,
+            normal: wall_normal,
+        } = &doc.entity(wall).unwrap().kind
+        else {
+            panic!("wall should be a face");
+        };
+
+        assert_eq!(*floor_normal, Vec3::Z);
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(*wall_normal, -Vec3::X);
+    }
+
+    #[test]
+    fn drafting_essentials_catalog_exposes_circle_polygon_arc_and_freehand() {
+        let catalog = EditorToolCatalog::default();
+        let registry = SketchCommandRegistry::default();
+
+        for (tool, command_id, label) in [
+            (EditorToolId::Circle, "editor.circle", "CIRCLE"),
+            (EditorToolId::Polygon, "editor.polygon", "POLYGON"),
+            (EditorToolId::Arc, "editor.arc", "ARC"),
+            (EditorToolId::Freehand, "editor.freehand", "FREEHAND"),
+        ] {
+            let definition = catalog
+                .definition(tool)
+                .expect("drafting primitive should be in the built-in tool catalog");
+            assert_eq!(definition.label, label);
+            assert!(definition.uses_inference);
+            assert!(definition.supports_typed_measurement);
+            assert_eq!(
+                registry
+                    .tool(command_id)
+                    .map(|descriptor| descriptor.editor_tool),
+                Some(tool)
+            );
+            assert_eq!(
+                registry
+                    .command(command_id)
+                    .and_then(|descriptor| descriptor.tool),
+                Some(tool)
+            );
+        }
+    }
+
+    #[test]
+    fn circle_polygon_arc_and_freehand_create_semantic_drafting_entities() {
+        let mut doc = SketchDocument::new();
+
+        let circle = doc
+            .draw_circle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::Z,
+                4.0,
+                24,
+                "Circle face",
+            )
+            .unwrap();
+        let polygon = doc
+            .draw_polygon_face(
+                doc.active_context(),
+                Vec3::new(12.0, 0.0, 0.0),
+                Vec3::Z,
+                3.0,
+                6,
+                "Polygon face",
+            )
+            .unwrap();
+        let arc = doc
+            .draw_arc_curve(
+                doc.active_context(),
+                Vec3::new(0.0, 10.0, 0.0),
+                Vec3::Z,
+                5.0,
+                Vec3::X,
+                std::f32::consts::FRAC_PI_2,
+                8,
+                "Arc curve",
+            )
+            .unwrap();
+        let freehand = doc
+            .draw_freehand_curve(
+                doc.active_context(),
+                [
+                    Vec3::new(0.0, 0.0, 1.0),
+                    Vec3::new(1.0, 0.5, 1.0),
+                    Vec3::new(2.0, 0.25, 1.0),
+                ],
+                "Freehand curve",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &doc.entity(circle).unwrap().kind,
+            SketchEntityKind::CircleFace {
+                radius,
+                segments: 24,
+                vertices,
+                ..
+            } if (*radius - 4.0).abs() < f32::EPSILON && vertices.len() == 24
+        ));
+        assert!(matches!(
+            &doc.entity(polygon).unwrap().kind,
+            SketchEntityKind::PolygonFace {
+                sides: 6,
+                vertices,
+                ..
+            } if vertices.len() == 6
+        ));
+        assert!(matches!(
+            &doc.entity(arc).unwrap().kind,
+            SketchEntityKind::ArcCurve {
+                sweep_radians,
+                points,
+                ..
+            } if (*sweep_radians - std::f32::consts::FRAC_PI_2).abs() < f32::EPSILON
+                && points.len() == 9
+        ));
+        assert!(matches!(
+            &doc.entity(freehand).unwrap().kind,
+            SketchEntityKind::FreehandCurve { points } if points.len() == 3
+        ));
+
+        let circle_kinds: BTreeSet<_> = doc
+            .entity_inference_candidates(circle)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.kind)
+            .collect();
+        let arc_kinds: BTreeSet<_> = doc
+            .entity_inference_candidates(arc)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.kind)
+            .collect();
+        assert!(circle_kinds.contains(&InferenceKind::Endpoint));
+        assert!(circle_kinds.contains(&InferenceKind::Midpoint));
+        assert!(circle_kinds.contains(&InferenceKind::FaceCenter));
+        assert!(circle_kinds.contains(&InferenceKind::OnFace));
+        assert!(arc_kinds.contains(&InferenceKind::Endpoint));
+        assert!(arc_kinds.contains(&InferenceKind::Midpoint));
+        assert!(arc_kinds.contains(&InferenceKind::OnEdge));
+
+        let snapshot = doc.to_stable_ron().expect("serialize semantic primitives");
+        let restored =
+            SketchDocument::from_stable_ron(&snapshot).expect("restore semantic primitives");
+        assert!(matches!(
+            &restored.entity(circle).unwrap().kind,
+            SketchEntityKind::CircleFace { segments: 24, .. }
+        ));
+        assert!(matches!(
+            &restored.entity(freehand).unwrap().kind,
+            SketchEntityKind::FreehandCurve { points } if points.len() == 3
+        ));
+
+        assert_eq!(doc.undo_count(), 4);
+        for expected in ["Freehand curve", "Arc curve", "Polygon face", "Circle face"] {
+            assert_eq!(doc.undo_last().unwrap().label, expected);
+        }
+        assert_eq!(doc.redo_count(), 4);
+    }
+
+    #[test]
+    fn pencil_and_rectangle_share_endpoint_midpoint_face_center_inference() {
+        let mut doc = SketchDocument::new();
+        let line = doc
+            .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::new(6.0, 0.0, 0.0))
+            .unwrap();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 4.0,
+                Vec3::Y * 3.0,
+                "Rectangle",
+            )
+            .unwrap();
+
+        let line_kinds: BTreeSet<_> = doc
+            .entity_inference_candidates(line)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.kind)
+            .collect();
+        let face_kinds: BTreeSet<_> = doc
+            .entity_inference_candidates(face)
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.kind)
+            .collect();
+
+        assert!(line_kinds.contains(&InferenceKind::Endpoint));
+        assert!(line_kinds.contains(&InferenceKind::Midpoint));
+        assert!(line_kinds.contains(&InferenceKind::OnEdge));
+        assert!(face_kinds.contains(&InferenceKind::Endpoint));
+        assert!(face_kinds.contains(&InferenceKind::Midpoint));
+        assert!(face_kinds.contains(&InferenceKind::FaceCenter));
+        assert!(face_kinds.contains(&InferenceKind::OnEdge));
+        assert!(face_kinds.contains(&InferenceKind::OnFace));
+    }
+
+    #[test]
+    fn opening_room_and_pushpull_create_undoable_house_semantics() {
+        let mut doc = SketchDocument::new();
+        let pencil = doc
+            .draw_pencil_line(
+                doc.active_context(),
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(-1.0, 0.0, 4.0),
+            )
+            .unwrap();
+        let wall = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 8.0,
+                Vec3::Z * 4.0,
+                "Wall face",
+            )
+            .unwrap();
+
+        let extrusion = doc.push_pull_face(wall, 6.0).unwrap();
+        let opening = doc
+            .cut_opening_through_face(
+                wall,
+                Vec3::new(3.0, 0.0, 1.5),
+                Vec3::new(2.0, 0.0, 3.0),
+                1.25,
+            )
+            .unwrap();
+        let room = doc.create_hollow_room(wall, 0.35, 6.0).unwrap();
+
+        assert!(matches!(
+            &doc.entity(extrusion).unwrap().kind,
+            SketchEntityKind::PushPullExtrusion {
+                source_face,
+                depth,
+                ..
+            } if *source_face == wall && (*depth - 6.0).abs() < f32::EPSILON
+        ));
+        assert!(matches!(
+            &doc.entity(opening).unwrap().kind,
+            SketchEntityKind::Opening {
+                host,
+                through_depth,
+                ..
+            } if *host == wall && (*through_depth - 1.25).abs() < f32::EPSILON
+        ));
+        let SketchEntityKind::Room {
+            shell,
+            shell_bounds,
+            interior_bounds,
+            wall_thickness,
+        } = &doc.entity(room).unwrap().kind
+        else {
+            panic!("room tool should create room semantics");
+        };
+        assert_eq!(*shell, wall);
+        assert!((*wall_thickness - 0.35).abs() < f32::EPSILON);
+        assert!(
+            interior_bounds.size().x < shell_bounds.size().x
+                && interior_bounds.size().z < shell_bounds.size().z,
+            "room must preserve an outer shell instead of deleting the entire wall mass"
+        );
+        assert!(
+            doc.entity(pencil).is_some(),
+            "pencil edge remains selectable"
+        );
+        assert!(
+            doc.entity(wall).is_some(),
+            "host wall face remains selectable"
+        );
+
+        assert_eq!(doc.undo_count(), 5);
+        assert_eq!(doc.redo_count(), 0);
+        for expected_label in [
+            "Room hollow",
+            "Opening cut",
+            "Push/Pull",
+            "Wall face",
+            "Pencil line",
+        ] {
+            let undone = doc.undo_last().expect("undo step");
+            assert_eq!(undone.label, expected_label);
+        }
+        assert!(doc.entity(wall).is_none());
+        assert_eq!(doc.undo_count(), 0);
+        assert_eq!(doc.redo_count(), 5);
+
+        for expected_label in [
+            "Pencil line",
+            "Wall face",
+            "Push/Pull",
+            "Opening cut",
+            "Room hollow",
+        ] {
+            let redone = doc.redo_last().expect("redo step");
+            assert_eq!(redone.label, expected_label);
+        }
+        assert!(doc.entity(wall).is_some());
+        assert!(doc.entity(room).is_some());
+    }
+
+    #[test]
+    fn planar_graph_reconstructs_closed_rectangle_face_from_edges() {
+        let mut doc = SketchDocument::new();
+        for (a, b) in [
+            (Vec3::ZERO, Vec3::X * 4.0),
+            (Vec3::X * 4.0, Vec3::new(4.0, 3.0, 0.0)),
+            (Vec3::new(4.0, 3.0, 0.0), Vec3::Y * 3.0),
+            (Vec3::Y * 3.0, Vec3::ZERO),
+        ] {
+            doc.add_entity_to_active(SketchEntityKind::Edge { a, b })
+                .unwrap();
+        }
+
+        let faces = doc
+            .reconstruct_planar_faces(doc.active_context(), Vec3::Z)
+            .unwrap();
+
+        assert_eq!(faces.len(), 1);
+        let face = doc.entity(faces[0]).unwrap();
+        let SketchEntityKind::Face { vertices, normal } = &face.kind else {
+            panic!("reconstructed entity should be a face");
+        };
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(*normal, Vec3::Z);
+    }
+
+    #[test]
+    fn planar_graph_splits_rectangle_when_diagonal_edge_exists() {
+        let mut doc = SketchDocument::new();
+        let p00 = Vec3::ZERO;
+        let p40 = Vec3::X * 4.0;
+        let p43 = Vec3::new(4.0, 3.0, 0.0);
+        let p03 = Vec3::Y * 3.0;
+        for (a, b) in [(p00, p40), (p40, p43), (p43, p03), (p03, p00), (p00, p43)] {
+            doc.add_entity_to_active(SketchEntityKind::Edge { a, b })
+                .unwrap();
+        }
+
+        let faces = doc
+            .reconstruct_planar_faces(doc.active_context(), Vec3::Z)
+            .unwrap();
+        let face_vertex_counts: Vec<_> = faces
+            .iter()
+            .map(|id| match &doc.entity(*id).unwrap().kind {
+                SketchEntityKind::Face { vertices, .. } => vertices.len(),
+                _ => 0,
+            })
+            .collect();
+
+        assert_eq!(faces.len(), 2);
+        assert_eq!(face_vertex_counts, vec![3, 3]);
+    }
+}

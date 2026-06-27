@@ -7,19 +7,19 @@
 //!    coplanar face under the crosshair (see [`super::face`]). The face
 //!    boundary is drawn as a pulse-coloured outline via `Gizmos`.
 //!
-//! 2. On left-mouse-down, locks that face into a [`PushPullDrag`] and
-//!    records the screen-space direction the surface normal projects
-//!    to. From then until release, mouse-motion delta is projected onto
-//!    that direction, divided by [`PIXELS_PER_VOXEL`], and rounded to an
+//! 2. On first click, locks that face into a [`PushPullDrag`] and records
+//!    the screen-space direction the surface normal projects to. Until
+//!    the second click, mouse-motion delta is projected onto that
+//!    direction, divided by [`PIXELS_PER_VOXEL`], and rounded to an
 //!    integer "extrusion distance" `d`.
 //!
-//! 3. Each frame while dragging, if `d` changed, the previous preview
+//! 3. Each frame while active, if `d` changed, the previous preview
 //!    is reverted (write `before` voxels back) and a new preview is
 //!    applied — extrude with `d > 0`, intrude (delete) with `d < 0`. We
 //!    use [`VoxelWorld::edit_set_voxel_batched`] which only touches the
 //!    voxel slot, leaving material data intact so revert is exact.
 //!
-//! 4. On left-mouse-up, the accumulated `(pos, before, after)` list is
+//! 4. On the second click, the accumulated `(pos, before, after)` list is
 //!    pushed onto the same undo timeline as the Classic builder via
 //!    [`BuilderHistory::record_external`]. Ctrl+Z then rewinds the
 //!    extrusion as a single batch.
@@ -89,6 +89,13 @@ pub struct PushPullDrag {
     /// "remove this leftover face/layer" while a failed drag still
     /// cancels safely.
     pub motion_len: f32,
+    /// SketchUp-style click-move-click operation. The first LMB click locks
+    /// the face; releasing it does not finish. The next LMB click commits.
+    pub click_finish: bool,
+    /// Toolbox selection generation that started this operation. If the
+    /// mouse-first editor picks another tool, the live preview must revert
+    /// instead of keeping ownership of clicks.
+    pub tool_generation: u64,
     /// Most recently applied integer distance. `0` means the preview is
     /// empty and nothing has been written yet.
     pub last_d: i32,
@@ -108,6 +115,8 @@ impl PushPullDrag {
         self.preview.clear();
         self.motion_accum = Vec2::ZERO;
         self.motion_len = 0.0;
+        self.click_finish = false;
+        self.tool_generation = 0;
         self.last_d = 0;
         self.reference_d = None;
     }
@@ -122,11 +131,15 @@ pub enum InferenceSnapKind {
 
 impl InferenceSnapKind {
     fn label(self) -> &'static str {
-        match self {
-            Self::Endpoint => "endpoint",
-            Self::Midpoint => "midpoint",
-            Self::FaceCenter => "face center",
-        }
+        pushpull_inference_kind(self).tooltip()
+    }
+}
+
+fn pushpull_inference_kind(kind: InferenceSnapKind) -> crate::sketch_model::InferenceKind {
+    match kind {
+        InferenceSnapKind::Endpoint => crate::sketch_model::InferenceKind::Endpoint,
+        InferenceSnapKind::Midpoint => crate::sketch_model::InferenceKind::Midpoint,
+        InferenceSnapKind::FaceCenter => crate::sketch_model::InferenceKind::FaceCenter,
     }
 }
 
@@ -482,6 +495,7 @@ pub fn begin_drag(
     cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
     mut gesture_lock: ResMut<BuildGestureLock>,
     mut drag: ResMut<PushPullDrag>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
 ) {
     if drag.active {
         return;
@@ -543,33 +557,36 @@ pub fn begin_drag(
         .map(|d| screen_dir.normalize_or_zero() * d as f32 * PIXELS_PER_VOXEL)
         .unwrap_or(Vec2::ZERO);
     drag.motion_len = 0.0;
+    drag.click_finish = true;
+    drag.tool_generation = toolbelt.selection_generation();
     drag.last_d = 0;
     drag.reference_d = reference_d;
     drag.preview.clear();
     gesture_lock.lock(PUSH_PULL_OWNER);
+    tool_controller.begin_transaction("Push/Pull preview");
     toolbelt.status = if mode.build_tool() == Some(ToolbeltTool::DrawRect) {
         format!(
-            "Quick Push/Pull started: {} cells locked. Hold RMB to orbit without changing depth; LMB release commits.",
+            "Quick Push/Pull started: {} cells locked. Move to choose depth; click again to commit. RMB orbits.",
             drag.face_cells.len()
         )
     } else if let Some(d) = reference_d {
         if reference_raw != reference_d {
             format!(
-                "Push Pull Face started with reference snap {d:+} layers (capped at {max_d}). Drag to tune or release to commit."
+                "Push Pull Face started with reference snap {d:+} layers (capped at {max_d}). Move to tune; click to commit."
             )
         } else {
             format!(
-                "Push Pull Face started with reference snap {d:+} layers. Drag to tune or release to commit."
+                "Push Pull Face started with reference snap {d:+} layers. Move to tune; click to commit."
             )
         }
     } else if face.clipped {
         format!(
-            "Push Pull Face started: {} cells locked (face capped). Drag LMB to extrude/cut; hold RMB to orbit; Esc cancels.",
+            "Push Pull Face started: {} cells locked (face capped). Move to extrude/cut; click to commit; RMB orbits; Esc cancels.",
             drag.face_cells.len()
         )
     } else {
         format!(
-            "Push Pull Face started: {} cells locked. Drag LMB to extrude/cut; hold RMB to orbit; Esc cancels.",
+            "Push Pull Face started: {} cells locked. Move to extrude/cut; click to commit; RMB orbits; Esc cancels.",
             drag.face_cells.len()
         )
     };
@@ -587,6 +604,7 @@ pub fn update_drag(
     mut state: ResMut<SculptState>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut gesture_lock: ResMut<BuildGestureLock>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
 ) {
     if !drag.active {
         // Drain the queue so events don't pile up between drags.
@@ -596,10 +614,25 @@ pub fn update_drag(
     }
 
     gesture_lock.lock(PUSH_PULL_OWNER);
+    if pushpull_should_cancel_for_tool_selection(&drag, toolbelt.selection_generation()) {
+        revert_preview(&mut world, &mut drag);
+        state.status = "Sculpt: cancelled by toolbox switch.".into();
+        toolbelt.status =
+            "Push Pull Face cancelled. Toolbox switched tools; preview reverted.".into();
+        tool_controller
+            .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolboxClick);
+        drag.clear();
+        gesture_lock.release(PUSH_PULL_OWNER);
+        motion_evr.clear();
+        return;
+    }
+
     if !sculpt_active(&mode, &keys, drag.active) {
         revert_preview(&mut world, &mut drag);
         state.status = "Sculpt: cancelled by tool switch.".into();
         toolbelt.status = "Push Pull Face cancelled by tool switch. Preview reverted.".into();
+        tool_controller
+            .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolSwitch);
         drag.clear();
         gesture_lock.release(PUSH_PULL_OWNER);
         motion_evr.clear();
@@ -613,6 +646,7 @@ pub fn update_drag(
         revert_preview(&mut world, &mut drag);
         state.status = "Sculpt: cancelled.".into();
         toolbelt.status = "Push Pull Face cancelled. Preview reverted.".into();
+        tool_controller.cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
         drag.clear();
         gesture_lock.release(PUSH_PULL_OWNER);
         motion_evr.clear();
@@ -622,7 +656,7 @@ pub fn update_drag(
     if !pushpull_drag_accepts_motion(mouse.pressed(MouseButton::Right)) {
         state.status = "Sculpt: orbiting; Push/Pull depth held.".into();
         toolbelt.status =
-            "Push Pull Face held while orbiting. Release RMB to keep tuning, release LMB to commit."
+            "Push Pull Face held while orbiting. Release RMB to keep tuning; click to commit."
                 .into();
         motion_evr.clear();
         return;
@@ -685,13 +719,16 @@ pub fn update_drag(
     };
     toolbelt.status = if capped {
         format!(
-            "Push Pull Face preview capped at {} layers: {}. Release LMB to commit.",
-            max_d, state.status
+            "Push Pull Face preview capped at {} layers: {}. {}",
+            max_d,
+            state.status,
+            pushpull_commit_hint(drag.click_finish)
         )
     } else {
         format!(
-            "Push Pull Face preview: {}. Release LMB to commit.",
-            state.status
+            "Push Pull Face preview: {}. {}",
+            state.status,
+            pushpull_commit_hint(drag.click_finish)
         )
     };
 }
@@ -702,6 +739,30 @@ fn pushpull_drag_cancel_requested(escape_just: bool, _right_just: bool) -> bool 
 
 fn pushpull_drag_accepts_motion(right_held: bool) -> bool {
     !right_held
+}
+
+fn pushpull_should_cancel_for_tool_selection(drag: &PushPullDrag, current_generation: u64) -> bool {
+    drag.active && drag.tool_generation != current_generation
+}
+
+fn pushpull_commit_requested(
+    click_finish: bool,
+    left_just_pressed: bool,
+    left_just_released: bool,
+) -> bool {
+    if click_finish {
+        left_just_pressed
+    } else {
+        left_just_released
+    }
+}
+
+fn pushpull_commit_hint(click_finish: bool) -> &'static str {
+    if click_finish {
+        "Click again to commit."
+    } else {
+        "Release LMB to commit."
+    }
 }
 
 fn preview_distance_cap(face_cells: usize) -> i32 {
@@ -781,22 +842,29 @@ pub fn end_drag(
     mut state: ResMut<SculptState>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut gesture_lock: ResMut<BuildGestureLock>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
 ) {
     if !drag.active {
         return;
     }
-    if !mouse.just_released(MouseButton::Left) {
+    if !pushpull_commit_requested(
+        drag.click_finish,
+        mouse.just_pressed(MouseButton::Left),
+        mouse.just_released(MouseButton::Left),
+    ) {
         return;
     }
 
     if drag.preview.is_empty() || drag.last_d == 0 {
-        if drag.motion_len <= TAP_CLEANUP_MAX_MOTION_PX {
+        if !drag.click_finish && drag.motion_len <= TAP_CLEANUP_MAX_MOTION_PX {
             if commit_tap_cleanup(
                 &mut world,
                 &mut drag,
                 &mut history,
                 &mut state,
                 &mut toolbelt,
+                &mut tool_controller,
             ) {
                 gesture_lock.release(PUSH_PULL_OWNER);
                 return;
@@ -804,6 +872,7 @@ pub fn end_drag(
         }
         drag.clear();
         gesture_lock.release(PUSH_PULL_OWNER);
+        tool_controller.cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
         state.status = "Sculpt: cancelled.".into();
         toolbelt.status =
             "Push Pull Face cancelled: no extrusion distance. Tap small leftovers to clean them."
@@ -830,10 +899,75 @@ pub fn end_drag(
     }
     let n = changes.len();
     history.record_external(&label, changes);
+    if n > 0 {
+        if let Err(error) = record_pushpull_semantics(&drag, &mut sketch_doc) {
+            warn!("sketch model: could not record push/pull semantic extrusion: {error}");
+        }
+        tool_controller.begin_transaction(label.clone());
+        let _ = tool_controller.commit_transaction();
+    }
     state.status = format!("{label}: {n} Voxel committed.");
     toolbelt.status = state.status.clone();
     drag.clear();
     gesture_lock.release(PUSH_PULL_OWNER);
+}
+
+fn record_pushpull_semantics(
+    drag: &PushPullDrag,
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+) -> Result<Option<crate::sketch_model::SketchId>, crate::sketch_model::SketchModelError> {
+    if drag.face_cells.is_empty() || drag.last_d == 0 {
+        return Ok(None);
+    }
+    let Some((origin, axis_u, axis_v)) = pushpull_semantic_face_axes(drag) else {
+        return Ok(None);
+    };
+    let (_, extrusion) = sketch_doc.record_push_pull_face(
+        sketch_doc.active_context(),
+        origin,
+        axis_u,
+        axis_v,
+        drag.last_d as f32,
+        "Push/Pull semantic",
+    )?;
+    Ok(Some(extrusion))
+}
+
+fn pushpull_semantic_face_axes(drag: &PushPullDrag) -> Option<(Vec3, Vec3, Vec3)> {
+    let normal_axis = normal_axis(drag.normal)?;
+    let plane_axes: Vec<_> = (0..3).filter(|axis| *axis != normal_axis).collect();
+    let u_axis = plane_axes[0];
+    let v_axis = plane_axes[1];
+    let normal_sign = ivec_component(drag.normal, normal_axis).signum();
+
+    let first = *drag.face_cells.first()?;
+    let mut min = first;
+    let mut max = first;
+    for cell in &drag.face_cells {
+        min = min.min(*cell);
+        max = max.max(*cell);
+    }
+
+    let plane = if normal_sign > 0 {
+        ivec_component(max, normal_axis) as f32 + 1.0
+    } else {
+        ivec_component(min, normal_axis) as f32
+    };
+    let u0 = ivec_component(min, u_axis) as f32;
+    let v0 = ivec_component(min, v_axis) as f32;
+    let u_len = (ivec_component(max, u_axis) - ivec_component(min, u_axis) + 1) as f32;
+    let v_len = (ivec_component(max, v_axis) - ivec_component(min, v_axis) + 1) as f32;
+
+    let origin = face_point(normal_axis, plane, u_axis, u0, v_axis, v0);
+    let mut axis_u = Vec3::ZERO;
+    axis_u = set_vec_component(axis_u, u_axis, u_len);
+    let mut axis_v = Vec3::ZERO;
+    axis_v = set_vec_component(axis_v, v_axis, v_len);
+
+    if axis_u.cross(axis_v).dot(drag.normal.as_vec3()) < 0.0 {
+        std::mem::swap(&mut axis_u, &mut axis_v);
+    }
+    Some((origin, axis_u, axis_v))
 }
 
 fn commit_tap_cleanup(
@@ -842,6 +976,7 @@ fn commit_tap_cleanup(
     history: &mut BuilderHistory,
     state: &mut SculptState,
     toolbelt: &mut ToolbeltState,
+    tool_controller: &mut crate::sketch_model::ToolController,
 ) -> bool {
     if drag.face_cells.is_empty() {
         return false;
@@ -849,7 +984,7 @@ fn commit_tap_cleanup(
     if drag.face_cells.len() > TAP_CLEANUP_FACE_CAP {
         state.status = "Sculpt: tap cleanup skipped; face is too large.".into();
         toolbelt.status = format!(
-            "Tap cleanup protects large faces: {} cells > {}. Drag Push/Pull to edit this surface.",
+            "Tap cleanup protects large faces: {} cells > {}. Use Push/Pull click-move-click to edit this surface.",
             drag.face_cells.len(),
             TAP_CLEANUP_FACE_CAP
         );
@@ -884,7 +1019,10 @@ fn commit_tap_cleanup(
     }
 
     let changed = changes.len();
-    history.record_external(format!("Tap cleanup {} cells", changed), changes);
+    let label = format!("Tap cleanup {} cells", changed);
+    history.record_external(label.clone(), changes);
+    tool_controller.begin_transaction(label);
+    let _ = tool_controller.commit_transaction();
     drag.clear();
     state.status = format!("Tap cleanup removed {changed} leftover cells. Ctrl+Z undo.");
     toolbelt.status = state.status.clone();
@@ -1144,6 +1282,65 @@ mod tests {
     }
 
     #[test]
+    fn pushpull_commit_records_semantic_extrusion_with_undo() {
+        let stone = Voxel::from(BlockType::Stone);
+        let drag = PushPullDrag {
+            active: true,
+            face_cells: vec![IVec3::ZERO, IVec3::X],
+            normal: IVec3::Y,
+            voxel: stone,
+            anchor_world: Vec3::ZERO,
+            screen_dir: Vec2::X,
+            motion_accum: Vec2::ZERO,
+            motion_len: 24.0,
+            click_finish: true,
+            tool_generation: 0,
+            last_d: 3,
+            reference_d: None,
+            preview: AHashMap::new(),
+        };
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+
+        let extrusion = record_pushpull_semantics(&drag, &mut sketch_doc)
+            .expect("semantic push/pull should record")
+            .expect("positive push/pull distance should create extrusion");
+
+        let ids = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .clone();
+        assert_eq!(ids.len(), 2);
+        let source_face = ids[0];
+        assert_eq!(ids[1], extrusion);
+        assert!(matches!(
+            &sketch_doc.entity(source_face).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Face { vertices, normal }
+                if vertices[0] == Vec3::new(0.0, 1.0, 0.0)
+                    && vertices[2] == Vec3::new(2.0, 1.0, 1.0)
+                    && *normal == Vec3::Y
+        ));
+        assert!(matches!(
+            &sketch_doc.entity(extrusion).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::PushPullExtrusion { source_face: got, depth, .. }
+                if *got == source_face && (*depth - 3.0).abs() < f32::EPSILON
+        ));
+
+        let undone = sketch_doc
+            .undo_last()
+            .expect("undo pushpull semantic batch");
+        assert_eq!(undone.label, "Push/Pull semantic");
+        assert_eq!(undone.entity_count, 2);
+        assert!(ids.iter().all(|id| sketch_doc.entity(*id).is_none()));
+
+        let redone = sketch_doc
+            .redo_last()
+            .expect("redo pushpull semantic batch");
+        assert_eq!(redone.entity_count, 2);
+        assert!(ids.iter().all(|id| sketch_doc.entity(*id).is_some()));
+    }
+
+    #[test]
     fn tap_cleanup_removes_small_leftover_face_layer() {
         let mut world = VoxelWorld::new();
         let stone = Voxel::from(BlockType::Stone);
@@ -1160,6 +1357,8 @@ mod tests {
             screen_dir: Vec2::X,
             motion_accum: Vec2::ZERO,
             motion_len: 0.0,
+            click_finish: false,
+            tool_generation: 0,
             last_d: 0,
             reference_d: None,
             preview: AHashMap::new(),
@@ -1167,16 +1366,22 @@ mod tests {
         let mut history = BuilderHistory::default();
         let mut state = SculptState::default();
         let mut toolbelt = ToolbeltState::default();
+        let mut tool_controller = crate::sketch_model::ToolController::default();
 
         assert!(commit_tap_cleanup(
             &mut world,
             &mut drag,
             &mut history,
             &mut state,
-            &mut toolbelt
+            &mut toolbelt,
+            &mut tool_controller
         ));
         assert_eq!(world.voxel_at(0, 0, 0), AIR);
         assert_eq!(history.undo_len(), 1);
+        assert_eq!(
+            tool_controller.last_transaction_label(),
+            Some("Tap cleanup 1 cells")
+        );
     }
 
     #[test]
@@ -1222,6 +1427,22 @@ mod tests {
     }
 
     #[test]
+    fn pushpull_reference_points_use_shared_inference_kinds_and_tooltips() {
+        assert_eq!(
+            pushpull_inference_kind(InferenceSnapKind::Endpoint),
+            crate::sketch_model::InferenceKind::Endpoint
+        );
+        assert_eq!(
+            pushpull_inference_kind(InferenceSnapKind::Midpoint).tooltip(),
+            "Midpoint"
+        );
+        assert_eq!(
+            pushpull_inference_kind(InferenceSnapKind::FaceCenter).tooltip(),
+            "Face center"
+        );
+    }
+
+    #[test]
     fn right_mouse_does_not_cancel_active_pushpull_drag() {
         assert!(
             !pushpull_drag_cancel_requested(false, true),
@@ -1237,6 +1458,24 @@ mod tests {
             "RMB orbit should move the camera without also changing Push/Pull depth"
         );
         assert!(pushpull_drag_accepts_motion(false));
+    }
+
+    #[test]
+    fn click_finish_pushpull_ignores_first_release_and_commits_on_second_click() {
+        assert!(!pushpull_commit_requested(true, false, true));
+        assert!(pushpull_commit_requested(true, true, false));
+        assert!(pushpull_commit_requested(false, false, true));
+        assert!(!pushpull_commit_requested(false, true, false));
+    }
+
+    #[test]
+    fn active_pushpull_preview_cancels_when_toolbox_selection_changes() {
+        let mut drag = PushPullDrag::default();
+        drag.active = true;
+        drag.tool_generation = 7;
+
+        assert!(pushpull_should_cancel_for_tool_selection(&drag, 8));
+        assert!(!pushpull_should_cancel_for_tool_selection(&drag, 7));
     }
 }
 

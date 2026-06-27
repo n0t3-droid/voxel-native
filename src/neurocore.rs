@@ -175,11 +175,12 @@ pub struct RuntimeBudget {
     pub status: String,
 }
 
-const SMOOTH_MAX_CHUNKS_PER_FRAME: u32 = 10;
-const SMOOTH_MAX_MESHES_PER_FRAME: u32 = 10;
-const SMOOTH_MAX_MESH_APPLIES_PER_FRAME: u32 = 8;
-const SMOOTH_MAX_IN_FLIGHT_TERRAIN: u32 = 96;
-const SMOOTH_MAX_IN_FLIGHT_MESHES: u32 = 80;
+const SMOOTH_MAX_CHUNKS_PER_FRAME: u32 = 6;
+const SMOOTH_MAX_MESHES_PER_FRAME: u32 = 6;
+const SMOOTH_MAX_MESH_APPLIES_PER_FRAME: u32 = 4;
+const SMOOTH_MAX_IN_FLIGHT_TERRAIN: u32 = 48;
+const SMOOTH_MAX_IN_FLIGHT_MESHES: u32 = 36;
+const LAUNCH_WARMUP_SECONDS: f32 = 12.0;
 
 impl Default for RuntimeBudget {
     fn default() -> Self {
@@ -210,8 +211,14 @@ impl Default for RuntimeBudget {
 
 impl RuntimeBudget {
     pub fn from_settings(settings: &WorldSettings) -> Self {
+        let mut out = Self::raw_from_settings(settings);
+        out.clamp_to_settings(settings);
+        out
+    }
+
+    fn raw_from_settings(settings: &WorldSettings) -> Self {
         let target = (settings.render_distance as i32).max(2);
-        let mut out = Self {
+        Self {
             enabled: settings.neurocore_enabled,
             profile: settings.runtime_profile,
             target_render_distance: target,
@@ -224,9 +231,7 @@ impl RuntimeBudget {
             shadow_radius: target.min(10).max(4),
             status: "direct".into(),
             ..Self::default()
-        };
-        out.clamp_to_settings(settings);
-        out
+        }
     }
 
     fn clamp_to_settings(&mut self, settings: &WorldSettings) {
@@ -283,6 +288,7 @@ pub struct NeuroCore {
     pub telemetry: RuntimeTelemetry,
     pub status: String,
     effective_render_distance: i32,
+    launch_seconds: f32,
     sample_timer: f32,
     stable_samples: u8,
 }
@@ -297,6 +303,7 @@ impl Default for NeuroCore {
             telemetry: RuntimeTelemetry::default(),
             status: "warming up".into(),
             effective_render_distance: 0,
+            launch_seconds: 0.0,
             sample_timer: 0.0,
             stable_samples: 0,
         }
@@ -314,6 +321,7 @@ impl NeuroCore {
         self.profile = settings.runtime_profile;
         self.intent = telemetry.intent;
         self.telemetry = telemetry;
+        self.launch_seconds = (self.launch_seconds + dt.max(0.0)).min(3_600.0);
 
         let mut budget = if !self.enabled {
             let mut direct = RuntimeBudget::from_settings(settings);
@@ -325,7 +333,7 @@ impl NeuroCore {
             self.status = direct.status.clone();
             return direct;
         } else if self.profile == RuntimeProfile::Benchmark {
-            let mut raw = RuntimeBudget::from_settings(settings);
+            let mut raw = RuntimeBudget::raw_from_settings(settings);
             raw.profile = RuntimeProfile::Benchmark;
             raw.intent = self.intent;
             raw.quality = QualityState::Benchmark;
@@ -348,6 +356,9 @@ impl NeuroCore {
         budget.frame_ms = self.telemetry.frame_ms;
         budget.queue_pressure = self.telemetry.queue_pressure;
         budget.frame_pressure = self.telemetry.frame_pressure;
+        self.apply_pressure_guard(&mut budget);
+        self.apply_interactive_horizon_guard(&mut budget);
+        self.apply_launch_warmup(&mut budget);
         budget.clamp_to_settings(settings);
         self.quality = budget.quality;
         self.status = budget.status.clone();
@@ -590,6 +601,132 @@ impl NeuroCore {
             RuntimeIntent::Explore => (1.0, 1.0, 1.0, 1.0, 1.0),
         }
     }
+
+    fn apply_launch_warmup(&self, budget: &mut RuntimeBudget) {
+        if self.profile == RuntimeProfile::Benchmark || self.launch_seconds >= LAUNCH_WARMUP_SECONDS
+        {
+            return;
+        }
+        let progress = (self.launch_seconds / LAUNCH_WARMUP_SECONDS).clamp(0.0, 1.0);
+        let base_rd = match self.intent {
+            RuntimeIntent::Menu => 4,
+            RuntimeIntent::Editor => 5,
+            RuntimeIntent::Build => 6,
+            RuntimeIntent::Combat => 8,
+            RuntimeIntent::Explore => 8,
+        };
+        let target = budget.target_render_distance.max(2);
+        let rd_cap = ((base_rd as f32) + (target - base_rd).max(0) as f32 * progress)
+            .floor()
+            .max(2.0) as i32;
+        let job_cap = (2.0 + 6.0 * progress).floor().max(1.0) as u32;
+        let upload_cap = (1.0 + 5.0 * progress).floor().max(1.0) as u32;
+        let terrain_cap = (12.0 + 36.0 * progress).floor().max(8.0) as u32;
+        let mesh_cap = (10.0 + 26.0 * progress).floor().max(8.0) as u32;
+
+        budget.render_distance = budget.render_distance.min(rd_cap).max(2);
+        budget.chunks_per_frame = budget.chunks_per_frame.min(job_cap).max(1);
+        budget.meshes_per_frame = budget.meshes_per_frame.min(job_cap).max(1);
+        budget.mesh_applies_per_frame = budget.mesh_applies_per_frame.min(upload_cap).max(1);
+        budget.max_in_flight_terrain = budget.max_in_flight_terrain.min(terrain_cap).max(1);
+        budget.max_in_flight_meshes = budget.max_in_flight_meshes.min(mesh_cap).max(1);
+        budget.shadow_radius = budget.shadow_radius.min(6).max(2);
+        budget.weather_fx_scale = budget.weather_fx_scale.min(0.45 + progress * 0.55);
+        budget.weapon_fx_scale = budget.weapon_fx_scale.min(0.55 + progress * 0.45);
+        budget.update_cadence = budget.update_cadence.max(0.75);
+        budget.quality = match budget.quality {
+            QualityState::Benchmark => QualityState::Benchmark,
+            _ => QualityState::Throttled,
+        };
+        budget.status = format!(
+            "launch warmup {:>2.0}% | {}",
+            progress * 100.0,
+            budget.status
+        );
+    }
+
+    fn apply_interactive_horizon_guard(&self, budget: &mut RuntimeBudget) {
+        if self.profile == RuntimeProfile::Benchmark {
+            return;
+        }
+        let cap = match self.intent {
+            RuntimeIntent::Build => 24,
+            RuntimeIntent::Editor => 18,
+            RuntimeIntent::Menu => 10,
+            _ => return,
+        }
+        .min(budget.target_render_distance.max(2));
+        if budget.render_distance <= cap {
+            return;
+        }
+
+        budget.render_distance = cap.max(2);
+        budget.chunks_per_frame = budget.chunks_per_frame.min(5).max(1);
+        budget.meshes_per_frame = budget.meshes_per_frame.min(5).max(1);
+        budget.mesh_applies_per_frame = budget.mesh_applies_per_frame.min(3).max(1);
+        budget.max_in_flight_terrain = budget.max_in_flight_terrain.min(40).max(1);
+        budget.max_in_flight_meshes = budget.max_in_flight_meshes.min(30).max(1);
+        budget.shadow_radius = budget.shadow_radius.min(5).max(2);
+        budget.weather_fx_scale = budget.weather_fx_scale.min(0.50);
+        budget.weapon_fx_scale = budget.weapon_fx_scale.min(0.35);
+        budget.status = format!("interactive horizon | {}", budget.status);
+    }
+
+    fn apply_pressure_guard(&self, budget: &mut RuntimeBudget) {
+        if self.profile == RuntimeProfile::Benchmark {
+            return;
+        }
+        let pressure = self
+            .telemetry
+            .frame_pressure
+            .max(self.telemetry.queue_pressure);
+        let hard = pressure >= 0.90
+            || (self.telemetry.fps > 0.0
+                && self.telemetry.fps < self.telemetry.target_fps.max(15.0) * 0.70);
+        let soft = pressure >= 0.65
+            || (self.telemetry.fps > 0.0
+                && self.telemetry.fps < self.telemetry.target_fps.max(15.0) * 0.86);
+        if !hard && !soft {
+            return;
+        }
+
+        let target = budget.target_render_distance.max(2);
+        let floor = match self.intent {
+            RuntimeIntent::Menu => 4,
+            RuntimeIntent::Editor => 6,
+            RuntimeIntent::Build => 8,
+            RuntimeIntent::Combat => 10,
+            RuntimeIntent::Explore => 12,
+        }
+        .min(target);
+        let rd_factor = if hard { 0.45 } else { 0.65 };
+        let rd_cap = ((target as f32 * rd_factor).round() as i32).clamp(floor, target);
+        let job_cap = if hard { 4 } else { 6 };
+        let upload_cap = if hard { 3 } else { 4 };
+        let terrain_cap = if hard { 48 } else { 64 };
+        let mesh_cap = if hard { 36 } else { 48 };
+
+        budget.render_distance = budget.render_distance.min(rd_cap).max(2);
+        budget.chunks_per_frame = budget.chunks_per_frame.min(job_cap).max(1);
+        budget.meshes_per_frame = budget.meshes_per_frame.min(job_cap).max(1);
+        budget.mesh_applies_per_frame = budget.mesh_applies_per_frame.min(upload_cap).max(1);
+        budget.max_in_flight_terrain = budget.max_in_flight_terrain.min(terrain_cap).max(1);
+        budget.max_in_flight_meshes = budget.max_in_flight_meshes.min(mesh_cap).max(1);
+        budget.shadow_radius = budget.shadow_radius.min(if hard { 5 } else { 7 }).max(2);
+        budget.weather_fx_scale = budget.weather_fx_scale.min(if hard { 0.30 } else { 0.55 });
+        budget.weapon_fx_scale = budget.weapon_fx_scale.min(if hard { 0.55 } else { 0.75 });
+        budget.update_cadence = budget.update_cadence.max(if hard { 0.85 } else { 0.65 });
+        budget.quality = if hard {
+            QualityState::Critical
+        } else {
+            QualityState::Throttled
+        };
+        budget.status = format!(
+            "pressure guard {:.0}% | {}",
+            pressure.clamp(0.0, 1.25) * 100.0,
+            budget.status
+        );
+    }
 }
 
 fn update_neurocore(
@@ -816,6 +953,137 @@ mod tests {
         assert!(budget.mesh_applies_per_frame <= 5);
         assert!(budget.max_in_flight_terrain <= 20);
         assert!(budget.max_in_flight_meshes <= 12);
+    }
+
+    #[test]
+    fn cinematic_launch_uses_warmup_budget_before_full_horizon() {
+        let mut settings = WorldSettings::default();
+        settings.runtime_profile = RuntimeProfile::Cinematic;
+        settings.render_distance = 56;
+        settings.vertical_chunks = 12;
+        settings.chunks_per_frame = 8;
+        settings.meshes_per_frame = 8;
+        settings.mesh_applies_per_frame = 6;
+        settings.max_in_flight_terrain = 144;
+        settings.max_in_flight_meshes = 112;
+
+        let mut core = NeuroCore::default();
+        let first = core.update_budget(&settings, telemetry(0.0, 0.0, RuntimeIntent::Explore), 0.1);
+
+        assert!(
+            first.render_distance <= 16,
+            "launch should not stream the full cinematic horizon immediately"
+        );
+        assert!(first.chunks_per_frame <= 4);
+        assert!(first.meshes_per_frame <= 4);
+        assert!(first.mesh_applies_per_frame <= 2);
+        assert!(first.max_in_flight_terrain <= 32);
+        assert!(first.max_in_flight_meshes <= 24);
+        assert!(first.status.contains("launch warmup"));
+    }
+
+    #[test]
+    fn launch_budget_starts_in_ultra_stable_mode_for_heavy_worlds() {
+        let mut settings = WorldSettings::default();
+        settings.runtime_profile = RuntimeProfile::Cinematic;
+        settings.render_distance = 64;
+        settings.vertical_chunks = 12;
+        settings.chunks_per_frame = 18;
+        settings.meshes_per_frame = 16;
+        settings.mesh_applies_per_frame = 10;
+        settings.max_in_flight_terrain = 224;
+        settings.max_in_flight_meshes = 168;
+
+        let mut core = NeuroCore::default();
+        let first = core.update_budget(&settings, telemetry(0.0, 0.0, RuntimeIntent::Explore), 0.1);
+
+        assert!(
+            first.render_distance <= 8,
+            "startup must not immediately stream a max-distance saved world"
+        );
+        assert!(first.chunks_per_frame <= 2);
+        assert!(first.meshes_per_frame <= 2);
+        assert!(first.mesh_applies_per_frame <= 1);
+        assert!(first.max_in_flight_terrain <= 16);
+        assert!(first.max_in_flight_meshes <= 12);
+        assert!(first.status.contains("launch warmup"));
+    }
+
+    #[test]
+    fn cinematic_budget_throttles_when_queues_are_saturated() {
+        let mut settings = WorldSettings::default();
+        settings.runtime_profile = RuntimeProfile::Cinematic;
+        settings.render_distance = 56;
+        settings.chunks_per_frame = 8;
+        settings.meshes_per_frame = 8;
+        settings.mesh_applies_per_frame = 6;
+        settings.max_in_flight_terrain = 144;
+        settings.max_in_flight_meshes = 112;
+
+        let mut core = NeuroCore::default();
+        let mut budget =
+            core.update_budget(&settings, telemetry(60.0, 0.0, RuntimeIntent::Explore), 0.6);
+        for _ in 0..20 {
+            budget =
+                core.update_budget(&settings, telemetry(28.0, 1.0, RuntimeIntent::Explore), 0.6);
+        }
+
+        assert!(
+            budget.render_distance < settings.render_distance as i32,
+            "cinematic mode must still back off when queues are saturated"
+        );
+        assert!(budget.max_in_flight_terrain < settings.max_in_flight_terrain);
+        assert!(budget.max_in_flight_meshes < settings.max_in_flight_meshes);
+        assert!(budget.status.contains("pressure guard"));
+    }
+
+    #[test]
+    fn smooth_runtime_caps_keep_background_streaming_low_end_safe() {
+        let mut settings = WorldSettings::default();
+        settings.runtime_profile = RuntimeProfile::Cinematic;
+        settings.render_distance = 64;
+        settings.chunks_per_frame = 18;
+        settings.meshes_per_frame = 16;
+        settings.mesh_applies_per_frame = 10;
+        settings.max_in_flight_terrain = 224;
+        settings.max_in_flight_meshes = 168;
+
+        let mut core = NeuroCore::default();
+        for _ in 0..25 {
+            core.update_budget(
+                &settings,
+                telemetry(120.0, 0.0, RuntimeIntent::Explore),
+                0.6,
+            );
+        }
+        let budget = core.update_budget(
+            &settings,
+            telemetry(120.0, 0.0, RuntimeIntent::Explore),
+            0.6,
+        );
+
+        assert!(budget.chunks_per_frame <= 6);
+        assert!(budget.meshes_per_frame <= 6);
+        assert!(budget.mesh_applies_per_frame <= 4);
+        assert!(budget.max_in_flight_terrain <= 48);
+        assert!(budget.max_in_flight_meshes <= 36);
+    }
+
+    #[test]
+    fn build_intent_caps_cinematic_horizon_for_responsive_editing() {
+        let mut settings = WorldSettings::default();
+        settings.runtime_profile = RuntimeProfile::Cinematic;
+        settings.render_distance = 56;
+
+        let mut core = NeuroCore::default();
+        for _ in 0..25 {
+            core.update_budget(&settings, telemetry(120.0, 0.0, RuntimeIntent::Build), 0.6);
+        }
+        let budget =
+            core.update_budget(&settings, telemetry(120.0, 0.0, RuntimeIntent::Build), 0.6);
+
+        assert!(budget.render_distance <= 24);
+        assert!(budget.status.contains("interactive horizon"));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Global Command Deck palette and keybind inspector.
 //!
 //! This is the first shared command layer: actions are described once
-//! with label, key, context and icon, then rendered as a searchable F1 /
-//! Ctrl+P overlay. Later phases can attach executable callbacks and
+//! with label, access path, context and icon, then rendered as a searchable
+//! command overlay. Later phases can attach executable callbacks and
 //! conflict-aware remapping without scattering strings through UI code.
 
 use bevy::prelude::*;
@@ -161,7 +161,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Command Deck oeffnen",
         detail: "Durchsuchbare Hilfe, Keybinds und Kontexte",
-        key: "F1 / Ctrl+P",
+        key: "Command",
         context: CommandContext::Global,
         icon: Icon::Search,
         essential: true,
@@ -177,7 +177,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Schnellspeichern",
         detail: "Aktuelle Settings und aktive Welt sichern",
-        key: "F5",
+        key: "Save",
         context: CommandContext::Global,
         icon: Icon::Save,
         essential: true,
@@ -185,7 +185,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Screenshot",
         detail: "Bild des aktuellen Views speichern",
-        key: "F2",
+        key: "Screenshot",
         context: CommandContext::Global,
         icon: Icon::Eye,
         essential: false,
@@ -193,7 +193,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Debug Overlay umschalten",
         detail: "FPS, Position, Biome, Streaming und Key-Hinweise zeigen",
-        key: "Shift+F3",
+        key: "Overlay",
         context: CommandContext::System,
         icon: Icon::Eye,
         essential: true,
@@ -207,97 +207,97 @@ const COMMANDS: &[CommandSpec] = &[
         essential: true,
     },
     CommandSpec {
-        label: "Build Live oeffnen",
-        detail: "Smart Builder direkt nutzen: LMB Startpunkt, zum Endpunkt ziehen, loslassen baut; RMB schneidet",
-        key: "LMB/RMB",
+        label: "Sketch Editor oeffnen",
+        detail: "Mouse-first Toolbox nutzen: Pencil, Rectangle, Push/Pull, Room, Opening, Roads und Bot Area",
+        key: "Toolbox",
         context: CommandContext::Builder,
         icon: Icon::ModeBuild,
         essential: true,
     },
     CommandSpec {
-        label: "Build / Waffen umschalten",
-        detail: "Minecraft-artig zwischen direktem Bauen und Kampfmodus wechseln",
-        key: "F8",
+        label: "Play Mode aktivieren",
+        detail: "Sketch Editor verlassen und Waffen/Spielsteuerung bewusst aktivieren",
+        key: "PLAY",
         context: CommandContext::Builder,
         icon: Icon::ModeBuild,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 1 Rectangle Fill",
+        label: "Workflow Rectangle",
         detail: "Rechtecke direkt in der Welt ziehen",
-        key: "1",
+        key: "Toolbox",
         context: CommandContext::Builder,
         icon: Icon::Grid,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 2 Sculpt Push Pull",
+        label: "Workflow Push Pull",
         detail: "Faces direkt herausziehen oder einschneiden",
-        key: "2",
+        key: "Toolbox",
         context: CommandContext::Builder,
         icon: Icon::Move,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 3 Smart Tower",
+        label: "Workflow Tower",
         detail: "Schneller Smart-Block fuer vertikale Formen",
-        key: "3",
+        key: "Drawer",
         context: CommandContext::Builder,
         icon: Icon::City,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 4 Smart Builder",
+        label: "Workflow Smart Builder",
         detail: "Startpunkt setzen, auf Block-Endpunkt ziehen, exakt bauen; RMB schneidet ohne Toolwechsel",
-        key: "4",
+        key: "Drawer",
         context: CommandContext::Builder,
         icon: Icon::Brush,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 5 Brush Cut",
+        label: "Workflow Brush Cut",
         detail: "Brush-Volumen direkt entfernen",
-        key: "5",
+        key: "Drawer",
         context: CommandContext::Builder,
         icon: Icon::Eraser,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 6 Road",
-        detail: "Road-Grid direkt aus Build Live legen",
-        key: "6",
+        label: "Workflow Road",
+        detail: "Road-Komponenten direkt aus dem Sketch Editor legen",
+        key: "Toolbox",
         context: CommandContext::City,
         icon: Icon::Road,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 7 District",
+        label: "Workflow Bot Area",
         detail: "District-Zone direkt platzieren",
-        key: "7",
+        key: "Toolbox",
         context: CommandContext::City,
         icon: Icon::District,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 8 Building Shell",
+        label: "Workflow Building Shell",
         detail: "Gebaeude-Corners direkt in der Welt setzen",
-        key: "8",
+        key: "Toolbox",
         context: CommandContext::City,
         icon: Icon::City,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 9 Facade Stamp",
+        label: "Workflow Facade Stamp",
         detail: "Aktive Fassade direkt auf Waende stempeln",
-        key: "9",
+        key: "Drawer",
         context: CommandContext::City,
         icon: Icon::Open,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 0 Animation Pick",
+        label: "Workflow Animation Pick",
         detail: "Voxel-Auswahl fuer Animation Studio direkt aktivieren",
-        key: "0",
+        key: "Drawer",
         context: CommandContext::Animation,
         icon: Icon::Animation,
         essential: false,
@@ -305,7 +305,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Simulation einfrieren",
         detail: "Zeit anhalten fuer Screenshots und Praezisionsbau",
-        key: "F6",
+        key: "Pause",
         context: CommandContext::Editor,
         icon: Icon::Time,
         essential: false,
@@ -352,7 +352,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         label: "Waffe wechseln",
-        detail: "Nur wenn Waffen per F8 bewusst scharf sind",
+        detail: "Nur wenn Waffen bewusst scharf sind",
         key: "1-9",
         context: CommandContext::Combat,
         icon: Icon::ModeBuild,
@@ -360,15 +360,15 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         label: "Waffen scharf schalten",
-        detail: "Explizit in Combat wechseln; F8 holstert wieder",
-        key: "F8",
+        detail: "Explizit in Combat wechseln; Sketch Editor holstert wieder",
+        key: "PLAY",
         context: CommandContext::Combat,
         icon: Icon::ModeBuild,
         essential: true,
     },
     CommandSpec {
         label: "Feuern",
-        detail: "Nur im Combat-Modus nach F8; Creative Build nutzt LMB zum Editieren",
+        detail: "Nur im Combat-Modus; Sketch Editor nutzt LMB zum Editieren",
         key: "LMB",
         context: CommandContext::Combat,
         icon: Icon::LightBulb,
@@ -457,7 +457,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Animation Picker",
         detail: "Voxel-Auswahl fuer Animation Studio aktivieren",
-        key: "F4",
+        key: "Drawer",
         context: CommandContext::Animation,
         icon: Icon::Animation,
         essential: false,
@@ -591,9 +591,7 @@ fn toggle_command_palette(
     mut palette: ResMut<CommandPaletteState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let requested = keys.just_pressed(KeyCode::F1) || (ctrl && keys.just_pressed(KeyCode::KeyP));
-    if requested {
+    if command_palette_requested(&keys) {
         if palette.open {
             palette.close();
         } else {
@@ -610,6 +608,11 @@ fn toggle_command_palette(
             window.cursor.visible = true;
         }
     }
+}
+
+fn command_palette_requested(keys: &ButtonInput<KeyCode>) -> bool {
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    ctrl && keys.just_pressed(KeyCode::KeyP)
 }
 
 fn draw_command_palette(
@@ -734,7 +737,7 @@ fn draw_palette_header(ui: &mut egui::Ui, theme: ThemeSettings, state: &GameStat
                     .color(theme.color.primary()),
             );
             ui.label(
-                egui::RichText::new("F1 / Ctrl+P  |  Esc schliesst, wenn dieses Deck offen ist")
+                egui::RichText::new("Search commands  |  Esc schliesst dieses Deck")
                     .monospace()
                     .small()
                     .color(theme.color.dim()),
@@ -928,19 +931,19 @@ fn command_action(command: &CommandSpec) -> Option<CommandAction> {
         "Simulation einfrieren" => Some(CommandAction::ToggleSimPause),
         "Inventar oeffnen" => Some(CommandAction::OpenInventory),
         "Waffen scharf schalten" => Some(CommandAction::ArmWeapons),
-        "Build Live oeffnen" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushPlace)),
-        "Tool 1 Rectangle Fill" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
-        "Tool 2 Sculpt Push Pull" => Some(CommandAction::SetBuildTool(ToolbeltTool::Sculpt)),
-        "Tool 3 Smart Tower" => Some(CommandAction::SetBuildTool(ToolbeltTool::SmartTower)),
-        "Tool 4 Smart Builder" | "Tool 4 Power Brush" | "Tool 4 Brush Place" => {
+        "Sketch Editor oeffnen" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
+        "Workflow Rectangle" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
+        "Workflow Push Pull" => Some(CommandAction::SetBuildTool(ToolbeltTool::Sculpt)),
+        "Workflow Tower" => Some(CommandAction::SetBuildTool(ToolbeltTool::SmartTower)),
+        "Workflow Smart Builder" | "Tool 4 Power Brush" | "Tool 4 Brush Place" => {
             Some(CommandAction::SetBuildTool(ToolbeltTool::BrushPlace))
         }
-        "Tool 5 Brush Cut" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushCut)),
-        "Tool 6 Road" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityRoad)),
-        "Tool 7 District" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityDistrict)),
-        "Tool 8 Building Shell" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityBuilding)),
-        "Tool 9 Facade Stamp" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityFacade)),
-        "Tool 0 Animation Pick" => Some(CommandAction::SetBuildTool(ToolbeltTool::AnimationPick)),
+        "Workflow Brush Cut" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushCut)),
+        "Workflow Road" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityRoad)),
+        "Workflow Bot Area" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityDistrict)),
+        "Workflow Building Shell" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityBuilding)),
+        "Workflow Facade Stamp" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityFacade)),
+        "Workflow Animation Pick" => Some(CommandAction::SetBuildTool(ToolbeltTool::AnimationPick)),
         "Builder Aktion rueckgaengig" => Some(CommandAction::BuilderUndo),
         "Builder Aktion wiederholen" => Some(CommandAction::BuilderRedo),
         "Box-Auswahl starten"
@@ -1044,15 +1047,10 @@ fn execute_command_action(
         }
         CommandAction::SetBuildTool(tool) => {
             if *state.get() == GameState::MainMenu {
-                Some("Build Live braucht eine geladene Welt.".into())
+                Some("Sketch Editor braucht eine geladene Welt.".into())
             } else {
                 toolbelt.tool = tool;
-                let status = format!(
-                    "Build Live: [{}] {}. {}",
-                    tool.quick_slot_label(),
-                    tool.label(),
-                    tool.hint()
-                );
+                let status = format!("Sketch Editor: {}. {}", tool.label(), tool.hint());
                 mode.set(crate::mode::ActiveMode::BuildLive { tool }, status.clone());
                 toolbelt.status = status;
                 editor.open = false;
@@ -1101,7 +1099,7 @@ fn execute_command_action(
                         crate::mode::ActiveMode::BuildLive {
                             tool: ToolbeltTool::AnimationPick,
                         },
-                        "Build Live: Animation Picker. LMB/RMB pick voxels for animation authoring.",
+                        "Sketch Editor: Animation Picker. LMB/RMB pick voxels for animation authoring.",
                     );
                 } else {
                     mode.set(crate::mode::ActiveMode::Combat, "Animation Picker off.");
@@ -1133,7 +1131,7 @@ fn execute_command_action(
                             tool: toolbelt.tool,
                         },
                         format!(
-                            "Build Live: {}. {}",
+                            "Sketch Editor: {}. {}",
                             toolbelt.tool.label(),
                             toolbelt.tool.hint()
                         ),
@@ -1344,5 +1342,41 @@ fn game_state_label(state: &GameState) -> &'static str {
         GameState::MainMenu => "MAIN MENU",
         GameState::InGame => "IN GAME",
         GameState::Paused => "PAUSED",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f1_no_longer_opens_command_palette() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::F1);
+
+        assert!(!command_palette_requested(&keys));
+    }
+
+    #[test]
+    fn ctrl_p_remains_hidden_command_palette_access() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::KeyP);
+
+        assert!(command_palette_requested(&keys));
+    }
+
+    #[test]
+    fn command_deck_does_not_advertise_function_keys() {
+        for command in COMMANDS {
+            assert!(
+                !["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",]
+                    .iter()
+                    .any(|token| command.key.contains(token)),
+                "command still advertises a function-key workflow: {} -> {}",
+                command.label,
+                command.key
+            );
+        }
     }
 }
