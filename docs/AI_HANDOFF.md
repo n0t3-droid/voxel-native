@@ -83,9 +83,11 @@ metadata, rooms create both a shell face and a room entity, and targeted
 The next bridge is also started: `SketchVoxelLinkIndex` maps committed voxel
 cells/faces back to semantic `SketchId`s. Sketch Draw and Push/Pull now register
 their committed cells into that index, and Push/Pull hover resolution publishes
-`SemanticHoverHit` when the hovered voxel face has a semantic link. This is the
-base for future click selection, material assignment, and bot edits that target
-existing semantic faces instead of flood-filling anonymous voxels.
+`SemanticHoverHit` when the hovered voxel face has a semantic link. Select /
+Navigate clicks now consume that hover record and update
+`ToolController.selection`, which is the base for material assignment,
+transforms, openings, and bot edits that target existing semantic faces instead
+of flood-filling anonymous voxels.
 
 ## Important Remaining Gaps
 
@@ -96,10 +98,10 @@ existing semantic faces instead of flood-filling anonymous voxels.
 - The builder still needs stronger endpoint/midpoint/face-center inference for
   all drafting tools, not only rectangle/pencil and Push/Pull.
 - The next major architecture step should be a lightweight B-Rep/vector layer
-  over the voxel rasterizer plus runtime selection that consumes
-  `SemanticHoverHit`. That will let Pencil, Rectangle, Push/Pull, Opening,
-  Room, and bot CAD commands share one deterministic modeling model and let
-  mouse clicks select/edit semantic `SketchEntity` records directly.
+  over the voxel rasterizer plus semantic material/transform/opening actions
+  that operate on `ToolController.selection`. That will let Pencil, Rectangle,
+  Push/Pull, Opening, Room, and bot CAD commands share one deterministic
+  modeling model and let selected `SketchEntity` records be edited directly.
 - Startup can still inherit huge generated save/edit/bot state locally. Keep
   source commits separate from generated `saves/` unless deliberately testing a
   specific world.

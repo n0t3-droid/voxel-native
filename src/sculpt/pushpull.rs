@@ -298,6 +298,72 @@ fn semantic_hover_hit_from_region(
     )
 }
 
+pub fn semantic_select_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mode: Res<ModeContext>,
+    ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
+    semantic_hover: Res<crate::sketch_model::SemanticHoverHit>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut toolbelt: ResMut<ToolbeltState>,
+) {
+    if !semantic_select_input_active(
+        mode.is_build_live(),
+        mode.build_tool(),
+        tool_controller.active_tool(),
+        mouse.just_pressed(MouseButton::Left),
+        ui_focus
+            .as_deref()
+            .is_some_and(|focus| focus.pointer_over_editor_ui),
+    ) {
+        return;
+    }
+
+    let additive = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let update =
+        apply_semantic_selection_click(&mut tool_controller, semantic_hover.0.as_ref(), additive);
+    match update {
+        crate::sketch_model::SelectionUpdate::Selected(id) => {
+            toolbelt.status = format!(
+                "Select: semantic entity {} selected. Shift-click adds to selection.",
+                id.raw()
+            );
+        }
+        crate::sketch_model::SelectionUpdate::Cleared => {
+            toolbelt.status = "Select: semantic selection cleared.".into();
+        }
+        crate::sketch_model::SelectionUpdate::Ignored => {}
+    }
+}
+
+fn semantic_select_input_active(
+    build_live: bool,
+    build_tool: Option<ToolbeltTool>,
+    active_editor_tool: crate::sketch_model::EditorToolId,
+    left_just_pressed: bool,
+    pointer_over_editor_ui: bool,
+) -> bool {
+    build_live
+        && left_just_pressed
+        && !pointer_over_editor_ui
+        && (build_tool == Some(ToolbeltTool::Navigate)
+            || active_editor_tool == crate::sketch_model::EditorToolId::Select)
+}
+
+fn apply_semantic_selection_click(
+    tool_controller: &mut crate::sketch_model::ToolController,
+    hover: Option<&crate::sketch_model::HitRecord>,
+    additive: bool,
+) -> crate::sketch_model::SelectionUpdate {
+    if let Some(hit) = hover {
+        tool_controller.select_hit(hit, additive)
+    } else if additive {
+        crate::sketch_model::SelectionUpdate::Ignored
+    } else {
+        tool_controller.clear_selection()
+    }
+}
+
 pub fn reference_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -1476,6 +1542,88 @@ mod tests {
         assert_eq!(hit.kind, crate::sketch_model::HitKind::Face);
         assert_eq!(hit.world_point, Vec3::new(4.5, 5.5, 6.5));
         assert_eq!(hit.normal, Some(Vec3::Y));
+    }
+
+    #[test]
+    fn semantic_select_click_uses_hover_hit_and_respects_additive_selection() {
+        let first = crate::sketch_model::SketchId::new_for_test(10);
+        let second = crate::sketch_model::SketchId::new_for_test(11);
+        let mut controller = crate::sketch_model::ToolController::default();
+        let first_hit = crate::sketch_model::HitRecord::new(
+            first,
+            [],
+            crate::sketch_model::HitKind::Face,
+            Vec3::ZERO,
+            0.0,
+        );
+        let second_hit = crate::sketch_model::HitRecord::new(
+            second,
+            [],
+            crate::sketch_model::HitKind::Face,
+            Vec3::X,
+            0.0,
+        );
+
+        assert_eq!(
+            apply_semantic_selection_click(&mut controller, Some(&first_hit), false),
+            crate::sketch_model::SelectionUpdate::Selected(first)
+        );
+        assert_eq!(controller.selection().ordered(), &[first]);
+
+        assert_eq!(
+            apply_semantic_selection_click(&mut controller, Some(&second_hit), true),
+            crate::sketch_model::SelectionUpdate::Selected(second)
+        );
+        assert_eq!(controller.selection().ordered(), &[first, second]);
+
+        assert_eq!(
+            apply_semantic_selection_click(&mut controller, None, false),
+            crate::sketch_model::SelectionUpdate::Cleared
+        );
+        assert!(controller.selection().is_empty());
+        assert_eq!(
+            apply_semantic_selection_click(&mut controller, None, true),
+            crate::sketch_model::SelectionUpdate::Ignored
+        );
+    }
+
+    #[test]
+    fn semantic_select_input_only_runs_for_mouse_first_select_surface() {
+        assert!(semantic_select_input_active(
+            true,
+            Some(ToolbeltTool::Navigate),
+            crate::sketch_model::EditorToolId::Rectangle,
+            true,
+            false
+        ));
+        assert!(semantic_select_input_active(
+            true,
+            Some(ToolbeltTool::DrawRect),
+            crate::sketch_model::EditorToolId::Select,
+            true,
+            false
+        ));
+        assert!(!semantic_select_input_active(
+            true,
+            Some(ToolbeltTool::DrawRect),
+            crate::sketch_model::EditorToolId::Rectangle,
+            true,
+            false
+        ));
+        assert!(!semantic_select_input_active(
+            true,
+            Some(ToolbeltTool::Navigate),
+            crate::sketch_model::EditorToolId::Select,
+            true,
+            true
+        ));
+        assert!(!semantic_select_input_active(
+            false,
+            Some(ToolbeltTool::Navigate),
+            crate::sketch_model::EditorToolId::Select,
+            true,
+            false
+        ));
     }
 
     #[test]

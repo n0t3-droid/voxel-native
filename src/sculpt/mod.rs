@@ -52,6 +52,7 @@ impl Plugin for SculptPlugin {
                 (
                     pushpull::update_hover,
                     pushpull::resolve_hover_face,
+                    pushpull::semantic_select_input,
                     pushpull::reference_input,
                     pushpull::begin_drag,
                     pushpull::update_drag,

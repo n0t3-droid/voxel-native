@@ -3436,6 +3436,13 @@ impl HitRecord {
 #[derive(Resource, Debug, Clone, Default, PartialEq)]
 pub struct SemanticHoverHit(pub Option<HitRecord>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionUpdate {
+    Ignored,
+    Cleared,
+    Selected(SketchId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum InferenceKind {
     Endpoint,
@@ -4297,6 +4304,33 @@ impl ToolController {
         &mut self.selection
     }
 
+    pub fn select_hit(&mut self, hit: &HitRecord, additive: bool) -> SelectionUpdate {
+        if !additive {
+            self.selection.clear();
+        }
+        self.selection.select(hit.entity);
+        self.active_tool_hint = format!(
+            "Selected {:?} entity {}. Pick another linked face or choose a modeling tool.",
+            hit.kind,
+            hit.entity.raw()
+        );
+        self.tool_phase = EditorToolPhase::Committed;
+        self.preview_generation += 1;
+        SelectionUpdate::Selected(hit.entity)
+    }
+
+    pub fn clear_selection(&mut self) -> SelectionUpdate {
+        if self.selection.is_empty() {
+            return SelectionUpdate::Ignored;
+        }
+        self.selection.clear();
+        self.active_tool_hint =
+            "Selection cleared. Pick a linked face, edge, room, road, or component.".to_owned();
+        self.tool_phase = EditorToolPhase::Idle;
+        self.preview_generation += 1;
+        SelectionUpdate::Cleared
+    }
+
     pub fn preview_generation(&self) -> u64 {
         self.preview_generation
     }
@@ -4895,6 +4929,52 @@ mod tests {
         assert_eq!(selection.ordered(), &[a, b]);
         assert!(selection.contains(a));
         assert_eq!(selection.len(), 2);
+    }
+
+    #[test]
+    fn tool_controller_selects_semantic_hits_with_replace_and_additive_modes() {
+        let first = SketchId::new_for_test(10);
+        let second = SketchId::new_for_test(20);
+        let mut controller = ToolController::default();
+        let first_hit = HitRecord::new(first, [], HitKind::Face, Vec3::ZERO, 1.0);
+        let second_hit = HitRecord::new(second, [], HitKind::Face, Vec3::X, 2.0);
+
+        assert_eq!(
+            controller.select_hit(&first_hit, false),
+            SelectionUpdate::Selected(first)
+        );
+        assert_eq!(controller.selection().ordered(), &[first]);
+        let generation_after_first = controller.preview_generation();
+
+        assert_eq!(
+            controller.select_hit(&second_hit, true),
+            SelectionUpdate::Selected(second)
+        );
+        assert_eq!(controller.selection().ordered(), &[first, second]);
+        assert!(controller.preview_generation() > generation_after_first);
+
+        assert_eq!(
+            controller.select_hit(&first_hit, false),
+            SelectionUpdate::Selected(first)
+        );
+        assert_eq!(controller.selection().ordered(), &[first]);
+        assert!(controller
+            .active_tool_hint()
+            .contains("Selected Face entity 10"));
+    }
+
+    #[test]
+    fn tool_controller_clear_selection_reports_when_it_changed_state() {
+        let entity = SketchId::new_for_test(33);
+        let mut controller = ToolController::default();
+        let hit = HitRecord::new(entity, [], HitKind::Face, Vec3::ZERO, 1.0);
+        controller.select_hit(&hit, false);
+        let generation_after_select = controller.preview_generation();
+
+        assert_eq!(controller.clear_selection(), SelectionUpdate::Cleared);
+        assert!(controller.selection().is_empty());
+        assert!(controller.preview_generation() > generation_after_select);
+        assert_eq!(controller.clear_selection(), SelectionUpdate::Ignored);
     }
 
     #[test]
