@@ -537,6 +537,7 @@ pub struct ToolbeltPlugin;
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct SketchEditorUiFocus {
     pub pointer_over_editor_ui: bool,
+    pub hover_drawer_open: bool,
 }
 
 impl Plugin for ToolbeltPlugin {
@@ -585,6 +586,7 @@ fn draw_toolbelt(
     let dock = draw_build_dock(
         active_tool,
         expanded,
+        ui_focus.hover_drawer_open,
         &status,
         builder.block,
         brush,
@@ -597,6 +599,7 @@ fn draw_toolbelt(
         ctx,
     );
     ui_focus.pointer_over_editor_ui = dock.wheel_navigation_hovered;
+    ui_focus.hover_drawer_open = !expanded && (dock.toolbox_hovered || dock.drawer_hovered);
 
     let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
     if live {
@@ -782,6 +785,8 @@ fn workflow_preset_selected(
 struct BuildDockResult {
     clicked_tool: Option<ToolbeltTool>,
     wheel_navigation_hovered: bool,
+    toolbox_hovered: bool,
+    drawer_hovered: bool,
     toggle_picker: bool,
     exit_editor: bool,
     brush_preset: Option<IVec3>,
@@ -822,6 +827,63 @@ impl ToolboxSelection {
 enum HistoryCommand {
     Undo,
     Redo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferenceCue {
+    Point,
+    Corner,
+    Center,
+    Face,
+    Plane,
+    Axis,
+    Path,
+    Area,
+    Volume,
+}
+
+impl InferenceCue {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Point => "Point",
+            Self::Corner => "Corner",
+            Self::Center => "Center",
+            Self::Face => "Face",
+            Self::Plane => "Plane",
+            Self::Axis => "Axis",
+            Self::Path => "Path",
+            Self::Area => "Area",
+            Self::Volume => "Volume",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Point => "snaps to endpoints and midpoints",
+            Self::Corner => "snaps to block corners and opposite corners",
+            Self::Center => "snaps from a center point to a radius",
+            Self::Face => "locks onto the face under the cursor",
+            Self::Plane => "locks drawing onto the floor, wall, or roof plane",
+            Self::Axis => "keeps movement along one clean direction",
+            Self::Path => "continues from road/path endpoints and branches",
+            Self::Area => "uses two corners to mark a build zone",
+            Self::Volume => "works with shell depth, rooms, and hollow space",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Self::Point => Icon::Snap,
+            Self::Corner => Icon::Grid,
+            Self::Center => Icon::Magnet,
+            Self::Face => Icon::Cube,
+            Self::Plane => Icon::Layout,
+            Self::Axis => Icon::Move,
+            Self::Path => Icon::Road,
+            Self::Area => Icon::District,
+            Self::Volume => Icon::Open,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -906,20 +968,15 @@ impl BuildWorkflowPreset {
         Self::Skyline,
         Self::Spacecraft,
     ];
-    const TOOLBOX: [Self; 13] = [
+    const TOOLBOX: [Self; 8] = [
         Self::Pencil,
         Self::Sketch,
-        Self::Circle,
-        Self::Polygon,
-        Self::Arc,
-        Self::Freehand,
-        Self::ModernHouse,
         Self::PushPull,
-        Self::Room,
         Self::Opening,
+        Self::Room,
         Self::Roads,
         Self::BotArea,
-        Self::CityShell,
+        Self::ModernHouse,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -1077,6 +1134,38 @@ impl BuildWorkflowPreset {
         }
     }
 
+    fn inference_cue(self) -> InferenceCue {
+        match self {
+            Self::Pencil => InferenceCue::Point,
+            Self::Sketch => InferenceCue::Corner,
+            Self::Circle => InferenceCue::Center,
+            Self::Polygon => InferenceCue::Center,
+            Self::Arc => InferenceCue::Path,
+            Self::Freehand => InferenceCue::Path,
+            Self::Room => InferenceCue::Volume,
+            Self::Opening => InferenceCue::Face,
+            Self::PushPull => InferenceCue::Face,
+            Self::ModernHouse => InferenceCue::Volume,
+            Self::Roads => InferenceCue::Path,
+            Self::BotArea => InferenceCue::Area,
+            Self::Landscape => InferenceCue::Plane,
+            Self::CityShell => InferenceCue::Corner,
+            Self::Skyline => InferenceCue::Axis,
+            Self::Spacecraft => InferenceCue::Axis,
+        }
+    }
+
+    fn inference_hover_text(self) -> String {
+        let cue = self.inference_cue();
+        format!(
+            "{}\nInference: {} - {}\n{}",
+            self.label(),
+            cue.label(),
+            cue.hint(),
+            self.hint()
+        )
+    }
+
     fn color(self) -> egui::Color32 {
         match self {
             Self::Pencil => egui::Color32::from_rgb(255, 205, 92),
@@ -1097,6 +1186,62 @@ impl BuildWorkflowPreset {
             Self::Spacecraft => egui::Color32::from_rgb(150, 205, 230),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct WorkflowDrawerGroup {
+    label: &'static str,
+    hint: &'static str,
+    icon: Icon,
+    presets: &'static [BuildWorkflowPreset],
+}
+
+const DRAW_WORKFLOWS: [BuildWorkflowPreset; 6] = [
+    BuildWorkflowPreset::Pencil,
+    BuildWorkflowPreset::Sketch,
+    BuildWorkflowPreset::Circle,
+    BuildWorkflowPreset::Polygon,
+    BuildWorkflowPreset::Arc,
+    BuildWorkflowPreset::Freehand,
+];
+
+const SHAPE_WORKFLOWS: [BuildWorkflowPreset; 4] = [
+    BuildWorkflowPreset::PushPull,
+    BuildWorkflowPreset::Opening,
+    BuildWorkflowPreset::Room,
+    BuildWorkflowPreset::ModernHouse,
+];
+
+const WORLD_WORKFLOWS: [BuildWorkflowPreset; 6] = [
+    BuildWorkflowPreset::Roads,
+    BuildWorkflowPreset::BotArea,
+    BuildWorkflowPreset::CityShell,
+    BuildWorkflowPreset::Landscape,
+    BuildWorkflowPreset::Skyline,
+    BuildWorkflowPreset::Spacecraft,
+];
+
+fn workflow_drawer_groups() -> [WorkflowDrawerGroup; 3] {
+    [
+        WorkflowDrawerGroup {
+            label: "Draw",
+            hint: "Lines, boxes, circles, polygons, arcs, and freehand strokes.",
+            icon: Icon::Pipette,
+            presets: &DRAW_WORKFLOWS,
+        },
+        WorkflowDrawerGroup {
+            label: "Shape",
+            hint: "Push faces, cut windows, hollow rooms, and guide house massing.",
+            icon: Icon::Builder,
+            presets: &SHAPE_WORKFLOWS,
+        },
+        WorkflowDrawerGroup {
+            label: "World",
+            hint: "Roads, bot areas, city shells, gardens, towers, and spacecraft.",
+            icon: Icon::City,
+            presets: &WORLD_WORKFLOWS,
+        },
+    ]
 }
 
 fn active_toolbox_selection(
@@ -1232,6 +1377,7 @@ fn editor_tool_for_workflow(preset: BuildWorkflowPreset) -> crate::sketch_model:
 fn draw_build_dock(
     active_tool: ToolbeltTool,
     picker_open: bool,
+    hover_drawer_open: bool,
     status: &str,
     active_block: BlockType,
     brush: IVec3,
@@ -1258,6 +1404,7 @@ fn draw_build_dock(
         dim,
         &mut result,
     );
+    let drawer_visible = picker_open || hover_drawer_open || result.toolbox_hovered;
     draw_editor_status_bar(
         ctx,
         active_tool,
@@ -1273,7 +1420,7 @@ fn draw_build_dock(
         dim,
         &mut result,
     );
-    if picker_open {
+    if drawer_visible {
         draw_editor_drawer(
             ctx,
             active_tool,
@@ -1282,6 +1429,7 @@ fn draw_build_dock(
             brush,
             theme,
             colors.info,
+            drawer_visible,
             &mut result,
         );
     }
@@ -1404,6 +1552,7 @@ fn draw_editor_toolbox(
             });
         });
     result.wheel_navigation_hovered |= area.response.hovered();
+    result.toolbox_hovered |= area.response.hovered();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1518,15 +1667,21 @@ fn draw_editor_drawer(
     brush: IVec3,
     theme: crate::theme::ThemeSettings,
     accent: egui::Color32,
+    drawer_visible: bool,
     result: &mut BuildDockResult,
 ) {
     let colors = theme.semantic();
+    let open_t = ctx.animate_bool(
+        egui::Id::new("voxel_native_sketch_editor_hover_drawer_anim"),
+        drawer_visible,
+    );
+    let fill_alpha = (168.0 + 58.0 * open_t).round() as u8;
     let frame = egui::Frame::none()
         .fill(egui::Color32::from_rgba_unmultiplied(
             colors.surface_strong.r(),
             colors.surface_strong.g(),
             colors.surface_strong.b(),
-            226,
+            fill_alpha,
         ))
         .stroke(egui::Stroke::new(1.1, accent))
         .inner_margin(egui::Margin::symmetric(10.0, 10.0))
@@ -1539,7 +1694,10 @@ fn draw_editor_drawer(
         });
 
     let area = egui::Area::new(egui::Id::new("voxel_native_sketch_editor_drawer"))
-        .anchor(egui::Align2::LEFT_CENTER, egui::vec2(92.0, 0.0))
+        .anchor(
+            egui::Align2::LEFT_CENTER,
+            egui::vec2(76.0 + 16.0 * open_t, 0.0),
+        )
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
@@ -1572,24 +1730,27 @@ fn draw_editor_drawer(
                 });
                 crate::ui_kit::compact_separator(ui, theme);
                 ui.label(
-                    egui::RichText::new("WORKFLOWS")
+                    egui::RichText::new("HOVER TOOLBOX")
                         .monospace()
                         .size(9.5)
                         .strong()
                         .color(colors.text_muted),
                 );
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
-                    for preset in BuildWorkflowPreset::ALL {
-                        if workflow_preset_chip(
-                            ui,
-                            preset,
-                            workflow_preset_selected(preset, active_tool, active_workflow),
-                        ) {
-                            result.workflow_preset = Some(preset);
+                for group in workflow_drawer_groups() {
+                    workflow_group_header(ui, group, colors.text_muted, accent);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                        for preset in group.presets {
+                            if workflow_preset_chip(
+                                ui,
+                                *preset,
+                                workflow_preset_selected(*preset, active_tool, active_workflow),
+                            ) {
+                                result.workflow_preset = Some(*preset);
+                            }
                         }
-                    }
-                });
+                    });
+                }
                 if active_tool.uses_live_brush() {
                     crate::ui_kit::compact_separator(ui, theme);
                     ui.horizontal_wrapped(|ui| {
@@ -1606,6 +1767,7 @@ fn draw_editor_drawer(
             });
         });
     result.wheel_navigation_hovered |= area.response.hovered();
+    result.drawer_hovered |= area.response.hovered();
 }
 
 fn editor_toolbox_separator(ui: &mut egui::Ui, color: egui::Color32) {
@@ -1653,28 +1815,28 @@ fn active_editor_hint(tool: ToolbeltTool, active_workflow: Option<BuildWorkflowP
 
 fn workflow_toolbox_label(preset: BuildWorkflowPreset) -> &'static str {
     match preset {
-        BuildWorkflowPreset::Pencil => "PENCIL",
-        BuildWorkflowPreset::Sketch => "RECT",
-        BuildWorkflowPreset::Circle => "CIRC",
-        BuildWorkflowPreset::Polygon => "POLY",
-        BuildWorkflowPreset::Arc => "ARC",
-        BuildWorkflowPreset::Freehand => "FREE",
-        BuildWorkflowPreset::PushPull => "PUSH",
-        BuildWorkflowPreset::Room => "ROOM",
-        BuildWorkflowPreset::Opening => "OPEN",
-        BuildWorkflowPreset::Roads => "ROAD",
-        BuildWorkflowPreset::BotArea => "AREA",
-        BuildWorkflowPreset::CityShell => "CITY",
-        BuildWorkflowPreset::ModernHouse => "HOUSE",
-        BuildWorkflowPreset::Landscape => "LAND",
-        BuildWorkflowPreset::Skyline => "TOWER",
-        BuildWorkflowPreset::Spacecraft => "SHIP",
+        BuildWorkflowPreset::Pencil => "Line",
+        BuildWorkflowPreset::Sketch => "Box",
+        BuildWorkflowPreset::Circle => "Circle",
+        BuildWorkflowPreset::Polygon => "Shape",
+        BuildWorkflowPreset::Arc => "Arc",
+        BuildWorkflowPreset::Freehand => "Free",
+        BuildWorkflowPreset::PushPull => "Pull",
+        BuildWorkflowPreset::Room => "Room",
+        BuildWorkflowPreset::Opening => "Window",
+        BuildWorkflowPreset::Roads => "Road",
+        BuildWorkflowPreset::BotArea => "Bots",
+        BuildWorkflowPreset::CityShell => "City",
+        BuildWorkflowPreset::ModernHouse => "House",
+        BuildWorkflowPreset::Landscape => "Garden",
+        BuildWorkflowPreset::Skyline => "Tower",
+        BuildWorkflowPreset::Spacecraft => "Ship",
     }
 }
 
 fn toolbox_workflow_button(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected: bool) -> bool {
     let color = preset.color();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 44.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 50.0), egui::Sense::click());
     let hovered = response.hovered();
     let fill = if selected {
         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 74)
@@ -1693,21 +1855,48 @@ fn toolbox_workflow_button(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selec
     paint_icon(
         &painter,
         egui::Rect::from_center_size(
-            rect.center_top() + egui::vec2(0.0, 14.0),
+            rect.center_top() + egui::vec2(-2.0, 14.0),
             egui::vec2(18.0, 18.0),
         ),
         preset.icon(),
         if selected { AMBER } else { color },
     );
+    let cue = preset.inference_cue();
+    let cue_rect = egui::Rect::from_min_size(
+        rect.right_top() + egui::vec2(-19.0, 4.0),
+        egui::vec2(14.0, 14.0),
+    );
+    painter.circle_filled(
+        cue_rect.center(),
+        7.5,
+        egui::Color32::from_rgba_unmultiplied(0, 12, 18, 178),
+    );
+    paint_icon(
+        &painter,
+        cue_rect.shrink(2.0),
+        cue.icon(),
+        if selected {
+            AMBER
+        } else {
+            color.linear_multiply(1.1)
+        },
+    );
+    painter.text(
+        rect.center_bottom() - egui::vec2(0.0, 17.0),
+        egui::Align2::CENTER_BOTTOM,
+        workflow_toolbox_label(preset),
+        egui::FontId::monospace(8.4),
+        TEXT,
+    );
     painter.text(
         rect.center_bottom() - egui::vec2(0.0, 5.0),
         egui::Align2::CENTER_BOTTOM,
-        workflow_toolbox_label(preset),
-        egui::FontId::monospace(8.2),
-        TEXT,
+        cue.label(),
+        egui::FontId::monospace(6.8),
+        egui::Color32::from_white_alpha(150),
     );
     let clicked = response.clicked();
-    response.on_hover_text(preset.hint());
+    response.on_hover_text(preset.inference_hover_text());
     clicked
 }
 
@@ -2255,9 +2444,45 @@ fn format_history_command_status(
     }
 }
 
+fn workflow_group_header(
+    ui: &mut egui::Ui,
+    group: WorkflowDrawerGroup,
+    muted: egui::Color32,
+    accent: egui::Color32,
+) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(366.0, 22.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        egui::Rounding::same(5.0),
+        egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 18),
+    );
+    paint_icon(
+        &painter,
+        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 4.0), egui::vec2(14.0, 14.0)),
+        group.icon,
+        accent,
+    );
+    painter.text(
+        rect.min + egui::vec2(27.0, 11.0),
+        egui::Align2::LEFT_CENTER,
+        group.label,
+        egui::FontId::monospace(9.5),
+        TEXT,
+    );
+    painter.text(
+        rect.right_center() - egui::vec2(7.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        group.hint,
+        egui::FontId::monospace(7.5),
+        muted,
+    );
+    response.on_hover_text(group.hint);
+}
+
 fn workflow_preset_chip(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected: bool) -> bool {
     let color = preset.color();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(82.0, 38.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(108.0, 42.0), egui::Sense::click());
     let hovered = response.hovered();
     let fill = if selected {
         egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 88)
@@ -2279,15 +2504,42 @@ fn workflow_preset_chip(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected
         preset.icon(),
         if selected { AMBER } else { color },
     );
+    let cue = preset.inference_cue();
+    let cue_rect = egui::Rect::from_min_size(
+        rect.right_top() + egui::vec2(-22.0, 5.0),
+        egui::vec2(15.0, 15.0),
+    );
+    painter.circle_filled(
+        cue_rect.center(),
+        8.0,
+        egui::Color32::from_rgba_unmultiplied(0, 12, 18, 170),
+    );
+    paint_icon(
+        &painter,
+        cue_rect.shrink(2.0),
+        cue.icon(),
+        if selected {
+            AMBER
+        } else {
+            color.linear_multiply(1.15)
+        },
+    );
     painter.text(
-        rect.right_center() - egui::vec2(8.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        preset.label(),
+        rect.min + egui::vec2(32.0, 14.0),
+        egui::Align2::LEFT_CENTER,
+        workflow_toolbox_label(preset),
         egui::FontId::monospace(10.0),
         TEXT,
     );
+    painter.text(
+        rect.min + egui::vec2(32.0, 29.0),
+        egui::Align2::LEFT_CENTER,
+        cue.label(),
+        egui::FontId::monospace(8.0),
+        egui::Color32::from_white_alpha(152),
+    );
     let clicked = response.clicked();
-    response.on_hover_text(preset.hint());
+    response.on_hover_text(preset.inference_hover_text());
     clicked
 }
 
@@ -2781,19 +3033,65 @@ mod tests {
             [
                 BuildWorkflowPreset::Pencil,
                 BuildWorkflowPreset::Sketch,
-                BuildWorkflowPreset::Circle,
-                BuildWorkflowPreset::Polygon,
-                BuildWorkflowPreset::Arc,
-                BuildWorkflowPreset::Freehand,
-                BuildWorkflowPreset::ModernHouse,
                 BuildWorkflowPreset::PushPull,
-                BuildWorkflowPreset::Room,
                 BuildWorkflowPreset::Opening,
+                BuildWorkflowPreset::Room,
                 BuildWorkflowPreset::Roads,
                 BuildWorkflowPreset::BotArea,
-                BuildWorkflowPreset::CityShell,
+                BuildWorkflowPreset::ModernHouse,
             ]
         );
+    }
+
+    #[test]
+    fn workflow_toolbox_labels_are_plain_language_not_internal_codes() {
+        assert_eq!(workflow_toolbox_label(BuildWorkflowPreset::Pencil), "Line");
+        assert_eq!(workflow_toolbox_label(BuildWorkflowPreset::Sketch), "Box");
+        assert_eq!(
+            workflow_toolbox_label(BuildWorkflowPreset::PushPull),
+            "Pull"
+        );
+        assert_eq!(
+            workflow_toolbox_label(BuildWorkflowPreset::Opening),
+            "Window"
+        );
+        assert_eq!(workflow_toolbox_label(BuildWorkflowPreset::BotArea), "Bots");
+    }
+
+    #[test]
+    fn workflow_presets_expose_inference_cues_for_icons_and_hover_help() {
+        assert_eq!(
+            BuildWorkflowPreset::Pencil.inference_cue(),
+            InferenceCue::Point
+        );
+        assert_eq!(
+            BuildWorkflowPreset::Sketch.inference_cue(),
+            InferenceCue::Corner
+        );
+        assert_eq!(
+            BuildWorkflowPreset::PushPull.inference_cue(),
+            InferenceCue::Face
+        );
+        assert_eq!(
+            BuildWorkflowPreset::Roads.inference_cue(),
+            InferenceCue::Path
+        );
+        assert!(BuildWorkflowPreset::Opening
+            .inference_hover_text()
+            .contains("Inference: Face"));
+    }
+
+    #[test]
+    fn workflow_drawer_groups_keep_subtools_sorted_under_hover_sections() {
+        let groups = workflow_drawer_groups();
+
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].label, "Draw");
+        assert!(groups[0].presets.contains(&BuildWorkflowPreset::Circle));
+        assert_eq!(groups[1].label, "Shape");
+        assert!(groups[1].presets.contains(&BuildWorkflowPreset::PushPull));
+        assert_eq!(groups[2].label, "World");
+        assert!(groups[2].presets.contains(&BuildWorkflowPreset::Spacecraft));
     }
 
     #[test]

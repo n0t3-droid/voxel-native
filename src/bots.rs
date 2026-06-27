@@ -58,6 +58,10 @@ const COMPANION_FOLLOW_MIN: f32 = 5.0;
 const COMPANION_FOLLOW_MAX: f32 = 28.0;
 const COMPANION_FOLLOW_STEP: f32 = 2.25;
 
+fn companion_workers_per_leader() -> u8 {
+    COMPANION_WORKERS_PER_LEADER
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 static BOT_SAVE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
@@ -1008,8 +1012,10 @@ fn ensure_companion_worker_swarms(save: &mut BotWorldSave) {
         BotRole::RepairTech,
     ];
 
+    let worker_count = companion_workers_per_leader();
     for (leader_id, leader_name, order, leader_pos, home_id) in leaders {
-        for index in 1..=COMPANION_WORKERS_PER_LEADER {
+        for offset in 0..worker_count {
+            let index = offset + 1;
             let helper_name = format!("{leader_name} Swarm {index}");
             let existing_idx = save.agents.iter().position(|bot| {
                 (bot.swarm_leader_id == Some(leader_id) && bot.swarm_index == index)

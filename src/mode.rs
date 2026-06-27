@@ -15,7 +15,7 @@ use crate::editor::{EditorState, EditorTab};
 use crate::menu::{GameState, PauseScreen};
 use crate::player::Player;
 use crate::ships::ShipKind;
-use crate::toolbelt::{ToolbeltState, ToolbeltTool};
+use crate::toolbelt::{SketchEditorUiFocus, ToolbeltState, ToolbeltTool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveMode {
@@ -511,10 +511,12 @@ fn cursor_policy_for(
     editor_open: bool,
     command_palette_open: bool,
     sketch_orbiting: bool,
+    pointer_over_editor_ui: bool,
 ) -> CursorPolicy {
     if game_state != GameState::InGame || editor_open || command_palette_open {
         return CursorPolicy::ReleasedVisible;
     }
+    let sketch_orbiting_in_world = sketch_orbiting && !pointer_over_editor_ui;
     match mode {
         ActiveMode::BuildPicker { .. }
         | ActiveMode::Editor { .. }
@@ -522,7 +524,7 @@ fn cursor_policy_for(
         | ActiveMode::Paused
         | ActiveMode::CommandPalette => CursorPolicy::ReleasedVisible,
         ActiveMode::BuildLive { tool } if tool.uses_pointer_editor_cursor() => {
-            if sketch_orbiting {
+            if sketch_orbiting_in_world {
                 CursorPolicy::LockedHidden
             } else {
                 CursorPolicy::ReleasedVisible
@@ -562,6 +564,7 @@ fn mode_cursor_guard(
     mode: Res<ModeContext>,
     editor: Res<EditorState>,
     command_palette: Option<Res<CommandPaletteState>>,
+    ui_focus: Option<Res<SketchEditorUiFocus>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else {
@@ -574,6 +577,9 @@ fn mode_cursor_guard(
         editor.open,
         command_palette.as_deref().map(|p| p.open).unwrap_or(false),
         mouse.pressed(MouseButton::Right),
+        ui_focus
+            .as_deref()
+            .is_some_and(|focus| focus.pointer_over_editor_ui),
     ) {
         CursorPolicy::ReleasedVisible => {
             window.cursor.grab_mode = CursorGrabMode::None;
@@ -790,6 +796,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
             ),
             CursorPolicy::ReleasedVisible
         );
@@ -806,11 +813,19 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
             ),
             CursorPolicy::LockedHidden
         );
         assert_eq!(
-            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, false, false),
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::Combat,
+                false,
+                false,
+                false,
+                false
+            ),
             CursorPolicy::LockedHidden
         );
     }
@@ -835,6 +850,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                 ),
                 CursorPolicy::ReleasedVisible,
                 "{tool:?} needs a real visible cursor for mouse-first editing"
@@ -846,6 +862,7 @@ mod tests {
                     false,
                     false,
                     true,
+                    false,
                 ),
                 CursorPolicy::LockedHidden,
                 "Holding RMB in {tool:?} should immediately become camera orbit"
@@ -860,11 +877,30 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                 ),
                 CursorPolicy::LockedHidden,
                 "{tool:?} remains the old FPS brush path and keeps mouse-look capture"
             );
         }
+    }
+
+    #[test]
+    fn cursor_policy_keeps_toolbox_mouse_visible_during_right_click() {
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::BuildLive {
+                    tool: ToolbeltTool::DrawRect,
+                },
+                false,
+                false,
+                true,
+                true,
+            ),
+            CursorPolicy::ReleasedVisible,
+            "right mouse over the Sketch Editor UI must not steal the cursor into orbit"
+        );
     }
 
     #[test]
@@ -878,11 +914,19 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
             ),
             CursorPolicy::ReleasedVisible
         );
         assert_eq!(
-            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, true, false),
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::Combat,
+                false,
+                true,
+                false,
+                false
+            ),
             CursorPolicy::ReleasedVisible
         );
     }

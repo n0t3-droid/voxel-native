@@ -17,6 +17,15 @@ handoff unless a later task explicitly needs a reproducible save.
 
 - Build/editor UI has been moving away from visible F-key switching toward a
   mouse-first Sketch Editor toolbox and status bar.
+- The Sketch Editor toolbox now has a smaller primary rail and a hover drawer
+  with grouped sections: Draw, Shape, and World. Each visible workflow button
+  shows a simple label plus an inference cue such as Point, Corner, Face, Path,
+  Area, Axis, Plane, or Volume so the player can tell what the tool snaps to
+  before clicking it.
+- The hover drawer keeps focus while the cursor moves from the rail into the
+  drawer. Cursor policy is also UI-aware: right mouse only becomes world orbit
+  when the pointer is not over the Sketch Editor UI, so the toolbox should not
+  make the mouse disappear while selecting tools.
 - `sketch_model` is now the semantic spine for editor tools, transactions,
   selection, inference, components, rectangle/pencil semantics, room/opening
   semantics, and Push/Pull-style operations.
