@@ -2,7 +2,7 @@
 
 The project goal is not just a voxel sandbox.
 
-## Engine Pillars
+## Engine
 
 - **Native performance:** Rust + Bevy + wgpu for DX12/Vulkan/Metal instead of
   an Electron or browser shell.
