@@ -114,6 +114,15 @@ impl RectEndpointInference {
             Self::ReferenceLength => " Reference length snap.",
         }
     }
+
+    fn readout_label(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Axis => Some("axis line"),
+            Self::EqualLength => Some("equal length"),
+            Self::ReferenceLength => Some("reference length"),
+        }
+    }
 }
 
 impl RectFaceSnapKind {
@@ -123,6 +132,14 @@ impl RectFaceSnapKind {
             crate::sketch_model::InferenceKind::Midpoint => " Midpoint snap.",
             crate::sketch_model::InferenceKind::FaceCenter => " Face center snap.",
             _ => " Snap.",
+        }
+    }
+
+    fn readout_label(self) -> &'static str {
+        match self {
+            Self::Endpoint => "Endpoint",
+            Self::Midpoint => "Midpoint",
+            Self::FaceCenter => "Face center",
         }
     }
 }
@@ -158,6 +175,16 @@ impl RectAxisLock {
         }
     }
 
+    fn readout_label(self, start: IVec3, current: IVec3) -> String {
+        let from = component_by_axis(start, self.axis());
+        let to = component_by_axis(current, self.axis());
+        match self {
+            Self::X => format!("red X line {from} -> {to}"),
+            Self::Y => format!("same height line Y {from} -> {to}"),
+            Self::Z => format!("green Z line {from} -> {to}"),
+        }
+    }
+
     fn color(self) -> Color {
         match self {
             Self::X => Color::srgb(1.0, 0.18, 0.16),
@@ -182,6 +209,25 @@ fn rect_status_suffix(
         suffix.push_str(inference.status_suffix());
     }
     suffix
+}
+
+fn rect_alignment_readout(
+    start: IVec3,
+    current: IVec3,
+    snap_kind: Option<RectFaceSnapKind>,
+    inference: RectEndpointInference,
+    axis_lock: Option<RectAxisLock>,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(snap_kind) = snap_kind {
+        parts.push(snap_kind.readout_label().to_string());
+    }
+    if let Some(axis_lock) = axis_lock {
+        parts.push(axis_lock.readout_label(start, current));
+    } else if let Some(label) = inference.readout_label() {
+        parts.push(label.to_string());
+    }
+    parts.join(" | ")
 }
 
 impl RectDrawAction {
@@ -714,6 +760,18 @@ pub fn rect_draw_input(
             let raw_cells = draw_preview_cell_count(&draw);
             draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
             let status_suffix = rect_status_suffix(draw.snap_kind, draw.inference, draw.axis_lock);
+            let readout = rect_alignment_readout(
+                draw.start,
+                draw.current,
+                draw.snap_kind,
+                draw.inference,
+                draw.axis_lock,
+            );
+            let readout_suffix = if readout.is_empty() {
+                String::new()
+            } else {
+                format!(" [{readout}]")
+            };
             let action_label = if draw.pencil_line {
                 "Pencil"
             } else if draw.room_cut {
@@ -725,19 +783,21 @@ pub fn rect_draw_input(
             };
             toolbelt.status = if raw_cells > DRAW_CELL_CAP {
                 format!(
-                    "{} preview capped: {} of {} snapped cells.{} {}",
+                    "{} preview capped: {} of {} snapped cells.{}{} {}",
                     action_label,
                     DRAW_CELL_CAP,
                     raw_cells,
                     status_suffix,
+                    readout_suffix,
                     rect_commit_hint(&draw)
                 )
             } else {
                 format!(
-                    "{} preview: {} snapped cells.{} {}",
+                    "{} preview: {} snapped cells.{}{} {}",
                     action_label,
                     draw.status_cells,
                     status_suffix,
+                    readout_suffix,
                     rect_commit_hint(&draw)
                 )
             };
@@ -2830,6 +2890,40 @@ mod tests {
                 Some(RectAxisLock::Y)
             ),
             " Endpoint snap. Y height lock."
+        );
+    }
+
+    #[test]
+    fn rect_alignment_readout_names_reference_points_and_axis_lines() {
+        assert_eq!(
+            rect_alignment_readout(
+                IVec3::new(4, 8, 2),
+                IVec3::new(4, 13, 2),
+                Some(RectFaceSnapKind::Endpoint),
+                RectEndpointInference::Axis,
+                Some(RectAxisLock::Y),
+            ),
+            "Endpoint | same height line Y 8 -> 13"
+        );
+        assert_eq!(
+            rect_alignment_readout(
+                IVec3::new(4, 8, 2),
+                IVec3::new(9, 8, 2),
+                Some(RectFaceSnapKind::Midpoint),
+                RectEndpointInference::Axis,
+                Some(RectAxisLock::X),
+            ),
+            "Midpoint | red X line 4 -> 9"
+        );
+        assert_eq!(
+            rect_alignment_readout(
+                IVec3::new(4, 8, 2),
+                IVec3::new(9, 8, 7),
+                Some(RectFaceSnapKind::FaceCenter),
+                RectEndpointInference::EqualLength,
+                None,
+            ),
+            "Face center | equal length"
         );
     }
 

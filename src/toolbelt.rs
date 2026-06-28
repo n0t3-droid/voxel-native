@@ -1018,19 +1018,15 @@ impl ToolboxSelection {
     ];
 }
 
-const PRIMARY_TOOLBOX_ITEMS: [ToolboxSelection; 13] = [
+const PRIMARY_TOOLBOX_ITEMS: [ToolboxSelection; 9] = [
     ToolboxSelection::Tool(ToolbeltTool::Navigate),
     ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
     ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
     ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
     ToolboxSelection::Tool(ToolbeltTool::TransformMove),
-    ToolboxSelection::Tool(ToolbeltTool::TransformScale),
-    ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
     ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
     ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
     ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
     ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
 ];
 
@@ -3662,7 +3658,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_editor_order_prioritizes_house_editing_before_world_tools() {
+    fn primary_editor_order_keeps_only_high_value_mouse_first_tools() {
         assert_eq!(
             PRIMARY_TOOLBOX_ITEMS,
             [
@@ -3671,13 +3667,9 @@ mod tests {
                 ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
                 ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
                 ToolboxSelection::Tool(ToolbeltTool::TransformMove),
-                ToolboxSelection::Tool(ToolbeltTool::TransformScale),
-                ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
                 ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
                 ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
                 ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
                 ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
             ]
         );

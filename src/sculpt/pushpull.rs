@@ -286,16 +286,26 @@ fn semantic_hover_hit_from_region(
     sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
 ) -> Option<crate::sketch_model::HitRecord> {
     let cell = *region.cells.first()?;
-    sketch_links.hit_for_face(
-        cell,
-        region.normal,
-        Vec3::new(
-            cell.x as f32 + 0.5,
-            cell.y as f32 + 0.5,
-            cell.z as f32 + 0.5,
-        ),
-        0.0,
-    )
+    let world_point = Vec3::new(
+        cell.x as f32 + 0.5,
+        cell.y as f32 + 0.5,
+        cell.z as f32 + 0.5,
+    );
+    sketch_links
+        .hit_for_face(cell, region.normal, world_point, 0.0)
+        .or_else(|| {
+            region.cells.iter().copied().find_map(|cell| {
+                sketch_links.hit_for_cell(
+                    cell,
+                    Vec3::new(
+                        cell.x as f32 + 0.5,
+                        cell.y as f32 + 0.5,
+                        cell.z as f32 + 0.5,
+                    ),
+                    0.0,
+                )
+            })
+        })
 }
 
 pub fn semantic_select_input(

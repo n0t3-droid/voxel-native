@@ -18,11 +18,10 @@ handoff unless a later task explicitly needs a reproducible save.
 - Build/editor UI has been moving away from visible F-key switching toward a
   mouse-first Sketch Editor toolbox and status bar.
 - The Sketch Editor toolbox now has a smaller primary rail ordered for house
-  building first: Select, Line, Box, Push/Pull, Move, Scale, Rotate, Opening,
-  Room, Material, Road, Bots, and House. Hovering a rail icon opens a compact
-  contextual flyout for that tool family (`Draw`, `Edit Selected`, `Openings`,
-  `House Builder`, `City Layout`, or `Scene`) instead of dumping every workflow
-  into one large mixed drawer.
+  building first: Select, Line, Box, Push/Pull, Move, Opening, Material, Road,
+  and House. Scale, Rotate, Room, Bots, city shell, landscape, skyline, and
+  spacecraft remain available through compact contextual flyouts instead of
+  competing on the first-level rail.
 - Each visible workflow button shows a simple label plus an inference cue such
   as Point, Corner, Face, Path, Area, Axis, Plane, or Volume so the player can
   tell what the tool snaps to before clicking it.
@@ -128,6 +127,18 @@ renders small colored input-point markers plus an axis guide, and Pencil can
 use arrow-key axis locks: Right = X, Left = Z, Up = Y height, Down = clear.
 When Pencil leaves the original face plane through an axis lock, its voxel
 stroke uses a 3D line path instead of collapsing back onto the old plane.
+The status readout now names the active reference explicitly, for example
+`Endpoint | same height line Y 8 -> 13`, `Midpoint | red X line 4 -> 9`, or
+`Face center | equal length`, so users can see whether the current point is
+really aligned before committing.
+
+Selection and Move are now no longer just semantic placeholders. `SketchVoxelLinkIndex`
+can resolve cell-level hits for Pencil strokes and translate linked cell/face
+records when selected entities move. `src/sculpt/transform.rs` adds the first
+voxel-snapped Move drag: select a semantic stroke/face/component, drag, use
+Right/Up/Left arrows for X/Y/Z locks, preview the target bounds with Gizmos,
+and release to commit voxel edits plus semantic document/link translation in a
+single undo batch.
 
 The first lightweight B-Rep/vector layer now lives in `src/sketch_model.rs` as
 `SketchBRepKernel`. It stores linked vertices, oriented edges, loop faces, plane
@@ -160,9 +171,15 @@ and geometry/bounds updates for faces, curves, openings, rooms, and extrusions.
   live Pencil/Rectangle/Push/Pull/Openings, then voxelize B-Rep previews/commits
   through the existing batch edit and undo paths. Semantic material/transform/
   opening actions should operate on `ToolController.selection`.
-- Move, Scale, and Rotate are now first-class editor tool IDs and primary rail
-  tools, but live mouse handles still need to call the semantic transform
-  operations on `ToolController.selection`.
+- Move is now wired to live mouse drag for semantic selections. Scale and
+  Rotate remain first-class editor tool IDs with semantic operations, but still
+  need real handle UX, local-axis pivots, and preview/commit parity.
+- The Rendering/Scenery research from Nick McDonald's high-performance voxel
+  article, LearnOpenGL instancing, and TinyEngine should be translated later
+  into Bevy/WGPU-native batching work: persistent/pooled mesh buffers, fewer
+  per-chunk uploads, indirect/dense draw grouping where practical, and scenery
+  LOD. Do not copy the OpenGL examples directly into Rust; use them as design
+  pressure against the current chunk mesh/update pipeline.
 - `docs/SKETCHUP_EQUIVALENCE_AUDIT.md` tracks which PDF/SketchUp capabilities
   are actual, partial, or missing. Keep it honest; do not mark a feature exact
   just because a similarly named Rust type exists.

@@ -1032,6 +1032,10 @@ impl SketchVoxelLinkIndex {
         self.links_for_face(cell, normal).into_iter().next()
     }
 
+    pub fn primary_cell_link(&self, cell: IVec3) -> Option<SketchVoxelLink> {
+        self.links_for_cell(cell).into_iter().next()
+    }
+
     pub fn hit_for_face(
         &self,
         cell: IVec3,
@@ -1052,6 +1056,78 @@ impl SketchVoxelLinkIndex {
         )
     }
 
+    pub fn hit_for_cell(&self, cell: IVec3, world_point: Vec3, distance: f32) -> Option<HitRecord> {
+        let link = self.primary_cell_link(cell)?;
+        Some(HitRecord::new(
+            link.entity,
+            std::iter::empty::<SketchId>(),
+            hit_kind_for_voxel_link_role(link.role),
+            world_point,
+            distance,
+        ))
+    }
+
+    pub fn cells_for_entity(&self, entity: SketchId) -> Vec<IVec3> {
+        self.cell_links
+            .iter()
+            .filter_map(|(cell, links)| {
+                links
+                    .iter()
+                    .any(|link| link.entity == entity)
+                    .then_some(cell.as_ivec3())
+            })
+            .collect()
+    }
+
+    pub fn translate_entities(
+        &mut self,
+        entities: impl IntoIterator<Item = SketchId>,
+        delta: IVec3,
+    ) {
+        if delta == IVec3::ZERO {
+            return;
+        }
+        let entities: BTreeSet<SketchId> = entities.into_iter().collect();
+        if entities.is_empty() {
+            return;
+        }
+
+        let mut translated_cells: BTreeMap<SketchVoxelCellKey, BTreeSet<SketchVoxelLink>> =
+            BTreeMap::new();
+        for (cell, links) in std::mem::take(&mut self.cell_links) {
+            for link in links {
+                let target_cell = if entities.contains(&link.entity) {
+                    SketchVoxelCellKey::from_ivec3(cell.as_ivec3() + delta)
+                } else {
+                    cell
+                };
+                translated_cells
+                    .entry(target_cell)
+                    .or_default()
+                    .insert(link);
+            }
+        }
+        self.cell_links = translated_cells;
+
+        let mut translated_faces: BTreeMap<SketchVoxelFaceKey, BTreeSet<SketchVoxelLink>> =
+            BTreeMap::new();
+        for (face, links) in std::mem::take(&mut self.face_links) {
+            for link in links {
+                let target_face = if entities.contains(&link.entity) {
+                    SketchVoxelFaceKey::new(face.cell.as_ivec3() + delta, face.normal())
+                        .unwrap_or(face)
+                } else {
+                    face
+                };
+                translated_faces
+                    .entry(target_face)
+                    .or_default()
+                    .insert(link);
+            }
+        }
+        self.face_links = translated_faces;
+    }
+
     pub fn remove_entity(&mut self, entity: SketchId) {
         for links in self.cell_links.values_mut() {
             links.retain(|link| link.entity != entity);
@@ -1061,6 +1137,18 @@ impl SketchVoxelLinkIndex {
             links.retain(|link| link.entity != entity);
         }
         self.face_links.retain(|_, links| !links.is_empty());
+    }
+}
+
+fn hit_kind_for_voxel_link_role(role: SketchVoxelLinkRole) -> HitKind {
+    match role {
+        SketchVoxelLinkRole::Stroke | SketchVoxelLinkRole::Road => HitKind::Edge,
+        SketchVoxelLinkRole::Face
+        | SketchVoxelLinkRole::Shape
+        | SketchVoxelLinkRole::Extrusion
+        | SketchVoxelLinkRole::Opening
+        | SketchVoxelLinkRole::Room
+        | SketchVoxelLinkRole::BotArea => HitKind::Face,
     }
 }
 
@@ -5881,6 +5969,53 @@ mod tests {
         assert!(links.links_for_cell(cell + IVec3::Y).iter().any(|link| {
             link.entity == extrusion && link.role == SketchVoxelLinkRole::Extrusion
         }));
+    }
+
+    #[test]
+    fn voxel_link_index_exposes_cell_hits_for_line_strokes() {
+        let mut links = SketchVoxelLinkIndex::default();
+        let entity = SketchId::new_for_test(20);
+        let context = SketchId::new_for_test(1);
+        let link = SketchVoxelLink::new(entity, context, SketchVoxelLinkRole::Stroke);
+
+        links.link_cells([IVec3::new(4, 5, 6), IVec3::new(5, 5, 6)], link);
+
+        let hit = links
+            .hit_for_cell(IVec3::new(5, 5, 6), Vec3::new(5.5, 5.5, 6.5), 3.0)
+            .expect("stroke cell should be selectable even without a face normal");
+
+        assert_eq!(hit.entity, entity);
+        assert_eq!(hit.kind, HitKind::Edge);
+        assert_eq!(hit.world_point, Vec3::new(5.5, 5.5, 6.5));
+    }
+
+    #[test]
+    fn voxel_link_index_translates_selected_entity_cells_and_faces() {
+        let mut links = SketchVoxelLinkIndex::default();
+        let entity = SketchId::new_for_test(21);
+        let other = SketchId::new_for_test(22);
+        let context = SketchId::new_for_test(1);
+        let selected_link = SketchVoxelLink::new(entity, context, SketchVoxelLinkRole::Face);
+        let other_link = SketchVoxelLink::new(other, context, SketchVoxelLinkRole::Stroke);
+
+        assert!(links.link_face_cell(IVec3::new(1, 2, 3), IVec3::Y, selected_link));
+        links.link_cell(IVec3::new(9, 9, 9), other_link);
+
+        links.translate_entities([entity], IVec3::new(10, 0, -2));
+
+        assert!(links.links_for_cell(IVec3::new(1, 2, 3)).is_empty());
+        assert_eq!(
+            links.primary_cell_link(IVec3::new(11, 2, 1)),
+            Some(selected_link)
+        );
+        assert_eq!(
+            links.primary_face_link(IVec3::new(11, 2, 1), IVec3::Y),
+            Some(selected_link)
+        );
+        assert_eq!(
+            links.primary_cell_link(IVec3::new(9, 9, 9)),
+            Some(other_link)
+        );
     }
 
     #[test]

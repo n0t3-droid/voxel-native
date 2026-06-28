@@ -29,6 +29,7 @@ pub mod pushpull;
 pub mod raycast;
 pub mod smart;
 pub mod state;
+pub mod transform;
 
 pub use raycast::dda_voxel;
 pub use state::SculptState;
@@ -43,6 +44,7 @@ impl Plugin for SculptPlugin {
             .init_resource::<pushpull::PushPullDrag>()
             .init_resource::<pushpull::PushPullReference>()
             .init_resource::<pushpull::HoverFace>()
+            .init_resource::<transform::SemanticMoveDrag>()
             // Hover → face resolve → input → preview update → gizmo.
             // Order matters: drag-end must run AFTER update_drag so the
             // last applied preview is visible in `world.voxel_at` when
@@ -53,6 +55,9 @@ impl Plugin for SculptPlugin {
                     pushpull::update_hover,
                     pushpull::resolve_hover_face,
                     pushpull::semantic_select_input,
+                    transform::begin_move_drag,
+                    transform::update_move_drag,
+                    transform::end_move_drag,
                     pushpull::reference_input,
                     pushpull::begin_drag,
                     pushpull::update_drag,
@@ -60,6 +65,7 @@ impl Plugin for SculptPlugin {
                     pushpull::universal_undo_input,
                     pushpull::draw_face_gizmo,
                     pushpull::draw_reference_gizmo,
+                    transform::draw_move_gizmo,
                     draw::rect_draw_input,
                     draw::draw_rect_gizmo,
                     smart::smart_tower_input,
