@@ -202,6 +202,44 @@ fn sculpt_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, drag_active: b
     }
 }
 
+fn build_tool_needs_semantic_hover(tool: Option<ToolbeltTool>) -> bool {
+    matches!(
+        tool,
+        Some(
+            ToolbeltTool::Navigate
+                | ToolbeltTool::TransformMove
+                | ToolbeltTool::TransformScale
+                | ToolbeltTool::TransformRotate
+                | ToolbeltTool::MaterialPicker
+        )
+    )
+}
+
+fn editor_tool_needs_semantic_hover(active_editor_tool: crate::sketch_model::EditorToolId) -> bool {
+    matches!(
+        active_editor_tool,
+        crate::sketch_model::EditorToolId::Select
+            | crate::sketch_model::EditorToolId::Move
+            | crate::sketch_model::EditorToolId::Scale
+            | crate::sketch_model::EditorToolId::Rotate
+            | crate::sketch_model::EditorToolId::Material
+    )
+}
+
+fn semantic_hover_active(
+    mode: &ModeContext,
+    keys: &ButtonInput<KeyCode>,
+    drag_active: bool,
+    active_editor_tool: crate::sketch_model::EditorToolId,
+) -> bool {
+    if sculpt_active(mode, keys, drag_active) {
+        return true;
+    }
+    mode.is_build_live()
+        && (build_tool_needs_semantic_hover(mode.build_tool())
+            || editor_tool_needs_semantic_hover(active_editor_tool))
+}
+
 /// Update [`SculptState::hover`] each frame from the camera ray. Runs
 /// only when the sculpt tool is live; resets hover to `None` otherwise
 /// so stale highlights don't bleed into other tools.
@@ -209,6 +247,7 @@ pub fn update_hover(
     keys: Res<ButtonInput<KeyCode>>,
     mode: Res<ModeContext>,
     drag: Res<PushPullDrag>,
+    tool_controller: Res<crate::sketch_model::ToolController>,
     world: Res<VoxelWorld>,
     cam_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
     mut state: ResMut<SculptState>,
@@ -218,7 +257,7 @@ pub fn update_hover(
     if drag.active {
         return;
     }
-    if !sculpt_active(&mode, &keys, drag.active) {
+    if !semantic_hover_active(&mode, &keys, drag.active, tool_controller.active_tool()) {
         if state.hover.is_some() {
             state.hover = None;
             state.mode = SculptMode::Idle;
@@ -1381,6 +1420,43 @@ mod tests {
         assert_eq!(preview_distance_cap(1), 128);
         assert!(preview_distance_cap(16_384) < 32);
         assert!(preview_distance_cap(1_000_000) >= 1);
+    }
+
+    #[test]
+    fn semantic_hover_runs_for_select_and_transform_tools() {
+        assert!(build_tool_needs_semantic_hover(Some(ToolbeltTool::Navigate)));
+        assert!(build_tool_needs_semantic_hover(Some(
+            ToolbeltTool::TransformMove
+        )));
+        assert!(build_tool_needs_semantic_hover(Some(
+            ToolbeltTool::TransformScale
+        )));
+        assert!(build_tool_needs_semantic_hover(Some(
+            ToolbeltTool::TransformRotate
+        )));
+        assert!(build_tool_needs_semantic_hover(Some(
+            ToolbeltTool::MaterialPicker
+        )));
+        assert!(!build_tool_needs_semantic_hover(Some(ToolbeltTool::DrawRect)));
+
+        assert!(editor_tool_needs_semantic_hover(
+            crate::sketch_model::EditorToolId::Select
+        ));
+        assert!(editor_tool_needs_semantic_hover(
+            crate::sketch_model::EditorToolId::Move
+        ));
+        assert!(editor_tool_needs_semantic_hover(
+            crate::sketch_model::EditorToolId::Scale
+        ));
+        assert!(editor_tool_needs_semantic_hover(
+            crate::sketch_model::EditorToolId::Rotate
+        ));
+        assert!(editor_tool_needs_semantic_hover(
+            crate::sketch_model::EditorToolId::Material
+        ));
+        assert!(!editor_tool_needs_semantic_hover(
+            crate::sketch_model::EditorToolId::Rectangle
+        ));
     }
 
     #[test]

@@ -699,7 +699,7 @@ pub fn rect_draw_input(
                     snap_pencil_endpoint_to_axis_from_ray(draw.start, draw.axis_lock, origin, dir)
                 {
                     draw.current = endpoint;
-                    draw.current_point = endpoint.as_vec3();
+                    draw.current_point = pencil_cell_marker_point(endpoint);
                     draw.inference = RectEndpointInference::Axis;
                     draw.snap_kind = None;
                 }
@@ -1487,14 +1487,17 @@ fn snap_pencil_endpoint_to_axis_from_ray(
     let locked_point = crate::sketch_model::closest_point_on_locked_axis_from_ray(
         ray_origin,
         ray_dir,
-        start.as_vec3(),
+        pencil_cell_marker_point(start),
         axis_lock.axis_vec3(),
     )?;
     let mut endpoint = start;
     set_component_by_axis(
         &mut endpoint,
         axis_lock.axis(),
-        round_to_i32_safe(vec_component_by_axis(locked_point, axis_lock.axis())),
+        center_axis_component_to_cell(
+            vec_component_by_axis(locked_point, axis_lock.axis()),
+            component_by_axis(start, axis_lock.axis()),
+        ),
     );
     Some(endpoint)
 }
@@ -1815,6 +1818,13 @@ fn round_to_i32_safe(value: f32) -> i32 {
         return 0;
     }
     value.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
+}
+
+fn center_axis_component_to_cell(value: f32, fallback: i32) -> i32 {
+    if !value.is_finite() {
+        return fallback;
+    }
+    value.floor().clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
 
 fn component_by_index(v: IVec3, index: usize) -> i32 {
@@ -3232,12 +3242,29 @@ mod tests {
         let endpoint = snap_pencil_endpoint_to_axis_from_ray(
             IVec3::ZERO,
             Some(RectAxisLock::X),
-            Vec3::new(0.0, 10.0, 0.0),
+            Vec3::new(0.5, 10.5, 0.5),
             Vec3::new(1.0, -1.0, 0.0).normalize(),
         )
         .expect("locked endpoint");
 
         assert_eq!(endpoint, IVec3::new(10, 0, 0));
+    }
+
+    #[test]
+    fn pencil_axis_lock_uses_cell_center_thresholds_not_corner_rounding() {
+        let endpoint = snap_pencil_endpoint_to_axis_from_ray(
+            IVec3::ZERO,
+            Some(RectAxisLock::Y),
+            Vec3::new(0.5, 7.85, 10.5),
+            Vec3::NEG_Z,
+        )
+        .expect("locked endpoint");
+
+        assert_eq!(
+            endpoint,
+            IVec3::new(0, 7, 0),
+            "locked Pencil endpoints should not jump to the next voxel before the cursor crosses that cell boundary"
+        );
     }
 
     #[test]
