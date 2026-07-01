@@ -418,8 +418,8 @@ fn draw_neon_combat_hud(
     ));
 
     let colors = settings.theme.semantic();
-    let cyan = colors.info;
-    let magenta = egui::Color32::from_rgb(255, 46, 220);
+    let cyan = settings.theme.color.primary();
+    let magenta = egui::Color32::from_rgb(255, 122, 176);
     let amber = colors.warning;
     let green = colors.success;
     let profile = settings.hud_profile;
@@ -521,7 +521,10 @@ fn draw_neon_combat_hud(
             egui::pos2(top.left() + 22.0, top.center().y),
             egui::pos2(top.right() - 22.0, top.center().y),
         ],
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 230, 255, 100)),
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(cyan.r(), cyan.g(), cyan.b(), 100),
+        ),
     );
     for i in 0..17 {
         let x = top.left() + 28.0 + i as f32 * (top.width() - 56.0) / 16.0;
@@ -536,7 +539,7 @@ fn draw_neon_combat_hud(
                 if tall {
                     cyan
                 } else {
-                    egui::Color32::from_rgba_unmultiplied(0, 230, 255, 90)
+                    egui::Color32::from_rgba_unmultiplied(cyan.r(), cyan.g(), cyan.b(), 90)
                 },
             ),
         );
@@ -783,6 +786,7 @@ fn draw_neon_combat_hud(
         to_i32_safe(pos.x),
         to_i32_safe(pos.z),
         player.yaw,
+        cyan,
     );
 
     if let Some(mode) = mode.as_deref().filter(|m| m.transition_hint_t > 0.0) {
@@ -1017,10 +1021,11 @@ fn draw_ground_minimap(
     px: i32,
     pz: i32,
     player_yaw: f32,
+    accent: egui::Color32,
 ) {
     let center = egui::pos2(screen.right() - 92.0, screen.bottom() - 102.0);
     let r = 54.0_f32;
-    let rim = egui::Color32::from_rgba_unmultiplied(0, 230, 255, 130);
+    let rim = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 130);
     painter.circle_filled(
         center,
         r + 4.0,
@@ -1030,7 +1035,10 @@ fn draw_ground_minimap(
     painter.circle_stroke(
         center,
         r,
-        egui::Stroke::new(0.8, egui::Color32::from_rgba_unmultiplied(0, 230, 255, 70)),
+        egui::Stroke::new(
+            0.8,
+            egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 70),
+        ),
     );
 
     let step = 12_i32;

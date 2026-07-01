@@ -104,7 +104,8 @@ fn reinit_world_for_active(
     if !pending.0 {
         return;
     }
-    world.generator = TerrainGenerator::new(settings.seed);
+    world.generator =
+        TerrainGenerator::new(settings.seed).with_scenery_quality(settings.scenery_quality);
     world.clear_chunks();
     world.edited_overrides.clear();
     world.column_top_cy.clear();
@@ -914,7 +915,8 @@ fn init_world(
     mut material_library: ResMut<crate::textures::MaterialLibrary>,
     settings: Res<WorldSettings>,
 ) {
-    world.generator = TerrainGenerator::new(settings.seed);
+    world.generator =
+        TerrainGenerator::new(settings.seed).with_scenery_quality(settings.scenery_quality);
     material_library.rebuild(&mut materials, &mut images);
 
     // Bake the procedural surface-grain texture once. 128×128 is the
@@ -1260,7 +1262,8 @@ fn stream_chunks(
                     column_complete = false;
                     break;
                 }
-                let gen = TerrainGenerator::new(gen_seed);
+                let gen =
+                    TerrainGenerator::new(gen_seed).with_scenery_quality(settings.scenery_quality);
                 #[cfg(target_arch = "wasm32")]
                 {
                     let mut chunk = Chunk::new(cp);

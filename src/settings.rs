@@ -76,6 +76,12 @@ pub struct WorldSettings {
     /// Graphics tier: controls shadow-map resolution, fog, particles.
     pub graphics: GraphicsMode,
 
+    /// Generated scenery density and tree scale. This is intentionally a
+    /// simple tier so the UI can expose rich world controls without making
+    /// low-end machines pay for decorative voxels they do not need.
+    #[serde(default)]
+    pub scenery_quality: SceneryQuality,
+
     /// Field of view in degrees.
     pub fov_deg: f32,
 
@@ -285,6 +291,59 @@ pub enum GraphicsMode {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SceneryQuality {
+    Off,
+    Lean,
+    Balanced,
+    Lush,
+}
+
+impl Default for SceneryQuality {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+impl SceneryQuality {
+    pub const ALL: [Self; 4] = [Self::Off, Self::Lean, Self::Balanced, Self::Lush];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Lean => "Lean",
+            Self::Balanced => "Balanced",
+            Self::Lush => "Lush",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::Off => "No generated trees/flora for weakest PCs.",
+            Self::Lean => "Sparse trees, clear visibility, fastest terrain.",
+            Self::Balanced => "Readable forests without crowding the world.",
+            Self::Lush => "Bigger bonsai and blossom silhouettes for scenic worlds.",
+        }
+    }
+
+    pub fn density_scale(self) -> f64 {
+        match self {
+            Self::Off => 0.0,
+            Self::Lean => 0.45,
+            Self::Balanced => 1.0,
+            Self::Lush => 1.65,
+        }
+    }
+
+    pub fn height_bonus(self) -> i32 {
+        match self {
+            Self::Off | Self::Lean => 0,
+            Self::Balanced => 1,
+            Self::Lush => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WeatherPreset {
     Clear,
     LightRain,
@@ -394,6 +453,7 @@ impl Default for WorldSettings {
             time_of_day: NORMAL_TIME_OF_DAY,
             cycle_speed: 0.01,
             graphics: GraphicsMode::Balanced,
+            scenery_quality: SceneryQuality::Balanced,
             fov_deg: 78.0,
             weather: WeatherSettings::default(),
             visual_preset: default_visual_preset(),
@@ -489,6 +549,7 @@ impl WorldSettings {
                 self.max_in_flight_meshes = 168;
                 self.target_fps = 60.0;
                 self.graphics = GraphicsMode::Balanced;
+                self.scenery_quality = SceneryQuality::Lean;
             }
             WorldModeCard::SmoothBuild => {
                 self.neurocore_enabled = true;
@@ -502,6 +563,7 @@ impl WorldSettings {
                 self.max_in_flight_meshes = 96;
                 self.target_fps = 60.0;
                 self.graphics = GraphicsMode::Balanced;
+                self.scenery_quality = SceneryQuality::Balanced;
             }
             WorldModeCard::FastLaptop => {
                 self.neurocore_enabled = true;
@@ -515,6 +577,7 @@ impl WorldSettings {
                 self.max_in_flight_meshes = 40;
                 self.target_fps = 60.0;
                 self.graphics = GraphicsMode::Fast;
+                self.scenery_quality = SceneryQuality::Lean;
             }
             WorldModeCard::Cinematic => {
                 self.neurocore_enabled = true;
@@ -528,8 +591,25 @@ impl WorldSettings {
                 self.max_in_flight_meshes = 112;
                 self.target_fps = 60.0;
                 self.graphics = GraphicsMode::High;
+                self.scenery_quality = SceneryQuality::Lush;
             }
         }
+    }
+
+    pub fn apply_zen_garden_look(&mut self) {
+        self.graphics = GraphicsMode::High;
+        self.scenery_quality = SceneryQuality::Lush;
+        self.time_mode = TimeMode::Fixed;
+        self.time_of_day = 17.8;
+        self.weather.apply_preset(WeatherPreset::Clear);
+        self.weather.fog_density = 0.18;
+        self.weather.wind_x = 1.4;
+        self.weather.wind_z = 0.8;
+        self.theme.style = crate::theme::ThemeStyle::LiquidGlass;
+        self.theme.color = crate::theme::ThemeColor::Sakura;
+        self.theme.scanlines = false;
+        self.hud_panel_opacity = 0.74;
+        self.visual_preset = VisualPreset::NaturalWorld;
     }
 
     /// Keep persisted settings inside a startup-safe envelope. Save files
@@ -569,6 +649,9 @@ impl WorldSettings {
         self.hud_panel_opacity =
             finite_or(self.hud_panel_opacity, default_hud_panel_opacity()).clamp(0.35, 0.92);
         self.theme.style = crate::theme::ThemeStyle::LiquidGlass;
+        if self.theme.color == crate::theme::ThemeColor::Green {
+            self.theme.color = crate::theme::ThemeColor::Sakura;
+        }
         self.theme.scanlines = false;
         self.visual_preset = VisualPreset::NaturalWorld;
         self.companion_ui.show_companion_dock = false;
@@ -750,6 +833,8 @@ pub fn ensure_saves_dir() {
     let _ = fs::create_dir_all(saves_dir());
 }
 
+const WORLD_ARTIFACT_SUFFIXES: [&str; 3] = ["_edits", "_bots", "_city"];
+
 fn sanitize_world_name(name: &str) -> String {
     name.chars()
         .map(|c| {
@@ -765,12 +850,60 @@ fn sanitize_world_name(name: &str) -> String {
 }
 
 pub fn world_storage_stem(name: &str) -> String {
-    sanitize_world_name(name)
+    let clean = sanitize_world_name(name);
+    if clean.is_empty() {
+        "world".to_string()
+    } else {
+        clean
+    }
+}
+
+pub fn world_artifact_stem_from_entry_name(entry_name: &str) -> Option<String> {
+    for suffix in WORLD_ARTIFACT_SUFFIXES {
+        if let Some(stem) = entry_name.strip_suffix(suffix) {
+            if !stem.is_empty() {
+                return Some(stem.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn reserved_world_storage_stems() -> std::collections::HashSet<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return browser_world_manifest().into_iter().collect();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ensure_saves_dir();
+        let mut out = std::collections::HashSet::new();
+        let Ok(read) = fs::read_dir(saves_dir()) else {
+            return out;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("ron") {
+                if let Some(stem) = path.file_stem().and_then(|name| name.to_str()) {
+                    out.insert(stem.to_string());
+                }
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if let Some(stem) = world_artifact_stem_from_entry_name(name) {
+                out.insert(stem);
+            }
+        }
+        out
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn world_file(name: &str) -> PathBuf {
-    saves_dir().join(format!("{}.ron", sanitize_world_name(name)))
+    saves_dir().join(format!("{}.ron", world_storage_stem(name)))
 }
 
 pub fn list_worlds() -> Vec<WorldMeta> {
@@ -962,7 +1095,32 @@ pub fn delete_world(name: &str) {
             Ok(_) => info!("Deleted world '{}'", name),
             Err(e) => warn!("Failed to delete world '{}': {e}", name),
         }
+        let removed = delete_world_artifacts(name);
+        if removed > 0 {
+            info!("Deleted {removed} derived save folders for '{}'", name);
+        }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn world_artifact_roots(name: &str) -> [PathBuf; 3] {
+    let stem = world_storage_stem(name);
+    [
+        saves_dir().join(format!("{stem}_edits")),
+        saves_dir().join(format!("{stem}_bots")),
+        saves_dir().join(format!("{stem}_city")),
+    ]
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn delete_world_artifacts(name: &str) -> usize {
+    let mut removed = 0;
+    for root in world_artifact_roots(name) {
+        if root.exists() && fs::remove_dir_all(&root).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// The currently active world, inserted once the user picks / creates one.
@@ -1059,6 +1217,7 @@ mod tests {
         assert_eq!(settings.theme.style, crate::theme::ThemeStyle::LiquidGlass);
         assert_eq!(settings.theme.density, crate::theme::UiDensity::Comfortable);
         assert_eq!(settings.visual_preset, VisualPreset::NaturalWorld);
+        assert_eq!(settings.scenery_quality, SceneryQuality::Balanced);
     }
 
     #[test]
@@ -1122,12 +1281,14 @@ mod tests {
         settings.apply_world_mode_card(WorldModeCard::FastLaptop);
         assert_eq!(settings.graphics, GraphicsMode::Fast);
         assert_eq!(settings.runtime_profile, RuntimeProfile::LowSpec);
+        assert_eq!(settings.scenery_quality, SceneryQuality::Lean);
         assert!(settings.render_distance <= 24);
         assert_eq!(settings.vertical_chunks, 6);
 
         settings.apply_world_mode_card(WorldModeCard::Cinematic);
         assert_eq!(settings.graphics, GraphicsMode::High);
         assert_eq!(settings.runtime_profile, RuntimeProfile::Cinematic);
+        assert_eq!(settings.scenery_quality, SceneryQuality::Lush);
         assert!(settings.render_distance >= 56);
         assert!(settings.mesh_applies_per_frame <= 8);
     }
@@ -1144,5 +1305,50 @@ mod tests {
         assert!(settings.mesh_applies_per_frame <= 4);
         assert!(settings.max_in_flight_terrain <= 64);
         assert!(settings.max_in_flight_meshes <= 48);
+    }
+
+    #[test]
+    fn artifact_root_names_reserve_world_storage_stems() {
+        assert_eq!(
+            world_artifact_stem_from_entry_name("world_04_edits"),
+            Some("world_04".to_string())
+        );
+        assert_eq!(
+            world_artifact_stem_from_entry_name("world_04_bots"),
+            Some("world_04".to_string())
+        );
+        assert_eq!(
+            world_artifact_stem_from_entry_name("world_04_city"),
+            Some("world_04".to_string())
+        );
+        assert_eq!(world_artifact_stem_from_entry_name("world_04"), None);
+    }
+
+    #[test]
+    fn zen_garden_look_applies_lush_readable_world() {
+        let mut settings = WorldSettings::default();
+
+        settings.apply_zen_garden_look();
+
+        assert_eq!(settings.theme.style, crate::theme::ThemeStyle::LiquidGlass);
+        assert_eq!(settings.theme.color, crate::theme::ThemeColor::Sakura);
+        assert_eq!(settings.scenery_quality, SceneryQuality::Lush);
+        assert_eq!(settings.weather.preset, WeatherPreset::Clear);
+        assert!(settings.weather.fog_density <= 0.24);
+        assert_eq!(settings.time_mode, TimeMode::Fixed);
+        assert!(
+            (17.0..=18.5).contains(&settings.time_of_day),
+            "zen look should start in a bright cinematic golden hour"
+        );
+    }
+
+    #[test]
+    fn old_green_terminal_accent_migrates_to_zen_sakura() {
+        let mut settings = WorldSettings::default();
+        settings.theme.color = crate::theme::ThemeColor::Green;
+
+        settings.normalize_runtime_safety();
+
+        assert_eq!(settings.theme.color, crate::theme::ThemeColor::Sakura);
     }
 }

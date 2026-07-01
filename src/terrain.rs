@@ -100,6 +100,7 @@ pub enum Region {
 
 pub struct TerrainGenerator {
     pub seed: u32,
+    scenery_quality: crate::settings::SceneryQuality,
     continent: Perlin,
     erosion: Perlin,
     hills_a: Perlin,
@@ -139,6 +140,7 @@ impl TerrainGenerator {
         // deterministic but each layer has its own noise field.
         Self {
             seed,
+            scenery_quality: crate::settings::SceneryQuality::Balanced,
             continent: Perlin::new(seed.wrapping_add(1)),
             erosion: Perlin::new(seed.wrapping_add(2)),
             hills_a: Perlin::new(seed.wrapping_add(3)),
@@ -156,6 +158,54 @@ impl TerrainGenerator {
             moisture: Perlin::new(seed.wrapping_add(11)),
             region: Perlin::new(seed.wrapping_add(12)),
             region_b: Perlin::new(seed.wrapping_add(13)),
+        }
+    }
+
+    pub fn with_scenery_quality(mut self, quality: crate::settings::SceneryQuality) -> Self {
+        self.scenery_quality = quality;
+        self
+    }
+
+    pub fn tree_density_for_biome(&self, biome: Biome) -> f64 {
+        let base = match biome {
+            Biome::Forest => 0.085,
+            Biome::Jungle => 0.135,
+            Biome::Plains => 0.018,
+            Biome::Savanna => 0.018,
+            Biome::Tundra => 0.008,
+            Biome::Karst => 0.060,
+            _ => 0.0,
+        };
+        base * self.scenery_quality.density_scale()
+    }
+
+    pub fn tree_height_for_biome(&self, biome: Biome, r: f64) -> (i32, BlockType) {
+        let bonus = self.scenery_quality.height_bonus();
+        match biome {
+            Biome::Jungle => (
+                7 + ((r * 997.0) as i32 % 4) + bonus,
+                BlockType::JungleLeaves,
+            ),
+            Biome::Forest => {
+                let leaves =
+                    if self.scenery_quality == crate::settings::SceneryQuality::Lush && r < 0.45 {
+                        BlockType::BlossomLeaves
+                    } else {
+                        BlockType::Leaves
+                    };
+                (5 + ((r * 997.0) as i32 % 3) + bonus, leaves)
+            }
+            Biome::Karst => (
+                6 + ((r * 997.0) as i32 % 3) + bonus,
+                if self.scenery_quality == crate::settings::SceneryQuality::Lush && r < 0.35 {
+                    BlockType::BlossomLeaves
+                } else {
+                    BlockType::Leaves
+                },
+            ),
+            Biome::Savanna => (4 + bonus / 2, BlockType::Leaves),
+            Biome::Tundra => (3 + bonus / 2, BlockType::Leaves),
+            _ => (4 + ((r * 997.0) as i32 % 2) + bonus, BlockType::Leaves),
         }
     }
 
@@ -694,16 +744,16 @@ impl TerrainGenerator {
 
         match biome {
             Biome::Plains | Biome::Forest => {
-                if slope <= 1 && r < 0.045 {
+                if slope <= 1 && r < 0.012 {
                     BlockType::Dirt
-                } else if grain > 0.46 && r < 0.080 {
+                } else if grain > 0.64 && r < 0.018 {
                     BlockType::MossStone
                 } else {
                     current
                 }
             }
             Biome::Jungle => {
-                if slope <= 1 && r < 0.090 {
+                if slope <= 1 && grain > 0.62 && r < 0.020 {
                     BlockType::MossStone
                 } else {
                     current
@@ -711,34 +761,34 @@ impl TerrainGenerator {
             }
             Biome::Beach | Biome::Desert | Biome::Savanna => current,
             Biome::Tundra => {
-                if r < 0.10 {
+                if r < 0.035 {
                     BlockType::Snow
-                } else if r < 0.16 {
+                } else if r < 0.050 {
                     BlockType::Gravel
                 } else {
                     current
                 }
             }
             Biome::Mountains | Biome::SnowyMountains => {
-                if r < 0.18 {
+                if r < 0.060 {
                     BlockType::Gravel
-                } else if matches!(biome, Biome::SnowyMountains) && r < 0.34 {
+                } else if matches!(biome, Biome::SnowyMountains) && r < 0.140 {
                     BlockType::Snow
                 } else {
                     current
                 }
             }
             Biome::Mesa => {
-                if r < 0.10 {
+                if r < 0.030 {
                     BlockType::MesaClay
-                } else if grain > 0.50 && r < 0.20 {
+                } else if grain > 0.58 && r < 0.060 {
                     BlockType::RedStone
                 } else {
                     current
                 }
             }
             Biome::Karst => {
-                if grain > 0.36 && r < 0.18 {
+                if grain > 0.60 && r < 0.020 {
                     BlockType::Limestone
                 } else {
                     current
@@ -1004,15 +1054,10 @@ impl TerrainGenerator {
                     continue;
                 }
 
-                // Only forest biomes get trees. Density varies per biome.
-                let density = match biome {
-                    Biome::Forest => 0.06,
-                    Biome::Jungle => 0.14,
-                    Biome::Plains => 0.008,
-                    Biome::Savanna => 0.010,
-                    Biome::Tundra => 0.005,
-                    _ => 0.0,
-                };
+                // Density scales with SceneryQuality so low-end PCs can
+                // keep foliage sparse while cinematic worlds get larger
+                // bonsai/blossom silhouettes.
+                let density = self.tree_density_for_biome(biome);
                 if density == 0.0 {
                     continue;
                 }
@@ -1030,14 +1075,17 @@ impl TerrainGenerator {
                     continue;
                 }
                 // And we need room for the whole tree above.
-                let (trunk_h, leaf_kind) = match biome {
-                    Biome::Jungle => (7 + ((r * 997.0) as i32 % 4), BlockType::JungleLeaves),
-                    Biome::Forest => (5 + ((r * 997.0) as i32 % 3), BlockType::Leaves),
-                    Biome::Savanna => (4, BlockType::Leaves),
-                    Biome::Tundra => (3, BlockType::Leaves),
-                    _ => (4 + ((r * 997.0) as i32 % 2), BlockType::Leaves),
-                };
-                let top_y = base_y + trunk_h + 2; // +2 for canopy above trunk
+                let (trunk_h, leaf_kind) = self.tree_height_for_biome(biome, r);
+                let wants_bonsai = self.scenery_quality == crate::settings::SceneryQuality::Lush
+                    && matches!(
+                        biome,
+                        Biome::Forest | Biome::Karst | Biome::Jungle | Biome::Plains
+                    )
+                    && lx >= 5
+                    && lz >= 5
+                    && lx + 5 < CHUNK_SIZE
+                    && lz + 5 < CHUNK_SIZE;
+                let top_y = base_y + trunk_h + if wants_bonsai { 4 } else { 2 };
                 if top_y >= origin_y + CHUNK_SIZE_I {
                     continue;
                 }
@@ -1054,6 +1102,12 @@ impl TerrainGenerator {
                 if ground != <BlockType as Into<Voxel>>::into(BlockType::Grass)
                     && ground != <BlockType as Into<Voxel>>::into(BlockType::SavannaGrass)
                     && ground != <BlockType as Into<Voxel>>::into(BlockType::TundraGrass)
+                {
+                    continue;
+                }
+
+                if wants_bonsai
+                    && self.try_place_bonsai_tree(chunk, lx, lz, base_y, origin_y, leaf_kind)
                 {
                     continue;
                 }
@@ -1112,6 +1166,101 @@ impl TerrainGenerator {
         self.decorate_flora(chunk);
     }
 
+    fn try_place_bonsai_tree(
+        &self,
+        chunk: &mut Chunk,
+        lx: usize,
+        lz: usize,
+        base_y: i32,
+        origin_y: i32,
+        leaf_kind: BlockType,
+    ) -> bool {
+        let wx = chunk.pos.x * CHUNK_SIZE_I + lx as i32;
+        let wz = chunk.pos.z * CHUNK_SIZE_I + lz as i32;
+        let height_roll = column_rand(self.seed ^ 0xB05A_1001, wx, wz);
+        let lean_roll = column_rand(self.seed ^ 0xB05A_2002, wx, wz);
+        let trunk_h = 7 + (height_roll * 3.0) as i32;
+        if base_y < origin_y || base_y + trunk_h + 4 >= origin_y + CHUNK_SIZE_I {
+            return false;
+        }
+
+        let lean_x = if lean_roll < 0.33 {
+            -1
+        } else if lean_roll > 0.66 {
+            1
+        } else {
+            0
+        };
+        let mut trunk_x = lx as i32;
+        let trunk_z = lz as i32;
+        for dy in 0..trunk_h {
+            if dy == trunk_h / 2 {
+                trunk_x += lean_x;
+            }
+            if trunk_x < 0 || trunk_z < 0 {
+                return false;
+            }
+            set_safe(
+                chunk,
+                trunk_x as usize,
+                base_y + dy,
+                trunk_z as usize,
+                BlockType::Wood,
+                origin_y,
+            );
+            if dy >= 3 && dy % 3 == 0 {
+                for side in [-1, 1] {
+                    let bx = trunk_x + side * 2;
+                    if bx >= 0 {
+                        set_safe(
+                            chunk,
+                            bx as usize,
+                            base_y + dy,
+                            trunk_z as usize,
+                            BlockType::Wood,
+                            origin_y,
+                        );
+                    }
+                }
+            }
+        }
+
+        let crown_block = if leaf_kind == BlockType::BlossomLeaves
+            || column_rand(self.seed ^ 0xB05A_3003, wx, wz) < 0.35
+        {
+            BlockType::BlossomLeaves
+        } else {
+            leaf_kind
+        };
+        let tiers: [(i32, i32, i32, i32); 5] = [
+            (0, 0, trunk_h - 1, 3),
+            (-2, 0, trunk_h - 2, 2),
+            (2, 1, trunk_h, 2),
+            (0, -2, trunk_h + 1, 2),
+            (0, 0, trunk_h + 3, 1),
+        ];
+        for (ox, oz, dy, radius) in tiers {
+            let cx = trunk_x + ox;
+            let cz = trunk_z + oz;
+            let cy = base_y + dy;
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx.abs() + dz.abs() > radius + 1 {
+                        continue;
+                    }
+                    let nx = cx + dx;
+                    let nz = cz + dz;
+                    if nx < 0 || nz < 0 {
+                        continue;
+                    }
+                    set_safe(chunk, nx as usize, cy, nz as usize, crown_block, origin_y);
+                }
+            }
+        }
+
+        true
+    }
+
     /// Low-density single-block tufts for atmosphere. Deliberately
     /// sparse so the ground stays smooth and walkable â€” the player
     /// must never have to jump over decoration. No 2-tall stacks.
@@ -1154,28 +1303,29 @@ impl TerrainGenerator {
                 let is_sand_ground = ground == <BlockType as Into<Voxel>>::into(BlockType::Sand)
                     || ground == <BlockType as Into<Voxel>>::into(BlockType::GlowSand)
                     || ground == <BlockType as Into<Voxel>>::into(BlockType::RedSand);
+                let lush = self.scenery_quality == crate::settings::SceneryQuality::Lush;
 
                 // One single-block tuft per biome, very sparse.
                 // Densities chosen so the ground reads as "populated"
                 // but never as "obstacle course".
                 match biome {
                     Biome::Plains => {
-                        if is_grass_ground && r < 0.012 {
-                            chunk.set(lx, above_ly as usize, lz, BlockType::Leaves.into());
+                        if lush && is_grass_ground && r < 0.003 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::SakuraPetals.into());
                         }
                     }
                     Biome::Forest => {
-                        if is_grass_ground && r < 0.020 {
-                            chunk.set(lx, above_ly as usize, lz, BlockType::Leaves.into());
+                        if lush && is_grass_ground && r < 0.005 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::SakuraPetals.into());
                         }
                     }
                     Biome::Jungle => {
-                        if is_grass_ground && r < 0.035 {
-                            chunk.set(lx, above_ly as usize, lz, BlockType::JungleLeaves.into());
+                        if lush && is_grass_ground && r < 0.006 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::Bamboo.into());
                         }
                     }
                     Biome::Savanna => {
-                        if is_grass_ground && r < 0.010 {
+                        if lush && is_grass_ground && r < 0.002 {
                             chunk.set(lx, above_ly as usize, lz, BlockType::SavannaGrass.into());
                         }
                     }
@@ -1185,12 +1335,12 @@ impl TerrainGenerator {
                         }
                     }
                     Biome::Tundra => {
-                        if is_grass_ground && r < 0.015 {
+                        if lush && is_grass_ground && r < 0.003 {
                             chunk.set(lx, above_ly as usize, lz, BlockType::TundraGrass.into());
                         }
                     }
                     Biome::SnowyMountains | Biome::Mountains => {
-                        if r < 0.008 {
+                        if r < 0.002 {
                             chunk.set(lx, above_ly as usize, lz, BlockType::Gravel.into());
                         }
                     }
@@ -1200,12 +1350,12 @@ impl TerrainGenerator {
                         }
                     }
                     Biome::Karst => {
-                        if is_grass_ground && r < 0.020 {
-                            chunk.set(lx, above_ly as usize, lz, BlockType::MossStone.into());
+                        if lush && is_grass_ground && r < 0.006 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::SakuraPetals.into());
                         }
                     }
                     Biome::Beach => {
-                        if is_sand_ground && r < 0.003 {
+                        if lush && is_sand_ground && r < 0.001 {
                             chunk.set(lx, above_ly as usize, lz, BlockType::Gravel.into());
                         }
                     }
@@ -2637,12 +2787,32 @@ mod tests {
             "default terrain should stay playable for normal streaming budgets; highest sample was {highest}"
         );
     }
+
+    #[test]
+    fn scenery_quality_scales_tree_density_without_changing_seed() {
+        let lean = TerrainGenerator::new(12345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lean);
+        let lush = TerrainGenerator::new(12345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush);
+
+        assert!(
+            lush.tree_density_for_biome(Biome::Forest) > lean.tree_density_for_biome(Biome::Forest)
+        );
+        assert!(
+            lush.tree_height_for_biome(Biome::Forest, 0.5).0
+                > lean.tree_height_for_biome(Biome::Forest, 0.5).0
+        );
+        assert_eq!(
+            lush.tree_height_for_biome(Biome::Forest, 0.4).1,
+            BlockType::BlossomLeaves
+        );
+    }
 }
 
 // Derive Copy/Clone only for lookup (biome blocks helper is `&self`-free).
 impl Clone for TerrainGenerator {
     fn clone(&self) -> Self {
-        Self::new(self.seed)
+        Self::new(self.seed).with_scenery_quality(self.scenery_quality)
     }
 }
 

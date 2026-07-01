@@ -343,6 +343,15 @@ pub fn bake_all_block_swatches(size: u32) -> Vec<BlockSwatch> {
         (LuminiteCrystal, "luminite_crystal", BlockStyle::Ice),
         (MagnetiteOre, "magnetite_ore", BlockStyle::Rock),
         (IridiumVein, "iridium_vein", BlockStyle::Ice),
+        (BlossomLeaves, "blossom_leaves", BlockStyle::Leaves),
+        (ZenStone, "zen_stone", BlockStyle::Rock),
+        (Bamboo, "bamboo", BlockStyle::Wood),
+        (SakuraPetals, "sakura_petals", BlockStyle::Leaves),
+        (ShojiPaper, "shoji_paper", BlockStyle::Ice),
+        (RoofTile, "roof_tile", BlockStyle::Rock),
+        (TatamiMat, "tatami_mat", BlockStyle::Wood),
+        (NeonGlass, "neon_glass", BlockStyle::Ice),
+        (ShojiLamp, "shoji_lamp", BlockStyle::Lava),
     ];
     list.iter()
         .map(|(b, n, style)| bake_block_swatch(*b, n, *style, size))
@@ -516,13 +525,27 @@ fn bake_block_swatch(
                     )
                 }
                 BlockStyle::Sand => {
-                    let ripple = (v * two_pi * 6.0 + broad * 2.4 + fbm * 2.0).sin() * 0.08;
-                    let mineral = (grain_n - 0.52).max(0.0) * 0.08;
+                    let ripple_a = (v * two_pi * 8.0 + broad * 2.6 + fbm * 2.4).sin() * 0.055;
+                    let ripple_b = ((u + v * 0.42) * two_pi * 4.5 + macro_n * 2.8).sin() * 0.025;
+                    let dune_shadow = broad.min(0.0).abs() * 0.035;
+                    let mineral = (grain_n - 0.50).max(0.0) * 0.10;
+                    let quartz = if vein > 0.46 {
+                        (vein - 0.46) * 0.35
+                    } else {
+                        0.0
+                    };
                     (
-                        0.91 + macro_shadow * 0.75 + fbm * 0.10 + micro * 0.14 + ripple + mineral,
-                        mineral as f32 * 0.05,
-                        0.0,
-                        -(mineral as f32) * 0.02,
+                        0.86 + macro_shadow * 0.45
+                            + fbm * 0.08
+                            + micro * 0.11
+                            + ripple_a
+                            + ripple_b
+                            - dune_shadow
+                            + mineral
+                            + quartz,
+                        mineral as f32 * 0.035 + quartz as f32 * 0.020,
+                        -(dune_shadow as f32) * 0.020,
+                        -(mineral as f32) * 0.050 - (dune_shadow as f32) * 0.035,
                     )
                 }
                 BlockStyle::Water => {

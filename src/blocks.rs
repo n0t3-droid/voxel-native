@@ -118,6 +118,24 @@ pub enum BlockType {
     MagnetiteOre = 34,
     /// Deep purple rare vein — reference "Iridium".
     IridiumVein = 35,
+    /// Pale pink sakura / rose foliage for zen-garden and lush forest silhouettes.
+    BlossomLeaves = 36,
+    /// Smooth pale garden stone for zen paths, courtyards and modern walls.
+    ZenStone = 37,
+    /// Tall green bamboo cane / plant block for gardens and groves.
+    Bamboo = 38,
+    /// Soft pink fallen petals / flower mass for sakura ground detail.
+    SakuraPetals = 39,
+    /// Warm translucent paper wall for shoji screens and interior panels.
+    ShojiPaper = 40,
+    /// Charcoal ceramic roof tile for Japanese roofs and modern dark trim.
+    RoofTile = 41,
+    /// Warm woven floor block for tatami rooms and calm interiors.
+    TatamiMat = 42,
+    /// Cyan transparent neon glass for sci-fi windows and railings.
+    NeonGlass = 43,
+    /// Warm emissive lantern block for zen streets and interiors.
+    ShojiLamp = 44,
 }
 
 /// Voxel ids for the three mineable neon resources (HUD + telemetry).
@@ -128,7 +146,16 @@ pub const VOXEL_IRIDIUM: Voxel = BlockType::IridiumVein as Voxel;
 impl BlockType {
     #[inline]
     pub fn is_solid(self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water)
+        !matches!(
+            self,
+            BlockType::Air
+                | BlockType::Water
+                | BlockType::Lava
+                | BlockType::Leaves
+                | BlockType::JungleLeaves
+                | BlockType::BlossomLeaves
+                | BlockType::SakuraPetals
+        )
     }
 
     #[inline]
@@ -139,8 +166,11 @@ impl BlockType {
                 | BlockType::Water
                 | BlockType::Leaves
                 | BlockType::JungleLeaves
+                | BlockType::BlossomLeaves
                 | BlockType::Ice
                 | BlockType::CockpitGlass
+                | BlockType::ShojiPaper
+                | BlockType::NeonGlass
         )
     }
 
@@ -163,6 +193,8 @@ impl BlockType {
                 | BlockType::LuminiteCrystal
                 | BlockType::MagnetiteOre
                 | BlockType::IridiumVein
+                | BlockType::NeonGlass
+                | BlockType::ShojiLamp
         )
     }
 
@@ -170,20 +202,20 @@ impl BlockType {
     pub fn color(self) -> Color {
         match self {
             BlockType::Air => Color::NONE,
-            BlockType::Stone => Color::srgb(0.34, 0.36, 0.44),
-            BlockType::Dirt => Color::srgb(0.24, 0.15, 0.11),
-            BlockType::Grass => Color::srgb(0.11, 0.40, 0.15),
-            BlockType::Sand => Color::srgb(0.76, 0.67, 0.45),
+            BlockType::Stone => Color::srgb(0.42, 0.43, 0.42),
+            BlockType::Dirt => Color::srgb(0.27, 0.18, 0.12),
+            BlockType::Grass => Color::srgb(0.12, 0.34, 0.15),
+            BlockType::Sand => Color::srgb(0.76, 0.67, 0.47),
             // Turquoise energy-water read (concept underground river).
             BlockType::Water => Color::srgba(0.06, 0.78, 0.92, 0.62),
-            BlockType::Wood => Color::srgb(0.24, 0.14, 0.08),
-            BlockType::Leaves => Color::srgb(0.06, 0.32, 0.11),
+            BlockType::Wood => Color::srgb(0.40, 0.25, 0.14),
+            BlockType::Leaves => Color::srgb(0.09, 0.29, 0.12),
             BlockType::Snow => Color::srgb(0.96, 0.97, 0.99),
             BlockType::Ice => Color::srgba(0.70, 0.88, 0.98, 0.85),
             BlockType::TundraGrass => Color::srgb(0.62, 0.76, 0.55),
-            BlockType::JungleLeaves => Color::srgb(0.03, 0.38, 0.13),
-            BlockType::SavannaGrass => Color::srgb(0.46, 0.50, 0.20),
-            BlockType::Gravel => Color::srgb(0.42, 0.40, 0.45),
+            BlockType::JungleLeaves => Color::srgb(0.06, 0.35, 0.16),
+            BlockType::SavannaGrass => Color::srgb(0.44, 0.42, 0.22),
+            BlockType::Gravel => Color::srgb(0.45, 0.44, 0.43),
             BlockType::Bedrock => Color::srgb(0.12, 0.12, 0.14),
             // Sedona red — saturated rust-orange surface dust.
             BlockType::RedSand => Color::srgb(0.92, 0.46, 0.24),
@@ -192,9 +224,9 @@ impl BlockType {
             // Pale yellow mesa cap, the bright stripe between reds.
             BlockType::MesaClay => Color::srgb(0.94, 0.76, 0.48),
             // Dark mossy limestone — wet karst pillar bodies.
-            BlockType::MossStone => Color::srgb(0.20, 0.31, 0.25),
+            BlockType::MossStone => Color::srgb(0.16, 0.27, 0.20),
             // Bright pale limestone — sun-lit karst sides.
-            BlockType::Limestone => Color::srgb(0.86, 0.84, 0.76),
+            BlockType::Limestone => Color::srgb(0.76, 0.74, 0.66),
             // Alien crystal — saturated cyan-violet, slightly translucent.
             BlockType::Crystal => Color::srgba(0.18, 0.72, 1.00, 0.70),
             // Volcanic basalt — dark, but not unreadable black. Keeping
@@ -220,6 +252,15 @@ impl BlockType {
             BlockType::LuminiteCrystal => Color::srgba(0.12, 0.82, 1.00, 0.68),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
+            BlockType::BlossomLeaves => Color::srgba(1.0, 0.66, 0.82, 0.86),
+            BlockType::ZenStone => Color::srgb(0.68, 0.68, 0.62),
+            BlockType::Bamboo => Color::srgb(0.47, 0.68, 0.26),
+            BlockType::SakuraPetals => Color::srgba(1.00, 0.54, 0.72, 0.78),
+            BlockType::ShojiPaper => Color::srgba(1.00, 0.88, 0.68, 0.70),
+            BlockType::RoofTile => Color::srgb(0.10, 0.13, 0.16),
+            BlockType::TatamiMat => Color::srgb(0.72, 0.62, 0.34),
+            BlockType::NeonGlass => Color::srgba(0.18, 0.92, 1.00, 0.48),
+            BlockType::ShojiLamp => Color::srgb(1.00, 0.62, 0.24),
         }
     }
 
@@ -260,6 +301,15 @@ impl BlockType {
             33 => BlockType::LuminiteCrystal,
             34 => BlockType::MagnetiteOre,
             35 => BlockType::IridiumVein,
+            36 => BlockType::BlossomLeaves,
+            37 => BlockType::ZenStone,
+            38 => BlockType::Bamboo,
+            39 => BlockType::SakuraPetals,
+            40 => BlockType::ShojiPaper,
+            41 => BlockType::RoofTile,
+            42 => BlockType::TatamiMat,
+            43 => BlockType::NeonGlass,
+            44 => BlockType::ShojiLamp,
             _ => BlockType::Air,
         }
     }
@@ -272,7 +322,7 @@ impl From<BlockType> for Voxel {
     }
 }
 
-pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
+pub const BUILDABLE_BLOCKS: [BlockType; 44] = [
     BlockType::Stone,
     BlockType::Dirt,
     BlockType::Grass,
@@ -308,6 +358,15 @@ pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
     BlockType::LuminiteCrystal,
     BlockType::MagnetiteOre,
     BlockType::IridiumVein,
+    BlockType::BlossomLeaves,
+    BlockType::ZenStone,
+    BlockType::Bamboo,
+    BlockType::SakuraPetals,
+    BlockType::ShojiPaper,
+    BlockType::RoofTile,
+    BlockType::TatamiMat,
+    BlockType::NeonGlass,
+    BlockType::ShojiLamp,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +398,11 @@ const ASPHALT_CONCRETE: &[BlockPaletteEntry] = &[
         block: BlockType::Bedrock,
         label: "Bedrock",
         role: "dark foundation",
+    },
+    BlockPaletteEntry {
+        block: BlockType::ZenStone,
+        label: "Zen Stone",
+        role: "smooth garden concrete",
     },
 ];
 
@@ -386,6 +450,11 @@ const GLASS: &[BlockPaletteEntry] = &[
         label: "Iridium",
         role: "violet rare-glass vein",
     },
+    BlockPaletteEntry {
+        block: BlockType::NeonGlass,
+        label: "Neon Glass",
+        role: "cyan sci-fi window",
+    },
 ];
 
 const GROUND: &[BlockPaletteEntry] = &[
@@ -413,6 +482,16 @@ const GROUND: &[BlockPaletteEntry] = &[
         block: BlockType::JungleLeaves,
         label: "Jungle",
         role: "dense planting",
+    },
+    BlockPaletteEntry {
+        block: BlockType::BlossomLeaves,
+        label: "Blossom",
+        role: "sakura canopy",
+    },
+    BlockPaletteEntry {
+        block: BlockType::SakuraPetals,
+        label: "Petals",
+        role: "sakura ground",
     },
     BlockPaletteEntry {
         block: BlockType::SavannaGrass,
@@ -470,9 +549,24 @@ const PLASTER_LIGHT: &[BlockPaletteEntry] = &[
         label: "White",
         role: "bright paint",
     },
+    BlockPaletteEntry {
+        block: BlockType::ShojiPaper,
+        label: "Shoji Paper",
+        role: "warm paper wall",
+    },
+    BlockPaletteEntry {
+        block: BlockType::TatamiMat,
+        label: "Tatami",
+        role: "woven interior floor",
+    },
 ];
 
 const PATTERN_TILE_ROOFING: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::RoofTile,
+        label: "Roof Tile",
+        role: "charcoal ceramic roof",
+    },
     BlockPaletteEntry {
         block: BlockType::Basalt,
         label: "Basalt",
@@ -501,6 +595,11 @@ const SOLID_COLORS: &[BlockPaletteEntry] = &[
         label: "Neon Amber",
         role: "amber color/accent",
     },
+    BlockPaletteEntry {
+        block: BlockType::ShojiLamp,
+        label: "Lantern",
+        role: "warm emissive light",
+    },
 ];
 
 const WOOD_NATURE: &[BlockPaletteEntry] = &[
@@ -513,6 +612,11 @@ const WOOD_NATURE: &[BlockPaletteEntry] = &[
         block: BlockType::Leaves,
         label: "Leaves",
         role: "foliage",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Bamboo,
+        label: "Bamboo",
+        role: "bamboo posts/plants",
     },
 ];
 
@@ -611,10 +715,12 @@ pub fn block_label(block: BlockType) -> &'static str {
 }
 
 /// Fast voxel → solid? (without converting through the enum).
-/// AIR (0), Water (5) and Lava (22) are non-solid for collision.
+/// Fluid and foliage/detail blocks are non-solid for collision so sakura
+/// petals, leaves and future half-height details do not behave like full
+/// hard cubes.
 #[inline]
 pub fn voxel_is_solid(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 22)
+    !matches!(v, 0 | 5 | 7 | 11 | 22 | 36 | 39)
 }
 
 /// Fast voxel -> can weapons intentionally hit and destroy this block?
@@ -628,10 +734,14 @@ pub fn voxel_is_weapon_target(v: Voxel) -> bool {
 
 /// Fast voxel → opaque? (used for face-culling).
 /// Air (0), water (5), leaves (7), ice (9), jungle leaves (11),
-/// crystal (20), lava (22), cockpit (28), luminite/iridium glass are non-opaque.
+/// blossom leaves (36), shoji paper (40), neon glass (43), crystal (20),
+/// lava (22), cockpit (28), luminite/iridium glass are non-opaque.
 #[inline]
 pub fn voxel_is_opaque(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35)
+    !matches!(
+        v,
+        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 36 | 40 | 43
+    )
 }
 
 /// Fast voxel → is this block bioluminescent? Emissive blocks get
@@ -640,9 +750,13 @@ pub fn voxel_is_opaque(v: Voxel) -> bool {
 /// alien moss, glow-sand).
 #[inline]
 pub fn voxel_is_emissive(v: Voxel) -> bool {
-    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9.
+    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35,
+    // NeonGlass=43, ShojiLamp=44, Ice=9.
     // Ice gets a whisper of glow so glacier biomes shimmer at night.
-    matches!(v, 9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35)
+    matches!(
+        v,
+        9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 43 | 44
+    )
 }
 
 #[inline]
@@ -732,6 +846,18 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[1] *= 0.9;
             c[2] *= 4.6;
         }
+        43 => {
+            // Neon glass — transparent cyan architecture accent.
+            c[0] *= 1.2;
+            c[1] *= 3.4;
+            c[2] *= 4.2;
+        }
+        44 => {
+            // Shoji lamp — warm lantern glow for streets/interiors.
+            c[0] *= 3.4;
+            c[1] *= 2.0;
+            c[2] *= 0.7;
+        }
         _ => {}
     }
     c
@@ -760,17 +886,65 @@ mod tests {
     }
 
     #[test]
+    fn foliage_and_petal_details_do_not_collide_like_full_cubes() {
+        for block in [
+            BlockType::Leaves,
+            BlockType::JungleLeaves,
+            BlockType::BlossomLeaves,
+            BlockType::SakuraPetals,
+        ] {
+            assert!(
+                !block.is_solid(),
+                "{block:?} should be a soft detail block, not a full collision cube"
+            );
+            assert!(
+                !voxel_is_solid(block.into()),
+                "{block:?} should be non-solid in the fast collision path"
+            );
+        }
+    }
+
+    #[test]
     fn shuttle_blocks_map_from_voxel_ids() {
         assert_eq!(BlockType::from_voxel(26), BlockType::ShipHullDark);
         assert_eq!(BlockType::from_voxel(28), BlockType::CockpitGlass);
         assert_eq!(BlockType::from_voxel(32), BlockType::EngineCore);
         assert_eq!(BlockType::from_voxel(33), BlockType::LuminiteCrystal);
         assert_eq!(BlockType::from_voxel(35), BlockType::IridiumVein);
+        assert_eq!(BlockType::from_voxel(38), BlockType::Bamboo);
+        assert_eq!(BlockType::from_voxel(40), BlockType::ShojiPaper);
+        assert_eq!(BlockType::from_voxel(44), BlockType::ShojiLamp);
         assert!(voxel_is_emissive(BlockType::NeonCyan.into()));
+        assert!(voxel_is_emissive(BlockType::ShojiLamp.into()));
         assert!(!voxel_is_opaque(BlockType::CockpitGlass.into()));
         assert!(!voxel_is_opaque(BlockType::LuminiteCrystal.into()));
+        assert!(!voxel_is_opaque(BlockType::NeonGlass.into()));
+        assert!(!voxel_is_opaque(BlockType::ShojiPaper.into()));
         assert!(voxel_is_opaque(BlockType::MagnetiteOre.into()));
         assert!(ore_units_for_mined_voxel(VOXEL_LUMINITE) > 0);
+    }
+
+    #[test]
+    fn zen_builder_inventory_exposes_plants_and_architecture_blocks() {
+        for block in [
+            BlockType::ZenStone,
+            BlockType::Bamboo,
+            BlockType::SakuraPetals,
+            BlockType::ShojiPaper,
+            BlockType::RoofTile,
+            BlockType::TatamiMat,
+            BlockType::NeonGlass,
+            BlockType::ShojiLamp,
+        ] {
+            assert!(
+                BUILDABLE_BLOCKS.contains(&block),
+                "{block:?} should be directly buildable"
+            );
+            assert!(
+                block_palette_entry(block).is_some(),
+                "{block:?} should be visible in the material catalog"
+            );
+        }
     }
 
     #[test]

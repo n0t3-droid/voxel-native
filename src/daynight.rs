@@ -140,6 +140,14 @@ fn shadow_size_for(mode: GraphicsMode) -> usize {
     }
 }
 
+fn terrain_directional_shadows_enabled(_mode: GraphicsMode) -> bool {
+    // Terrain chunks are streamed and shadow-caster culled independently.
+    // Until cascades are chunk-stable, directional terrain shadows produce
+    // hard rectangular bands across sand/grass. Voxel face lighting, AO and
+    // fog keep depth readable without the broken shadow plane.
+    false
+}
+
 fn cascade_config_for(mode: GraphicsMode) -> bevy::pbr::CascadeShadowConfig {
     match mode {
         // Fast: 1 tight cascade, 64-block radius. Perfect for iGPU +
@@ -181,8 +189,7 @@ fn spawn_sun(mut commands: Commands, settings: Res<WorldSettings>) {
         DirectionalLightBundle {
             directional_light: DirectionalLight {
                 illuminance: 10_000.0,
-                // Shadows off in Fast mode — single biggest iGPU win.
-                shadows_enabled: settings.graphics != GraphicsMode::Fast,
+                shadows_enabled: terrain_directional_shadows_enabled(settings.graphics),
                 ..default()
             },
             transform: Transform::from_xyz(50.0, 200.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -215,7 +222,7 @@ fn update_shadow_quality(
     shadow.size = shadow_size_for(settings.graphics);
     if let Ok((mut cfg, mut light)) = sun.get_single_mut() {
         *cfg = cascade_config_for(settings.graphics);
-        light.shadows_enabled = settings.graphics != GraphicsMode::Fast;
+        light.shadows_enabled = terrain_directional_shadows_enabled(settings.graphics);
     }
 }
 
@@ -258,7 +265,7 @@ fn update_sun(
 
     // Day factor 0..1 where 1 = high noon, 0 = deep night.
     let day = sun_dir.y.max(0.0);
-    light.illuminance = 2_200.0 + day * 14_000.0;
+    light.illuminance = sun_illuminance_for_day(day);
     // Warm sun, cool moon — the cinematic directional tint that
     // gives grass its golden rim at dusk and a silvery wash at night.
     let warmth = ((sun_dir.y - 0.05).clamp(-0.3, 0.4) / 0.4).clamp(-1.0, 1.0);
@@ -274,8 +281,7 @@ fn update_sun(
     let base = if day > 0.0 { day_color } else { night_color };
     let amb_lin = base.mix(&sunset_color, sunset * 0.40);
     ambient.color = Color::LinearRgba(amb_lin);
-    // Much brighter ambient floor so night is still visible (was 100.0).
-    ambient.brightness = (380.0 + day * 550.0) * intel.profile.ambient_mul;
+    ambient.brightness = ambient_brightness_for_day(day, intel.profile.ambient_mul);
 
     // Sky (clear colour) interpolates similarly — richer gradient from
     // deep indigo night → fiery horizon → deep cyan midday.
@@ -317,9 +323,9 @@ fn update_sun(
             // Fog thins at clear noon for epic long-distance vistas of
             // alien spires and mountain ranges, thickens dramatically
             // at sunset/sunrise for fiery god-ray haze.
-            let base_density = 0.00055;
+            let base_density = 0.00034;
             *density = base_density
-                * (1.0 + sunset * 1.4 + (1.0 - day) * 0.25)
+                * (1.0 + sunset * 0.82 + (1.0 - day) * 0.12)
                 * intel.profile.fog_density_mul;
         }
         // Directional light scattering — makes god-ray / atmospheric
@@ -328,6 +334,16 @@ fn update_sun(
         fog_settings.directional_light_color = Color::LinearRgba(horizon);
         fog_settings.directional_light_exponent = 18.0;
     }
+}
+
+fn sun_illuminance_for_day(day: f32) -> f32 {
+    let day = day.clamp(0.0, 1.0);
+    6_200.0 + day.powf(0.78) * 18_500.0
+}
+
+fn ambient_brightness_for_day(day: f32, profile_ambient_mul: f32) -> f32 {
+    let day = day.clamp(0.0, 1.0);
+    (920.0 + day.powf(0.58) * 860.0) * profile_ambient_mul.max(0.92)
 }
 
 fn update_world_intel_runtime(
@@ -346,4 +362,32 @@ fn update_world_intel_runtime(
     }
     intel.biome = biome;
     intel.profile = BiomeArtProfile::for_biome(biome);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terrain_directional_shadows_stay_off_to_avoid_chunk_shadow_bands() {
+        assert!(!terrain_directional_shadows_enabled(GraphicsMode::Fast));
+        assert!(!terrain_directional_shadows_enabled(GraphicsMode::Balanced));
+        assert!(!terrain_directional_shadows_enabled(GraphicsMode::High));
+    }
+
+    #[test]
+    fn night_ambient_floor_keeps_world_readable() {
+        assert!(
+            ambient_brightness_for_day(0.0, 1.0) >= 620.0,
+            "night ambient must keep terrain/trees readable instead of black silhouettes"
+        );
+    }
+
+    #[test]
+    fn dusk_keeps_directional_light_visible() {
+        assert!(
+            sun_illuminance_for_day(0.08) >= 5_500.0,
+            "low sun should still give visible form and not collapse to black"
+        );
+    }
 }

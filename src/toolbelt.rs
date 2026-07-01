@@ -1376,22 +1376,22 @@ impl BuildWorkflowPreset {
 
     fn color(self) -> egui::Color32 {
         match self {
-            Self::Pencil => egui::Color32::from_rgb(255, 205, 92),
-            Self::Sketch => egui::Color32::from_rgb(80, 170, 255),
-            Self::Circle => egui::Color32::from_rgb(110, 230, 255),
-            Self::Polygon => egui::Color32::from_rgb(160, 220, 255),
-            Self::Arc => egui::Color32::from_rgb(255, 210, 120),
-            Self::Freehand => egui::Color32::from_rgb(255, 190, 150),
-            Self::Room => egui::Color32::from_rgb(80, 235, 190),
-            Self::Opening => egui::Color32::from_rgb(255, 92, 112),
-            Self::PushPull => egui::Color32::from_rgb(110, 210, 255),
-            Self::ModernHouse => egui::Color32::from_rgb(240, 245, 230),
-            Self::Roads => egui::Color32::from_rgb(80, 235, 225),
-            Self::BotArea => egui::Color32::from_rgb(120, 255, 180),
-            Self::Landscape => egui::Color32::from_rgb(130, 235, 95),
-            Self::CityShell => egui::Color32::from_rgb(130, 255, 125),
-            Self::Skyline => egui::Color32::from_rgb(255, 184, 70),
-            Self::Spacecraft => egui::Color32::from_rgb(150, 205, 230),
+            Self::Pencil => egui::Color32::from_rgb(255, 182, 102),
+            Self::Sketch => egui::Color32::from_rgb(255, 138, 184),
+            Self::Circle => egui::Color32::from_rgb(255, 170, 204),
+            Self::Polygon => egui::Color32::from_rgb(232, 196, 220),
+            Self::Arc => egui::Color32::from_rgb(255, 203, 112),
+            Self::Freehand => egui::Color32::from_rgb(255, 166, 146),
+            Self::Room => egui::Color32::from_rgb(215, 230, 206),
+            Self::Opening => egui::Color32::from_rgb(255, 94, 130),
+            Self::PushPull => egui::Color32::from_rgb(246, 190, 130),
+            Self::ModernHouse => egui::Color32::from_rgb(255, 242, 224),
+            Self::Roads => egui::Color32::from_rgb(84, 220, 205),
+            Self::BotArea => egui::Color32::from_rgb(142, 226, 150),
+            Self::Landscape => egui::Color32::from_rgb(118, 206, 120),
+            Self::CityShell => egui::Color32::from_rgb(188, 226, 196),
+            Self::Skyline => egui::Color32::from_rgb(255, 176, 80),
+            Self::Spacecraft => egui::Color32::from_rgb(192, 210, 224),
         }
     }
 }

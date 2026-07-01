@@ -16,12 +16,12 @@ use crate::icons::Icon;
 use crate::neurocore::RuntimeProfile;
 use crate::player::Player;
 use crate::settings::{
-    GraphicsMode, HudProfile, TimeMode, WeatherPreset, WorldModeCard, WorldSettings,
-    SAFE_MAX_CHUNKS_PER_FRAME, SAFE_MAX_IN_FLIGHT_MESHES, SAFE_MAX_IN_FLIGHT_TERRAIN,
-    SAFE_MAX_MESHES_PER_FRAME, SAFE_MAX_MESH_APPLIES_PER_FRAME, SAFE_MAX_RENDER_DISTANCE,
-    SAFE_MAX_VERTICAL_CHUNKS, SAFE_MIN_CHUNKS_PER_FRAME, SAFE_MIN_IN_FLIGHT_MESHES,
-    SAFE_MIN_IN_FLIGHT_TERRAIN, SAFE_MIN_MESHES_PER_FRAME, SAFE_MIN_MESH_APPLIES_PER_FRAME,
-    SAFE_MIN_RENDER_DISTANCE, SAFE_MIN_VERTICAL_CHUNKS,
+    GraphicsMode, HudProfile, SceneryQuality, TimeMode, WeatherPreset, WorldModeCard,
+    WorldSettings, SAFE_MAX_CHUNKS_PER_FRAME, SAFE_MAX_IN_FLIGHT_MESHES,
+    SAFE_MAX_IN_FLIGHT_TERRAIN, SAFE_MAX_MESHES_PER_FRAME, SAFE_MAX_MESH_APPLIES_PER_FRAME,
+    SAFE_MAX_RENDER_DISTANCE, SAFE_MAX_VERTICAL_CHUNKS, SAFE_MIN_CHUNKS_PER_FRAME,
+    SAFE_MIN_IN_FLIGHT_MESHES, SAFE_MIN_IN_FLIGHT_TERRAIN, SAFE_MIN_MESHES_PER_FRAME,
+    SAFE_MIN_MESH_APPLIES_PER_FRAME, SAFE_MIN_RENDER_DISTANCE, SAFE_MIN_VERTICAL_CHUNKS,
 };
 use crate::textures::{bake_all_block_swatches, BlockSwatch, TEX_DIR};
 use crate::theme::{
@@ -1021,6 +1021,22 @@ fn draw_graphics_tab(ui: &mut egui::Ui, settings: &mut WorldSettings, fps_hist: 
     ui.horizontal_wrapped(|ui| {
         if crate::ui_kit::mode_card(
             ui,
+            Icon::Sun,
+            "Zen Garden",
+            "Sakura glass UI, blossom scenery and bright golden-hour sky.",
+            settings.scenery_quality == SceneryQuality::Lush
+                && settings.theme.color == ThemeColor::Sakura
+                && settings.graphics == GraphicsMode::High
+                && settings.time_mode == TimeMode::Fixed
+                && (settings.time_of_day - 17.8).abs() < 0.25,
+            settings.theme,
+        )
+        .clicked()
+        {
+            settings.apply_zen_garden_look();
+        }
+        if crate::ui_kit::mode_card(
+            ui,
             Icon::Eye,
             "Clear",
             "Readable distance and calm contrast.",
@@ -1089,6 +1105,24 @@ fn draw_graphics_tab(ui: &mut egui::Ui, settings: &mut WorldSettings, fps_hist: 
             }
         }
     });
+    ui.add_space(6.0);
+    section_heading(ui, "SCENERY");
+    ui.horizontal_wrapped(|ui| {
+        for quality in SceneryQuality::ALL {
+            let selected = settings.scenery_quality == quality;
+            if crate::ui_kit::tab_chip(ui, Icon::Detail, quality.label(), selected, settings.theme)
+                .on_hover_text(quality.detail())
+                .clicked()
+            {
+                settings.scenery_quality = quality;
+            }
+        }
+    });
+    ui.label(
+        egui::RichText::new("Regenerate refreshes trees and blossom density for the current seed.")
+            .size(11.0)
+            .color(egui::Color32::from_gray(160)),
+    );
     ui.add_space(6.0);
     section_heading(ui, "SICHTFELD");
     ui.add(egui::Slider::new(&mut settings.fov_deg, 50.0..=110.0).text("FOV (Grad)"));
@@ -1611,10 +1645,11 @@ fn draw_system_tab(
     });
 
     ui.add_space(8.0);
-    section_heading(ui, "THEME / CRT");
+    section_heading(ui, "THEME / ACCENT");
     ui.horizontal(|ui| {
-        ui.label("Phosphor:");
+        ui.label("Accent:");
         for (variant, label) in [
+            (ThemeColor::Sakura, "SAKURA"),
             (ThemeColor::Green, "GREEN"),
             (ThemeColor::Amber, "AMBER"),
             (ThemeColor::Blue, "BLUE"),
@@ -1704,7 +1739,8 @@ fn handle_regen(
     }
     state.regen_requested = false;
 
-    world.generator = crate::terrain::TerrainGenerator::new(settings.seed);
+    world.generator = crate::terrain::TerrainGenerator::new(settings.seed)
+        .with_scenery_quality(settings.scenery_quality);
     world.clear_chunks();
     world.column_top_cy.clear();
     world.edit_dirty_chunks.clear();

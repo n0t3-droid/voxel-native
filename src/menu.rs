@@ -24,6 +24,9 @@ use crate::settings::{self, ActiveWorld, WorldMeta, WorldSettings};
 use crate::theme::{command_frame, metric_pill, CYAN, TEXT};
 use crate::world::{ChunkStreamer, VoxelWorld};
 
+const START_TITLE: &str = "R93G SAKURA ZEN";
+const START_SUBTITLE: &str = "mouse-first sketch dojo // blossom worlds // fast low-end streaming";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InventoryPage {
     Blocks,
@@ -201,40 +204,57 @@ fn draw_main_menu(
     draw_stable_start_backdrop(ctx, settings.theme);
     let painter = ctx.layer_painter(egui::LayerId::background());
     let theme = settings.theme;
+    let colors = theme.semantic();
     let primary = theme.color.primary();
     let dim = theme.color.dim();
 
     // ---- Title with neon glow + animated underline ----
-    let title_pos = egui::pos2(screen.center().x, screen.top() + 100.0);
+    let title_pos = egui::pos2(screen.center().x, screen.top() + 34.0);
     let glow_pulse = (t_anim * 1.5).sin() * 0.25 + 0.75;
+    let cyan = colors.info;
+    let chrome = egui::Color32::from_rgb(246, 252, 255);
     // Glow halo behind text.
-    for g in (1..=4).rev() {
-        let a = (30.0 * glow_pulse / g as f32) as u8;
+    for g in (1..=6).rev() {
+        let a = (42.0 * glow_pulse / g as f32) as u8;
         painter.text(
-            title_pos + egui::vec2(0.0, 0.0),
+            title_pos + egui::vec2(-2.0 * g as f32, 0.5 * g as f32),
             egui::Align2::CENTER_CENTER,
-            "VOXEL-NATIVE",
-            egui::FontId::monospace(64.0 + g as f32 * 2.0),
+            START_TITLE,
+            egui::FontId::monospace(42.0 + g as f32 * 1.2),
             egui::Color32::from_rgba_unmultiplied(primary.r(), primary.g(), primary.b(), a),
+        );
+        painter.text(
+            title_pos + egui::vec2(2.0 * g as f32, -0.5 * g as f32),
+            egui::Align2::CENTER_CENTER,
+            START_TITLE,
+            egui::FontId::monospace(42.0 + g as f32),
+            egui::Color32::from_rgba_unmultiplied(cyan.r(), cyan.g(), cyan.b(), a / 2),
         );
     }
     painter.text(
-        title_pos,
+        title_pos + egui::vec2(0.0, 5.0),
         egui::Align2::CENTER_CENTER,
-        "VOXEL-NATIVE",
-        egui::FontId::monospace(64.0),
-        TEXT,
+        START_TITLE,
+        egui::FontId::monospace(42.0),
+        primary,
     );
     painter.text(
-        egui::pos2(title_pos.x, title_pos.y + 50.0),
+        title_pos,
         egui::Align2::CENTER_CENTER,
-        "Sketch-first voxel engine // fast worlds // calm startup",
+        START_TITLE,
+        egui::FontId::monospace(42.0),
+        chrome,
+    );
+    painter.text(
+        egui::pos2(title_pos.x, title_pos.y + 32.0),
+        egui::Align2::CENTER_CENTER,
+        START_SUBTITLE,
         egui::FontId::monospace(15.0),
         dim,
     );
     // Animated accent bar under title.
     let bar_w = 360.0;
-    let bar_y = title_pos.y + 68.0;
+    let bar_y = title_pos.y + 46.0;
     let bar_rect = egui::Rect::from_min_size(
         egui::pos2(title_pos.x - bar_w * 0.5, bar_y),
         egui::vec2(bar_w, 2.0),
@@ -259,9 +279,14 @@ fn draw_main_menu(
         .iter()
         .max_by_key(|meta| meta.last_played_epoch)
         .cloned();
-    let panel_w = 720.0_f32.min(screen.width() - 40.0);
-    let panel_h = 590.0_f32.min(screen.height() - 190.0);
-    let pos = egui::pos2(screen.center().x - panel_w * 0.5, screen.top() + 180.0);
+    let panel_w = 660.0_f32.min(screen.width() - 40.0);
+    let panel_h = 610.0_f32.min(screen.height() - 128.0);
+    let pos = egui::pos2(screen.center().x - panel_w * 0.5, screen.top() + 112.0);
+    painter.rect_filled(
+        egui::Rect::from_min_size(pos, egui::vec2(panel_w, panel_h)),
+        egui::Rounding::same(8.0),
+        egui::Color32::from_rgba_unmultiplied(13, 10, 22, 170),
+    );
 
     egui::Window::new("voxel_native_main_menu")
         .title_bar(false)
@@ -276,15 +301,15 @@ fn draw_main_menu(
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
-                        egui::RichText::new("SKETCH ENGINE")
-                            .size(23.0)
+                        egui::RichText::new("ZEN SKETCH DOJO")
+                            .size(26.0)
                             .color(primary)
                             .strong()
                             .monospace(),
                     );
                     ui.label(
-                        egui::RichText::new("Continue a world or start a clean build session.")
-                            .size(11.0)
+                        egui::RichText::new("Fast start, clean worlds, mouse-first building.")
+                            .size(12.0)
                             .color(dim)
                             .monospace(),
                     );
@@ -336,7 +361,7 @@ fn draw_main_menu(
 
             crate::ui_kit::surface_panel(ui, theme, |ui| {
                 ui.horizontal(|ui| {
-                    crate::ui_kit::status_chip(ui, Icon::New, "NEW WORLD", "instant start", theme);
+                    crate::ui_kit::status_chip(ui, Icon::New, "NEW GARDEN", "clean start", theme);
                     ui.add(
                         egui::TextEdit::singleline(&mut form.name)
                             .hint_text(auto_world_name(&worlds))
@@ -353,11 +378,7 @@ fn draw_main_menu(
                             .seed_text
                             .parse::<u32>()
                             .unwrap_or_else(|_| rand_seed());
-                        let name = if form.name.trim().is_empty() {
-                            auto_world_name(&worlds)
-                        } else {
-                            form.name.trim().to_string()
-                        };
+                        let name = clean_new_world_name(&form.name, &worlds);
                         let meta = WorldMeta::new(name, seed);
                         settings::save_world(&meta);
                         apply_world_to_settings(&meta, &mut settings);
@@ -372,10 +393,75 @@ fn draw_main_menu(
             });
 
             ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new("GARDEN PRESETS")
+                    .size(12.0)
+                    .color(dim)
+                    .strong()
+                    .monospace(),
+            );
+            ui.columns(2, |cols| {
+                if crate::ui_kit::major_action(
+                    &mut cols[0],
+                    Icon::World,
+                    "Neo-Kyoto Garden",
+                    "sakura city seed",
+                    false,
+                    theme,
+                )
+                .clicked()
+                {
+                    form.name = "neo_kyoto_garden".to_string();
+                    form.seed_text = "930514".to_string();
+                }
+                if crate::ui_kit::major_action(
+                    &mut cols[1],
+                    Icon::Road,
+                    "Cyber-Zen Path",
+                    "roads and shorelines",
+                    false,
+                    theme,
+                )
+                .clicked()
+                {
+                    form.name = "cyber_zen_path".to_string();
+                    form.seed_text = "440993".to_string();
+                }
+            });
+            ui.columns(2, |cols| {
+                if crate::ui_kit::major_action(
+                    &mut cols[0],
+                    Icon::Moon,
+                    "Sakura Void",
+                    "night neon blossoms",
+                    false,
+                    theme,
+                )
+                .clicked()
+                {
+                    form.name = "sakura_void".to_string();
+                    form.seed_text = "884499".to_string();
+                }
+                if crate::ui_kit::major_action(
+                    &mut cols[1],
+                    Icon::Weather,
+                    "Lotus Drift",
+                    "water garden start",
+                    false,
+                    theme,
+                )
+                .clicked()
+                {
+                    form.name = "lotus_drift".to_string();
+                    form.seed_text = "221177".to_string();
+                }
+            });
+
+            ui.add_space(10.0);
             crate::ui_kit::status_chip(
                 ui,
                 Icon::Open,
-                "SAVED WORLDS",
+                "WORLD GARDENS",
                 &worlds.len().to_string(),
                 theme,
             );
@@ -386,7 +472,7 @@ fn draw_main_menu(
                 );
             } else {
                 egui::ScrollArea::vertical()
-                    .max_height(160.0)
+                    .max_height(112.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for meta in worlds.iter() {
@@ -479,22 +565,174 @@ fn draw_stable_start_backdrop(ctx: &egui::Context, theme: crate::theme::ThemeSet
     let screen = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::background());
     let primary = theme.color.primary();
-    let dim = theme.color.dim();
+    let rose = egui::Color32::from_rgb(255, 138, 184);
+    let amber = egui::Color32::from_rgb(255, 190, 112);
+    let paper = egui::Color32::from_rgb(255, 232, 198);
+    let ink = egui::Color32::from_rgb(8, 5, 10);
 
-    painter.rect_filled(screen, 0.0, egui::Color32::from_rgb(8, 13, 18));
+    painter.rect_filled(screen, 0.0, ink);
 
-    let horizon = screen.top() + screen.height() * 0.62;
+    let horizon = screen.top() + screen.height() * 0.58;
     let top = egui::Rect::from_min_max(screen.min, egui::pos2(screen.max.x, horizon));
-    painter.rect_filled(top, 0.0, egui::Color32::from_rgb(12, 22, 30));
+    painter.rect_filled(top, 0.0, egui::Color32::from_rgb(24, 13, 24));
     painter.rect_filled(
         egui::Rect::from_min_max(egui::pos2(screen.left(), horizon), screen.max),
         0.0,
-        egui::Color32::from_rgb(5, 8, 12),
+        egui::Color32::from_rgb(9, 6, 11),
     );
 
-    for i in 0..6 {
-        let y = horizon + i as f32 * 42.0;
-        let alpha = (70_i32 - i * 9).max(18) as u8;
+    for i in 0..96 {
+        let u = i as f32 / 96.0;
+        let x = screen.left() + screen.width() * ((u * 7.37 + 0.11).fract());
+        let y = screen.top() + screen.height() * (0.03 + ((u * 19.9).sin() * 0.5 + 0.5) * 0.45);
+        let tint = if i % 3 == 0 {
+            rose
+        } else if i % 5 == 0 {
+            paper
+        } else {
+            primary
+        };
+        let alpha = 42 + (i % 5) as u8 * 12;
+        painter.circle_filled(
+            egui::pos2(x, y),
+            0.9 + (i % 4) as f32 * 0.35,
+            egui::Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), alpha),
+        );
+    }
+
+    // Distant Neo-Kyoto skyline: small rects only, but enough to move the
+    // mood away from a flat settings screen and toward the target cyber-zen
+    // concept.
+    for i in 0..15 {
+        let w = 18.0 + (i % 5) as f32 * 7.0;
+        let h = 48.0 + ((i * 37) % 120) as f32;
+        let x = screen.right() - 370.0 + i as f32 * 26.0;
+        let y = horizon - h + 16.0;
+        let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+        painter.rect_filled(
+            rect,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(0, 8, 18, 126),
+        );
+        if i % 2 == 0 {
+            painter.line_segment(
+                [
+                    egui::pos2(x + w * 0.5, y - 18.0),
+                    egui::pos2(x + w * 0.5, y),
+                ],
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(
+                        primary.r(),
+                        primary.g(),
+                        primary.b(),
+                        82,
+                    ),
+                ),
+            );
+        }
+        for floor in 0..((h / 18.0) as i32).max(1) {
+            let wy = y + 8.0 + floor as f32 * 16.0;
+            painter.line_segment(
+                [egui::pos2(x + 4.0, wy), egui::pos2(x + w - 4.0, wy)],
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(rose.r(), rose.g(), rose.b(), 38),
+                ),
+            );
+        }
+    }
+
+    // Large paper moon/sun disk: this is the main Zen visual anchor.
+    let sun_center = egui::pos2(screen.center().x + screen.width() * 0.26, horizon - 132.0);
+    painter.circle_filled(
+        sun_center,
+        118.0,
+        egui::Color32::from_rgba_unmultiplied(paper.r(), paper.g(), paper.b(), 34),
+    );
+    painter.circle_filled(
+        sun_center,
+        78.0,
+        egui::Color32::from_rgba_unmultiplied(amber.r(), amber.g(), amber.b(), 22),
+    );
+    painter.circle_stroke(
+        sun_center,
+        120.0,
+        egui::Stroke::new(
+            1.4,
+            egui::Color32::from_rgba_unmultiplied(amber.r(), amber.g(), amber.b(), 118),
+        ),
+    );
+
+    for i in 0..9 {
+        let angle = i as f32 * std::f32::consts::TAU / 9.0 + 0.35;
+        let a = egui::pos2(
+            sun_center.x + angle.cos() * 38.0,
+            sun_center.y + angle.sin() * 38.0,
+        );
+        let b = egui::pos2(
+            sun_center.x + angle.cos() * 132.0,
+            sun_center.y + angle.sin() * 132.0,
+        );
+        painter.line_segment(
+            [a, b],
+            egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgba_unmultiplied(primary.r(), primary.g(), primary.b(), 44),
+            ),
+        );
+    }
+    painter.circle_stroke(
+        sun_center,
+        86.0,
+        egui::Stroke::new(
+            0.9,
+            egui::Color32::from_rgba_unmultiplied(rose.r(), rose.g(), rose.b(), 96),
+        ),
+    );
+
+    // Quiet shoji-panel side bands, so the screen reads Japanese before any
+    // button is touched while staying cheap to draw.
+    for side in [0.0, 1.0] {
+        let x0 = if side == 0.0 {
+            screen.left() + 58.0
+        } else {
+            screen.right() - 158.0
+        };
+        let panel = egui::Rect::from_min_size(
+            egui::pos2(x0, screen.top() + 84.0),
+            egui::vec2(100.0, screen.height() - 150.0),
+        );
+        painter.rect_filled(
+            panel,
+            egui::Rounding::same(2.0),
+            egui::Color32::from_rgba_unmultiplied(paper.r(), paper.g(), paper.b(), 13),
+        );
+        for i in 1..4 {
+            let x = panel.left() + i as f32 * panel.width() / 4.0;
+            painter.line_segment(
+                [egui::pos2(x, panel.top()), egui::pos2(x, panel.bottom())],
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(paper.r(), paper.g(), paper.b(), 24),
+                ),
+            );
+        }
+        for i in 1..6 {
+            let y = panel.top() + i as f32 * panel.height() / 6.0;
+            painter.line_segment(
+                [egui::pos2(panel.left(), y), egui::pos2(panel.right(), y)],
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(paper.r(), paper.g(), paper.b(), 18),
+                ),
+            );
+        }
+    }
+
+    for i in 0..9 {
+        let y = horizon + i as f32 * 32.0;
+        let alpha = (46_i32 - i * 4).max(12) as u8;
         painter.line_segment(
             [egui::pos2(screen.left(), y), egui::pos2(screen.right(), y)],
             egui::Stroke::new(
@@ -504,17 +742,87 @@ fn draw_stable_start_backdrop(ctx: &egui::Context, theme: crate::theme::ThemeSet
         );
     }
 
-    for i in -5..=5 {
-        let x = screen.center().x + i as f32 * screen.width() / 10.0;
+    let mountain_base = horizon + 32.0;
+    for band in 0..3 {
+        let y = mountain_base + band as f32 * 32.0;
+        let color = egui::Color32::from_rgba_unmultiplied(2, 1, 4, 166 - band as u8 * 34);
+        let step = screen.width() / 8.0;
+        let mut points = Vec::new();
+        points.push(egui::pos2(screen.left(), screen.bottom()));
+        points.push(egui::pos2(screen.left(), y + 34.0));
+        for i in 0..=8 {
+            let x = screen.left() + i as f32 * step;
+            let peak = y - ((i as f32 * 1.7 + band as f32).sin().abs() * 82.0 + 18.0);
+            points.push(egui::pos2(x, peak));
+        }
+        points.push(egui::pos2(screen.right(), y + 50.0));
+        points.push(egui::pos2(screen.right(), screen.bottom()));
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    let gate_x = screen.center().x - screen.width() * 0.31;
+    let gate_y = horizon + 8.0;
+    let gate = egui::Color32::from_rgba_unmultiplied(255, 76, 108, 126);
+    let gate_glow = egui::Color32::from_rgba_unmultiplied(255, 138, 184, 50);
+    painter.line_segment(
+        [
+            egui::pos2(gate_x - 88.0, gate_y - 8.0),
+            egui::pos2(gate_x + 88.0, gate_y - 8.0),
+        ],
+        egui::Stroke::new(8.0, gate_glow),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(gate_x - 84.0, gate_y),
+            egui::pos2(gate_x + 84.0, gate_y),
+        ],
+        egui::Stroke::new(4.0, gate),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(gate_x - 60.0, gate_y + 12.0),
+            egui::pos2(gate_x + 60.0, gate_y + 12.0),
+        ],
+        egui::Stroke::new(2.0, gate),
+    );
+    for x in [gate_x - 50.0, gate_x + 50.0] {
         painter.line_segment(
-            [
-                egui::pos2(screen.center().x, horizon),
-                egui::pos2(x, screen.bottom()),
-            ],
-            egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgba_unmultiplied(dim.r(), dim.g(), dim.b(), 40),
-            ),
+            [egui::pos2(x, gate_y), egui::pos2(x, gate_y + 128.0)],
+            egui::Stroke::new(3.0, gate),
+        );
+    }
+
+    // Sakura branch and petals: static, deterministic, and much cheaper than
+    // texture assets while immediately changing the mood.
+    let branch = egui::Color32::from_rgba_unmultiplied(74, 32, 30, 150);
+    painter.line_segment(
+        [
+            egui::pos2(screen.left() + 40.0, screen.top() + 118.0),
+            egui::pos2(screen.left() + 280.0, screen.top() + 42.0),
+        ],
+        egui::Stroke::new(3.0, branch),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(screen.left() + 150.0, screen.top() + 86.0),
+            egui::pos2(screen.left() + 222.0, screen.top() + 128.0),
+        ],
+        egui::Stroke::new(1.8, branch),
+    );
+
+    for i in 0..42 {
+        let u = i as f32 / 42.0;
+        let x = screen.left() + screen.width() * ((u * 1.73 + 0.18).fract());
+        let y = screen.top() + screen.height() * (0.12 + ((u * 7.1).sin() * 0.5 + 0.5) * 0.42);
+        let radius = 1.7 + (i % 4) as f32 * 0.7;
+        painter.circle_filled(
+            egui::pos2(x, y),
+            radius,
+            egui::Color32::from_rgba_unmultiplied(rose.r(), rose.g(), rose.b(), 86),
         );
     }
 
@@ -618,12 +926,48 @@ fn draw_inventory_menu(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::settings::WorldMeta;
+
     #[test]
     fn main_menu_does_not_force_continuous_repaint() {
         let source = include_str!("menu.rs");
         assert!(
             !source.contains(concat!("request_", "repaint();")),
             "main menu should not force an every-frame repaint; startup/menu must idle cheaply"
+        );
+    }
+
+    #[test]
+    fn start_screen_uses_zen_neon_identity() {
+        assert!(START_TITLE.contains("ZEN"));
+        assert!(START_TITLE.contains("SAKURA"));
+        assert!(START_SUBTITLE.contains("sketch dojo"));
+        assert!(START_SUBTITLE.contains("blossom worlds"));
+        assert!(START_SUBTITLE.contains("low-end"));
+    }
+
+    #[test]
+    fn auto_world_name_skips_orphan_artifact_stems() {
+        let worlds = Vec::<WorldMeta>::new();
+        let reserved = HashSet::from(["world_01".to_string(), "world_02".to_string()]);
+
+        assert_eq!(
+            auto_world_name_with_reserved(&worlds, &reserved),
+            "world_03"
+        );
+    }
+
+    #[test]
+    fn typed_new_world_name_is_made_unique_when_storage_stem_exists() {
+        let worlds = Vec::<WorldMeta>::new();
+        let reserved = HashSet::from(["dream_city".to_string()]);
+
+        assert_eq!(
+            clean_new_world_name_with_reserved("dream_city", &worlds, &reserved),
+            "dream_city_02"
         );
     }
 }
@@ -1784,13 +2128,59 @@ fn big_button(label: &str, fill: [u8; 3]) -> egui::Button<'_> {
 }
 
 fn auto_world_name(worlds: &[WorldMeta]) -> String {
+    let reserved = settings::reserved_world_storage_stems();
+    auto_world_name_with_reserved(worlds, &reserved)
+}
+
+fn clean_new_world_name(input: &str, worlds: &[WorldMeta]) -> String {
+    let reserved = settings::reserved_world_storage_stems();
+    clean_new_world_name_with_reserved(input, worlds, &reserved)
+}
+
+fn auto_world_name_with_reserved(
+    worlds: &[WorldMeta],
+    reserved: &std::collections::HashSet<String>,
+) -> String {
     for n in 1..1000 {
         let candidate = format!("world_{n:02}");
-        if !worlds.iter().any(|world| world.name == candidate) {
+        if !world_storage_stem_taken(&candidate, worlds, reserved) {
             return candidate;
         }
     }
     format!("world_{}", rand_seed())
+}
+
+fn clean_new_world_name_with_reserved(
+    input: &str,
+    worlds: &[WorldMeta],
+    reserved: &std::collections::HashSet<String>,
+) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return auto_world_name_with_reserved(worlds, reserved);
+    }
+    if !world_storage_stem_taken(trimmed, worlds, reserved) {
+        return trimmed.to_string();
+    }
+    for n in 2..1000 {
+        let candidate = format!("{trimmed}_{n:02}");
+        if !world_storage_stem_taken(&candidate, worlds, reserved) {
+            return candidate;
+        }
+    }
+    format!("{}_{}", trimmed, rand_seed())
+}
+
+fn world_storage_stem_taken(
+    name: &str,
+    worlds: &[WorldMeta],
+    reserved: &std::collections::HashSet<String>,
+) -> bool {
+    let stem = settings::world_storage_stem(name);
+    reserved.contains(&stem)
+        || worlds
+            .iter()
+            .any(|world| settings::world_storage_stem(&world.name) == stem)
 }
 
 fn apply_world_to_settings(meta: &WorldMeta, settings: &mut WorldSettings) {

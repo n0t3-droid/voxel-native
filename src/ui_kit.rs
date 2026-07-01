@@ -56,9 +56,9 @@ pub fn hud_panel(
     let colors = theme.semantic();
     let opacity = opacity.clamp(0.28, 0.94);
     let rounding = egui::Rounding::same(9.0);
-    let base = egui::Color32::from_rgba_unmultiplied(5, 14, 20, alpha_u8(opacity * 0.78));
-    let deep = egui::Color32::from_rgba_unmultiplied(1, 4, 8, alpha_u8(opacity * 0.46));
-    let top_sheen = egui::Color32::from_rgba_unmultiplied(210, 246, 255, alpha_u8(opacity * 0.15));
+    let base = with_alpha(colors.surface_strong, opacity * 0.82);
+    let deep = with_alpha(colors.background, opacity * 0.52);
+    let top_sheen = with_alpha(colors.text, opacity * 0.12);
     let inner_sheen = egui::Color32::from_white_alpha(alpha_u8(opacity * 0.18));
 
     painter.rect_filled(rect, rounding, base);
@@ -125,6 +125,10 @@ pub fn icon_action(
     let width = (label.chars().count() as f32 * 8.0 + 42.0).clamp(82.0, 170.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let hovered = response.hovered();
+    let glow = ui
+        .ctx()
+        .animate_bool(response.id.with("zen_hover"), hovered || selected);
+    let paint_rect = rect.translate(egui::vec2(0.0, -glow));
     let fill = if selected {
         colors.accent
     } else if hovered {
@@ -142,18 +146,27 @@ pub fn icon_action(
     } else {
         colors.stroke.linear_multiply(0.62)
     };
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, egui::Rounding::same(7.0), fill);
+    let painter = ui.painter_at(rect.expand(4.0));
+    if glow > 0.01 {
+        painter.rect_stroke(
+            paint_rect.expand(1.0 + glow * 2.0),
+            egui::Rounding::same(7.0),
+            egui::Stroke::new(1.0 + glow * 0.6, with_alpha(colors.accent, glow * 0.28)),
+        );
+    }
+    painter.rect_filled(paint_rect, egui::Rounding::same(7.0), fill);
     painter.rect_stroke(
-        rect,
+        paint_rect,
         egui::Rounding::same(7.0),
         egui::Stroke::new(1.0, stroke),
     );
-    let icon_rect =
-        egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 8.0), egui::vec2(20.0, 20.0));
+    let icon_rect = egui::Rect::from_min_size(
+        paint_rect.min + egui::vec2(10.0, 8.0),
+        egui::vec2(20.0, 20.0),
+    );
     paint_icon(&painter, icon_rect, icon, text);
     painter.text(
-        egui::pos2(rect.left() + 38.0, rect.center().y),
+        egui::pos2(paint_rect.left() + 38.0, paint_rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(12.0),
@@ -252,6 +265,11 @@ pub fn tab_chip(
     let colors = theme.semantic();
     let width = (label.chars().count() as f32 * 8.5 + 44.0).clamp(96.0, 150.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
+    let glow = ui.ctx().animate_bool(
+        response.id.with("zen_chip_hover"),
+        response.hovered() || selected,
+    );
+    let paint_rect = rect.translate(egui::vec2(0.0, -glow * 0.8));
     let fill = if selected {
         colors.accent
     } else if response.hovered() {
@@ -269,21 +287,31 @@ pub fn tab_chip(
     } else {
         colors.stroke.linear_multiply(0.55)
     };
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, egui::Rounding::same(7.0), fill);
+    let painter = ui.painter_at(rect.expand(4.0));
+    if glow > 0.01 {
+        painter.rect_stroke(
+            paint_rect.expand(1.0 + glow * 2.0),
+            egui::Rounding::same(7.0),
+            egui::Stroke::new(1.0, with_alpha(colors.accent, glow * 0.24)),
+        );
+    }
+    painter.rect_filled(paint_rect, egui::Rounding::same(7.0), fill);
     painter.rect_stroke(
-        rect,
+        paint_rect,
         egui::Rounding::same(7.0),
         egui::Stroke::new(1.0, stroke),
     );
     paint_icon(
         &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(9.0, 8.0), egui::vec2(18.0, 18.0)),
+        egui::Rect::from_min_size(
+            paint_rect.min + egui::vec2(9.0, 8.0),
+            egui::vec2(18.0, 18.0),
+        ),
         icon,
         text,
     );
     painter.text(
-        egui::pos2(rect.left() + 35.0, rect.center().y),
+        egui::pos2(paint_rect.left() + 35.0, paint_rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(11.5),
@@ -409,6 +437,10 @@ fn card_response(
     let colors = theme.semantic();
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let hovered = response.hovered();
+    let glow = ui
+        .ctx()
+        .animate_bool(response.id.with("zen_card_hover"), hovered || selected);
+    let paint_rect = rect.translate(egui::vec2(0.0, -glow * 1.5));
     let fill = if selected {
         colors.selected
     } else if hovered {
@@ -421,25 +453,41 @@ fn card_response(
     } else {
         colors.stroke.linear_multiply(0.62)
     };
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, egui::Rounding::same(8.0), fill);
+    let painter = ui.painter_at(rect.expand(8.0));
+    if glow > 0.01 {
+        painter.rect_stroke(
+            paint_rect.expand(2.0 + glow * 4.0),
+            egui::Rounding::same(8.0),
+            egui::Stroke::new(1.0 + glow * 0.8, with_alpha(colors.accent, glow * 0.26)),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(paint_rect.left() + 14.0, paint_rect.top() + 2.0),
+                egui::pos2(paint_rect.right() - 14.0, paint_rect.top() + 2.0),
+            ],
+            egui::Stroke::new(1.0, with_alpha(colors.info, glow * 0.30)),
+        );
+    }
+    painter.rect_filled(paint_rect, egui::Rounding::same(8.0), fill);
     painter.rect_stroke(
-        rect,
+        paint_rect,
         egui::Rounding::same(8.0),
         egui::Stroke::new(1.0, stroke),
     );
-    let icon_rect =
-        egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 14.0), egui::vec2(26.0, 26.0));
+    let icon_rect = egui::Rect::from_min_size(
+        paint_rect.min + egui::vec2(12.0, 14.0 - glow * 1.5),
+        egui::vec2(26.0, 26.0),
+    );
     paint_icon(&painter, icon_rect, icon, colors.accent);
     painter.text(
-        egui::pos2(rect.left() + 48.0, rect.top() + 18.0),
+        egui::pos2(paint_rect.left() + 48.0, paint_rect.top() + 18.0),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(13.0),
         colors.text,
     );
     painter.text(
-        egui::pos2(rect.left() + 48.0, rect.top() + 42.0),
+        egui::pos2(paint_rect.left() + 48.0, paint_rect.top() + 42.0),
         egui::Align2::LEFT_CENTER,
         detail,
         egui::FontId::monospace(10.0),

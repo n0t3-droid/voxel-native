@@ -607,15 +607,23 @@ pub fn rect_draw_input(
         };
         draw.active = true;
         let start_input = rect_face_input_point(origin, dir, hit, prev);
-        let mut start = rect_start_cell_from_ray(action, hit, prev, axis_u, axis_v, origin, dir);
+        let mut start = if pencil_line {
+            pencil_anchor_cell_from_ray(hit, prev, axis_u, axis_v, origin, dir)
+        } else {
+            rect_start_cell_from_ray(action, hit, prev, axis_u, axis_v, origin, dir)
+        };
         if let Some(input) = start_input {
             start = apply_face_input_point_to_cell(start, input, axis_u, axis_v);
         }
         draw.start = start;
         draw.current = start;
-        draw.start_point = start_input
-            .map(|input| input.point)
-            .unwrap_or_else(|| start.as_vec3());
+        draw.start_point = if pencil_line {
+            pencil_cell_marker_point(start)
+        } else {
+            start_input
+                .map(|input| input.point)
+                .unwrap_or_else(|| start.as_vec3())
+        };
         draw.current_point = draw.start_point;
         draw.normal = normal;
         draw.axis_u = axis_u;
@@ -698,16 +706,29 @@ pub fn rect_draw_input(
             } else if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
                 let input = rect_face_input_point(origin, dir, hit, prev);
                 draw.snap_kind = input.and_then(|input| input.kind);
-                let endpoint = snap_rect_endpoint_to_locked_plane_from_ray(
-                    draw.start,
-                    draw.normal,
-                    draw.axis_u,
-                    draw.axis_v,
-                    hit,
-                    prev,
-                    origin,
-                    dir,
-                );
+                let endpoint = if draw.pencil_line {
+                    snap_pencil_endpoint_to_locked_plane_from_ray(
+                        draw.start,
+                        draw.normal,
+                        draw.axis_u,
+                        draw.axis_v,
+                        hit,
+                        prev,
+                        origin,
+                        dir,
+                    )
+                } else {
+                    snap_rect_endpoint_to_locked_plane_from_ray(
+                        draw.start,
+                        draw.normal,
+                        draw.axis_u,
+                        draw.axis_v,
+                        hit,
+                        prev,
+                        origin,
+                        dir,
+                    )
+                };
                 let endpoint = input
                     .map(|input| {
                         apply_face_input_point_to_cell(endpoint, input, draw.axis_u, draw.axis_v)
@@ -727,11 +748,15 @@ pub fn rect_draw_input(
                 };
                 draw.current = endpoint;
                 draw.inference = inference;
-                draw.current_point = input
-                    .map(|input| {
-                        project_face_point_to_locked_plane(input.point, draw.start, draw.normal)
-                    })
-                    .unwrap_or_else(|| endpoint.as_vec3());
+                draw.current_point = if draw.pencil_line {
+                    pencil_cell_marker_point(endpoint)
+                } else {
+                    input
+                        .map(|input| {
+                            project_face_point_to_locked_plane(input.point, draw.start, draw.normal)
+                        })
+                        .unwrap_or_else(|| endpoint.as_vec3())
+                };
             } else if let Some(endpoint) = snap_rect_endpoint_from_locked_plane_ray(
                 draw.start,
                 draw.normal,
@@ -923,7 +948,7 @@ fn commit_rect_fill(
 
     let mut batch = WorldEditBatch::default();
     let mut changes: Vec<(IVec3, Voxel, Voxel)> = Vec::with_capacity(cells.len());
-    for pos in cells {
+    for &pos in &cells {
         if let Some((before, after)) =
             world.edit_set_voxel_batched(pos.x, pos.y, pos.z, draw.voxel, &mut batch)
         {
@@ -980,15 +1005,35 @@ fn commit_rect_fill(
             )
         };
     } else {
-        toolbelt.status = format!(
-            "{} selected {} cells but made no changes because the area already matched.",
-            if draw.pencil_line {
-                "Pencil line"
-            } else {
-                draw.action.label()
-            },
-            selected
-        );
+        if should_chain_pencil {
+            let label = format!("Pencil connection {} cells", selected);
+            match record_rect_semantics(draw, sketch_doc) {
+                Ok(records) => register_rect_semantic_links(
+                    draw,
+                    &cells,
+                    sketch_doc.active_context(),
+                    &records,
+                    sketch_links,
+                ),
+                Err(error) => warn!("sketch model: could not record pencil connection: {error}"),
+            }
+            tool_controller.begin_transaction(label);
+            let _ = tool_controller.commit_transaction();
+            toolbelt.status = format!(
+                "Pencil connected existing cells. Next endpoint starts from {},{},{}.",
+                chain_start.x, chain_start.y, chain_start.z
+            );
+        } else {
+            toolbelt.status = format!(
+                "{} selected {} cells but made no changes because the area already matched.",
+                if draw.pencil_line {
+                    "Pencil line"
+                } else {
+                    draw.action.label()
+                },
+                selected
+            );
+        }
     }
     if should_chain_pencil {
         draw.active = true;
@@ -1200,6 +1245,44 @@ fn rect_start_cell(action: RectDrawAction, hit: IVec3, adjacent: IVec3) -> IVec3
     }
 }
 
+fn pencil_anchor_cell(hit: IVec3, adjacent: IVec3) -> IVec3 {
+    let normal = adjacent - hit;
+    if normal == IVec3::Y {
+        adjacent
+    } else {
+        hit
+    }
+}
+
+fn pencil_anchor_cell_from_ray(
+    hit: IVec3,
+    adjacent: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+) -> IVec3 {
+    let mut cell = pencil_anchor_cell(hit, adjacent);
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return cell;
+    }
+    if let Some(face_hit) = ray_face_hit_point(ray_origin, ray_dir, hit, adjacent) {
+        let fallback_u = component_by_axis(cell, axis_u);
+        let fallback_v = component_by_axis(cell, axis_v);
+        set_component_by_axis(
+            &mut cell,
+            axis_u,
+            face_axis_component_to_cell(vec_component_by_axis(face_hit, axis_u), fallback_u),
+        );
+        set_component_by_axis(
+            &mut cell,
+            axis_v,
+            face_axis_component_to_cell(vec_component_by_axis(face_hit, axis_v), fallback_v),
+        );
+    }
+    cell
+}
+
 fn rect_start_cell_from_ray(
     action: RectDrawAction,
     hit: IVec3,
@@ -1214,15 +1297,17 @@ fn rect_start_cell_from_ray(
         return start;
     }
     if let Some(face_hit) = ray_face_hit_point(ray_origin, ray_dir, hit, adjacent) {
+        let fallback_u = component_by_axis(start, axis_u);
+        let fallback_v = component_by_axis(start, axis_v);
         set_component_by_axis(
             &mut start,
             axis_u,
-            round_to_i32_safe(vec_component_by_axis(face_hit, axis_u)),
+            face_axis_component_to_cell(vec_component_by_axis(face_hit, axis_u), fallback_u),
         );
         set_component_by_axis(
             &mut start,
             axis_v,
-            round_to_i32_safe(vec_component_by_axis(face_hit, axis_v)),
+            face_axis_component_to_cell(vec_component_by_axis(face_hit, axis_v), fallback_v),
         );
     }
     start
@@ -1247,16 +1332,40 @@ fn snap_rect_endpoint_to_locked_plane_from_ray(
         return snapped;
     }
     if let Some(face_hit) = ray_face_hit_point(ray_origin, ray_dir, hit, adjacent) {
+        let fallback_u = component_by_axis(snapped, axis_u);
+        let fallback_v = component_by_axis(snapped, axis_v);
         set_component_by_axis(
             &mut snapped,
             axis_u,
-            round_to_i32_safe(vec_component_by_axis(face_hit, axis_u)),
+            face_axis_component_to_cell(vec_component_by_axis(face_hit, axis_u), fallback_u),
         );
         set_component_by_axis(
             &mut snapped,
             axis_v,
-            round_to_i32_safe(vec_component_by_axis(face_hit, axis_v)),
+            face_axis_component_to_cell(vec_component_by_axis(face_hit, axis_v), fallback_v),
         );
+        set_component_by_index(
+            &mut snapped,
+            plane_axis,
+            component_by_index(start, plane_axis),
+        );
+    }
+    snapped
+}
+
+fn snap_pencil_endpoint_to_locked_plane_from_ray(
+    start: IVec3,
+    normal: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    hit: IVec3,
+    adjacent: IVec3,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+) -> IVec3 {
+    let mut snapped =
+        pencil_anchor_cell_from_ray(hit, adjacent, axis_u, axis_v, ray_origin, ray_dir);
+    if let Some(plane_axis) = normal_axis(normal) {
         set_component_by_index(
             &mut snapped,
             plane_axis,
@@ -1651,15 +1760,17 @@ fn apply_face_input_point_to_cell(
     if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
         return cell;
     }
+    let fallback_u = component_by_axis(cell, axis_u);
+    let fallback_v = component_by_axis(cell, axis_v);
     set_component_by_axis(
         &mut cell,
         axis_u,
-        round_to_i32_safe(vec_component_by_axis(input.point, axis_u)),
+        face_axis_component_to_cell(vec_component_by_axis(input.point, axis_u), fallback_u),
     );
     set_component_by_axis(
         &mut cell,
         axis_v,
-        round_to_i32_safe(vec_component_by_axis(input.point, axis_v)),
+        face_axis_component_to_cell(vec_component_by_axis(input.point, axis_v), fallback_v),
     );
     cell
 }
@@ -1677,6 +1788,10 @@ fn project_face_point_to_locked_plane(point: Vec3, start: IVec3, normal: IVec3) 
     projected
 }
 
+fn pencil_cell_marker_point(cell: IVec3) -> Vec3 {
+    cell.as_vec3() + Vec3::splat(0.5)
+}
+
 #[cfg(test)]
 fn classify_rect_face_snap(
     face_hit: Vec3,
@@ -1684,6 +1799,15 @@ fn classify_rect_face_snap(
     adjacent: IVec3,
 ) -> Option<RectFaceSnapKind> {
     nearest_rect_face_input_point(face_hit, hit, adjacent).and_then(|input| input.kind)
+}
+
+fn face_axis_component_to_cell(value: f32, face_cell_component: i32) -> i32 {
+    if !value.is_finite() {
+        return face_cell_component;
+    }
+    let min = face_cell_component as f32;
+    let max = min + 1.0 - 0.0001;
+    value.clamp(min, max).floor() as i32
 }
 
 fn round_to_i32_safe(value: f32) -> i32 {
@@ -2437,6 +2561,68 @@ mod tests {
     }
 
     #[test]
+    fn pencil_connection_records_semantic_edge_even_when_voxels_already_exist() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = true;
+        draw.pencil_line = true;
+        draw.action = RectDrawAction::Fill;
+        draw.start = IVec3::new(0, 4, 0);
+        draw.current = IVec3::new(3, 4, 0);
+        draw.normal = IVec3::Y;
+        draw.axis_u = IVec3::X;
+        draw.axis_v = IVec3::Z;
+        draw.voxel = Voxel::from(BlockType::Limestone);
+
+        let mut world = VoxelWorld::new();
+        for pos in pencil_line_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP) {
+            assert!(world.edit_set_voxel(pos.x, pos.y, pos.z, draw.voxel));
+        }
+        let mut history = BuilderHistory::default();
+        let mut toolbelt = ToolbeltState::default();
+        let mut tool_controller = crate::sketch_model::ToolController::default();
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
+
+        commit_rect_fill(
+            &mut draw,
+            &mut world,
+            &mut history,
+            &mut toolbelt,
+            &mut tool_controller,
+            &mut sketch_doc,
+            &mut sketch_links,
+        );
+
+        assert!(
+            history.undo_len() == 0,
+            "existing-voxel connection should not create a no-op voxel undo batch"
+        );
+        assert!(draw.active, "pencil remains armed after connecting");
+        assert_eq!(draw.start, IVec3::new(3, 4, 0));
+        assert!(toolbelt.status.contains("connected existing cells"));
+        assert!(tool_controller
+            .last_transaction_label()
+            .is_some_and(|label| label.starts_with("Pencil connection")));
+        let semantic_edge = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .last()
+            .copied()
+            .expect("semantic connection edge");
+        assert!(matches!(
+            &sketch_doc.entity(semantic_edge).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::new(0.0, 4.0, 0.0) && *b == Vec3::new(3.0, 4.0, 0.0)
+        ));
+        assert!(sketch_links
+            .links_for_face(IVec3::new(1, 4, 0), IVec3::Y)
+            .iter()
+            .any(|link| link.entity == semantic_edge));
+    }
+
+    #[test]
     fn committed_rectangle_finishes_operation_instead_of_chaining() {
         let mut draw = RectDrawState::default();
         draw.active = true;
@@ -2782,7 +2968,7 @@ mod tests {
     }
 
     #[test]
-    fn rect_start_snaps_to_nearest_block_corner_on_hit_face() {
+    fn rect_start_stays_inside_hovered_face_cell_from_ray_hit() {
         let start = rect_start_cell_from_ray(
             RectDrawAction::Fill,
             IVec3::new(10, 0, 14),
@@ -2795,13 +2981,13 @@ mod tests {
 
         assert_eq!(
             start,
-            IVec3::new(11, 1, 14),
-            "start point should snap to a real voxel grid corner, not only the hit cell center"
+            IVec3::new(10, 1, 14),
+            "surface clicks should not jump into the next voxel when the cursor is still over this face"
         );
     }
 
     #[test]
-    fn rect_endpoint_snaps_to_nearest_block_corner_from_ray_hit() {
+    fn rect_endpoint_stays_inside_hovered_face_cell_from_ray_hit() {
         let snapped = snap_rect_endpoint_to_locked_plane_from_ray(
             IVec3::new(0, 1, 0),
             IVec3::Y,
@@ -2813,7 +2999,7 @@ mod tests {
             Vec3::NEG_Y,
         );
 
-        assert_eq!(snapped, IVec3::new(11, 1, 14));
+        assert_eq!(snapped, IVec3::new(10, 1, 14));
     }
 
     #[test]
@@ -2942,8 +3128,83 @@ mod tests {
         let cell = apply_face_input_point_to_cell(IVec3::new(10, 1, 14), input, IVec3::X, IVec3::Z);
         assert_eq!(
             cell,
-            IVec3::new(11, 1, 14),
-            "the discrete voxel endpoint follows the visual Input Point"
+            IVec3::new(10, 1, 14),
+            "the discrete voxel endpoint stays in the hovered face cell instead of jumping to a neighbor"
+        );
+    }
+
+    #[test]
+    fn face_input_point_on_far_edge_does_not_jump_to_neighbor_cell() {
+        let input = nearest_rect_face_input_point(
+            Vec3::new(11.0, 1.0, 15.0),
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+        )
+        .expect("endpoint input point");
+
+        assert_eq!(input.kind, Some(RectFaceSnapKind::Endpoint));
+
+        let cell = apply_face_input_point_to_cell(IVec3::new(10, 1, 14), input, IVec3::X, IVec3::Z);
+        assert_eq!(
+            cell,
+            IVec3::new(10, 1, 14),
+            "exact block-edge clicks must select the visible block cell, not x+1/z+1"
+        );
+    }
+
+    #[test]
+    fn pencil_side_face_anchor_uses_hit_cell_to_connect_existing_blocks() {
+        let cell = pencil_anchor_cell_from_ray(
+            IVec3::new(20, 10, 6),
+            IVec3::new(21, 10, 6),
+            IVec3::Y,
+            IVec3::Z,
+            Vec3::new(30.0, 10.25, 6.75),
+            Vec3::NEG_X,
+        );
+
+        assert_eq!(
+            cell,
+            IVec3::new(20, 10, 6),
+            "Pencil side-face clicks should reference the visible block, not the outside adjacent cell"
+        );
+    }
+
+    #[test]
+    fn pencil_top_face_anchor_still_builds_on_surface() {
+        let cell = pencil_anchor_cell_from_ray(
+            IVec3::new(10, 0, 14),
+            IVec3::new(10, 1, 14),
+            IVec3::X,
+            IVec3::Z,
+            Vec3::new(10.25, 8.0, 14.75),
+            Vec3::NEG_Y,
+        );
+
+        assert_eq!(
+            cell,
+            IVec3::new(10, 1, 14),
+            "Pencil top-face clicks should still place on top of terrain/floors"
+        );
+    }
+
+    #[test]
+    fn pencil_endpoint_keeps_start_plane_but_uses_target_side_cell_reference() {
+        let endpoint = snap_pencil_endpoint_to_locked_plane_from_ray(
+            IVec3::new(20, 10, 6),
+            IVec3::X,
+            IVec3::Y,
+            IVec3::Z,
+            IVec3::new(20, 2, 6),
+            IVec3::new(21, 2, 6),
+            Vec3::new(30.0, 2.25, 6.75),
+            Vec3::NEG_X,
+        );
+
+        assert_eq!(
+            endpoint,
+            IVec3::new(20, 2, 6),
+            "Pencil previews should align with the block under the cursor on the locked plane"
         );
     }
 

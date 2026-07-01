@@ -1,10 +1,10 @@
-//! Hacker-terminal egui theme (phosphor-on-black).
+//! Zen glass egui theme (ink, sakura, and low-cost neon).
 //!
-//! Replaces the earlier cyberpunk-neon look with a green/amber CRT
-//! aesthetic: monospace fonts, tight corners, ASCII frame helpers,
-//! a blinking-cursor header banner, a scanline overlay, and a status
-//! bar. All in a single small module so [`crate::editor`] can call one
-//! function (`apply_hacker_theme`) and use a handful of widget helpers.
+//! The original editor UI started as a hacker-terminal skin. The current
+//! default keeps the same cheap immediate-mode implementation, but shifts the
+//! palette toward warm ink glass, sakura pink, amber light, and calm cyan
+//! utility lines so the whole engine reads more like a sci-fi Japanese dojo
+//! than a debug panel.
 //!
 //! Performance budget: <0.10 ms/frame on Vega 8.
 //!   * Theme application is one-shot at startup (no per-frame setup).
@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 /// Colour variant for the phosphor look.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeColor {
+    /// Default sakura rose accent for the Zen engine look.
+    Sakura,
     /// Classic green CRT (#00FF66).
     Green,
     /// Amber 1980s monochrome.
@@ -38,7 +40,7 @@ pub enum ThemeColor {
 
 impl Default for ThemeColor {
     fn default() -> Self {
-        ThemeColor::Green
+        ThemeColor::Sakura
     }
 }
 
@@ -46,6 +48,7 @@ impl ThemeColor {
     /// Bright "primary" phosphor.
     pub fn primary(self) -> egui::Color32 {
         match self {
+            ThemeColor::Sakura => egui::Color32::from_rgb(0xFF, 0x8A, 0xB8),
             ThemeColor::Green => egui::Color32::from_rgb(0x00, 0xFF, 0x66),
             ThemeColor::Amber => egui::Color32::from_rgb(0xFF, 0xB0, 0x00),
             ThemeColor::Blue => egui::Color32::from_rgb(0x40, 0xC8, 0xFF),
@@ -55,6 +58,7 @@ impl ThemeColor {
     /// Dimmed primary, used for non-selected text + thin strokes.
     pub fn dim(self) -> egui::Color32 {
         match self {
+            ThemeColor::Sakura => egui::Color32::from_rgb(0xB8, 0x5A, 0x84),
             ThemeColor::Green => egui::Color32::from_rgb(0x00, 0xB0, 0x50),
             ThemeColor::Amber => egui::Color32::from_rgb(0xB0, 0x70, 0x00),
             ThemeColor::Blue => egui::Color32::from_rgb(0x20, 0x80, 0xB0),
@@ -64,6 +68,7 @@ impl ThemeColor {
     /// Even darker, used for disabled widgets and grid-like fills.
     pub fn deep(self) -> egui::Color32 {
         match self {
+            ThemeColor::Sakura => egui::Color32::from_rgb(0x32, 0x12, 0x22),
             ThemeColor::Green => egui::Color32::from_rgb(0x00, 0x33, 0x15),
             ThemeColor::Amber => egui::Color32::from_rgb(0x33, 0x22, 0x00),
             ThemeColor::Blue => egui::Color32::from_rgb(0x10, 0x28, 0x38),
@@ -145,7 +150,7 @@ pub struct SemanticColors {
 }
 
 fn default_scanlines() -> bool {
-    true
+    false
 }
 
 /// Persistent theme preferences. Lives inside [`crate::settings::WorldSettings`].
@@ -171,7 +176,7 @@ impl Default for ThemeSettings {
             color: ThemeColor::default(),
             style: ThemeStyle::default(),
             density: UiDensity::default(),
-            scanlines: true,
+            scanlines: default_scanlines(),
             beeps: false,
         }
     }
@@ -184,13 +189,13 @@ impl ThemeSettings {
         let deep = self.color.deep();
         match self.style {
             ThemeStyle::LiquidGlass => SemanticColors {
-                background: egui::Color32::from_rgba_premultiplied(3, 8, 13, 238),
-                surface: egui::Color32::from_rgba_premultiplied(14, 26, 34, 208),
-                surface_strong: egui::Color32::from_rgba_premultiplied(24, 42, 54, 226),
-                text: egui::Color32::from_rgb(232, 250, 255),
-                text_muted: egui::Color32::from_rgb(150, 196, 210),
+                background: egui::Color32::from_rgba_premultiplied(10, 7, 12, 240),
+                surface: egui::Color32::from_rgba_premultiplied(25, 20, 28, 210),
+                surface_strong: egui::Color32::from_rgba_premultiplied(38, 30, 42, 228),
+                text: egui::Color32::from_rgb(255, 242, 224),
+                text_muted: egui::Color32::from_rgb(214, 172, 184),
                 success: egui::Color32::from_rgb(88, 242, 158),
-                warning: egui::Color32::from_rgb(0xFF, 0xC2, 0x4A),
+                warning: egui::Color32::from_rgb(0xFF, 0xC7, 0x72),
                 danger: egui::Color32::from_rgb(0xFF, 0x48, 0x58),
                 info: egui::Color32::from_rgb(0x52, 0xE6, 0xFF),
                 accent,
