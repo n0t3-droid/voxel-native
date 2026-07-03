@@ -997,20 +997,20 @@ impl ToolboxSelection {
         Self::Tool(ToolbeltTool::Navigate),
         Self::Workflow(BuildWorkflowPreset::Pencil),
         Self::Workflow(BuildWorkflowPreset::Sketch),
+        Self::Workflow(BuildWorkflowPreset::Circle),
         Self::Workflow(BuildWorkflowPreset::PushPull),
         Self::Tool(ToolbeltTool::TransformMove),
-        Self::Tool(ToolbeltTool::TransformScale),
         Self::Tool(ToolbeltTool::TransformRotate),
+        Self::Tool(ToolbeltTool::TransformScale),
+        Self::Tool(ToolbeltTool::MaterialPicker),
+        Self::Workflow(BuildWorkflowPreset::Arc),
+        Self::Workflow(BuildWorkflowPreset::Polygon),
+        Self::Workflow(BuildWorkflowPreset::Freehand),
         Self::Workflow(BuildWorkflowPreset::Opening),
         Self::Workflow(BuildWorkflowPreset::Room),
-        Self::Tool(ToolbeltTool::MaterialPicker),
+        Self::Workflow(BuildWorkflowPreset::ModernHouse),
         Self::Workflow(BuildWorkflowPreset::Roads),
         Self::Workflow(BuildWorkflowPreset::BotArea),
-        Self::Workflow(BuildWorkflowPreset::ModernHouse),
-        Self::Workflow(BuildWorkflowPreset::Circle),
-        Self::Workflow(BuildWorkflowPreset::Polygon),
-        Self::Workflow(BuildWorkflowPreset::Arc),
-        Self::Workflow(BuildWorkflowPreset::Freehand),
         Self::Workflow(BuildWorkflowPreset::CityShell),
         Self::Workflow(BuildWorkflowPreset::Landscape),
         Self::Workflow(BuildWorkflowPreset::Skyline),
@@ -1022,12 +1022,12 @@ const PRIMARY_TOOLBOX_ITEMS: [ToolboxSelection; 9] = [
     ToolboxSelection::Tool(ToolbeltTool::Navigate),
     ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
     ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Circle),
     ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
     ToolboxSelection::Tool(ToolbeltTool::TransformMove),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
+    ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
+    ToolboxSelection::Tool(ToolbeltTool::TransformScale),
     ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1176,9 +1176,10 @@ impl BuildWorkflowPreset {
         Self::Spacecraft,
     ];
     #[cfg(test)]
-    const TOOLBOX: [Self; 8] = [
+    const TOOLBOX: [Self; 9] = [
         Self::Pencil,
         Self::Sketch,
+        Self::Circle,
         Self::PushPull,
         Self::Opening,
         Self::Room,
@@ -1868,7 +1869,7 @@ fn draw_editor_toolbox(
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 5.0);
                 ui.vertical_centered(|ui| {
                     for (index, item) in PRIMARY_TOOLBOX_ITEMS.into_iter().enumerate() {
-                        if index == 1 || index == 7 || index == 10 {
+                        if index == 1 || index == 4 || index == 8 {
                             editor_toolbox_separator(ui, colors.stroke);
                         }
                         match item {
@@ -3588,6 +3589,7 @@ mod tests {
             [
                 BuildWorkflowPreset::Pencil,
                 BuildWorkflowPreset::Sketch,
+                BuildWorkflowPreset::Circle,
                 BuildWorkflowPreset::PushPull,
                 BuildWorkflowPreset::Opening,
                 BuildWorkflowPreset::Room,
@@ -3665,14 +3667,50 @@ mod tests {
                 ToolboxSelection::Tool(ToolbeltTool::Navigate),
                 ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
                 ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
+                ToolboxSelection::Workflow(BuildWorkflowPreset::Circle),
                 ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
                 ToolboxSelection::Tool(ToolbeltTool::TransformMove),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
+                ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
+                ToolboxSelection::Tool(ToolbeltTool::TransformScale),
                 ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
             ]
         );
+    }
+
+    #[test]
+    fn expanded_editor_order_starts_with_the_primary_toolbar() {
+        assert_eq!(
+            &ToolboxSelection::ORDER[..PRIMARY_TOOLBOX_ITEMS.len()],
+            PRIMARY_TOOLBOX_ITEMS
+        );
+    }
+
+    #[test]
+    fn voxel_specific_workflows_stay_in_contextual_flyouts_not_primary_rail() {
+        for advanced in [
+            ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
+            ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
+            ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
+            ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
+            ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
+        ] {
+            assert!(
+                !PRIMARY_TOOLBOX_ITEMS.contains(&advanced),
+                "{advanced:?} should be available through hover drawers, not the primary rail"
+            );
+        }
+
+        let house = context_group_for_selection(ToolboxSelection::Workflow(
+            BuildWorkflowPreset::ModernHouse,
+        ));
+        assert!(house
+            .items
+            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::Opening)));
+        let city =
+            context_group_for_selection(ToolboxSelection::Workflow(BuildWorkflowPreset::Roads));
+        assert!(city
+            .items
+            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea)));
     }
 
     #[test]

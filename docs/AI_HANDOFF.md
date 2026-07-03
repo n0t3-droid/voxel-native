@@ -17,11 +17,11 @@ handoff unless a later task explicitly needs a reproducible save.
 
 - Build/editor UI has been moving away from visible F-key switching toward a
   mouse-first Sketch Editor toolbox and status bar.
-- The Sketch Editor toolbox now has a smaller primary rail ordered for house
-  building first: Select, Line, Box, Push/Pull, Move, Opening, Material, Road,
-  and House. Scale, Rotate, Room, Bots, city shell, landscape, skyline, and
-  spacecraft remain available through compact contextual flyouts instead of
-  competing on the first-level rail.
+- The Sketch Editor toolbox now has a smaller primary rail ordered around core
+  modeling first: Select, Line, Rectangle, Circle, Push/Pull, Move, Rotate,
+  Scale, and Material. Opening, Room, House, Roads, Bots, city shell, landscape,
+  skyline, and spacecraft remain available through compact contextual flyouts
+  instead of competing on the first-level rail.
 - Each visible workflow button shows a simple label plus an inference cue such
   as Point, Corner, Face, Path, Area, Axis, Plane, or Volume so the player can
   tell what the tool snaps to before clicking it.

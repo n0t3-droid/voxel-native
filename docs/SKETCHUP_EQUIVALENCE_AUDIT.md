@@ -30,7 +30,7 @@ not mean the feature behaves like SketchUp yet.
 | B-Rep / planar kernel | Started | `SketchBRepKernel` can store vertices/edges/faces, split coplanar faces, and push/pull simple face regions | Not yet the live authoring backend for all Pencil/Rectangle/Push/Pull/Opening edits |
 | Push/Pull | Partial | Semantic `PushPullExtrusion`, simple B-Rep extrusion, voxel commit routing exists | No robust topology healing, repeat-depth workflow, through-cut coincidence detection, or live semantic face replacement everywhere |
 | Move/Transform | Started | `src/sculpt/transform.rs` supports semantic selection voxel move with X/Y/Z arrow locks, Gizmo bounds preview, voxel commit, undo batch, `SketchDocument::move_selection`, and link-index translation | Move still needs grip-point-to-target inference, copy/array mode, typed deltas, crossing selection, and material/metadata-preserving voxel moves |
-| UI/toolbox workflow | Partial | Mouse-first rail, compact contextual flyouts, STYLE drawer, no visible F-key workflow; primary rail now prioritizes Select, Line, Box, Push/Pull, Move, Opening, Material, Road, House | Hover and cursor behavior still need visual playtesting; remaining tools need real per-tool capabilities instead of repeated cards |
+| UI/toolbox workflow | Partial | Mouse-first rail, compact contextual flyouts, STYLE drawer, no visible F-key workflow; primary rail now follows the core modeling order: Select, Line, Rectangle, Circle, Push/Pull, Move, Rotate, Scale, Material | Hover and cursor behavior still need visual playtesting; voxel-specific workflows such as Opening, Room, House, Road, Bots, and City stay in flyouts but still need deeper per-tool parity |
 
 ## New Source Changes In This Slice
 
@@ -61,6 +61,11 @@ not mean the feature behaves like SketchUp yet.
   and reference-length snaps.
 - Slimmed the primary toolbox rail to the highest-value mouse-first tools,
   moving duplicate/advanced choices into hover context groups.
+- Reordered the primary editor rail around SketchUp-style core modeling:
+  Select, Line, Rectangle, Circle, Push/Pull, Move, Rotate, Scale, and Material.
+  Opening, Room, House, Roads, Bots, city shell, landscape, skyline, and
+  spacecraft remain available through hover flyouts/full drawers instead of
+  competing with the first building gestures.
 
 ## Next Highest-Value Work
 
