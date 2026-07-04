@@ -66,6 +66,10 @@ not mean the feature behaves like SketchUp yet.
   Opening, Room, House, Roads, Bots, city shell, landscape, skyline, and
   spacecraft remain available through hover flyouts/full drawers instead of
   competing with the first building gestures.
+- Stabilized the hover flyout by retaining the last hovered group through the
+  grace window, widening the invisible bridge from toolbox to flyout, and
+  replacing terse labels such as `Mat`, `Box`, `Pull`, and `Window` with clearer
+  `Paint`, `Rect`, `Push/Pull`, and `Opening`.
 - Fixed a major cursor/alignment mismatch in the live editor path: when the
   cursor is visible/unlocked, Draw/Select-style semantic hover now uses the
   actual pointer ray instead of the camera crosshair ray.

@@ -31,6 +31,10 @@ handoff unless a later task explicitly needs a reproducible save.
   UI-aware: right mouse only becomes world orbit when the pointer is not over
   the Sketch Editor UI, so the toolbox should not make the mouse disappear
   while selecting tools.
+- The latest toolbox pass keeps the last hovered context group alive during
+  the grace window, so moving from the rail into the flyout should no longer
+  collapse or swap the panel mid-travel. Primary labels are now plainer:
+  Select, Line, Rect, Circle, Push/Pull, Move, Rotate, Scale, and Paint.
 - `sketch_model` is now the semantic spine for editor tools, transactions,
   selection, inference, components, rectangle/pencil semantics, room/opening
   semantics, and Push/Pull-style operations.

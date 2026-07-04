@@ -69,13 +69,13 @@ impl ToolbeltTool {
 
     pub fn chip_label(self) -> &'static str {
         match self {
-            ToolbeltTool::Navigate => "NAV",
+            ToolbeltTool::Navigate => "SELECT",
             ToolbeltTool::DrawRect => "RECT",
-            ToolbeltTool::Sculpt => "PUSH",
+            ToolbeltTool::Sculpt => "PUSH/PULL",
             ToolbeltTool::TransformMove => "MOVE",
             ToolbeltTool::TransformScale => "SCALE",
             ToolbeltTool::TransformRotate => "ROTATE",
-            ToolbeltTool::MaterialPicker => "MAT",
+            ToolbeltTool::MaterialPicker => "PAINT",
             ToolbeltTool::SmartTower => "TOWER",
             ToolbeltTool::BrushPlace => "BUILD",
             ToolbeltTool::BrushCut => "CUT",
@@ -647,6 +647,7 @@ pub struct SketchEditorUiFocus {
     pub pointer_over_editor_ui: bool,
     pub hover_drawer_open: bool,
     pub hover_drawer_grace_remaining: f32,
+    hover_drawer_selection: Option<ToolboxSelection>,
 }
 
 impl Plugin for ToolbeltPlugin {
@@ -675,6 +676,7 @@ fn draw_toolbelt(
         ui_focus.pointer_over_editor_ui = false;
         ui_focus.hover_drawer_open = false;
         ui_focus.hover_drawer_grace_remaining = 0.0;
+        ui_focus.hover_drawer_selection = None;
         wheel.clear();
         return;
     }
@@ -705,6 +707,7 @@ fn draw_toolbelt(
         history.undo_len(),
         history.redo_len(),
         toolbelt.active_workflow,
+        ui_focus.hover_drawer_selection,
         theme,
         primary,
         dim,
@@ -722,6 +725,11 @@ fn draw_toolbelt(
     );
     ui_focus.hover_drawer_open = hover_state.open;
     ui_focus.hover_drawer_grace_remaining = hover_state.grace_remaining;
+    if let Some(selection) = dock.hovered_selection {
+        ui_focus.hover_drawer_selection = Some(selection);
+    } else if !hover_state.open {
+        ui_focus.hover_drawer_selection = None;
+    }
 
     let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
     if live {
@@ -936,7 +944,7 @@ fn editor_drawer_surface(picker_open: bool, hover_open: bool) -> EditorDrawerSur
     }
 }
 
-const HOVER_DRAWER_GRACE_SECONDS: f32 = 0.42;
+const HOVER_DRAWER_GRACE_SECONDS: f32 = 0.85;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HoverDrawerState {
@@ -974,8 +982,8 @@ fn next_hover_drawer_state(
 fn hover_drawer_bridge_rect(screen: egui::Rect) -> egui::Rect {
     let center_y = screen.center().y;
     egui::Rect::from_min_max(
-        egui::pos2(68.0, center_y - 390.0),
-        egui::pos2(160.0, center_y + 390.0),
+        egui::pos2(64.0, center_y - 420.0),
+        egui::pos2(238.0, center_y + 420.0),
     )
 }
 
@@ -1750,6 +1758,7 @@ fn draw_build_dock(
     undo_count: usize,
     redo_count: usize,
     active_workflow: Option<BuildWorkflowPreset>,
+    retained_hover_selection: Option<ToolboxSelection>,
     theme: crate::theme::ThemeSettings,
     primary: egui::Color32,
     dim: egui::Color32,
@@ -1792,9 +1801,12 @@ fn draw_build_dock(
     match surface {
         EditorDrawerSurface::Hidden => {}
         EditorDrawerSurface::HoverFlyout => {
-            let hovered = result
-                .hovered_selection
-                .unwrap_or_else(|| active_toolbox_selection(active_tool, active_workflow));
+            let hovered = hover_drawer_selection(
+                result.hovered_selection,
+                retained_hover_selection,
+                active_tool,
+                active_workflow,
+            );
             draw_editor_hover_flyout(
                 ctx,
                 hovered,
@@ -1820,6 +1832,17 @@ fn draw_build_dock(
     }
 
     result
+}
+
+fn hover_drawer_selection(
+    current_hover: Option<ToolboxSelection>,
+    retained_hover: Option<ToolboxSelection>,
+    active_tool: ToolbeltTool,
+    active_workflow: Option<BuildWorkflowPreset>,
+) -> ToolboxSelection {
+    current_hover
+        .or(retained_hover)
+        .unwrap_or_else(|| active_toolbox_selection(active_tool, active_workflow))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2368,7 +2391,7 @@ fn toolbox_tool_label(tool: ToolbeltTool) -> &'static str {
         ToolbeltTool::TransformMove => "Move",
         ToolbeltTool::TransformScale => "Scale",
         ToolbeltTool::TransformRotate => "Rotate",
-        ToolbeltTool::MaterialPicker => "Mat",
+        ToolbeltTool::MaterialPicker => "Paint",
         _ => tool.chip_label(),
     }
 }
@@ -2376,14 +2399,14 @@ fn toolbox_tool_label(tool: ToolbeltTool) -> &'static str {
 fn workflow_toolbox_label(preset: BuildWorkflowPreset) -> &'static str {
     match preset {
         BuildWorkflowPreset::Pencil => "Line",
-        BuildWorkflowPreset::Sketch => "Box",
+        BuildWorkflowPreset::Sketch => "Rect",
         BuildWorkflowPreset::Circle => "Circle",
-        BuildWorkflowPreset::Polygon => "Shape",
+        BuildWorkflowPreset::Polygon => "Polygon",
         BuildWorkflowPreset::Arc => "Arc",
-        BuildWorkflowPreset::Freehand => "Free",
-        BuildWorkflowPreset::PushPull => "Pull",
+        BuildWorkflowPreset::Freehand => "Freehand",
+        BuildWorkflowPreset::PushPull => "Push/Pull",
         BuildWorkflowPreset::Room => "Room",
-        BuildWorkflowPreset::Opening => "Window",
+        BuildWorkflowPreset::Opening => "Opening",
         BuildWorkflowPreset::Roads => "Road",
         BuildWorkflowPreset::BotArea => "Bots",
         BuildWorkflowPreset::CityShell => "City",
@@ -3603,15 +3626,16 @@ mod tests {
     #[test]
     fn workflow_toolbox_labels_are_plain_language_not_internal_codes() {
         assert_eq!(workflow_toolbox_label(BuildWorkflowPreset::Pencil), "Line");
-        assert_eq!(workflow_toolbox_label(BuildWorkflowPreset::Sketch), "Box");
+        assert_eq!(workflow_toolbox_label(BuildWorkflowPreset::Sketch), "Rect");
         assert_eq!(
             workflow_toolbox_label(BuildWorkflowPreset::PushPull),
-            "Pull"
+            "Push/Pull"
         );
         assert_eq!(
             workflow_toolbox_label(BuildWorkflowPreset::Opening),
-            "Window"
+            "Opening"
         );
+        assert_eq!(toolbox_tool_label(ToolbeltTool::MaterialPicker), "Paint");
         assert_eq!(workflow_toolbox_label(BuildWorkflowPreset::BotArea), "Bots");
     }
 
@@ -3657,6 +3681,30 @@ mod tests {
 
         assert!(state.open);
         assert!(state.grace_remaining > 0.12);
+    }
+
+    #[test]
+    fn hover_drawer_grace_is_long_enough_for_human_mouse_travel() {
+        let state = next_hover_drawer_state(
+            false,
+            false,
+            false,
+            false,
+            true,
+            HOVER_DRAWER_GRACE_SECONDS,
+            0.50,
+        );
+
+        assert!(state.open);
+        assert!(state.grace_remaining > 0.30);
+    }
+
+    #[test]
+    fn hover_drawer_reuses_retained_group_while_pointer_crosses_gap() {
+        let retained = ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse);
+        let selected = hover_drawer_selection(None, Some(retained), ToolbeltTool::Navigate, None);
+
+        assert_eq!(selected, retained);
     }
 
     #[test]
