@@ -12,6 +12,64 @@ handoff unless a later task explicitly needs a reproducible save.
 - Remote: `origin` -> `https://github.com/n0t3-droid/voxel-native.git`
 - Source files changed under `src/` plus the new semantic editor spine
   `src/sketch_model.rs`.
+- Last verified source snapshot before this handoff note: `f90781df`
+  (`Fix sketch inference reference alignment`).
+
+## 2026-07-04 External AI Review Brief
+
+This project still does not behave like SketchUp. The latest user testing
+shows several user-visible failures that should be treated as blockers before
+adding more decorative tools:
+
+- Normal drawing should infer endpoints, midpoints, same-height references,
+  and parallel/axis alignment from mouse hover without forcing arrow-key locks.
+  Arrow keys should be optional hard locks, not the only reliable way to align.
+- Pencil/Line can still show a cyan preview cage or axis guide that does not
+  match the visible mouse pointer's intended block. The recent pointer-ray fix
+  reduced the worst mismatch, but the live tool is still too cell/grid driven
+  and not enough screen-space/inference driven.
+- Endpoint, midpoint, face-center, and edge markers must be obvious in the
+  world: green endpoint/start/end, cyan midpoint, red edge/axis, blue face.
+  The status text alone is not enough.
+- Select -> Move/Rotate/Scale is not a SketchUp-grade workflow yet. The user
+  expects to click a drawn object/component, choose a grip point, drag it to an
+  inferenced target, rotate/scale from handles, and keep voxel-to-voxel snaps.
+- Undo/redo is not trustworthy enough. Voxel edits, semantic entities,
+  link-index changes, and transform operations currently pass through multiple
+  partial history paths. The next AI should inspect `BuilderHistory`,
+  `SketchDocument` snapshots, `ToolController` transaction labels, and
+  transform commits, then converge them into one command timeline.
+- The toolbox still has duplicate-feeling tools. Primary tools should be the
+  highest-frequency SketchUp-like actions; specialized voxel/game workflows
+  belong in categorized flyouts with stable hover behavior.
+
+Treat the next milestone as "SketchUp interaction correctness", not "more
+icons". The highest-value implementation slice is:
+
+1. Route Pencil, Rectangle, Select, Move, Rotate, Scale, Push/Pull, Opening,
+   and Room through the same `PickService -> InferenceService -> ToolState`
+   pipeline every frame.
+2. Make hover inference visual first: draw colored snap points and axis/edge
+   guide lines at the inferenced world point under the actual OS cursor.
+3. Make arrow keys only set or clear explicit locks; natural hover inference
+   should already pick useful endpoints, midpoints, same-height references,
+   and parallel/perpendicular guides.
+4. Replace direct per-tool undo batches with a unified sketch command history
+   that records voxel diffs, semantic deltas, link-index updates, selection,
+   and transform metadata together.
+5. Upgrade Select/Move before adding new modeling tools: selection must create
+   a manipulable component-like object with exact grip-to-target snapping.
+
+Files to inspect first:
+
+- `src/sculpt/draw.rs`
+- `src/sculpt/transform.rs`
+- `src/sketch_model.rs`
+- `src/sculpt/pushpull.rs`
+- `src/builder.rs`
+- `src/toolbelt.rs`
+- `src/selection.rs`
+- `src/sculpt/mod.rs`
 
 ## Implemented Direction
 

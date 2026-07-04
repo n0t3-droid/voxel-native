@@ -81,6 +81,11 @@ GitHub front page describes the engine instead of showing outdated captures.
 The public project view should explain what is implemented, how to run it, and
 which math keeps the engine fast. Current bot-planning details live in
 [`docs/CITY_PLANNER_MATH.md`](docs/CITY_PLANNER_MATH.md).
+The current external-AI handoff is in [`docs/AI_HANDOFF.md`](docs/AI_HANDOFF.md),
+and the strict SketchUp-parity status is tracked in
+[`docs/SKETCHUP_EQUIVALENCE_AUDIT.md`](docs/SKETCHUP_EQUIVALENCE_AUDIT.md).
+Those documents intentionally list unresolved issues instead of presenting the
+builder as complete.
 
 Verified update for this snapshot:
 
