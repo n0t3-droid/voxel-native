@@ -2687,6 +2687,26 @@ impl SketchDocument {
         Ok(InferenceService::ranked(candidates))
     }
 
+    pub fn active_context_inference_candidates(
+        &self,
+    ) -> Result<Vec<InferenceCandidate>, SketchModelError> {
+        let context = self
+            .contexts
+            .get(&self.active_context)
+            .ok_or(SketchModelError::UnknownContext(self.active_context))?;
+        let mut candidates = Vec::new();
+        for entity in context.entities.iter().copied() {
+            if self
+                .entities
+                .get(&entity)
+                .is_some_and(|record| record.visible && !record.locked)
+            {
+                candidates.extend(self.entity_inference_candidates(entity)?);
+            }
+        }
+        Ok(InferenceService::ranked(candidates))
+    }
+
     pub fn undo_count(&self) -> usize {
         self.undo_stack.len()
     }

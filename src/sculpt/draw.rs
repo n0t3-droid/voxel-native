@@ -31,6 +31,7 @@ const RECT_AXIS_RATIO: f32 = 3.0;
 const RECT_EQUAL_LENGTH_TOLERANCE: i32 = 2;
 const RECT_FACE_SNAP_RADIUS: f32 = 0.30;
 const SEMANTIC_DRAW_POINT_RADIUS: f32 = 1.25;
+const SEMANTIC_DRAW_SCREEN_RADIUS: f32 = 22.0;
 
 #[derive(Resource, Default)]
 pub struct RectDrawState {
@@ -571,6 +572,16 @@ pub fn rect_draw_input(
         motion_evr.clear();
         return;
     };
+    let screen_snap = if cursor_locked {
+        None
+    } else {
+        cursor_position
+            .zip(camera.logical_viewport_size())
+            .map(|(cursor, viewport)| {
+                let view_projection = camera.clip_from_view() * cam_tf.compute_matrix().inverse();
+                (cursor, view_projection, viewport)
+            })
+    };
     let Some((origin, dir)) =
         draw_input_ray(active_tool, cursor_locked, cursor_position, camera, cam_tf)
     else {
@@ -645,16 +656,34 @@ pub fn rect_draw_input(
         if let Some(input) = start_input {
             start = apply_face_input_point_to_cell(start, input, axis_u, axis_v);
         }
-        let semantic_start = semantic_draw_input_point(
-            &sketch_doc,
-            semantic_hover.0.as_ref(),
-            start_input.map(|input| input.point),
-            start,
-            normal,
-            axis_u,
-            axis_v,
-            pencil_line,
-        );
+        let semantic_start = screen_snap
+            .and_then(|(cursor, view_projection, viewport)| {
+                semantic_draw_screen_space_input_point(
+                    &sketch_doc,
+                    semantic_hover.0.as_ref(),
+                    start_input.map(|input| input.point),
+                    start,
+                    normal,
+                    axis_u,
+                    axis_v,
+                    pencil_line,
+                    cursor,
+                    view_projection,
+                    viewport,
+                )
+            })
+            .or_else(|| {
+                semantic_draw_input_point(
+                    &sketch_doc,
+                    semantic_hover.0.as_ref(),
+                    start_input.map(|input| input.point),
+                    start,
+                    normal,
+                    axis_u,
+                    axis_v,
+                    pencil_line,
+                )
+            });
         if let Some(input) = semantic_start {
             start = input.cell;
         }
@@ -750,16 +779,34 @@ pub fn rect_draw_input(
                     dda_voxel(&world, origin, dir, DRAW_REACH).and_then(|(hit, prev)| {
                         rect_face_input_point(origin, dir, hit, prev).map(|input| input.point)
                     });
-                let semantic_input = semantic_draw_input_point(
-                    &sketch_doc,
-                    semantic_hover.0.as_ref(),
-                    semantic_reference,
-                    draw.start,
-                    draw.normal,
-                    draw.axis_u,
-                    draw.axis_v,
-                    true,
-                );
+                let semantic_input = screen_snap
+                    .and_then(|(cursor, view_projection, viewport)| {
+                        semantic_draw_screen_space_input_point(
+                            &sketch_doc,
+                            semantic_hover.0.as_ref(),
+                            semantic_reference,
+                            draw.start,
+                            draw.normal,
+                            draw.axis_u,
+                            draw.axis_v,
+                            true,
+                            cursor,
+                            view_projection,
+                            viewport,
+                        )
+                    })
+                    .or_else(|| {
+                        semantic_draw_input_point(
+                            &sketch_doc,
+                            semantic_hover.0.as_ref(),
+                            semantic_reference,
+                            draw.start,
+                            draw.normal,
+                            draw.axis_u,
+                            draw.axis_v,
+                            true,
+                        )
+                    });
                 if let (Some(axis_lock), Some(input)) = (draw.axis_lock, semantic_input) {
                     let (endpoint, point) =
                         semantic_axis_locked_endpoint(draw.start, input, axis_lock);
@@ -777,16 +824,34 @@ pub fn rect_draw_input(
                 }
             } else if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
                 let input = rect_face_input_point(origin, dir, hit, prev);
-                let semantic_input = semantic_draw_input_point(
-                    &sketch_doc,
-                    semantic_hover.0.as_ref(),
-                    input.map(|input| input.point),
-                    draw.start,
-                    draw.normal,
-                    draw.axis_u,
-                    draw.axis_v,
-                    draw.pencil_line,
-                );
+                let semantic_input = screen_snap
+                    .and_then(|(cursor, view_projection, viewport)| {
+                        semantic_draw_screen_space_input_point(
+                            &sketch_doc,
+                            semantic_hover.0.as_ref(),
+                            input.map(|input| input.point),
+                            draw.start,
+                            draw.normal,
+                            draw.axis_u,
+                            draw.axis_v,
+                            draw.pencil_line,
+                            cursor,
+                            view_projection,
+                            viewport,
+                        )
+                    })
+                    .or_else(|| {
+                        semantic_draw_input_point(
+                            &sketch_doc,
+                            semantic_hover.0.as_ref(),
+                            input.map(|input| input.point),
+                            draw.start,
+                            draw.normal,
+                            draw.axis_u,
+                            draw.axis_v,
+                            draw.pencil_line,
+                        )
+                    });
                 draw.snap_kind = semantic_input
                     .map(|input| input.kind)
                     .or_else(|| input.and_then(|input| input.kind));
@@ -867,16 +932,34 @@ pub fn rect_draw_input(
                 origin,
                 dir,
             ) {
-                let semantic_input = semantic_draw_input_point(
-                    &sketch_doc,
-                    semantic_hover.0.as_ref(),
-                    Some(pencil_cell_marker_point(endpoint)),
-                    draw.start,
-                    draw.normal,
-                    draw.axis_u,
-                    draw.axis_v,
-                    draw.pencil_line,
-                );
+                let semantic_input = screen_snap
+                    .and_then(|(cursor, view_projection, viewport)| {
+                        semantic_draw_screen_space_input_point(
+                            &sketch_doc,
+                            semantic_hover.0.as_ref(),
+                            Some(pencil_cell_marker_point(endpoint)),
+                            draw.start,
+                            draw.normal,
+                            draw.axis_u,
+                            draw.axis_v,
+                            draw.pencil_line,
+                            cursor,
+                            view_projection,
+                            viewport,
+                        )
+                    })
+                    .or_else(|| {
+                        semantic_draw_input_point(
+                            &sketch_doc,
+                            semantic_hover.0.as_ref(),
+                            Some(pencil_cell_marker_point(endpoint)),
+                            draw.start,
+                            draw.normal,
+                            draw.axis_u,
+                            draw.axis_v,
+                            draw.pencil_line,
+                        )
+                    });
                 let endpoint = semantic_input.map(|input| input.cell).unwrap_or(endpoint);
                 let endpoint = apply_axis_lock_to_endpoint(draw.start, endpoint, draw.axis_lock);
                 let (endpoint, inference) = if draw.axis_lock.is_some() {
@@ -2002,6 +2085,53 @@ fn semantic_draw_input_point(
     Some(SemanticDrawInputPoint { cell, point, kind })
 }
 
+fn semantic_draw_screen_space_input_point(
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    hover: Option<&crate::sketch_model::HitRecord>,
+    reference_point: Option<Vec3>,
+    start: IVec3,
+    normal: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    pencil_line: bool,
+    cursor_screen: Vec2,
+    view_projection: Mat4,
+    viewport_size: Vec2,
+) -> Option<SemanticDrawInputPoint> {
+    let mut candidates = sketch_doc.active_context_inference_candidates().ok()?;
+    if let Some(hover) = hover {
+        let hover_reference = reference_point.unwrap_or(hover.world_point);
+        candidates.extend(
+            crate::sketch_model::InferenceService::from_pick(
+                sketch_doc,
+                hover,
+                Some(hover_reference),
+            )
+            .ok()?,
+        );
+    }
+    let chosen = crate::sketch_model::best_screen_space_inference(
+        candidates,
+        cursor_screen,
+        view_projection,
+        viewport_size,
+        crate::sketch_model::ScreenSpaceSnapSettings {
+            radius_pixels: SEMANTIC_DRAW_SCREEN_RADIUS,
+            ..Default::default()
+        },
+        None,
+    )?;
+    let kind = rect_face_snap_from_inference_kind(chosen.inference.kind)?;
+    let point = project_draw_input_point_to_locked_plane(
+        chosen.inference.point,
+        start,
+        normal,
+        pencil_line,
+    );
+    let cell = semantic_draw_point_to_cell(start, point, normal, axis_u, axis_v);
+    Some(SemanticDrawInputPoint { cell, point, kind })
+}
+
 fn semantic_axis_locked_endpoint(
     start: IVec3,
     input: SemanticDrawInputPoint,
@@ -2476,6 +2606,8 @@ fn smart_room_cut_depth(span_u: i32, span_v: i32) -> i32 {
     (broad * 2 / 3).clamp(RECT_ROOM_CUT_MIN_DEPTH, RECT_ROOM_CUT_DEPTH_CAP)
 }
 
+const SNAP_MARKER_ORB_COUNT: usize = 5;
+
 fn rect_snap_marker_color(kind: Option<RectFaceSnapKind>) -> Color {
     match kind {
         Some(RectFaceSnapKind::Endpoint) => Color::srgb(0.2, 1.0, 0.28),
@@ -2485,17 +2617,84 @@ fn rect_snap_marker_color(kind: Option<RectFaceSnapKind>) -> Color {
     }
 }
 
+fn rect_snap_marker_radius(kind: Option<RectFaceSnapKind>, current: bool, pulse: f32) -> f32 {
+    let base = match kind {
+        Some(RectFaceSnapKind::Endpoint) => 0.16,
+        Some(RectFaceSnapKind::Midpoint) => 0.13,
+        Some(RectFaceSnapKind::FaceCenter) => 0.105,
+        None => 0.085,
+    };
+    let focus = if current { 0.035 } else { 0.0 };
+    base + focus + pulse.clamp(0.0, 1.0) * 0.035
+}
+
+fn rect_snap_marker_halo_radius(kind: Option<RectFaceSnapKind>, pulse: f32) -> f32 {
+    let base = match kind {
+        Some(RectFaceSnapKind::Endpoint) => 0.48,
+        Some(RectFaceSnapKind::Midpoint) => 0.42,
+        Some(RectFaceSnapKind::FaceCenter) => 0.36,
+        None => 0.30,
+    };
+    base + pulse.clamp(0.0, 1.0) * 0.11
+}
+
+fn rect_snap_marker_plane_basis(normal: IVec3) -> (Vec3, Vec3) {
+    match normal_axis(normal).unwrap_or(1) {
+        0 => (Vec3::Y, Vec3::Z),
+        1 => (Vec3::X, Vec3::Z),
+        _ => (Vec3::X, Vec3::Y),
+    }
+}
+
+fn rect_snap_marker_normal_dir(normal: IVec3) -> Dir3 {
+    match normal_axis(normal).unwrap_or(1) {
+        0 => Dir3::X,
+        1 => Dir3::Y,
+        _ => Dir3::Z,
+    }
+}
+
+fn rect_snap_marker_orb_offset(index: usize, normal: IVec3, radius: f32, angle: f32) -> Vec3 {
+    let (u, v) = rect_snap_marker_plane_basis(normal);
+    let phase = angle + index as f32 * std::f32::consts::TAU / SNAP_MARKER_ORB_COUNT as f32;
+    u * phase.cos() * radius + v * phase.sin() * radius
+}
+
 fn draw_input_point_marker(
     gizmos: &mut Gizmos,
     point: Vec3,
     normal: IVec3,
-    size: f32,
+    kind: Option<RectFaceSnapKind>,
+    current: bool,
+    pulse: f32,
+    orbit_angle: f32,
     color: Color,
 ) {
     let offset = normal.as_vec3() * 0.06;
+    let center = point + offset;
+    let marker_radius = rect_snap_marker_radius(kind, current, pulse);
+    let halo_radius = rect_snap_marker_halo_radius(kind, pulse);
+
+    gizmos.circle(
+        center,
+        rect_snap_marker_normal_dir(normal),
+        halo_radius,
+        color.with_alpha(if current { 0.55 } else { 0.35 }),
+    );
+    for index in 0..SNAP_MARKER_ORB_COUNT {
+        let orb_center =
+            center + rect_snap_marker_orb_offset(index, normal, halo_radius, orbit_angle);
+        let orb_scale = marker_radius * if index == 0 && current { 1.22 } else { 0.78 };
+        gizmos.sphere(
+            orb_center,
+            Quat::IDENTITY,
+            orb_scale,
+            color.with_alpha(if current { 0.92 } else { 0.62 }),
+        );
+    }
     gizmos.cuboid(
-        Transform::from_translation(point + offset).with_scale(Vec3::splat(size)),
-        color,
+        Transform::from_translation(center).with_scale(Vec3::splat(marker_radius * 1.35)),
+        color.with_alpha(if current { 0.95 } else { 0.70 }),
     );
 }
 
@@ -2504,25 +2703,31 @@ fn draw_rect_input_point_gizmos(draw: &RectDrawState, gizmos: &mut Gizmos, pulse
         gizmos,
         draw.start_point,
         draw.normal,
-        0.28,
+        draw.start_snap_kind,
+        false,
+        pulse,
+        pulse * 1.5,
         rect_snap_marker_color(draw.start_snap_kind),
     );
-    let current_size = if draw.snap_kind == Some(RectFaceSnapKind::Endpoint) {
-        0.26
-    } else {
-        0.22
-    };
     draw_input_point_marker(
         gizmos,
         draw.current_point,
         draw.normal,
-        current_size,
+        draw.snap_kind,
+        true,
+        pulse,
+        pulse * 2.2 + 0.6,
         rect_snap_marker_color(draw.snap_kind),
+    );
+    gizmos.line(
+        draw.start_point + draw.normal.as_vec3() * 0.12,
+        draw.current_point + draw.normal.as_vec3() * 0.12,
+        rect_snap_marker_color(draw.snap_kind).with_alpha(0.78),
     );
     if let Some(axis_lock) = draw.axis_lock {
         let axis = axis_lock.axis_vec3();
         let start = draw.start_point + draw.normal.as_vec3() * 0.10;
-        let reach = 64.0 + 16.0 * pulse;
+        let reach = 96.0 + 24.0 * pulse;
         gizmos.line(
             start - axis * reach,
             start + axis * reach,
@@ -3652,6 +3857,91 @@ mod tests {
         assert_eq!(input.kind, RectFaceSnapKind::Midpoint);
         assert_eq!(input.cell, IVec3::new(4, 4, 0));
         assert_eq!(input.point, Vec3::new(4.5, 4.5, 0.5));
+    }
+
+    #[test]
+    fn semantic_draw_screen_space_snap_prefers_cursor_endpoint_over_hover_cell() {
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let _near_hover_edge = sketch_doc
+            .draw_pencil_line(
+                sketch_doc.active_context(),
+                Vec3::new(0.5, 4.5, 0.5),
+                Vec3::new(2.5, 4.5, 0.5),
+            )
+            .expect("near hover edge");
+        let target_edge = sketch_doc
+            .draw_pencil_line(
+                sketch_doc.active_context(),
+                Vec3::new(10.5, 4.5, 0.5),
+                Vec3::new(12.5, 4.5, 0.5),
+            )
+            .expect("target edge");
+        let hover = crate::sketch_model::HitRecord::new(
+            target_edge,
+            [],
+            crate::sketch_model::HitKind::Edge,
+            Vec3::new(10.5, 4.5, 0.5),
+            0.0,
+        );
+        let view_projection = Mat4::IDENTITY;
+        let viewport = Vec2::new(100.0, 100.0);
+        let target_screen = crate::sketch_model::project_world_to_screen(
+            Vec3::new(12.5, 4.5, 0.5),
+            view_projection,
+            viewport,
+        )
+        .expect("screen projection")
+        .screen;
+
+        let input = semantic_draw_screen_space_input_point(
+            &sketch_doc,
+            Some(&hover),
+            Some(Vec3::new(10.5, 4.5, 0.5)),
+            IVec3::new(0, 4, 0),
+            IVec3::Y,
+            IVec3::X,
+            IVec3::Z,
+            true,
+            target_screen,
+            view_projection,
+            viewport,
+        )
+        .expect("screen-space endpoint");
+
+        assert_eq!(
+            input.point,
+            Vec3::new(12.5, 4.5, 0.5),
+            "Pencil should follow the endpoint nearest the visible cursor, not the raw hover cell"
+        );
+        assert_eq!(input.kind, RectFaceSnapKind::Endpoint);
+        assert_eq!(input.cell, IVec3::new(12, 4, 0));
+    }
+
+    #[test]
+    fn snap_marker_visuals_use_five_orbs_with_endpoint_priority() {
+        assert_eq!(SNAP_MARKER_ORB_COUNT, 5);
+
+        let endpoint = rect_snap_marker_radius(Some(RectFaceSnapKind::Endpoint), true, 1.0);
+        let midpoint = rect_snap_marker_radius(Some(RectFaceSnapKind::Midpoint), true, 1.0);
+        let face = rect_snap_marker_radius(Some(RectFaceSnapKind::FaceCenter), true, 1.0);
+        let fallback = rect_snap_marker_radius(None, true, 1.0);
+
+        assert!(endpoint > midpoint);
+        assert!(midpoint > face);
+        assert!(face > fallback);
+    }
+
+    #[test]
+    fn snap_marker_orbs_orbit_inside_the_snap_plane() {
+        let radius = rect_snap_marker_halo_radius(Some(RectFaceSnapKind::Endpoint), 1.0);
+        let first = rect_snap_marker_orb_offset(0, IVec3::Y, radius, 0.0);
+        let rotated = rect_snap_marker_orb_offset(0, IVec3::Y, radius, std::f32::consts::FRAC_PI_2);
+
+        assert!(first.y.abs() < 0.0001);
+        assert!(rotated.y.abs() < 0.0001);
+        assert!((first.length() - radius).abs() < 0.0001);
+        assert!((rotated.length() - radius).abs() < 0.0001);
+        assert_ne!(first, rotated);
     }
 
     #[test]

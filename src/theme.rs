@@ -277,6 +277,198 @@ impl ThemeSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemePreset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub tagline: &'static str,
+    pub style: ThemeStyle,
+    pub color: ThemeColor,
+}
+
+pub const THEME_PRESETS: [ThemePreset; 4] = [
+    ThemePreset {
+        id: "sakura_zen",
+        name: "Sakura Zen",
+        tagline: "pink glass, torii dusk, soft neon petals",
+        style: ThemeStyle::LiquidGlass,
+        color: ThemeColor::Sakura,
+    },
+    ThemePreset {
+        id: "neo_tokyo",
+        name: "Neo Tokyo",
+        tagline: "cyan city grid, bright sci-fi tooling",
+        style: ThemeStyle::NeonToolbench,
+        color: ThemeColor::Blue,
+    },
+    ThemePreset {
+        id: "jade_garden",
+        name: "Jade Garden",
+        tagline: "green editor glass, calm forest workflow",
+        style: ThemeStyle::LiquidGlass,
+        color: ThemeColor::Green,
+    },
+    ThemePreset {
+        id: "amber_dojo",
+        name: "Amber Dojo",
+        tagline: "warm CRT, compact low-end focus",
+        style: ThemeStyle::ClassicCrt,
+        color: ThemeColor::Amber,
+    },
+];
+
+pub fn selected_theme_preset(settings: ThemeSettings) -> Option<&'static ThemePreset> {
+    THEME_PRESETS
+        .iter()
+        .find(|preset| preset.style == settings.style && preset.color == settings.color)
+}
+
+pub fn draw_theme_preview_card(
+    ui: &mut egui::Ui,
+    preset: &ThemePreset,
+    selected: bool,
+    time: f32,
+) -> egui::Response {
+    let desired = egui::vec2(188.0, 108.0);
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    let hovered = response.hovered();
+    let theme = ThemeSettings {
+        color: preset.color,
+        style: preset.style,
+        ..Default::default()
+    };
+    let colors = theme.semantic();
+    let painter = ui.painter_at(rect.expand(5.0));
+    let glow = ui
+        .ctx()
+        .animate_bool(response.id.with("theme_preview_hover"), hovered || selected);
+    let card = rect.translate(egui::vec2(0.0, -glow * 1.5));
+
+    painter.rect_filled(card, egui::Rounding::same(8.0), colors.background);
+    let bands = 8;
+    for i in 0..bands {
+        let k = i as f32 / (bands - 1) as f32;
+        let y0 = egui::lerp(card.top()..=card.bottom(), k);
+        let y1 = egui::lerp(
+            card.top()..=card.bottom(),
+            ((i + 1) as f32 / bands as f32).min(1.0),
+        );
+        let band =
+            egui::Rect::from_min_max(egui::pos2(card.left(), y0), egui::pos2(card.right(), y1));
+        let fill = egui::Color32::from_rgba_premultiplied(
+            ((colors.surface.r() as f32) * (1.0 - k) + (colors.surface_strong.r() as f32) * k)
+                as u8,
+            ((colors.surface.g() as f32) * (1.0 - k) + (colors.surface_strong.g() as f32) * k)
+                as u8,
+            ((colors.surface.b() as f32) * (1.0 - k) + (colors.surface_strong.b() as f32) * k)
+                as u8,
+            220,
+        );
+        painter.rect_filled(band, 0.0, fill);
+    }
+
+    let accent = colors.accent;
+    let dim = colors.stroke;
+    if glow > 0.01 {
+        painter.rect_stroke(
+            card.expand(2.0 + glow * 4.0),
+            egui::Rounding::same(9.0),
+            egui::Stroke::new(1.2 + glow, accent.linear_multiply(0.45)),
+        );
+    }
+    painter.rect_stroke(
+        card,
+        egui::Rounding::same(8.0),
+        egui::Stroke::new(
+            if selected { 1.8 } else { 1.0 },
+            if selected { accent } else { dim },
+        ),
+    );
+
+    let horizon = card.top() + card.height() * 0.62;
+    for i in 0..5 {
+        let y = horizon + i as f32 * 7.0;
+        painter.line_segment(
+            [
+                egui::pos2(card.left() + 8.0, y),
+                egui::pos2(card.right() - 8.0, y),
+            ],
+            egui::Stroke::new(0.8, dim.linear_multiply(0.55)),
+        );
+    }
+    let gate_x = card.left() + 24.0;
+    let gate_y = horizon - 2.0;
+    painter.line_segment(
+        [
+            egui::pos2(gate_x - 11.0, gate_y),
+            egui::pos2(gate_x + 28.0, gate_y - 5.0),
+        ],
+        egui::Stroke::new(2.0, accent),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(gate_x - 6.0, gate_y + 2.0),
+            egui::pos2(gate_x + 22.0, gate_y - 2.0),
+        ],
+        egui::Stroke::new(1.2, accent.linear_multiply(0.8)),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(gate_x, gate_y + 1.0),
+            egui::pos2(gate_x, card.bottom() - 14.0),
+        ],
+        egui::Stroke::new(1.4, accent),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(gate_x + 18.0, gate_y - 1.0),
+            egui::pos2(gate_x + 18.0, card.bottom() - 12.0),
+        ],
+        egui::Stroke::new(1.4, accent),
+    );
+
+    let orb_center = egui::pos2(card.right() - 38.0, card.top() + 34.0);
+    painter.circle_filled(
+        orb_center,
+        20.0 + glow * 2.0,
+        colors.selected.linear_multiply(0.75),
+    );
+    painter.circle_stroke(
+        orb_center,
+        24.0 + glow * 4.0,
+        egui::Stroke::new(1.0, accent),
+    );
+
+    for i in 0..12 {
+        let phase = time * 0.55 + i as f32 * 1.73;
+        let x = card.left() + 12.0 + ((phase.sin() * 0.5 + 0.5) * (card.width() - 24.0));
+        let y = card.top() + 10.0 + ((phase.cos() * 0.5 + 0.5) * (card.height() - 28.0));
+        painter.circle_filled(
+            egui::pos2(x, y),
+            1.5 + (i % 3) as f32 * 0.35,
+            preset.color.primary().linear_multiply(0.72),
+        );
+    }
+
+    let label_pos = egui::pos2(card.left() + 10.0, card.top() + 10.0);
+    painter.text(
+        label_pos,
+        egui::Align2::LEFT_TOP,
+        preset.name,
+        egui::FontId::monospace(13.0),
+        colors.text,
+    );
+    painter.text(
+        label_pos + egui::vec2(0.0, 18.0),
+        egui::Align2::LEFT_TOP,
+        preset.tagline,
+        egui::FontId::monospace(9.0),
+        colors.text_muted,
+    );
+
+    response.on_hover_text(format!("{} - {}", preset.name, preset.tagline))
+}
+
 // ---------------------------------------------------------------------
 // One-shot egui style application
 // ---------------------------------------------------------------------
@@ -673,4 +865,29 @@ pub fn term_button(text: &str, selected: bool, theme: ThemeSettings) -> egui::Bu
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, theme.color.dim()))
         .rounding(egui::Rounding::ZERO)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_presets_have_unique_ids_and_real_preview_copy() {
+        let mut ids = std::collections::BTreeSet::new();
+        for preset in THEME_PRESETS {
+            assert!(!preset.id.is_empty());
+            assert!(!preset.name.is_empty());
+            assert!(!preset.tagline.is_empty());
+            assert!(ids.insert(preset.id), "duplicate theme preset id");
+        }
+        assert!(THEME_PRESETS.len() >= 4);
+    }
+
+    #[test]
+    fn default_theme_selects_sakura_zen_preset() {
+        let preset = selected_theme_preset(ThemeSettings::default()).expect("default preset");
+        assert_eq!(preset.id, "sakura_zen");
+        assert_eq!(preset.color, ThemeColor::Sakura);
+        assert_eq!(preset.style, ThemeStyle::LiquidGlass);
+    }
 }

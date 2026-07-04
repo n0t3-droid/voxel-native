@@ -25,8 +25,9 @@ use crate::settings::{
 };
 use crate::textures::{bake_all_block_swatches, BlockSwatch, TEX_DIR};
 use crate::theme::{
-    apply_hacker_theme, draw_banner, draw_status_bar, paint_scanlines, section_box, status_line,
-    term_button, ThemeColor, ThemeStyle, UiDensity, ALERT, AMBER,
+    apply_hacker_theme, draw_banner, draw_status_bar, draw_theme_preview_card, paint_scanlines,
+    section_box, selected_theme_preset, status_line, term_button, ThemeColor, ThemeStyle,
+    UiDensity, ALERT, AMBER, THEME_PRESETS,
 };
 use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
 
@@ -1478,17 +1479,25 @@ fn draw_system_tab(
                 settings.theme.density = density;
             }
         }
-        ui.label("Style:");
-        for (style, label) in [
-            (ThemeStyle::LiquidGlass, "Glass"),
-            (ThemeStyle::NeonToolbench, "Neon"),
-            (ThemeStyle::ClassicCrt, "CRT"),
-        ] {
-            let selected = settings.theme.style == style;
-            if crate::ui_kit::icon_action(ui, Icon::Layout, label, selected, settings.theme)
-                .clicked()
-            {
-                settings.theme.style = style;
+    });
+    ui.add_space(4.0);
+    let selected_theme_name = selected_theme_preset(settings.theme)
+        .map(|preset| preset.name)
+        .unwrap_or("Custom Mix");
+    ui.label(
+        egui::RichText::new(format!("Theme concept: {selected_theme_name}"))
+            .size(11.0)
+            .color(settings.theme.semantic().text_muted)
+            .monospace(),
+    );
+    let preview_time = ui.input(|input| input.time as f32);
+    ui.horizontal_wrapped(|ui| {
+        for preset in THEME_PRESETS.iter() {
+            let selected =
+                settings.theme.style == preset.style && settings.theme.color == preset.color;
+            if draw_theme_preview_card(ui, preset, selected, preview_time).clicked() {
+                settings.theme.style = preset.style;
+                settings.theme.color = preset.color;
             }
         }
     });
