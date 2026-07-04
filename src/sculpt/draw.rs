@@ -662,7 +662,11 @@ pub fn rect_draw_input(
         draw.current = start;
         draw.start_point = semantic_start.map(|input| input.point).unwrap_or_else(|| {
             if pencil_line {
-                pencil_cell_marker_point(start)
+                start_input
+                    .map(|input| {
+                        project_draw_input_point_to_locked_plane(input.point, start, normal, true)
+                    })
+                    .unwrap_or_else(|| pencil_cell_marker_point(start))
             } else {
                 start_input
                     .map(|input| input.point)
@@ -830,12 +834,14 @@ pub fn rect_draw_input(
                 draw.current = endpoint;
                 draw.inference = inference;
                 draw.current_point = if draw.pencil_line {
-                    semantic_input
-                        .filter(|input| {
-                            input.cell == endpoint && inference == RectEndpointInference::None
-                        })
-                        .map(|input| input.point)
-                        .unwrap_or_else(|| pencil_cell_marker_point(endpoint))
+                    pencil_display_point_for_endpoint(
+                        endpoint,
+                        semantic_input,
+                        input,
+                        draw.start,
+                        draw.normal,
+                        inference,
+                    )
                 } else {
                     semantic_input
                         .filter(|input| {
@@ -2010,7 +2016,32 @@ fn semantic_axis_locked_endpoint(
             component_by_axis(start, axis_lock.axis()),
         ),
     );
-    (endpoint, pencil_cell_marker_point(endpoint))
+    let mut marker = pencil_cell_marker_point(start);
+    set_vec_component_by_axis(
+        &mut marker,
+        axis_lock.axis(),
+        vec_component_by_axis(input.point, axis_lock.axis()),
+    );
+    (endpoint, marker)
+}
+
+fn pencil_display_point_for_endpoint(
+    endpoint: IVec3,
+    semantic_input: Option<SemanticDrawInputPoint>,
+    face_input: Option<RectFaceInputPoint>,
+    start: IVec3,
+    normal: IVec3,
+    inference: RectEndpointInference,
+) -> Vec3 {
+    if inference == RectEndpointInference::None {
+        if let Some(input) = semantic_input.filter(|input| input.cell == endpoint) {
+            return input.point;
+        }
+        if let Some(input) = face_input {
+            return project_draw_input_point_to_locked_plane(input.point, start, normal, true);
+        }
+    }
+    pencil_cell_marker_point(endpoint)
 }
 
 fn project_face_point_to_locked_plane(point: Vec3, start: IVec3, normal: IVec3) -> Vec3 {
@@ -2071,6 +2102,16 @@ fn component_by_index(v: IVec3, index: usize) -> i32 {
 }
 
 fn set_component_by_axis(v: &mut IVec3, axis: IVec3, value: i32) {
+    if axis.x != 0 {
+        v.x = value;
+    } else if axis.y != 0 {
+        v.y = value;
+    } else {
+        v.z = value;
+    }
+}
+
+fn set_vec_component_by_axis(v: &mut Vec3, axis: IVec3, value: f32) {
     if axis.x != 0 {
         v.x = value;
     } else if axis.y != 0 {
@@ -3626,6 +3667,49 @@ mod tests {
 
         assert_eq!(endpoint, IVec3::new(12, 4, 8));
         assert_eq!(marker, Vec3::new(12.5, 4.5, 8.5));
+    }
+
+    #[test]
+    fn semantic_axis_lock_marker_keeps_exact_target_coordinate_not_cell_center() {
+        let input = SemanticDrawInputPoint {
+            cell: IVec3::new(12, 9, 8),
+            point: Vec3::new(12.0, 9.25, 8.25),
+            kind: RectFaceSnapKind::Endpoint,
+        };
+
+        let (endpoint, marker) =
+            semantic_axis_locked_endpoint(IVec3::new(2, 4, 8), input, RectAxisLock::X);
+
+        assert_eq!(endpoint, IVec3::new(12, 4, 8));
+        assert_eq!(
+            marker,
+            Vec3::new(12.0, 4.5, 8.5),
+            "the visual axis-lock marker should sit on the exact endpoint coordinate, not on the voxel center"
+        );
+    }
+
+    #[test]
+    fn pencil_display_marker_uses_face_midpoint_when_commit_cell_stays_quantized() {
+        let endpoint = IVec3::new(10, 1, 14);
+        let face_input = RectFaceInputPoint {
+            point: Vec3::new(10.5, 1.0, 14.0),
+            kind: Some(RectFaceSnapKind::Midpoint),
+        };
+
+        let marker = pencil_display_point_for_endpoint(
+            endpoint,
+            None,
+            Some(face_input),
+            endpoint,
+            IVec3::Y,
+            RectEndpointInference::None,
+        );
+
+        assert_eq!(
+            marker,
+            Vec3::new(10.5, 1.5, 14.0),
+            "Pencil should show the hovered midpoint while committing to the correct voxel cell"
+        );
     }
 
     #[test]

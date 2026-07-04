@@ -49,6 +49,7 @@ pub struct SemanticMoveDrag {
     copy_mode: bool,
     copy_count: usize,
     grip_cell: Option<IVec3>,
+    grip_point: Option<Vec3>,
     hover_snap_active: bool,
     selection: crate::sketch_model::SelectionSet,
     cells: Vec<IVec3>,
@@ -65,6 +66,7 @@ impl Default for SemanticMoveDrag {
             copy_mode: false,
             copy_count: 1,
             grip_cell: None,
+            grip_point: None,
             hover_snap_active: false,
             selection: crate::sketch_model::SelectionSet::default(),
             cells: Vec::new(),
@@ -84,7 +86,9 @@ pub fn begin_move_drag(
     mode: Res<ModeContext>,
     ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
     tool_controller: Res<crate::sketch_model::ToolController>,
+    sketch_doc: Res<crate::sketch_model::SketchDocument>,
     sketch_links: Res<crate::sketch_model::SketchVoxelLinkIndex>,
+    semantic_hover: Res<crate::sketch_model::SemanticHoverHit>,
     state: Res<SculptState>,
     mut drag: ResMut<SemanticMoveDrag>,
     mut gesture_lock: ResMut<BuildGestureLock>,
@@ -115,6 +119,12 @@ pub fn begin_move_drag(
     drag.copy_mode = false;
     drag.copy_count = 1;
     drag.grip_cell = move_grip_cell(&cells, state.hover.map(|hit| hit.voxel));
+    drag.grip_point = move_grip_reference_point(
+        &sketch_doc,
+        &selection,
+        semantic_hover.0.as_ref(),
+        drag.grip_cell,
+    );
     drag.hover_snap_active = false;
     drag.selection = selection;
     drag.cells = cells;
@@ -132,6 +142,8 @@ pub fn update_move_drag(
     mut gesture_lock: ResMut<BuildGestureLock>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    sketch_doc: Res<crate::sketch_model::SketchDocument>,
+    semantic_hover: Res<crate::sketch_model::SemanticHoverHit>,
     state: Res<SculptState>,
 ) {
     if !drag.active {
@@ -181,8 +193,19 @@ pub fn update_move_drag(
     for ev in motion_evr.read() {
         drag.motion += ev.delta;
     }
-    let hover_delta =
-        move_delta_from_hover_cell(drag.grip_cell, state.hover.map(|hit| hit.voxel), drag.axis_lock);
+    let reference_delta = move_delta_from_reference_hit(
+        drag.grip_point,
+        &sketch_doc,
+        semantic_hover.0.as_ref(),
+        drag.axis_lock,
+    );
+    let hover_delta = reference_delta.or_else(|| {
+        move_delta_from_hover_cell(
+            drag.grip_cell,
+            state.hover.map(|hit| hit.voxel),
+            drag.axis_lock,
+        )
+    });
     let next_delta = hover_delta.unwrap_or_else(|| snapped_move_delta(drag.motion, drag.axis_lock));
     let next_hover_snap_active = hover_delta.is_some();
     let next_copy_mode = drag.copy_count > 1 || move_copy_modifier_pressed(&keys);
@@ -354,6 +377,81 @@ fn move_grip_cell(cells: &[IVec3], hovered: Option<IVec3>) -> Option<IVec3> {
     Some(first)
 }
 
+fn move_grip_reference_point(
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    selection: &crate::sketch_model::SelectionSet,
+    hover: Option<&crate::sketch_model::HitRecord>,
+    fallback_cell: Option<IVec3>,
+) -> Option<Vec3> {
+    if let Some(hit) = hover.filter(|hit| selection.contains(hit.entity)) {
+        return move_reference_point_from_hit(sketch_doc, hit).or(Some(hit.world_point));
+    }
+    fallback_cell.map(cell_center)
+}
+
+fn move_delta_from_reference_hit(
+    grip_point: Option<Vec3>,
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    hover: Option<&crate::sketch_model::HitRecord>,
+    axis_lock: Option<MoveAxisLock>,
+) -> Option<IVec3> {
+    let target = move_reference_point_from_hit(sketch_doc, hover?)?;
+    move_delta_from_reference_points(grip_point, Some(target), axis_lock)
+}
+
+fn move_reference_point_from_hit(
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    hit: &crate::sketch_model::HitRecord,
+) -> Option<Vec3> {
+    let mut candidates = sketch_doc.entity_inference_candidates(hit.entity).ok()?;
+    candidates.extend(
+        crate::sketch_model::InferenceService::from_pick(sketch_doc, hit, Some(hit.world_point))
+            .ok()?,
+    );
+    candidates
+        .into_iter()
+        .filter(|candidate| move_reference_kind_bias(candidate.kind).is_some())
+        .filter(|candidate| candidate.point.is_finite())
+        .filter_map(|candidate| {
+            let distance = candidate.point.distance(hit.world_point);
+            (distance <= 2.0).then_some((
+                candidate.point,
+                distance + move_reference_kind_bias(candidate.kind).unwrap_or(1.0),
+            ))
+        })
+        .min_by(|(_, score_a), (_, score_b)| score_a.total_cmp(score_b))
+        .map(|(point, _)| point)
+}
+
+fn move_reference_kind_bias(kind: crate::sketch_model::InferenceKind) -> Option<f32> {
+    match kind {
+        crate::sketch_model::InferenceKind::Endpoint => Some(0.0),
+        crate::sketch_model::InferenceKind::Midpoint => Some(0.08),
+        crate::sketch_model::InferenceKind::FaceCenter => Some(0.16),
+        crate::sketch_model::InferenceKind::OnEdge => Some(0.22),
+        crate::sketch_model::InferenceKind::OnFace => Some(0.34),
+        _ => None,
+    }
+}
+
+fn move_delta_from_reference_points(
+    grip: Option<Vec3>,
+    target: Option<Vec3>,
+    axis_lock: Option<MoveAxisLock>,
+) -> Option<IVec3> {
+    let raw = target? - grip?;
+    if !raw.is_finite() {
+        return None;
+    }
+    let delta = IVec3::new(
+        round_move_delta_component(raw.x),
+        round_move_delta_component(raw.y),
+        round_move_delta_component(raw.z),
+    );
+    let delta = apply_move_axis_lock(delta, axis_lock);
+    (delta != IVec3::ZERO).then_some(delta)
+}
+
 fn move_delta_from_hover_cell(
     grip: Option<IVec3>,
     hover: Option<IVec3>,
@@ -388,6 +486,16 @@ fn snapped_steps(pixels: f32) -> i32 {
     (pixels / MOVE_PIXELS_PER_VOXEL)
         .round()
         .clamp(-(MOVE_DELTA_LIMIT as f32), MOVE_DELTA_LIMIT as f32) as i32
+}
+
+fn round_move_delta_component(value: f32) -> i32 {
+    value
+        .round()
+        .clamp(-(MOVE_DELTA_LIMIT as f32), MOVE_DELTA_LIMIT as f32) as i32
+}
+
+fn cell_center(cell: IVec3) -> Vec3 {
+    cell.as_vec3() + Vec3::splat(0.5)
 }
 
 fn selection_cells(
@@ -487,9 +595,12 @@ pub fn commit_selection_voxel_copy_array(
     }
 
     let label = label.into();
-    let Ok(copied_entities) =
-        sketch_doc.copy_selection_linear_array(selection, delta.as_vec3(), copy_count, label.clone())
-    else {
+    let Ok(copied_entities) = sketch_doc.copy_selection_linear_array(
+        selection,
+        delta.as_vec3(),
+        copy_count,
+        label.clone(),
+    ) else {
         return 0;
     };
 
@@ -601,8 +712,9 @@ mod tests {
 
     use super::{
         commit_selection_voxel_copy_array, commit_selection_voxel_move, move_copy_count_from_key,
-        move_delta_from_hover_cell, move_drag_should_cancel, move_grip_cell, snapped_move_delta,
-        MoveAxisLock,
+        move_delta_from_hover_cell, move_delta_from_reference_points, move_drag_should_cancel,
+        move_grip_cell, move_grip_reference_point, move_reference_point_from_hit,
+        snapped_move_delta, MoveAxisLock,
     };
 
     #[test]
@@ -705,6 +817,49 @@ mod tests {
         assert_eq!(
             move_delta_from_hover_cell(grip, Some(IVec3::new(10, 7, -3)), Some(MoveAxisLock::X)),
             None
+        );
+    }
+
+    #[test]
+    fn move_delta_from_reference_points_preserves_exact_endpoint_alignment() {
+        assert_eq!(
+            move_delta_from_reference_points(
+                Some(Vec3::new(2.0, 4.5, 8.5)),
+                Some(Vec3::new(12.0, 9.25, 8.25)),
+                Some(MoveAxisLock::X),
+            ),
+            Some(IVec3::new(10, 0, 0)),
+            "Move should align selected geometry by the exact endpoint coordinate, not by voxel-center bias"
+        );
+    }
+
+    #[test]
+    fn move_reference_point_prefers_selected_endpoint_near_cursor() {
+        let mut doc = SketchDocument::default();
+        let edge = doc
+            .draw_pencil_line(
+                doc.active_context(),
+                Vec3::new(0.5, 4.5, 0.5),
+                Vec3::new(8.5, 4.5, 0.5),
+            )
+            .expect("edge entity");
+        let mut selection = SelectionSet::default();
+        selection.select(edge);
+        let hit = crate::sketch_model::HitRecord::new(
+            edge,
+            [],
+            crate::sketch_model::HitKind::Edge,
+            Vec3::new(8.3, 4.5, 0.5),
+            0.0,
+        );
+
+        let grip = move_grip_reference_point(&doc, &selection, Some(&hit), None)
+            .expect("selected endpoint grip");
+
+        assert_eq!(grip, Vec3::new(8.5, 4.5, 0.5));
+        assert_eq!(
+            move_reference_point_from_hit(&doc, &hit),
+            Some(Vec3::new(8.5, 4.5, 0.5))
         );
     }
 
