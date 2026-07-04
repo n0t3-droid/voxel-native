@@ -602,7 +602,7 @@ impl WorldSettings {
         self.time_mode = TimeMode::Fixed;
         self.time_of_day = 17.8;
         self.weather.apply_preset(WeatherPreset::Clear);
-        self.weather.fog_density = 0.18;
+        self.weather.fog_density = 0.06;
         self.weather.wind_x = 1.4;
         self.weather.wind_z = 0.8;
         self.theme.style = crate::theme::ThemeStyle::LiquidGlass;
@@ -765,6 +765,8 @@ pub struct WorldMeta {
     pub time_mode: TimeMode,
     pub cycle_speed: f32,
     pub weather: WeatherSettings,
+    #[serde(default)]
+    pub scenery_quality: SceneryQuality,
     pub player_pos: [f32; 3],
     pub player_yaw: f32,
     pub player_pitch: f32,
@@ -797,13 +799,17 @@ impl WorldMeta {
             .find_natural_spawn(0, 0, 4096)
             .map(|p| [p.x as f32 + 0.5, p.y as f32, p.z as f32 + 0.5])
             .unwrap_or([0.0, 140.0, 0.0]);
+        let mut weather = WeatherSettings::default();
+        weather.apply_preset(WeatherPreset::Clear);
+        weather.fog_density = 0.06;
         Self {
             name,
             seed,
-            time_of_day: NORMAL_TIME_OF_DAY,
+            time_of_day: 17.8,
             time_mode: TimeMode::Fixed,
             cycle_speed: 0.01,
-            weather: WeatherSettings::default(),
+            weather,
+            scenery_quality: SceneryQuality::Lush,
             player_pos: spawn,
             player_yaw: 0.0,
             player_pitch: -0.15,
@@ -1179,6 +1185,7 @@ mod tests {
         );
         assert!(meta.bot_world.agents.is_empty());
         assert_eq!(meta.world_edit_manifest.edited_chunks, 0);
+        assert_eq!(meta.scenery_quality, SceneryQuality::Balanced);
     }
 
     #[test]
@@ -1339,6 +1346,31 @@ mod tests {
         assert!(
             (17.0..=18.5).contains(&settings.time_of_day),
             "zen look should start in a bright cinematic golden hour"
+        );
+    }
+
+    #[test]
+    fn zen_garden_look_uses_light_haze_not_dark_fog() {
+        let mut settings = WorldSettings::default();
+
+        settings.apply_zen_garden_look();
+
+        assert!(
+            settings.weather.fog_density <= 0.08,
+            "zen garden startup should use light atmospheric haze, not a dark fog wall"
+        );
+    }
+
+    #[test]
+    fn new_world_meta_starts_as_lush_zen_garden() {
+        let meta = WorldMeta::new("garden".to_string(), 930514);
+
+        assert_eq!(meta.scenery_quality, SceneryQuality::Lush);
+        assert_eq!(meta.weather.preset, WeatherPreset::Clear);
+        assert!(meta.weather.fog_density <= 0.08);
+        assert!(
+            (17.0..=18.5).contains(&meta.time_of_day),
+            "new worlds should open in bright golden-hour Zen scenery, not old flat noon defaults"
         );
     }
 

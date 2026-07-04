@@ -929,7 +929,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::settings::WorldMeta;
+    use crate::settings::{SceneryQuality, WorldMeta};
 
     #[test]
     fn main_menu_does_not_force_continuous_repaint() {
@@ -969,6 +969,18 @@ mod tests {
             clean_new_world_name_with_reserved("dream_city", &worlds, &reserved),
             "dream_city_02"
         );
+    }
+
+    #[test]
+    fn loading_world_applies_saved_scenery_quality() {
+        let mut settings = WorldSettings::default();
+        settings.scenery_quality = SceneryQuality::Lean;
+        let mut meta = WorldMeta::new("garden".to_string(), 930514);
+        meta.scenery_quality = SceneryQuality::Lush;
+
+        apply_world_to_settings(&meta, &mut settings);
+
+        assert_eq!(settings.scenery_quality, SceneryQuality::Lush);
     }
 }
 
@@ -2189,6 +2201,7 @@ fn apply_world_to_settings(meta: &WorldMeta, settings: &mut WorldSettings) {
     settings.time_mode = meta.time_mode;
     settings.cycle_speed = meta.cycle_speed;
     settings.weather = meta.weather;
+    settings.scenery_quality = meta.scenery_quality;
     if settings.visual_preset == crate::settings::VisualPreset::NeonShuttle {
         settings.time_mode = crate::settings::TimeMode::Fixed;
         settings.time_of_day = 21.35;
@@ -2218,6 +2231,7 @@ fn save_current_world(
     meta.time_mode = settings.time_mode;
     meta.cycle_speed = settings.cycle_speed;
     meta.weather = settings.weather;
+    meta.scenery_quality = settings.scenery_quality;
     meta.ship_inventory = ship_inventory.clone();
     meta.bot_world = brain.save.clone();
     crate::bots::save_bot_world_files(&meta.name, &brain.save);

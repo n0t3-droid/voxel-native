@@ -203,18 +203,18 @@ impl BlockType {
         match self {
             BlockType::Air => Color::NONE,
             BlockType::Stone => Color::srgb(0.42, 0.43, 0.42),
-            BlockType::Dirt => Color::srgb(0.27, 0.18, 0.12),
-            BlockType::Grass => Color::srgb(0.12, 0.34, 0.15),
-            BlockType::Sand => Color::srgb(0.76, 0.67, 0.47),
+            BlockType::Dirt => Color::srgb(0.38, 0.25, 0.16),
+            BlockType::Grass => Color::srgb(0.21, 0.48, 0.22),
+            BlockType::Sand => Color::srgb(0.86, 0.78, 0.56),
             // Turquoise energy-water read (concept underground river).
             BlockType::Water => Color::srgba(0.06, 0.78, 0.92, 0.62),
-            BlockType::Wood => Color::srgb(0.40, 0.25, 0.14),
-            BlockType::Leaves => Color::srgb(0.09, 0.29, 0.12),
+            BlockType::Wood => Color::srgb(0.48, 0.31, 0.18),
+            BlockType::Leaves => Color::srgb(0.16, 0.43, 0.20),
             BlockType::Snow => Color::srgb(0.96, 0.97, 0.99),
             BlockType::Ice => Color::srgba(0.70, 0.88, 0.98, 0.85),
             BlockType::TundraGrass => Color::srgb(0.62, 0.76, 0.55),
-            BlockType::JungleLeaves => Color::srgb(0.06, 0.35, 0.16),
-            BlockType::SavannaGrass => Color::srgb(0.44, 0.42, 0.22),
+            BlockType::JungleLeaves => Color::srgb(0.12, 0.50, 0.23),
+            BlockType::SavannaGrass => Color::srgb(0.58, 0.54, 0.28),
             BlockType::Gravel => Color::srgb(0.45, 0.44, 0.43),
             BlockType::Bedrock => Color::srgb(0.12, 0.12, 0.14),
             // Sedona red — saturated rust-orange surface dust.
@@ -224,7 +224,7 @@ impl BlockType {
             // Pale yellow mesa cap, the bright stripe between reds.
             BlockType::MesaClay => Color::srgb(0.94, 0.76, 0.48),
             // Dark mossy limestone — wet karst pillar bodies.
-            BlockType::MossStone => Color::srgb(0.16, 0.27, 0.20),
+            BlockType::MossStone => Color::srgb(0.30, 0.40, 0.30),
             // Bright pale limestone — sun-lit karst sides.
             BlockType::Limestone => Color::srgb(0.76, 0.74, 0.66),
             // Alien crystal — saturated cyan-violet, slightly translucent.
@@ -902,6 +902,26 @@ mod tests {
                 "{block:?} should be non-solid in the fast collision path"
             );
         }
+    }
+
+    #[test]
+    fn natural_palette_keeps_grass_and_foliage_readable() {
+        let grass = voxel_color(BlockType::Grass.into());
+        let leaves = voxel_color(BlockType::Leaves.into());
+        let jungle = voxel_color(BlockType::JungleLeaves.into());
+
+        assert!(
+            grass[1] >= 0.13,
+            "grass green channel is too dark for scenic worlds"
+        );
+        assert!(
+            leaves[1] >= 0.11,
+            "tree leaves should not collapse into black silhouettes"
+        );
+        assert!(
+            jungle[1] >= 0.13,
+            "jungle/bonsai leaves need a visible midtone under fog and dusk light"
+        );
     }
 
     #[test]

@@ -183,21 +183,33 @@ impl TerrainGenerator {
         let bonus = self.scenery_quality.height_bonus();
         match biome {
             Biome::Jungle => (
-                7 + ((r * 997.0) as i32 % 4) + bonus,
+                9 + ((r * 997.0) as i32 % 4) + bonus,
                 BlockType::JungleLeaves,
             ),
-            Biome::Forest => {
-                let leaves =
-                    if self.scenery_quality == crate::settings::SceneryQuality::Lush && r < 0.45 {
+            Biome::Plains => {
+                if self.scenery_quality == crate::settings::SceneryQuality::Lush {
+                    let leaves = if r < 0.65 {
                         BlockType::BlossomLeaves
                     } else {
                         BlockType::Leaves
                     };
-                (5 + ((r * 997.0) as i32 % 3) + bonus, leaves)
+                    (7 + ((r * 997.0) as i32 % 3) + bonus, leaves)
+                } else {
+                    (4 + ((r * 997.0) as i32 % 2) + bonus, BlockType::Leaves)
+                }
+            }
+            Biome::Forest => {
+                let leaves =
+                    if self.scenery_quality == crate::settings::SceneryQuality::Lush && r < 0.65 {
+                        BlockType::BlossomLeaves
+                    } else {
+                        BlockType::Leaves
+                    };
+                (7 + ((r * 997.0) as i32 % 4) + bonus, leaves)
             }
             Biome::Karst => (
-                6 + ((r * 997.0) as i32 % 3) + bonus,
-                if self.scenery_quality == crate::settings::SceneryQuality::Lush && r < 0.35 {
+                8 + ((r * 997.0) as i32 % 4) + bonus,
+                if self.scenery_quality == crate::settings::SceneryQuality::Lush && r < 0.50 {
                     BlockType::BlossomLeaves
                 } else {
                     BlockType::Leaves
@@ -733,33 +745,27 @@ impl TerrainGenerator {
         &self,
         biome: Biome,
         current: BlockType,
-        slope: i32,
+        _slope: i32,
         wx: i32,
         wz: i32,
     ) -> BlockType {
+        match biome {
+            Biome::Plains
+            | Biome::Forest
+            | Biome::Jungle
+            | Biome::Beach
+            | Biome::Desert
+            | Biome::Savanna
+            | Biome::Ocean => return current,
+            _ => {}
+        }
+
         let r = column_rand(self.seed ^ 0xA17E_577, wx, wz);
         let grain = self
             .hills_b
             .get([wx as f64 * 0.033 + 19.0, wz as f64 * 0.033 - 31.0]);
 
         match biome {
-            Biome::Plains | Biome::Forest => {
-                if slope <= 1 && r < 0.012 {
-                    BlockType::Dirt
-                } else if grain > 0.64 && r < 0.018 {
-                    BlockType::MossStone
-                } else {
-                    current
-                }
-            }
-            Biome::Jungle => {
-                if slope <= 1 && grain > 0.62 && r < 0.020 {
-                    BlockType::MossStone
-                } else {
-                    current
-                }
-            }
-            Biome::Beach | Biome::Desert | Biome::Savanna => current,
             Biome::Tundra => {
                 if r < 0.035 {
                     BlockType::Snow
@@ -826,7 +832,13 @@ impl TerrainGenerator {
                     current
                 }
             }
-            Biome::Ocean => current,
+            Biome::Plains
+            | Biome::Forest
+            | Biome::Jungle
+            | Biome::Beach
+            | Biome::Desert
+            | Biome::Savanna
+            | Biome::Ocean => current,
         }
     }
 
@@ -1179,7 +1191,7 @@ impl TerrainGenerator {
         let wz = chunk.pos.z * CHUNK_SIZE_I + lz as i32;
         let height_roll = column_rand(self.seed ^ 0xB05A_1001, wx, wz);
         let lean_roll = column_rand(self.seed ^ 0xB05A_2002, wx, wz);
-        let trunk_h = 7 + (height_roll * 3.0) as i32;
+        let trunk_h = 8 + (height_roll * 4.0) as i32;
         if base_y < origin_y || base_y + trunk_h + 4 >= origin_y + CHUNK_SIZE_I {
             return false;
         }
@@ -1232,11 +1244,12 @@ impl TerrainGenerator {
         } else {
             leaf_kind
         };
-        let tiers: [(i32, i32, i32, i32); 5] = [
-            (0, 0, trunk_h - 1, 3),
-            (-2, 0, trunk_h - 2, 2),
-            (2, 1, trunk_h, 2),
-            (0, -2, trunk_h + 1, 2),
+        let tiers: [(i32, i32, i32, i32); 6] = [
+            (0, 0, trunk_h - 1, 4),
+            (-3, 0, trunk_h - 2, 3),
+            (3, 1, trunk_h, 3),
+            (0, -3, trunk_h + 1, 3),
+            (2, -2, trunk_h + 2, 2),
             (0, 0, trunk_h + 3, 1),
         ];
         for (ox, oz, dy, radius) in tiers {
@@ -2806,6 +2819,45 @@ mod tests {
             lush.tree_height_for_biome(Biome::Forest, 0.4).1,
             BlockType::BlossomLeaves
         );
+    }
+
+    #[test]
+    fn natural_grass_surface_detail_does_not_create_dark_single_patch_noise() {
+        let generator = TerrainGenerator::new(12345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush);
+        let mut checked = 0;
+
+        for z in (-512..=512).step_by(13) {
+            for x in (-512..=512).step_by(11) {
+                for biome in [Biome::Plains, Biome::Forest, Biome::Jungle] {
+                    checked += 1;
+                    let detail = generator.surface_detail_block(biome, BlockType::Grass, 0, x, z);
+                    assert!(
+                        !matches!(detail, BlockType::Dirt | BlockType::MossStone),
+                        "lush natural grass at {x},{z} should not turn into dark isolated patch noise"
+                    );
+                }
+            }
+        }
+
+        assert!(checked > 10_000);
+    }
+
+    #[test]
+    fn lush_plains_and_forests_get_large_blossom_tree_scale() {
+        let lush = TerrainGenerator::new(12345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush);
+
+        let (plains_h, plains_leaves) = lush.tree_height_for_biome(Biome::Plains, 0.40);
+        let (forest_h, forest_leaves) = lush.tree_height_for_biome(Biome::Forest, 0.40);
+
+        assert!(plains_h >= 9, "lush plains bonsai should not be tiny");
+        assert!(
+            forest_h >= 9,
+            "lush forest bonsai should read as a real canopy"
+        );
+        assert_eq!(plains_leaves, BlockType::BlossomLeaves);
+        assert_eq!(forest_leaves, BlockType::BlossomLeaves);
     }
 }
 
