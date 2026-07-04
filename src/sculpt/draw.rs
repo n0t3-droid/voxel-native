@@ -572,7 +572,9 @@ pub fn rect_draw_input(
         motion_evr.clear();
         return;
     };
-    let screen_snap = if cursor_locked {
+    let screen_snap = if cursor_locked
+        && !editor_pointer_ray_available(active_tool, cursor_locked, cursor_position)
+    {
         None
     } else {
         cursor_position
@@ -1087,7 +1089,7 @@ fn draw_input_ray(
     camera: &Camera,
     camera_tf: &GlobalTransform,
 ) -> Option<(Vec3, Vec3)> {
-    if matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt) && !cursor_locked {
+    if editor_pointer_ray_available(active_tool, cursor_locked, cursor_position) {
         if let Some(ray) =
             cursor_position.and_then(|cursor| camera.viewport_to_world(camera_tf, cursor))
         {
@@ -1095,6 +1097,15 @@ fn draw_input_ray(
         }
     }
     Some((camera_tf.translation(), camera_tf.forward().as_vec3()))
+}
+
+fn editor_pointer_ray_available(
+    active_tool: ToolbeltTool,
+    _cursor_locked: bool,
+    cursor_position: Option<Vec2>,
+) -> bool {
+    matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
+        && cursor_position.is_some()
 }
 
 fn rect_draw_endpoint_updates(smart_gesture: bool, right_held: bool) -> bool {
@@ -3942,6 +3953,18 @@ mod tests {
         assert!((first.length() - radius).abs() < 0.0001);
         assert!((rotated.length() - radius).abs() < 0.0001);
         assert_ne!(first, rotated);
+    }
+
+    #[test]
+    fn draw_rect_prefers_visible_cursor_when_windows_confines_pointer() {
+        assert!(
+            editor_pointer_ray_available(
+                ToolbeltTool::DrawRect,
+                true,
+                Some(Vec2::new(1420.0, 730.0))
+            ),
+            "Sketch drawing must use the visible mouse position even when Windows reports a confined cursor"
+        );
     }
 
     #[test]

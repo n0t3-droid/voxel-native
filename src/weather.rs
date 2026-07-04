@@ -56,8 +56,8 @@ fn fog_recipe(
     let rd_blocks = (render_distance_chunks.max(8) as f32) * CHUNK_WORLD_SIZE;
 
     if weather_density <= 0.001 {
-        let end = (rd_blocks * 0.96).clamp(220.0, 980.0);
-        let start = (rd_blocks * 0.55).clamp(120.0, end - 80.0);
+        let end = (rd_blocks * 1.75).clamp(900.0, 2200.0);
+        let start = (rd_blocks * 0.92).clamp(500.0, end - 260.0);
         return FogRecipe {
             weather_density,
             start,
@@ -65,9 +65,9 @@ fn fog_recipe(
         };
     }
 
-    let end_factor = 0.35 + (1.0 - weather_density) * 0.55;
-    let end = (rd_blocks * end_factor).clamp(70.0, 900.0);
-    let start = (end * 0.25).clamp(18.0, end - 40.0);
+    let end_factor = 0.62 + (1.0 - weather_density) * 0.72;
+    let end = (rd_blocks * end_factor).clamp(260.0, 1800.0);
+    let start = (end * 0.36).clamp(120.0, end - 160.0);
     FogRecipe {
         weather_density,
         start,
@@ -292,7 +292,14 @@ mod tests {
         let recipe = fog_recipe(0.0, 40, 1.0, 1.0, 1.0);
 
         assert!(recipe.end < 10_000.0);
-        assert!(recipe.start > 100.0);
+        assert!(
+            recipe.start >= 500.0,
+            "clear weather should not hide nearby mountains behind early fog"
+        );
+        assert!(
+            recipe.end >= 1000.0,
+            "clear weather should leave long-distance terrain readable"
+        );
         assert!(recipe.end > recipe.start);
     }
 
@@ -304,5 +311,13 @@ mod tests {
         assert!(foggy.weather_density > clear.weather_density);
         assert!(foggy.end < clear.end);
         assert!(foggy.start < clear.start);
+        assert!(
+            foggy.end >= 420.0,
+            "heavy fog should still be playable at max chunk distance"
+        );
+        assert!(
+            foggy.start >= 130.0,
+            "heavy fog should not wash out everything right in front of the player"
+        );
     }
 }

@@ -116,6 +116,23 @@ struct SkyMaterials {
     nebula: Handle<StandardMaterial>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SkyShowcasePolicy {
+    nebula: bool,
+    second_moon: bool,
+    ringed_planet: bool,
+    second_planet: bool,
+}
+
+fn default_sky_showcase_policy() -> SkyShowcasePolicy {
+    SkyShowcasePolicy {
+        nebula: false,
+        second_moon: false,
+        ringed_planet: false,
+        second_planet: false,
+    }
+}
+
 fn setup_sky(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -133,6 +150,7 @@ fn setup_sky(
         GraphicsMode::Balanced => (512, 3200),
         GraphicsMode::High => (1024, 5200),
     };
+    let showcase = default_sky_showcase_policy();
 
     // ----- Sky camera --------------------------------------------------
     // order = -1 → renders BEFORE the world camera in `player.rs` and
@@ -296,18 +314,20 @@ fn setup_sky(
         double_sided: true,
         ..default()
     });
-    commands.spawn((
-        PbrBundle {
-            mesh: nebula_mesh,
-            material: nebula_mat.clone(),
-            transform: Transform::IDENTITY,
-            ..default()
-        },
-        NotShadowCaster,
-        sky_layer.clone(),
-        Nebula,
-        Name::new("Nebula"),
-    ));
+    if showcase.nebula {
+        commands.spawn((
+            PbrBundle {
+                mesh: nebula_mesh,
+                material: nebula_mat.clone(),
+                transform: Transform::IDENTITY,
+                ..default()
+            },
+            NotShadowCaster,
+            sky_layer.clone(),
+            Nebula,
+            Name::new("Nebula"),
+        ));
+    }
 
     // ----- Second (smaller) moon --------------------------------------
     // Slightly offset from the main moon to create the paired-crescent
@@ -324,17 +344,19 @@ fn setup_sky(
         unlit: true,
         ..default()
     });
-    commands.spawn((
-        PbrBundle {
-            mesh: moon_b_mesh,
-            material: moon_b_mat.clone(),
-            ..default()
-        },
-        NotShadowCaster,
-        sky_layer.clone(),
-        MoonDiscB,
-        Name::new("MoonDiscB"),
-    ));
+    if showcase.second_moon {
+        commands.spawn((
+            PbrBundle {
+                mesh: moon_b_mesh,
+                material: moon_b_mat.clone(),
+                ..default()
+            },
+            NotShadowCaster,
+            sky_layer.clone(),
+            MoonDiscB,
+            Name::new("MoonDiscB"),
+        ));
+    }
 
     // ----- Ringed gas-giant planet ------------------------------------
     // Parked in a fixed sky direction; doesn't track the sun. Serves as
@@ -369,37 +391,39 @@ fn setup_sky(
     // horizon without blocking gameplay sight-lines.
     let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
     let planet_pos = planet_dir * SKY_DISTANCE * 0.9;
-    commands
-        .spawn((
-            PbrBundle {
-                mesh: planet_mesh,
-                material: planet_mat.clone(),
-                transform: Transform::from_translation(planet_pos)
-                    // Fixed tilt — ring plane tipped toward the viewer.
-                    // Never rotates (planets are stationary landmarks).
-                    .with_rotation(Quat::from_rotation_x(0.55) * Quat::from_rotation_z(-0.18)),
-                ..default()
-            },
-            NotShadowCaster,
-            sky_layer.clone(),
-            RingedPlanet,
-            Name::new("RingedPlanet"),
-        ))
-        .with_children(|p| {
-            p.spawn((
+    if showcase.ringed_planet {
+        commands
+            .spawn((
                 PbrBundle {
-                    mesh: ring_mesh,
-                    material: ring_mat.clone(),
-                    transform: Transform::from_rotation(Quat::from_rotation_x(
-                        std::f32::consts::FRAC_PI_2,
-                    )),
+                    mesh: planet_mesh,
+                    material: planet_mat.clone(),
+                    transform: Transform::from_translation(planet_pos)
+                        // Fixed tilt — ring plane tipped toward the viewer.
+                        // Never rotates (planets are stationary landmarks).
+                        .with_rotation(Quat::from_rotation_x(0.55) * Quat::from_rotation_z(-0.18)),
                     ..default()
                 },
                 NotShadowCaster,
                 sky_layer.clone(),
-                Name::new("RingedPlanet.Ring"),
-            ));
-        });
+                RingedPlanet,
+                Name::new("RingedPlanet"),
+            ))
+            .with_children(|p| {
+                p.spawn((
+                    PbrBundle {
+                        mesh: ring_mesh,
+                        material: ring_mat.clone(),
+                        transform: Transform::from_rotation(Quat::from_rotation_x(
+                            std::f32::consts::FRAC_PI_2,
+                        )),
+                        ..default()
+                    },
+                    NotShadowCaster,
+                    sky_layer.clone(),
+                    Name::new("RingedPlanet.Ring"),
+                ));
+            });
+    }
 
     // ----- Second planet (ice-teal gas giant) -------------------------
     // Parked low on the opposite horizon. Smaller, cooler-coloured,
@@ -417,19 +441,21 @@ fn setup_sky(
         ..default()
     });
     let planet_b_dir = Vec3::new(-0.72, 0.28, 0.55).normalize();
-    commands.spawn((
-        PbrBundle {
-            mesh: planet_b_mesh,
-            material: planet_b_mat.clone(),
-            transform: Transform::from_translation(planet_b_dir * SKY_DISTANCE * 0.88)
-                .with_rotation(Quat::from_rotation_x(0.2)),
-            ..default()
-        },
-        NotShadowCaster,
-        sky_layer.clone(),
-        PlanetB,
-        Name::new("PlanetB"),
-    ));
+    if showcase.second_planet {
+        commands.spawn((
+            PbrBundle {
+                mesh: planet_b_mesh,
+                material: planet_b_mat.clone(),
+                transform: Transform::from_translation(planet_b_dir * SKY_DISTANCE * 0.88)
+                    .with_rotation(Quat::from_rotation_x(0.2)),
+                ..default()
+            },
+            NotShadowCaster,
+            sky_layer.clone(),
+            PlanetB,
+            Name::new("PlanetB"),
+        ));
+    }
 
     commands.insert_resource(SkyMaterials {
         sun: sun_mat,
@@ -942,4 +968,19 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
         ..ImageSamplerDescriptor::linear()
     });
     image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_sky_keeps_only_realistic_sun_moon() {
+        let policy = default_sky_showcase_policy();
+
+        assert!(!policy.nebula);
+        assert!(!policy.second_moon);
+        assert!(!policy.ringed_planet);
+        assert!(!policy.second_planet);
+    }
 }
