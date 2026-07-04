@@ -207,6 +207,7 @@ fn build_tool_needs_semantic_hover(tool: Option<ToolbeltTool>) -> bool {
         tool,
         Some(
             ToolbeltTool::Navigate
+                | ToolbeltTool::DrawRect
                 | ToolbeltTool::TransformMove
                 | ToolbeltTool::TransformScale
                 | ToolbeltTool::TransformRotate
@@ -240,6 +241,44 @@ fn semantic_hover_active(
             || editor_tool_needs_semantic_hover(active_editor_tool))
 }
 
+fn semantic_hover_uses_pointer_ray(
+    build_tool: Option<ToolbeltTool>,
+    active_editor_tool: crate::sketch_model::EditorToolId,
+    cursor_locked: bool,
+) -> bool {
+    !cursor_locked
+        && (matches!(
+            build_tool,
+            Some(
+                ToolbeltTool::Navigate
+                    | ToolbeltTool::DrawRect
+                    | ToolbeltTool::TransformMove
+                    | ToolbeltTool::TransformScale
+                    | ToolbeltTool::TransformRotate
+                    | ToolbeltTool::MaterialPicker
+            )
+        ) || editor_tool_needs_semantic_hover(active_editor_tool))
+}
+
+fn semantic_hover_ray(
+    mode: &ModeContext,
+    active_editor_tool: crate::sketch_model::EditorToolId,
+    window: Option<&bevy::window::Window>,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+) -> Option<(Vec3, Vec3)> {
+    let cursor_locked = window.map(crate::mode::cursor_is_captured).unwrap_or(false);
+    if semantic_hover_uses_pointer_ray(mode.build_tool(), active_editor_tool, cursor_locked) {
+        if let Some(ray) = window
+            .and_then(|window| window.cursor_position())
+            .and_then(|cursor| camera.viewport_to_world(cam_tf, cursor))
+        {
+            return Some((ray.origin, *ray.direction));
+        }
+    }
+    Some((cam_tf.translation(), cam_tf.forward().as_vec3()))
+}
+
 /// Update [`SculptState::hover`] each frame from the camera ray. Runs
 /// only when the sculpt tool is live; resets hover to `None` otherwise
 /// so stale highlights don't bleed into other tools.
@@ -249,7 +288,8 @@ pub fn update_hover(
     drag: Res<PushPullDrag>,
     tool_controller: Res<crate::sketch_model::ToolController>,
     world: Res<VoxelWorld>,
-    cam_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
+    windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+    cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
     mut state: ResMut<SculptState>,
 ) {
     // Don't re-flood while a drag is locked — the face cells are pinned
@@ -264,13 +304,18 @@ pub fn update_hover(
         }
         return;
     }
-    let Ok(cam_tf) = cam_q.get_single() else {
+    let Ok((camera, cam_tf)) = cam_q.get_single() else {
         state.hover = None;
         return;
     };
 
-    let origin = cam_tf.translation();
-    let dir = cam_tf.forward().as_vec3();
+    let window = windows.get_single().ok();
+    let Some((origin, dir)) =
+        semantic_hover_ray(&mode, tool_controller.active_tool(), window, camera, cam_tf)
+    else {
+        state.hover = None;
+        return;
+    };
     if let Some((hit, prev)) = dda_voxel(&world, origin, dir, SCULPT_RAY_REACH) {
         state.hover = Some(HoverHit { voxel: hit, prev });
         state.mode = SculptMode::PushPull;
@@ -317,13 +362,37 @@ pub fn resolve_hover_face(
     semantic_hover.0 = hover_face
         .0
         .as_ref()
-        .and_then(|region| semantic_hover_hit_from_region(region, &sketch_links));
+        .and_then(|region| semantic_hover_hit_from_region_cell(region, &sketch_links, hit.voxel));
 }
 
 fn semantic_hover_hit_from_region(
     region: &FaceRegion,
     sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
 ) -> Option<crate::sketch_model::HitRecord> {
+    let cell = *region.cells.first()?;
+    semantic_hover_hit_from_region_cell(region, sketch_links, cell)
+}
+
+fn semantic_hover_hit_from_region_cell(
+    region: &FaceRegion,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    preferred_cell: IVec3,
+) -> Option<crate::sketch_model::HitRecord> {
+    if region.cells.contains(&preferred_cell) {
+        let world_point = Vec3::new(
+            preferred_cell.x as f32 + 0.5,
+            preferred_cell.y as f32 + 0.5,
+            preferred_cell.z as f32 + 0.5,
+        );
+        if let Some(hit) =
+            sketch_links.hit_for_face(preferred_cell, region.normal, world_point, 0.0)
+        {
+            return Some(hit);
+        }
+        if let Some(hit) = sketch_links.hit_for_cell(preferred_cell, world_point, 0.0) {
+            return Some(hit);
+        }
+    }
     let cell = *region.cells.first()?;
     let world_point = Vec3::new(
         cell.x as f32 + 0.5,
@@ -1424,7 +1493,12 @@ mod tests {
 
     #[test]
     fn semantic_hover_runs_for_select_and_transform_tools() {
-        assert!(build_tool_needs_semantic_hover(Some(ToolbeltTool::Navigate)));
+        assert!(build_tool_needs_semantic_hover(Some(
+            ToolbeltTool::Navigate
+        )));
+        assert!(build_tool_needs_semantic_hover(Some(
+            ToolbeltTool::DrawRect
+        )));
         assert!(build_tool_needs_semantic_hover(Some(
             ToolbeltTool::TransformMove
         )));
@@ -1437,7 +1511,6 @@ mod tests {
         assert!(build_tool_needs_semantic_hover(Some(
             ToolbeltTool::MaterialPicker
         )));
-        assert!(!build_tool_needs_semantic_hover(Some(ToolbeltTool::DrawRect)));
 
         assert!(editor_tool_needs_semantic_hover(
             crate::sketch_model::EditorToolId::Select
@@ -1456,6 +1529,30 @@ mod tests {
         ));
         assert!(!editor_tool_needs_semantic_hover(
             crate::sketch_model::EditorToolId::Rectangle
+        ));
+    }
+
+    #[test]
+    fn semantic_hover_uses_visible_pointer_for_mouse_first_editor_tools() {
+        assert!(semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::DrawRect),
+            crate::sketch_model::EditorToolId::Rectangle,
+            false
+        ));
+        assert!(semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::Navigate),
+            crate::sketch_model::EditorToolId::Select,
+            false
+        ));
+        assert!(semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::TransformMove),
+            crate::sketch_model::EditorToolId::Move,
+            false
+        ));
+        assert!(!semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::DrawRect),
+            crate::sketch_model::EditorToolId::Rectangle,
+            true
         ));
     }
 
@@ -1634,6 +1731,46 @@ mod tests {
         assert_eq!(hit.kind, crate::sketch_model::HitKind::Face);
         assert_eq!(hit.world_point, Vec3::new(4.5, 5.5, 6.5));
         assert_eq!(hit.normal, Some(Vec3::Y));
+    }
+
+    #[test]
+    fn semantic_hover_hit_prefers_cursor_cell_inside_large_face_region() {
+        let stone = Voxel::from(BlockType::Stone);
+        let first = crate::sketch_model::SketchId::new_for_test(30);
+        let preferred = crate::sketch_model::SketchId::new_for_test(31);
+        let context = crate::sketch_model::SketchId::new_for_test(2);
+        let normal = IVec3::Y;
+        let mut links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        links.link_face_cell(
+            IVec3::new(0, 5, 0),
+            normal,
+            crate::sketch_model::SketchVoxelLink::new(
+                first,
+                context,
+                crate::sketch_model::SketchVoxelLinkRole::Face,
+            ),
+        );
+        links.link_face_cell(
+            IVec3::new(9, 5, 0),
+            normal,
+            crate::sketch_model::SketchVoxelLink::new(
+                preferred,
+                context,
+                crate::sketch_model::SketchVoxelLinkRole::Face,
+            ),
+        );
+        let region = FaceRegion {
+            cells: vec![IVec3::new(0, 5, 0), IVec3::new(9, 5, 0)],
+            voxel: stone,
+            normal,
+            clipped: false,
+        };
+
+        let hit = semantic_hover_hit_from_region_cell(&region, &links, IVec3::new(9, 5, 0))
+            .expect("preferred semantic hover hit");
+
+        assert_eq!(hit.entity, preferred);
+        assert_eq!(hit.world_point, Vec3::new(9.5, 5.5, 0.5));
     }
 
     #[test]

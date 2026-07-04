@@ -127,6 +127,13 @@ renders small colored input-point markers plus an axis guide, and Pencil can
 use arrow-key axis locks: Right = X, Left = Z, Up = Y height, Down = clear.
 When Pencil leaves the original face plane through an axis lock, its voxel
 stroke uses a 3D line path instead of collapsing back onto the old plane.
+The latest cursor-alignment pass also makes unlocked mouse mode feed Draw and
+Select semantic hover from the real pointer ray instead of the center
+crosshair. Pencil semantic edges now store the same center points shown by the
+gizmos, and semantic hover prefers the exact voxel cell under the cursor before
+using a broader face/stroke fallback. This directly targets the reported issue
+where the visible mouse pointer sat on one block while the blue alignment
+preview attached to another block.
 The status readout now names the active reference explicitly, for example
 `Endpoint | same height line Y 8 -> 13`, `Midpoint | red X line 4 -> 9`, or
 `Face center | equal length`, so users can see whether the current point is
@@ -160,9 +167,10 @@ and geometry/bounds updates for faces, curves, openings, rooms, and extrusions.
   first-pass raster tools and need real curve editing, face splitting, and
   component-aware geometry.
 - The builder still needs stronger endpoint/midpoint/face-center inference for
-  all drafting tools. Pencil/Sketch Draw now has first live input-point markers
-  and arrow locks, but Push/Pull, Move, Scale, Rotate, Opening, and every
-  advanced draw tool still need the same universal pipeline.
+  all drafting tools. Pencil/Sketch Draw now has first live input-point markers,
+  pointer-ray semantic hover, preferred-cell hover, and arrow locks, but
+  Push/Pull, Move, Scale, Rotate, Opening, and every advanced draw tool still
+  need the same universal pipeline.
 - The new screen-space snap and skew-line locking math is tested in
   `sketch_model`, but only the first Pencil/Sketch Draw path consumes axis
   locking live. The remaining tools still need to consume it per frame and draw

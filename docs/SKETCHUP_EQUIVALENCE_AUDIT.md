@@ -19,10 +19,10 @@ not mean the feature behaves like SketchUp yet.
 | Area | Status | Current evidence | Not exact yet |
 |---|---|---|---|
 | Document/entity model | Partial | `SketchDocument`, contexts, entities, materials, tags, styles, scenes, snapshots | No full SketchUp model graph, outliner UX, section scene binding, or import/export semantic parity |
-| Selection and hit records | Partial | `SelectionSet`, `HitRecord`, instance paths, semantic hover hit, and cell-level `SketchVoxelLinkIndex::hit_for_cell` fallback for drawn strokes | No crossing-window selection, hidden/locked filters, nested pick priority, soft/smooth surface selection |
+| Selection and hit records | Partial | `SelectionSet`, `HitRecord`, instance paths, semantic hover hit, cell-level `SketchVoxelLinkIndex::hit_for_cell` fallback for drawn strokes, and preferred-cell hover resolution so large faces/strokes use the voxel under the cursor first | No crossing-window selection, hidden/locked filters, nested pick priority, soft/smooth surface selection |
 | Raw picking | Started | `PickService` ranks raw `HitRecord`s by distance and hit kind without inference bias | Not yet wired as the universal live picking layer for every tool |
 | Screen-space snap | Started | `project_world_to_screen`, `screen_space_inference_candidates`, and `best_screen_space_inference` project candidates through a view-projection matrix and rank by SketchUp-style kind priority plus screen distance/sticky boost | No BVH/octree broadphase yet; no depth-buffer occlusion test; not yet wired to every live tool overlay |
-| Inference/InputPoint | Partial | `InferenceService::from_pick` now converts a raw pick into ranked endpoint/midpoint/face/on-edge/axis/from-point candidates; Pencil/Sketch Draw stores live start/current input points, shows colored markers, and reports explicit alignment text such as endpoint/midpoint/face-center plus axis/reference length | Missing full parallel/perpendicular/intersection solving, cursor-near tooltip parity, ambiguity resolution, and live lock UX everywhere |
+| Inference/InputPoint | Partial | `InferenceService::from_pick` now converts a raw pick into ranked endpoint/midpoint/face/on-edge/axis/from-point candidates; Pencil/Sketch Draw consumes semantic hover under the visible mouse cursor, stores live center-point start/current input points, shows colored markers, and reports explicit alignment text such as endpoint/midpoint/face-center plus axis/reference length | Missing full parallel/perpendicular/intersection solving, cursor-near tooltip parity, ambiguity resolution, and live lock UX everywhere |
 | Inference locking | Started | `closest_point_on_locked_axis_from_ray` implements the skew-line projection needed for Shift/arrow axis locks; Pencil now supports Right=X, Left=Z, Up=Y height, Down=clear with visible axis guide | Not yet connected to every editor tool, and Shift pre-lock/reference chaining is still incomplete |
 | Rectangle plane orientation | Started | `rectangle_plane_from_view_or_face` chooses locked axis, hovered face normal, or dominant view axis and returns an orthonormal drawing basis | Live Rectangle still needs full screen-space snap and measurement UI wiring |
 | Tool controller | Partial | `ToolController` tracks active tool, phase, selection, inference lock, transaction label, and house guide | Not a complete SketchUp `Tool` event interface yet; no typed measurement parser for every tool |
@@ -66,12 +66,26 @@ not mean the feature behaves like SketchUp yet.
   Opening, Room, House, Roads, Bots, city shell, landscape, skyline, and
   spacecraft remain available through hover flyouts/full drawers instead of
   competing with the first building gestures.
+- Fixed a major cursor/alignment mismatch in the live editor path: when the
+  cursor is visible/unlocked, Draw/Select-style semantic hover now uses the
+  actual pointer ray instead of the camera crosshair ray.
+- Fixed semantic hover on larger drawn regions to prefer the hovered voxel cell
+  before falling back to a generic face/stroke hit. This prevents the blue
+  preview/selection box from jumping to the first stored cell on the same
+  semantic object.
+- Updated Pencil semantic line records to store the same visible center points
+  used by gizmo markers, avoiding the half-voxel offset between drawn strokes,
+  later endpoint/midpoint inference, and selection/move previews.
+- Added unit coverage for nearest endpoint preference, midpoint preference,
+  semantic axis-lock projection, visible-pointer semantic hover, and preferred
+  cell hover resolution.
 
 ## Next Highest-Value Work
 
 1. Replace the remaining voxel-first hover helpers with `PickService`,
-   screen-space snap, and `InferenceService::from_pick` in Rectangle,
-   Push/Pull, Opening, Move, Scale, and Rotate.
+   screen-space snap, and `InferenceService::from_pick` in Push/Pull, Opening,
+   Move, Scale, Rotate, and every advanced draw shape. Pencil/Rectangle now
+   consume the first semantic hover path but are still not full SketchUp tools.
 2. Add an overlay painter for green/cyan/red/blue inference points, edge highlights, axis locks,
    and tooltip text near the cursor.
 3. Convert Pencil/Rectangle/Opening from direct voxel-first commits to semantic

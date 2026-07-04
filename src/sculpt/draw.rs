@@ -30,6 +30,7 @@ const RECT_AXIS_JITTER: i32 = 1;
 const RECT_AXIS_RATIO: f32 = 3.0;
 const RECT_EQUAL_LENGTH_TOLERANCE: i32 = 2;
 const RECT_FACE_SNAP_RADIUS: f32 = 0.30;
+const SEMANTIC_DRAW_POINT_RADIUS: f32 = 1.25;
 
 #[derive(Resource, Default)]
 pub struct RectDrawState {
@@ -105,6 +106,13 @@ struct RectFaceInputPoint {
     kind: Option<RectFaceSnapKind>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SemanticDrawInputPoint {
+    cell: IVec3,
+    point: Vec3,
+    kind: RectFaceSnapKind,
+}
+
 impl RectEndpointInference {
     fn status_suffix(self) -> &'static str {
         match self {
@@ -151,6 +159,17 @@ fn rect_face_snap_inference_kind(
         RectFaceSnapKind::Endpoint => crate::sketch_model::InferenceKind::Endpoint,
         RectFaceSnapKind::Midpoint => crate::sketch_model::InferenceKind::Midpoint,
         RectFaceSnapKind::FaceCenter => crate::sketch_model::InferenceKind::FaceCenter,
+    }
+}
+
+fn rect_face_snap_from_inference_kind(
+    kind: crate::sketch_model::InferenceKind,
+) -> Option<RectFaceSnapKind> {
+    match kind {
+        crate::sketch_model::InferenceKind::Endpoint => Some(RectFaceSnapKind::Endpoint),
+        crate::sketch_model::InferenceKind::Midpoint => Some(RectFaceSnapKind::Midpoint),
+        crate::sketch_model::InferenceKind::FaceCenter => Some(RectFaceSnapKind::FaceCenter),
+        _ => None,
     }
 }
 
@@ -464,6 +483,7 @@ pub fn rect_draw_input(
     mode: Res<ModeContext>,
     mut toolbelt: ResMut<ToolbeltState>,
     ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
+    semantic_hover: Res<crate::sketch_model::SemanticHoverHit>,
     mut draw: ResMut<RectDrawState>,
     mut gesture_lock: ResMut<BuildGestureLock>,
     mut world: ResMut<VoxelWorld>,
@@ -472,8 +492,10 @@ pub fn rect_draw_input(
     mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
     mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
     builder: Res<BuilderState>,
-    windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
-    cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
+    mut view_q: ParamSet<(
+        Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+        Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
+    )>,
 ) {
     if !draw_rect_active(&mode, &keys, &draw) {
         if draw.active {
@@ -524,8 +546,14 @@ pub fn rect_draw_input(
         return;
     }
 
-    let window = windows.get_single().ok();
-    let cursor_locked = window.map(crate::mode::cursor_is_captured).unwrap_or(false);
+    let (cursor_locked, cursor_position) = {
+        let window_q = view_q.p0();
+        let window = window_q.get_single().ok();
+        (
+            window.map(crate::mode::cursor_is_captured).unwrap_or(false),
+            window.and_then(|window| window.cursor_position()),
+        )
+    };
     if smart_tool && !cursor_locked {
         if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {
             toolbelt.status =
@@ -535,6 +563,7 @@ pub fn rect_draw_input(
         return;
     }
 
+    let cam_q = view_q.p1();
     let Ok((camera, cam_tf)) = cam_q.get_single() else {
         if mouse.just_pressed(MouseButton::Left) {
             toolbelt.status = "Smart Build could not find the player camera this frame.".into();
@@ -542,7 +571,8 @@ pub fn rect_draw_input(
         motion_evr.clear();
         return;
     };
-    let Some((origin, dir)) = draw_input_ray(active_tool, cursor_locked, window, camera, cam_tf)
+    let Some((origin, dir)) =
+        draw_input_ray(active_tool, cursor_locked, cursor_position, camera, cam_tf)
     else {
         if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {
             toolbelt.status =
@@ -615,15 +645,30 @@ pub fn rect_draw_input(
         if let Some(input) = start_input {
             start = apply_face_input_point_to_cell(start, input, axis_u, axis_v);
         }
+        let semantic_start = semantic_draw_input_point(
+            &sketch_doc,
+            semantic_hover.0.as_ref(),
+            start_input.map(|input| input.point),
+            start,
+            normal,
+            axis_u,
+            axis_v,
+            pencil_line,
+        );
+        if let Some(input) = semantic_start {
+            start = input.cell;
+        }
         draw.start = start;
         draw.current = start;
-        draw.start_point = if pencil_line {
-            pencil_cell_marker_point(start)
-        } else {
-            start_input
-                .map(|input| input.point)
-                .unwrap_or_else(|| start.as_vec3())
-        };
+        draw.start_point = semantic_start.map(|input| input.point).unwrap_or_else(|| {
+            if pencil_line {
+                pencil_cell_marker_point(start)
+            } else {
+                start_input
+                    .map(|input| input.point)
+                    .unwrap_or_else(|| start.as_vec3())
+            }
+        });
         draw.current_point = draw.start_point;
         draw.normal = normal;
         draw.axis_u = axis_u;
@@ -636,7 +681,9 @@ pub fn rect_draw_input(
         draw.pencil_line = pencil_line;
         draw.shape_workflow = shape_workflow;
         draw.inference = RectEndpointInference::None;
-        draw.snap_kind = start_input.and_then(|input| input.kind);
+        draw.snap_kind = semantic_start
+            .map(|input| input.kind)
+            .or_else(|| start_input.and_then(|input| input.kind));
         draw.start_snap_kind = draw.snap_kind;
         draw.axis_lock = None;
         draw.tool_generation = toolbelt.selection_generation();
@@ -695,7 +742,28 @@ pub fn rect_draw_input(
                 draw.motion_len += ev.delta.length();
             }
             if draw.pencil_line && draw.axis_lock.is_some() {
-                if let Some(endpoint) =
+                let semantic_reference =
+                    dda_voxel(&world, origin, dir, DRAW_REACH).and_then(|(hit, prev)| {
+                        rect_face_input_point(origin, dir, hit, prev).map(|input| input.point)
+                    });
+                let semantic_input = semantic_draw_input_point(
+                    &sketch_doc,
+                    semantic_hover.0.as_ref(),
+                    semantic_reference,
+                    draw.start,
+                    draw.normal,
+                    draw.axis_u,
+                    draw.axis_v,
+                    true,
+                );
+                if let (Some(axis_lock), Some(input)) = (draw.axis_lock, semantic_input) {
+                    let (endpoint, point) =
+                        semantic_axis_locked_endpoint(draw.start, input, axis_lock);
+                    draw.current = endpoint;
+                    draw.current_point = point;
+                    draw.inference = RectEndpointInference::Axis;
+                    draw.snap_kind = Some(input.kind);
+                } else if let Some(endpoint) =
                     snap_pencil_endpoint_to_axis_from_ray(draw.start, draw.axis_lock, origin, dir)
                 {
                     draw.current = endpoint;
@@ -705,7 +773,19 @@ pub fn rect_draw_input(
                 }
             } else if let Some((hit, prev)) = dda_voxel(&world, origin, dir, DRAW_REACH) {
                 let input = rect_face_input_point(origin, dir, hit, prev);
-                draw.snap_kind = input.and_then(|input| input.kind);
+                let semantic_input = semantic_draw_input_point(
+                    &sketch_doc,
+                    semantic_hover.0.as_ref(),
+                    input.map(|input| input.point),
+                    draw.start,
+                    draw.normal,
+                    draw.axis_u,
+                    draw.axis_v,
+                    draw.pencil_line,
+                );
+                draw.snap_kind = semantic_input
+                    .map(|input| input.kind)
+                    .or_else(|| input.and_then(|input| input.kind));
                 let endpoint = if draw.pencil_line {
                     snap_pencil_endpoint_to_locked_plane_from_ray(
                         draw.start,
@@ -734,6 +814,7 @@ pub fn rect_draw_input(
                         apply_face_input_point_to_cell(endpoint, input, draw.axis_u, draw.axis_v)
                     })
                     .unwrap_or(endpoint);
+                let endpoint = semantic_input.map(|input| input.cell).unwrap_or(endpoint);
                 let endpoint = apply_axis_lock_to_endpoint(draw.start, endpoint, draw.axis_lock);
                 let (endpoint, inference) = if draw.axis_lock.is_some() {
                     (endpoint, RectEndpointInference::Axis)
@@ -749,11 +830,26 @@ pub fn rect_draw_input(
                 draw.current = endpoint;
                 draw.inference = inference;
                 draw.current_point = if draw.pencil_line {
-                    pencil_cell_marker_point(endpoint)
+                    semantic_input
+                        .filter(|input| {
+                            input.cell == endpoint && inference == RectEndpointInference::None
+                        })
+                        .map(|input| input.point)
+                        .unwrap_or_else(|| pencil_cell_marker_point(endpoint))
                 } else {
-                    input
-                        .map(|input| {
-                            project_face_point_to_locked_plane(input.point, draw.start, draw.normal)
+                    semantic_input
+                        .filter(|input| {
+                            input.cell == endpoint && inference == RectEndpointInference::None
+                        })
+                        .map(|input| input.point)
+                        .or_else(|| {
+                            input.map(|input| {
+                                project_face_point_to_locked_plane(
+                                    input.point,
+                                    draw.start,
+                                    draw.normal,
+                                )
+                            })
                         })
                         .unwrap_or_else(|| endpoint.as_vec3())
                 };
@@ -765,6 +861,17 @@ pub fn rect_draw_input(
                 origin,
                 dir,
             ) {
+                let semantic_input = semantic_draw_input_point(
+                    &sketch_doc,
+                    semantic_hover.0.as_ref(),
+                    Some(pencil_cell_marker_point(endpoint)),
+                    draw.start,
+                    draw.normal,
+                    draw.axis_u,
+                    draw.axis_v,
+                    draw.pencil_line,
+                );
+                let endpoint = semantic_input.map(|input| input.cell).unwrap_or(endpoint);
                 let endpoint = apply_axis_lock_to_endpoint(draw.start, endpoint, draw.axis_lock);
                 let (endpoint, inference) = if draw.axis_lock.is_some() {
                     (endpoint, RectEndpointInference::Axis)
@@ -779,8 +886,13 @@ pub fn rect_draw_input(
                 };
                 draw.current = endpoint;
                 draw.inference = inference;
-                draw.current_point = endpoint.as_vec3();
-                draw.snap_kind = None;
+                draw.current_point = semantic_input
+                    .filter(|input| {
+                        input.cell == endpoint && inference == RectEndpointInference::None
+                    })
+                    .map(|input| input.point)
+                    .unwrap_or_else(|| endpoint.as_vec3());
+                draw.snap_kind = semantic_input.map(|input| input.kind);
             }
             let raw_cells = draw_preview_cell_count(&draw);
             draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
@@ -882,14 +994,13 @@ fn rect_preview_transaction_label(draw: &RectDrawState) -> &'static str {
 fn draw_input_ray(
     active_tool: ToolbeltTool,
     cursor_locked: bool,
-    window: Option<&bevy::window::Window>,
+    cursor_position: Option<Vec2>,
     camera: &Camera,
     camera_tf: &GlobalTransform,
 ) -> Option<(Vec3, Vec3)> {
     if matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt) && !cursor_locked {
-        if let Some(ray) = window
-            .and_then(|window| window.cursor_position())
-            .and_then(|cursor| camera.viewport_to_world(camera_tf, cursor))
+        if let Some(ray) =
+            cursor_position.and_then(|cursor| camera.viewport_to_world(camera_tf, cursor))
         {
             return Some((ray.origin, *ray.direction));
         }
@@ -1040,7 +1151,7 @@ fn commit_rect_fill(
         draw.click_finish = true;
         draw.start = chain_start;
         draw.current = chain_start;
-        draw.start_point = chain_start.as_vec3();
+        draw.start_point = pencil_cell_marker_point(chain_start);
         draw.current_point = draw.start_point;
         draw.motion_len = 0.0;
         draw.status_cells = 1;
@@ -1068,8 +1179,8 @@ fn record_rect_semantics(
     if draw.pencil_line && draw.action == RectDrawAction::Fill {
         let edge = sketch_doc.draw_pencil_line(
             sketch_doc.active_context(),
-            ivec3_as_vec3(draw.start),
-            ivec3_as_vec3(draw.current),
+            draw.start_point,
+            draw.current_point,
         )?;
         Ok(vec![(
             edge,
@@ -1776,6 +1887,130 @@ fn apply_face_input_point_to_cell(
         face_axis_component_to_cell(vec_component_by_axis(input.point, axis_v), fallback_v),
     );
     cell
+}
+
+fn semantic_candidate_kind_bias(kind: RectFaceSnapKind) -> f32 {
+    match kind {
+        RectFaceSnapKind::Endpoint => 0.0,
+        RectFaceSnapKind::Midpoint => 0.08,
+        RectFaceSnapKind::FaceCenter => 0.16,
+    }
+}
+
+fn best_semantic_draw_candidate(
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    hover: &crate::sketch_model::HitRecord,
+    reference_point: Vec3,
+) -> Option<(crate::sketch_model::InferenceCandidate, RectFaceSnapKind)> {
+    let mut candidates = sketch_doc.entity_inference_candidates(hover.entity).ok()?;
+    candidates.extend(
+        crate::sketch_model::InferenceService::from_pick(sketch_doc, hover, Some(reference_point))
+            .ok()?,
+    );
+    candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let kind = rect_face_snap_from_inference_kind(candidate.kind)?;
+            candidate.point.is_finite().then_some((candidate, kind))
+        })
+        .filter_map(|(candidate, kind)| {
+            let distance = candidate.point.distance(reference_point);
+            (distance <= SEMANTIC_DRAW_POINT_RADIUS).then_some((candidate, kind, distance))
+        })
+        .min_by(|(_, kind_a, distance_a), (_, kind_b, distance_b)| {
+            let score_a = *distance_a + semantic_candidate_kind_bias(*kind_a);
+            let score_b = *distance_b + semantic_candidate_kind_bias(*kind_b);
+            score_a.total_cmp(&score_b)
+        })
+        .map(|(candidate, kind, _)| (candidate, kind))
+}
+
+fn project_draw_input_point_to_locked_plane(
+    point: Vec3,
+    start: IVec3,
+    normal: IVec3,
+    pencil_line: bool,
+) -> Vec3 {
+    let Some(plane_axis) = normal_axis(normal) else {
+        return point;
+    };
+    let mut projected = point;
+    let plane = component_by_index(start, plane_axis) as f32 + if pencil_line { 0.5 } else { 0.0 };
+    match plane_axis {
+        0 => projected.x = plane,
+        1 => projected.y = plane,
+        _ => projected.z = plane,
+    }
+    projected
+}
+
+fn semantic_draw_point_to_cell(
+    start: IVec3,
+    point: Vec3,
+    normal: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+) -> IVec3 {
+    let mut cell = start;
+    if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
+        return cell;
+    }
+    set_component_by_axis(
+        &mut cell,
+        axis_u,
+        center_axis_component_to_cell(
+            vec_component_by_axis(point, axis_u),
+            component_by_axis(start, axis_u),
+        ),
+    );
+    set_component_by_axis(
+        &mut cell,
+        axis_v,
+        center_axis_component_to_cell(
+            vec_component_by_axis(point, axis_v),
+            component_by_axis(start, axis_v),
+        ),
+    );
+    if let Some(plane_axis) = normal_axis(normal) {
+        set_component_by_index(&mut cell, plane_axis, component_by_index(start, plane_axis));
+    }
+    cell
+}
+
+fn semantic_draw_input_point(
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    hover: Option<&crate::sketch_model::HitRecord>,
+    reference_point: Option<Vec3>,
+    start: IVec3,
+    normal: IVec3,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    pencil_line: bool,
+) -> Option<SemanticDrawInputPoint> {
+    let hover = hover?;
+    let reference_point = reference_point.unwrap_or(hover.world_point);
+    let (candidate, kind) = best_semantic_draw_candidate(sketch_doc, hover, reference_point)?;
+    let point =
+        project_draw_input_point_to_locked_plane(candidate.point, start, normal, pencil_line);
+    let cell = semantic_draw_point_to_cell(start, point, normal, axis_u, axis_v);
+    Some(SemanticDrawInputPoint { cell, point, kind })
+}
+
+fn semantic_axis_locked_endpoint(
+    start: IVec3,
+    input: SemanticDrawInputPoint,
+    axis_lock: RectAxisLock,
+) -> (IVec3, Vec3) {
+    let mut endpoint = start;
+    set_component_by_axis(
+        &mut endpoint,
+        axis_lock.axis(),
+        center_axis_component_to_cell(
+            vec_component_by_axis(input.point, axis_lock.axis()),
+            component_by_axis(start, axis_lock.axis()),
+        ),
+    );
+    (endpoint, pencil_cell_marker_point(endpoint))
 }
 
 fn project_face_point_to_locked_plane(point: Vec3, start: IVec3, normal: IVec3) -> Vec3 {
@@ -2523,6 +2758,8 @@ mod tests {
         draw.axis_u = IVec3::X;
         draw.axis_v = IVec3::Z;
         draw.voxel = Voxel::from(BlockType::Limestone);
+        draw.start_point = pencil_cell_marker_point(draw.start);
+        draw.current_point = pencil_cell_marker_point(draw.current);
 
         let mut world = VoxelWorld::new();
         let mut history = BuilderHistory::default();
@@ -2559,7 +2796,7 @@ mod tests {
         assert!(matches!(
             &sketch_doc.entity(semantic_edge).unwrap().kind,
             crate::sketch_model::SketchEntityKind::Edge { a, b }
-                if *a == Vec3::new(0.0, 4.0, 0.0) && *b == Vec3::new(3.0, 4.0, 0.0)
+                if *a == Vec3::new(0.5, 4.5, 0.5) && *b == Vec3::new(3.5, 4.5, 0.5)
         ));
         assert!(sketch_links
             .links_for_face(IVec3::new(0, 4, 0), IVec3::Y)
@@ -2583,6 +2820,8 @@ mod tests {
         draw.axis_u = IVec3::X;
         draw.axis_v = IVec3::Z;
         draw.voxel = Voxel::from(BlockType::Limestone);
+        draw.start_point = pencil_cell_marker_point(draw.start);
+        draw.current_point = pencil_cell_marker_point(draw.current);
 
         let mut world = VoxelWorld::new();
         for pos in pencil_line_cells(draw.start, draw.current, draw.normal, DRAW_CELL_CAP) {
@@ -2624,7 +2863,7 @@ mod tests {
         assert!(matches!(
             &sketch_doc.entity(semantic_edge).unwrap().kind,
             crate::sketch_model::SketchEntityKind::Edge { a, b }
-                if *a == Vec3::new(0.0, 4.0, 0.0) && *b == Vec3::new(3.0, 4.0, 0.0)
+                if *a == Vec3::new(0.5, 4.5, 0.5) && *b == Vec3::new(3.5, 4.5, 0.5)
         ));
         assert!(sketch_links
             .links_for_face(IVec3::new(1, 4, 0), IVec3::Y)
@@ -3302,6 +3541,91 @@ mod tests {
             rect_face_snap_inference_kind(RectFaceSnapKind::FaceCenter).tooltip(),
             "Face center"
         );
+    }
+
+    #[test]
+    fn semantic_draw_snap_uses_nearest_edge_endpoint_not_first_endpoint() {
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let edge = sketch_doc
+            .draw_pencil_line(
+                sketch_doc.active_context(),
+                Vec3::new(0.5, 4.5, 0.5),
+                Vec3::new(8.5, 4.5, 0.5),
+            )
+            .expect("edge");
+        let hit = crate::sketch_model::HitRecord::new(
+            edge,
+            [],
+            crate::sketch_model::HitKind::Edge,
+            Vec3::new(7.8, 4.5, 0.5),
+            0.0,
+        );
+
+        let input = semantic_draw_input_point(
+            &sketch_doc,
+            Some(&hit),
+            Some(Vec3::new(7.8, 4.5, 0.5)),
+            IVec3::new(0, 4, 0),
+            IVec3::Y,
+            IVec3::X,
+            IVec3::Z,
+            true,
+        )
+        .expect("semantic endpoint");
+
+        assert_eq!(input.kind, RectFaceSnapKind::Endpoint);
+        assert_eq!(input.cell, IVec3::new(8, 4, 0));
+        assert_eq!(input.point, Vec3::new(8.5, 4.5, 0.5));
+    }
+
+    #[test]
+    fn semantic_draw_snap_reports_midpoint_when_cursor_is_near_edge_center() {
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let edge = sketch_doc
+            .draw_pencil_line(
+                sketch_doc.active_context(),
+                Vec3::new(0.5, 4.5, 0.5),
+                Vec3::new(8.5, 4.5, 0.5),
+            )
+            .expect("edge");
+        let hit = crate::sketch_model::HitRecord::new(
+            edge,
+            [],
+            crate::sketch_model::HitKind::Edge,
+            Vec3::new(4.5, 4.5, 0.5),
+            0.0,
+        );
+
+        let input = semantic_draw_input_point(
+            &sketch_doc,
+            Some(&hit),
+            Some(Vec3::new(4.5, 4.5, 0.5)),
+            IVec3::new(0, 4, 0),
+            IVec3::Y,
+            IVec3::X,
+            IVec3::Z,
+            true,
+        )
+        .expect("semantic midpoint");
+
+        assert_eq!(input.kind, RectFaceSnapKind::Midpoint);
+        assert_eq!(input.cell, IVec3::new(4, 4, 0));
+        assert_eq!(input.point, Vec3::new(4.5, 4.5, 0.5));
+    }
+
+    #[test]
+    fn semantic_axis_lock_projects_target_coordinate_onto_locked_line() {
+        let input = SemanticDrawInputPoint {
+            cell: IVec3::new(12, 9, 8),
+            point: Vec3::new(12.5, 9.5, 8.5),
+            kind: RectFaceSnapKind::Endpoint,
+        };
+
+        let (endpoint, marker) =
+            semantic_axis_locked_endpoint(IVec3::new(2, 4, 8), input, RectAxisLock::X);
+
+        assert_eq!(endpoint, IVec3::new(12, 4, 8));
+        assert_eq!(marker, Vec3::new(12.5, 4.5, 8.5));
     }
 
     #[test]
