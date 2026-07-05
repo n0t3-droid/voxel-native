@@ -11,6 +11,7 @@ use crate::toolbelt::{ToolbeltState, ToolbeltTool};
 use crate::world::{VoxelWorld, WorldEditBatch};
 
 const MOVE_OWNER: &str = "Sketch Move";
+#[cfg(test)]
 const MOVE_PIXELS_PER_VOXEL: f32 = 18.0;
 const MOVE_DELTA_LIMIT: i32 = 256;
 
@@ -131,7 +132,7 @@ pub fn begin_move_drag(
     drag.tool_generation = toolbelt.selection_generation();
     gesture_lock.lock(MOVE_OWNER);
     toolbelt.status =
-        "Move: drag selected voxels. Ctrl copies, 2..9 makes an array. ArrowRight=X, ArrowUp=height, ArrowLeft=Z, ArrowDown=free."
+        "Move: hover an endpoint, midpoint, face center, or voxel target. Ctrl copies; optional arrows lock X/Y/Z."
             .into();
 }
 
@@ -190,25 +191,37 @@ pub fn update_move_drag(
         }
     }
 
-    for ev in motion_evr.read() {
-        drag.motion += ev.delta;
-    }
     let reference_delta = move_delta_from_reference_hit(
         drag.grip_point,
         &sketch_doc,
         semantic_hover.0.as_ref(),
         drag.axis_lock,
     );
-    let hover_delta = reference_delta.or_else(|| {
-        move_delta_from_hover_cell(
-            drag.grip_cell,
-            state.hover.map(|hit| hit.voxel),
-            drag.axis_lock,
-        )
-    });
-    let next_delta = hover_delta.unwrap_or_else(|| snapped_move_delta(drag.motion, drag.axis_lock));
-    let next_hover_snap_active = hover_delta.is_some();
+    let hover_delta = move_delta_from_hover_cell(
+        drag.grip_cell,
+        state.hover.map(|hit| hit.voxel),
+        drag.axis_lock,
+    );
+    let snap_delta = move_delta_from_snap_target(reference_delta, hover_delta);
+    motion_evr.clear();
     let next_copy_mode = drag.copy_count > 1 || move_copy_modifier_pressed(&keys);
+    let Some(next_delta) = snap_delta else {
+        if drag.hover_snap_active || drag.delta != IVec3::ZERO || next_copy_mode != drag.copy_mode {
+            drag.delta = IVec3::ZERO;
+            drag.copy_mode = next_copy_mode;
+            drag.hover_snap_active = false;
+            let action = if drag.copy_mode {
+                format!("Copy x{}", drag.copy_count.max(1))
+            } else {
+                "Move".to_string()
+            };
+            toolbelt.status = format!(
+                "{action}: hover a real endpoint, midpoint, face center, or voxel target; no unsnapped mouse drift."
+            );
+        }
+        return;
+    };
+    let next_hover_snap_active = true;
     if next_delta != drag.delta
         || next_copy_mode != drag.copy_mode
         || next_hover_snap_active != drag.hover_snap_active
@@ -220,7 +233,7 @@ pub fn update_move_drag(
         let snap = if drag.hover_snap_active {
             "target snap"
         } else {
-            "mouse drag"
+            "waiting"
         };
         let action = if drag.copy_mode {
             format!("Copy x{}", drag.copy_count.max(1))
@@ -461,6 +474,13 @@ fn move_delta_from_hover_cell(
     (delta != IVec3::ZERO).then_some(delta)
 }
 
+fn move_delta_from_snap_target(
+    reference_delta: Option<IVec3>,
+    hover_delta: Option<IVec3>,
+) -> Option<IVec3> {
+    reference_delta.or(hover_delta)
+}
+
 fn apply_move_axis_lock(delta: IVec3, axis_lock: Option<MoveAxisLock>) -> IVec3 {
     match axis_lock {
         Some(MoveAxisLock::X) => IVec3::new(delta.x, 0, 0),
@@ -470,6 +490,7 @@ fn apply_move_axis_lock(delta: IVec3, axis_lock: Option<MoveAxisLock>) -> IVec3 
     }
 }
 
+#[cfg(test)]
 pub fn snapped_move_delta(motion: Vec2, axis_lock: Option<MoveAxisLock>) -> IVec3 {
     let step_x = snapped_steps(motion.x);
     let step_y = snapped_steps(-motion.y);
@@ -482,6 +503,7 @@ pub fn snapped_move_delta(motion: Vec2, axis_lock: Option<MoveAxisLock>) -> IVec
     }
 }
 
+#[cfg(test)]
 fn snapped_steps(pixels: f32) -> i32 {
     (pixels / MOVE_PIXELS_PER_VOXEL)
         .round()
@@ -712,9 +734,9 @@ mod tests {
 
     use super::{
         commit_selection_voxel_copy_array, commit_selection_voxel_move, move_copy_count_from_key,
-        move_delta_from_hover_cell, move_delta_from_reference_points, move_drag_should_cancel,
-        move_grip_cell, move_grip_reference_point, move_reference_point_from_hit,
-        snapped_move_delta, MoveAxisLock,
+        move_delta_from_hover_cell, move_delta_from_reference_points, move_delta_from_snap_target,
+        move_drag_should_cancel, move_grip_cell, move_grip_reference_point,
+        move_reference_point_from_hit, snapped_move_delta, MoveAxisLock,
     };
 
     #[test]
@@ -817,6 +839,25 @@ mod tests {
         assert_eq!(
             move_delta_from_hover_cell(grip, Some(IVec3::new(10, 7, -3)), Some(MoveAxisLock::X)),
             None
+        );
+    }
+
+    #[test]
+    fn move_delta_from_snap_target_never_invents_mouse_motion_delta() {
+        assert_eq!(
+            move_delta_from_snap_target(Some(IVec3::new(5, 0, 0)), Some(IVec3::new(1, 0, 0))),
+            Some(IVec3::new(5, 0, 0)),
+            "Exact inference targets should win over coarse voxel hover."
+        );
+        assert_eq!(
+            move_delta_from_snap_target(None, Some(IVec3::new(0, 3, 0))),
+            Some(IVec3::new(0, 3, 0)),
+            "Voxel hover is still valid when no semantic endpoint/midpoint is hit."
+        );
+        assert_eq!(
+            move_delta_from_snap_target(None, None),
+            None,
+            "Move must wait for a real snap target instead of falling back to raw mouse pixels."
         );
     }
 

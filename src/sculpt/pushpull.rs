@@ -260,6 +260,14 @@ fn semantic_hover_uses_pointer_ray(
         ) || editor_tool_needs_semantic_hover(active_editor_tool))
 }
 
+fn semantic_hover_allows_crosshair_fallback(
+    build_tool: Option<ToolbeltTool>,
+    active_editor_tool: crate::sketch_model::EditorToolId,
+    cursor_locked: bool,
+) -> bool {
+    !semantic_hover_uses_pointer_ray(build_tool, active_editor_tool, cursor_locked)
+}
+
 fn semantic_hover_ray(
     mode: &ModeContext,
     active_editor_tool: crate::sketch_model::EditorToolId,
@@ -268,13 +276,18 @@ fn semantic_hover_ray(
     cam_tf: &GlobalTransform,
 ) -> Option<(Vec3, Vec3)> {
     let cursor_locked = window.map(crate::mode::cursor_is_captured).unwrap_or(false);
-    if semantic_hover_uses_pointer_ray(mode.build_tool(), active_editor_tool, cursor_locked) {
+    if !semantic_hover_allows_crosshair_fallback(
+        mode.build_tool(),
+        active_editor_tool,
+        cursor_locked,
+    ) {
         if let Some(ray) = window
             .and_then(|window| window.cursor_position())
             .and_then(|cursor| camera.viewport_to_world(cam_tf, cursor))
         {
             return Some((ray.origin, *ray.direction));
         }
+        return None;
     }
     Some((cam_tf.translation(), cam_tf.forward().as_vec3()))
 }
@@ -1550,6 +1563,35 @@ mod tests {
             false
         ));
         assert!(!semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::DrawRect),
+            crate::sketch_model::EditorToolId::Rectangle,
+            true
+        ));
+    }
+
+    #[test]
+    fn semantic_hover_crosshair_fallback_is_disabled_for_mouse_first_editor_tools() {
+        assert!(!semantic_hover_allows_crosshair_fallback(
+            Some(ToolbeltTool::DrawRect),
+            crate::sketch_model::EditorToolId::Rectangle,
+            false
+        ));
+        assert!(!semantic_hover_allows_crosshair_fallback(
+            Some(ToolbeltTool::TransformMove),
+            crate::sketch_model::EditorToolId::Move,
+            false
+        ));
+        assert!(!semantic_hover_allows_crosshair_fallback(
+            Some(ToolbeltTool::MaterialPicker),
+            crate::sketch_model::EditorToolId::Material,
+            false
+        ));
+        assert!(semantic_hover_allows_crosshair_fallback(
+            Some(ToolbeltTool::BrushPlace),
+            crate::sketch_model::EditorToolId::Pencil,
+            false
+        ));
+        assert!(semantic_hover_allows_crosshair_fallback(
             Some(ToolbeltTool::DrawRect),
             crate::sketch_model::EditorToolId::Rectangle,
             true
