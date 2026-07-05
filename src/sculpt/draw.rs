@@ -61,6 +61,38 @@ pub struct RectDrawState {
     status_cells: usize,
 }
 
+#[derive(Resource, Debug, Clone, Default)]
+pub struct SketchEditorPointerMarker {
+    active: bool,
+    drawing: bool,
+    point: Vec3,
+    normal: IVec3,
+    cell: IVec3,
+    snap_kind: Option<RectFaceSnapKind>,
+}
+
+impl SketchEditorPointerMarker {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn set(
+        &mut self,
+        point: Vec3,
+        normal: IVec3,
+        cell: IVec3,
+        snap_kind: Option<RectFaceSnapKind>,
+        drawing: bool,
+    ) {
+        self.active = true;
+        self.drawing = drawing;
+        self.point = point;
+        self.normal = normal;
+        self.cell = cell;
+        self.snap_kind = snap_kind;
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum RectDrawAction {
     #[default]
@@ -463,6 +495,93 @@ fn clear_rect_preview(draw: &mut RectDrawState) {
     draw.start_snap_kind = None;
     draw.axis_lock = None;
     draw.inference = RectEndpointInference::None;
+}
+
+fn sync_pointer_marker_from_active_draw(
+    marker: &mut SketchEditorPointerMarker,
+    draw: &RectDrawState,
+) -> bool {
+    if !draw.active {
+        return false;
+    }
+    marker.set(
+        draw.current_point,
+        draw.normal,
+        draw.current,
+        draw.snap_kind,
+        true,
+    );
+    true
+}
+
+fn sync_pointer_marker_from_hover(
+    marker: &mut SketchEditorPointerMarker,
+    world: &VoxelWorld,
+    active_tool: ToolbeltTool,
+    pencil_workflow: bool,
+    origin: Vec3,
+    dir: Vec3,
+) -> bool {
+    if !matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt) {
+        return false;
+    }
+    let Some((hit, prev)) = dda_voxel(world, origin, dir, DRAW_REACH) else {
+        return false;
+    };
+    let normal = prev - hit;
+    let Some((axis_u, axis_v)) = plane_axes(normal) else {
+        return false;
+    };
+    let input = rect_face_input_point(origin, dir, hit, prev);
+    let action = if active_tool == ToolbeltTool::Sculpt {
+        rect_action_for_start_intent(
+            RectStartIntent {
+                fill: true,
+                cut: false,
+                room_cut: false,
+                button: RectDragButton::Left,
+            },
+            active_tool,
+            normal,
+        )
+    } else {
+        RectDrawAction::Fill
+    };
+    let mut cell = if pencil_workflow {
+        pencil_anchor_cell_from_ray(hit, prev, axis_u, axis_v, origin, dir)
+    } else {
+        rect_start_cell_from_ray(action, hit, prev, axis_u, axis_v, origin, dir)
+    };
+    if let Some(input) = input {
+        cell = apply_face_input_point_to_cell(cell, input, axis_u, axis_v);
+    }
+    let point = if pencil_workflow {
+        input
+            .map(|input| project_draw_input_point_to_locked_plane(input.point, cell, normal, true))
+            .unwrap_or_else(|| pencil_cell_marker_point(cell))
+    } else {
+        input.map(|input| input.point).unwrap_or_else(|| cell.as_vec3())
+    };
+    marker.set(point, normal, cell, input.and_then(|input| input.kind), false);
+    true
+}
+
+fn sync_pointer_marker(
+    marker: &mut SketchEditorPointerMarker,
+    draw: &RectDrawState,
+    world: &VoxelWorld,
+    active_tool: ToolbeltTool,
+    pencil_workflow: bool,
+    origin: Vec3,
+    dir: Vec3,
+) {
+    if sync_pointer_marker_from_active_draw(marker, draw) {
+        return;
+    }
+    if sync_pointer_marker_from_hover(marker, world, active_tool, pencil_workflow, origin, dir) {
+        return;
+    }
+    marker.clear();
 }
 
 fn draw_rect_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, draw: &RectDrawState) -> bool {
@@ -2790,6 +2909,106 @@ pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<T
     );
 }
 
+pub fn refresh_editor_pointer_marker(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<ModeContext>,
+    toolbelt: Res<ToolbeltState>,
+    draw: Res<RectDrawState>,
+    world: Res<VoxelWorld>,
+    mut marker: ResMut<SketchEditorPointerMarker>,
+    mut view_q: ParamSet<(
+        Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+        Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
+    )>,
+) {
+    if !draw_rect_active(&mode, &keys, &draw) {
+        marker.clear();
+        return;
+    }
+    if sync_pointer_marker_from_active_draw(&mut marker, &draw) {
+        return;
+    }
+
+    let active_tool = mode.build_tool().unwrap_or(toolbelt.tool);
+    let (cursor_locked, cursor_position) = {
+        let window_q = view_q.p0();
+        let window = window_q.get_single().ok();
+        (
+            window.map(crate::mode::cursor_is_captured).unwrap_or(false),
+            window.and_then(|window| window.cursor_position()),
+        )
+    };
+    let cam_q = view_q.p1();
+    let Ok((camera, cam_tf)) = cam_q.get_single() else {
+        marker.clear();
+        return;
+    };
+    let Some((origin, dir)) =
+        draw_input_ray(active_tool, cursor_locked, cursor_position, camera, cam_tf)
+    else {
+        marker.clear();
+        return;
+    };
+
+    sync_pointer_marker(
+        &mut marker,
+        &draw,
+        &world,
+        active_tool,
+        toolbelt.pencil_workflow_active(),
+        origin,
+        dir,
+    );
+}
+
+pub fn draw_editor_pointer_marker(
+    marker: Res<SketchEditorPointerMarker>,
+    mut gizmos: Gizmos,
+    time: Res<Time>,
+) {
+    if !marker.active {
+        return;
+    }
+    let pulse = 0.55 + 0.45 * (time.elapsed_seconds() * 8.5).sin().abs();
+    let spin = time.elapsed_seconds() * if marker.drawing { 4.6 } else { 3.2 };
+    let base_color = rect_snap_marker_color(marker.snap_kind);
+    let color = if marker.drawing {
+        base_color
+    } else {
+        Color::srgb(1.0, 0.86, 0.20)
+    };
+    draw_input_point_marker(
+        &mut gizmos,
+        marker.point,
+        marker.normal,
+        marker.snap_kind,
+        true,
+        pulse,
+        spin,
+        color,
+    );
+
+    let normal = marker.normal.as_vec3();
+    let (u, v) = rect_snap_marker_plane_basis(marker.normal);
+    let center = marker.point + normal * 0.14;
+    let cross_radius = if marker.drawing { 0.42 } else { 0.34 } + pulse * 0.08;
+    gizmos.line(
+        center - u * cross_radius,
+        center + u * cross_radius,
+        color.with_alpha(0.92),
+    );
+    gizmos.line(
+        center - v * cross_radius,
+        center + v * cross_radius,
+        color.with_alpha(0.92),
+    );
+    gizmos.line(
+        center,
+        center + normal * (0.76 + pulse * 0.18),
+        color.with_alpha(0.72),
+    );
+}
+
 fn rect_bounds(a: IVec3, b: IVec3) -> (IVec3, IVec3) {
     (
         IVec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)),
@@ -3953,6 +4172,51 @@ mod tests {
         assert!((first.length() - radius).abs() < 0.0001);
         assert!((rotated.length() - radius).abs() < 0.0001);
         assert_ne!(first, rotated);
+    }
+
+    #[test]
+    fn editor_pointer_marker_tracks_exact_active_draw_point_for_screenshots() {
+        let mut marker = SketchEditorPointerMarker::default();
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.current = IVec3::new(7, 8, 9);
+        draw.current_point = Vec3::new(7.25, 8.5, 9.75);
+        draw.normal = IVec3::Y;
+        draw.snap_kind = Some(RectFaceSnapKind::Midpoint);
+
+        assert!(sync_pointer_marker_from_active_draw(&mut marker, &draw));
+
+        assert!(marker.active);
+        assert!(marker.drawing);
+        assert_eq!(marker.cell, draw.current);
+        assert_eq!(marker.point, draw.current_point);
+        assert_eq!(marker.snap_kind, Some(RectFaceSnapKind::Midpoint));
+    }
+
+    #[test]
+    fn editor_pointer_marker_clears_when_no_draw_or_hover_target_exists() {
+        let mut marker = SketchEditorPointerMarker::default();
+        marker.set(
+            Vec3::new(4.0, 5.0, 6.0),
+            IVec3::Y,
+            IVec3::new(4, 5, 6),
+            Some(RectFaceSnapKind::Endpoint),
+            false,
+        );
+        let draw = RectDrawState::default();
+        let world = VoxelWorld::new();
+
+        sync_pointer_marker(
+            &mut marker,
+            &draw,
+            &world,
+            ToolbeltTool::DrawRect,
+            true,
+            Vec3::ZERO,
+            Vec3::Z,
+        );
+
+        assert!(!marker.active);
     }
 
     #[test]

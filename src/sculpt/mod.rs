@@ -40,6 +40,7 @@ impl Plugin for SculptPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SculptState>()
             .init_resource::<draw::RectDrawState>()
+            .init_resource::<draw::SketchEditorPointerMarker>()
             .init_resource::<smart::SmartTowerState>()
             .init_resource::<pushpull::PushPullDrag>()
             .init_resource::<pushpull::PushPullReference>()
@@ -72,6 +73,16 @@ impl Plugin for SculptPlugin {
                     smart::smart_tower_gizmo,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                draw::refresh_editor_pointer_marker
+                    .after(draw::rect_draw_input)
+                    .before(draw::draw_rect_gizmo),
+            )
+            .add_systems(
+                Update,
+                draw::draw_editor_pointer_marker.after(draw::draw_rect_gizmo),
             );
     }
 }
