@@ -1280,7 +1280,14 @@ fn draw_input_ray(
             return Some((ray.origin, *ray.direction));
         }
     }
+    if editor_pointer_tool_requires_cursor(active_tool) {
+        return None;
+    }
     Some((camera_tf.translation(), camera_tf.forward().as_vec3()))
+}
+
+fn editor_pointer_tool_requires_cursor(active_tool: ToolbeltTool) -> bool {
+    matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
 }
 
 fn editor_pointer_ray_available(
@@ -1288,8 +1295,7 @@ fn editor_pointer_ray_available(
     _cursor_locked: bool,
     cursor_position: Option<Vec2>,
 ) -> bool {
-    matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
-        && cursor_position.is_some()
+    editor_pointer_tool_requires_cursor(active_tool) && cursor_position.is_some()
 }
 
 fn rect_draw_endpoint_updates(smart_gesture: bool, right_held: bool) -> bool {
@@ -4466,6 +4472,24 @@ mod tests {
                 Some(Vec2::new(1420.0, 730.0))
             ),
             "Sketch drawing must use the visible mouse position even when Windows reports a confined cursor"
+        );
+    }
+
+    #[test]
+    fn pointer_editor_tools_do_not_fall_back_to_crosshair_without_cursor() {
+        assert!(editor_pointer_tool_requires_cursor(ToolbeltTool::DrawRect));
+        assert!(editor_pointer_tool_requires_cursor(ToolbeltTool::Sculpt));
+        assert!(!editor_pointer_tool_requires_cursor(
+            ToolbeltTool::BrushPlace
+        ));
+
+        assert!(
+            !editor_pointer_ray_available(ToolbeltTool::DrawRect, false, None),
+            "Pencil/Rectangle must not build from the camera center when Windows drops the pointer position"
+        );
+        assert!(
+            !editor_pointer_ray_available(ToolbeltTool::Sculpt, true, None),
+            "Push/Pull must wait for a real editor pointer instead of cutting or pulling under the crosshair"
         );
     }
 
