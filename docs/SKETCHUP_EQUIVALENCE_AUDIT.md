@@ -88,6 +88,9 @@ they are fixed in live play, not only in unit tests.
   moving duplicate/advanced choices into hover context groups.
 - Reordered the primary editor rail around SketchUp-style core modeling:
   Select, Line, Rectangle, Circle, Push/Pull, Move, Rotate, Scale, and Material.
+- Added an engine-rendered 2D editor cursor overlay so Windows screenshots show
+  the user's actual pointer position separately from the snapped voxel target.
+  This makes wrong alignment bugs visible instead of relying on the OS cursor.
   Opening, Room, House, Roads, Bots, city shell, landscape, skyline, and
   spacecraft remain available through hover flyouts/full drawers instead of
   competing with the first building gestures.

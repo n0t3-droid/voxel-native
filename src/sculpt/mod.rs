@@ -41,6 +41,7 @@ impl Plugin for SculptPlugin {
         app.init_resource::<SculptState>()
             .init_resource::<draw::RectDrawState>()
             .init_resource::<draw::SketchEditorPointerMarker>()
+            .init_resource::<draw::SketchEditorScreenCursor>()
             .init_resource::<smart::SmartTowerState>()
             .init_resource::<pushpull::PushPullDrag>()
             .init_resource::<pushpull::PushPullReference>()
@@ -83,6 +84,16 @@ impl Plugin for SculptPlugin {
             .add_systems(
                 Update,
                 draw::draw_editor_pointer_marker.after(draw::draw_rect_gizmo),
+            )
+            .add_systems(
+                Update,
+                draw::refresh_editor_screen_cursor.after(draw::refresh_editor_pointer_marker),
+            )
+            .add_systems(
+                Update,
+                draw::draw_editor_screen_cursor
+                    .after(draw::refresh_editor_screen_cursor)
+                    .after(draw::draw_editor_pointer_marker),
             );
     }
 }

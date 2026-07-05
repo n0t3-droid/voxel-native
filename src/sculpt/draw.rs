@@ -11,6 +11,7 @@
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
+use bevy_egui::{egui, EguiContexts};
 
 use crate::blocks::{voxel_is_solid, Voxel, AIR};
 use crate::builder::{BuilderHistory, BuilderState};
@@ -90,6 +91,38 @@ impl SketchEditorPointerMarker {
         self.normal = normal;
         self.cell = cell;
         self.snap_kind = snap_kind;
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct SketchEditorScreenCursor {
+    active: bool,
+    cursor: Vec2,
+    target: Option<Vec2>,
+    snap_kind: Option<RectFaceSnapKind>,
+    drawing: bool,
+    over_ui: bool,
+}
+
+impl SketchEditorScreenCursor {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn set(
+        &mut self,
+        cursor: Vec2,
+        target: Option<Vec2>,
+        snap_kind: Option<RectFaceSnapKind>,
+        drawing: bool,
+        over_ui: bool,
+    ) {
+        self.active = true;
+        self.cursor = cursor;
+        self.target = target;
+        self.snap_kind = snap_kind;
+        self.drawing = drawing;
+        self.over_ui = over_ui;
     }
 }
 
@@ -183,6 +216,30 @@ impl RectFaceSnapKind {
             Self::FaceCenter => "Face center",
         }
     }
+}
+
+fn screen_cursor_label(snap_kind: Option<RectFaceSnapKind>, drawing: bool) -> &'static str {
+    match snap_kind {
+        Some(kind) => kind.readout_label(),
+        None if drawing => "Cursor",
+        None => "Pointer",
+    }
+}
+
+fn screen_cursor_color(
+    snap_kind: Option<RectFaceSnapKind>,
+    drawing: bool,
+    over_ui: bool,
+) -> egui::Color32 {
+    let [r, g, b] = match snap_kind {
+        Some(RectFaceSnapKind::Endpoint) => [68, 255, 112],
+        Some(RectFaceSnapKind::Midpoint) => [68, 230, 255],
+        Some(RectFaceSnapKind::FaceCenter) => [82, 145, 255],
+        None if drawing => [255, 215, 72],
+        None => [255, 190, 54],
+    };
+    let alpha = if over_ui { 150 } else { 238 };
+    egui::Color32::from_rgba_unmultiplied(r, g, b, alpha)
 }
 
 fn rect_face_snap_inference_kind(
@@ -560,9 +617,17 @@ fn sync_pointer_marker_from_hover(
             .map(|input| project_draw_input_point_to_locked_plane(input.point, cell, normal, true))
             .unwrap_or_else(|| pencil_cell_marker_point(cell))
     } else {
-        input.map(|input| input.point).unwrap_or_else(|| cell.as_vec3())
+        input
+            .map(|input| input.point)
+            .unwrap_or_else(|| cell.as_vec3())
     };
-    marker.set(point, normal, cell, input.and_then(|input| input.kind), false);
+    marker.set(
+        point,
+        normal,
+        cell,
+        input.and_then(|input| input.kind),
+        false,
+    );
     true
 }
 
@@ -3009,6 +3074,135 @@ pub fn draw_editor_pointer_marker(
     );
 }
 
+pub fn refresh_editor_screen_cursor(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<ModeContext>,
+    toolbelt: Res<ToolbeltState>,
+    draw: Res<RectDrawState>,
+    marker: Res<SketchEditorPointerMarker>,
+    ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
+    mut screen_cursor: ResMut<SketchEditorScreenCursor>,
+    window_q: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+    camera_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
+) {
+    if !draw_rect_active(&mode, &keys, &draw) {
+        screen_cursor.clear();
+        return;
+    }
+
+    let active_tool = mode.build_tool().unwrap_or(toolbelt.tool);
+    if !matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt) {
+        screen_cursor.clear();
+        return;
+    }
+
+    let Some(cursor) = window_q
+        .get_single()
+        .ok()
+        .and_then(|window| window.cursor_position())
+    else {
+        screen_cursor.clear();
+        return;
+    };
+
+    let target = camera_q
+        .get_single()
+        .ok()
+        .and_then(|(camera, cam_tf)| marker_screen_target(&marker, camera, cam_tf));
+    screen_cursor.set(
+        cursor,
+        target,
+        marker.snap_kind,
+        draw.active || marker.drawing,
+        ui_focus
+            .as_deref()
+            .is_some_and(|focus| focus.pointer_over_editor_ui),
+    );
+}
+
+fn marker_screen_target(
+    marker: &SketchEditorPointerMarker,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+) -> Option<Vec2> {
+    if !marker.active {
+        return None;
+    }
+    camera.world_to_viewport(cam_tf, marker.point)
+}
+
+pub fn draw_editor_screen_cursor(
+    mut contexts: EguiContexts,
+    screen_cursor: Res<SketchEditorScreenCursor>,
+    time: Res<Time>,
+) {
+    if !screen_cursor.active {
+        return;
+    }
+
+    let ctx = contexts.ctx_mut();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("sketch_editor_screen_cursor"),
+    ));
+    let pos = egui::pos2(screen_cursor.cursor.x, screen_cursor.cursor.y);
+    let color = screen_cursor_color(
+        screen_cursor.snap_kind,
+        screen_cursor.drawing,
+        screen_cursor.over_ui,
+    );
+    let pulse = 0.55 + 0.45 * (time.elapsed_seconds() * 9.0).sin().abs();
+    let radius = if screen_cursor.drawing { 8.5 } else { 7.0 } + pulse * 2.0;
+    let stroke = egui::Stroke::new(1.6, color);
+
+    painter.circle_stroke(pos, radius, stroke);
+    painter.line_segment(
+        [pos + egui::vec2(-12.0, 0.0), pos + egui::vec2(-4.0, 0.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [pos + egui::vec2(4.0, 0.0), pos + egui::vec2(12.0, 0.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [pos + egui::vec2(0.0, -12.0), pos + egui::vec2(0.0, -4.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [pos + egui::vec2(0.0, 4.0), pos + egui::vec2(0.0, 12.0)],
+        stroke,
+    );
+
+    if let Some(target) = screen_cursor.target {
+        let target_pos = egui::pos2(target.x, target.y);
+        if pos.distance(target_pos) > 8.0 {
+            painter.line_segment(
+                [pos, target_pos],
+                egui::Stroke::new(1.0, color.gamma_multiply(0.45)),
+            );
+            painter.circle_stroke(target_pos, 5.5 + pulse, egui::Stroke::new(1.2, color));
+        }
+    }
+
+    let label = screen_cursor_label(screen_cursor.snap_kind, screen_cursor.drawing);
+    let label_pos = pos + egui::vec2(16.0, 16.0);
+    let label_rect =
+        egui::Rect::from_min_size(label_pos + egui::vec2(-8.0, -9.0), egui::vec2(98.0, 21.0));
+    painter.rect_filled(
+        label_rect,
+        5.0,
+        egui::Color32::from_rgba_unmultiplied(4, 18, 28, 210),
+    );
+    painter.rect_stroke(label_rect, 5.0, egui::Stroke::new(1.0, color));
+    painter.text(
+        label_pos,
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::monospace(12.0),
+        color,
+    );
+}
+
 fn rect_bounds(a: IVec3, b: IVec3) -> (IVec3, IVec3) {
     (
         IVec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)),
@@ -4191,6 +4385,50 @@ mod tests {
         assert_eq!(marker.cell, draw.current);
         assert_eq!(marker.point, draw.current_point);
         assert_eq!(marker.snap_kind, Some(RectFaceSnapKind::Midpoint));
+    }
+
+    #[test]
+    fn screen_cursor_label_reports_snap_kind_for_screenshots() {
+        assert_eq!(
+            screen_cursor_label(Some(RectFaceSnapKind::Endpoint), false),
+            "Endpoint"
+        );
+        assert_eq!(
+            screen_cursor_label(Some(RectFaceSnapKind::Midpoint), true),
+            "Midpoint"
+        );
+        assert_eq!(
+            screen_cursor_label(Some(RectFaceSnapKind::FaceCenter), false),
+            "Face center"
+        );
+        assert_eq!(screen_cursor_label(None, true), "Cursor");
+        assert_eq!(screen_cursor_label(None, false), "Pointer");
+    }
+
+    #[test]
+    fn screen_cursor_resource_keeps_mouse_and_snap_target_separate() {
+        let mut cursor = SketchEditorScreenCursor::default();
+
+        cursor.set(
+            Vec2::new(1180.0, 620.0),
+            Some(Vec2::new(840.0, 410.0)),
+            Some(RectFaceSnapKind::Midpoint),
+            true,
+            false,
+        );
+
+        assert!(cursor.active);
+        assert_eq!(cursor.cursor, Vec2::new(1180.0, 620.0));
+        assert_eq!(cursor.target, Some(Vec2::new(840.0, 410.0)));
+        assert_ne!(
+            Some(cursor.cursor),
+            cursor.target,
+            "screenshot overlay must preserve the user's real cursor separately from the snapped voxel target"
+        );
+        assert_eq!(
+            screen_cursor_label(cursor.snap_kind, cursor.drawing),
+            "Midpoint"
+        );
     }
 
     #[test]
