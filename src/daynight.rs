@@ -283,31 +283,10 @@ fn update_sun(
     ambient.color = Color::LinearRgba(amb_lin);
     ambient.brightness = ambient_brightness_for_day(day, intel.profile.ambient_mul);
 
-    // Sky (clear colour) interpolates similarly — richer gradient from
-    // deep indigo night → fiery horizon → deep cyan midday.
-    let sky_day = Color::srgb(0.48, 0.74, 0.98).to_linear();
-    let sky_night = Color::srgb(0.012, 0.022, 0.08).to_linear();
-    let sky = sky_night.mix(&sky_day, day);
-    let sky = sky.mix(&sunset_color, sunset * 0.32);
-    let sat: f32 = intel.profile.sky_saturation;
-    let sky = sky.mix(
-        &Color::srgb(0.5, 0.5, 0.5).to_linear(),
-        (1.0_f32 - sat).max(0.0),
-    );
-    // Extra wash for showcase biomes — reads closer to neon concept art.
-    let sky = match intel.biome {
-        Biome::CrystalSpires => {
-            let void_v = Color::srgb(0.06, 0.02, 0.20).to_linear();
-            let acc_c = Color::srgb(0.04, 0.26, 0.40).to_linear();
-            sky.mix(&void_v, (1.0 - day) * 0.62 + 0.07)
-                .mix(&acc_c, day * 0.24 + 0.05)
-        }
-        Biome::AlienReef => {
-            let reef = Color::srgb(0.16, 0.04, 0.22).to_linear();
-            sky.mix(&reef, (1.0 - day) * 0.48 + 0.11)
-        }
-        _ => sky,
-    };
+    // Sky (clear colour) interpolates similarly — grounded blue day,
+    // readable twilight, and deep indigo night without a milky clear fog.
+    let sky_srgb = sky_srgb_for_conditions(day, sunset, intel.profile.sky_saturation, intel.biome);
+    let sky = Color::srgb(sky_srgb.x, sky_srgb.y, sky_srgb.z).to_linear();
     clear_color.0 = Color::LinearRgba(sky);
 
     // Drive fog colour from the same sky interpolation so the horizon
@@ -316,7 +295,7 @@ fn update_sun(
     // near the horizon for atmospheric scattering feel.
     if let Ok(mut fog_settings) = fog.get_single_mut() {
         let horizon = sky
-            .mix(&Color::srgb(1.0, 1.0, 1.0).to_linear(), 0.15)
+            .mix(&Color::srgb(1.0, 1.0, 1.0).to_linear(), 0.07)
             .mix(&sunset_color, sunset * 0.25);
         fog_settings.color = Color::LinearRgba(sky);
         if let FogFalloff::ExponentialSquared { density } = &mut fog_settings.falloff {
@@ -344,6 +323,42 @@ fn sun_illuminance_for_day(day: f32) -> f32 {
 fn ambient_brightness_for_day(day: f32, profile_ambient_mul: f32) -> f32 {
     let day = day.clamp(0.0, 1.0);
     (920.0 + day.powf(0.58) * 860.0) * profile_ambient_mul.max(0.92)
+}
+
+fn lerp_vec3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
+    a + (b - a) * t.clamp(0.0, 1.0)
+}
+
+fn sky_srgb_for_conditions(day: f32, sunset: f32, sky_saturation: f32, biome: Biome) -> Vec3 {
+    let day = day.clamp(0.0, 1.0);
+    let sunset = sunset.clamp(0.0, 1.0);
+    let sky_day = Vec3::new(0.40, 0.66, 0.96);
+    let sky_night = Vec3::new(0.045, 0.065, 0.14);
+    let sunset_color = Vec3::new(1.0, 0.48, 0.25);
+
+    let twilight_floor = (sunset * 0.34).min(0.30);
+    let mut sky = lerp_vec3(sky_night, sky_day, day.max(twilight_floor));
+    sky = lerp_vec3(sky, sunset_color, sunset * 0.22);
+
+    let sat = sky_saturation;
+    sky = lerp_vec3(sky, Vec3::splat(0.5), (1.0_f32 - sat).max(0.0));
+
+    match biome {
+        Biome::CrystalSpires => {
+            let void_v = Vec3::new(0.06, 0.02, 0.20);
+            let acc_c = Vec3::new(0.04, 0.26, 0.40);
+            lerp_vec3(
+                lerp_vec3(sky, void_v, (1.0 - day) * 0.62 + 0.07),
+                acc_c,
+                day * 0.24 + 0.05,
+            )
+        }
+        Biome::AlienReef => {
+            let reef = Vec3::new(0.16, 0.04, 0.22);
+            lerp_vec3(sky, reef, (1.0 - day) * 0.48 + 0.11)
+        }
+        _ => sky,
+    }
 }
 
 fn update_world_intel_runtime(
@@ -388,6 +403,31 @@ mod tests {
         assert!(
             sun_illuminance_for_day(0.08) >= 5_500.0,
             "low sun should still give visible form and not collapse to black"
+        );
+    }
+
+    #[test]
+    fn normal_day_sky_is_blue_not_whitewashed() {
+        let sky = sky_srgb_for_conditions(1.0, 0.0, 1.0, Biome::Plains);
+
+        assert!(
+            sky.z > sky.y && sky.y > sky.x,
+            "clear day sky should stay visibly blue"
+        );
+        assert!(
+            sky.x <= 0.46,
+            "clear day red channel should stay low enough to avoid milky fog"
+        );
+    }
+
+    #[test]
+    fn evening_sky_keeps_readable_brightness_floor() {
+        let sky = sky_srgb_for_conditions(0.08, 0.68, 1.0, Biome::Plains);
+        let luminance = sky.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+
+        assert!(
+            luminance >= 0.24,
+            "evening sky should not collapse to an overly dark horizon"
         );
     }
 }

@@ -224,6 +224,9 @@ pub struct Player {
 pub const PLAYER_HALF_WIDTH: f32 = 0.3;
 pub const PLAYER_HEIGHT: f32 = 1.8;
 pub const PLAYER_EYE_HEIGHT: f32 = 1.62;
+/// The world camera must see visitable planets before boost travel starts.
+/// Fog still hides chunk edges; this only raises geometric clipping.
+pub const WORLD_CAMERA_FAR: f32 = 80_000.0;
 /// Hitbox height while sneaking — fits in a 1-block-tall gap, so a
 /// standing opponent shooting over a 1-block wall cannot hit us.
 pub const CROUCH_HEIGHT: f32 = 1.0;
@@ -247,6 +250,7 @@ fn spawn_player(mut commands: Commands) {
             transform: Transform::from_xyz(0.0, 120.0, 0.0),
             projection: Projection::Perspective(PerspectiveProjection {
                 fov: 75.0f32.to_radians(),
+                far: WORLD_CAMERA_FAR,
                 ..default()
             }),
             ..default()

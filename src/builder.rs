@@ -157,8 +157,10 @@ impl BuilderHistory {
     /// batch.
     ///
     /// The redo stack is cleared on every new edit, matching common
-    /// undo-history semantics. Stack and per-batch caps mirror the
-    /// existing Classic-builder limits.
+    /// undo-history semantics. The per-batch cap protects low-end PCs
+    /// from a single giant operation; the stack cap is intentionally
+    /// high so mouse-first Sketch sessions do not lose early precise
+    /// edits after only a few dozen strokes.
     pub fn record_external(
         &mut self,
         label: impl Into<String>,
@@ -899,7 +901,7 @@ fn live_raycast_voxel(
 }
 
 const UNDO_CHANGE_LIMIT: usize = 250_000;
-const UNDO_STACK_LIMIT: usize = 32;
+const UNDO_STACK_LIMIT: usize = 4096;
 
 fn stamp_cuboid(
     world: &mut VoxelWorld,
@@ -1639,5 +1641,23 @@ mod tests {
             assert!(!status.contains("Tab"));
             assert!(status.contains("Toolbox") || status.contains("game view"));
         }
+    }
+
+    #[test]
+    fn builder_history_keeps_long_sketch_sessions_beyond_old_32_step_cap() {
+        let mut history = BuilderHistory::default();
+
+        for x in 0..96 {
+            history.record_external(
+                format!("Pencil line {x}"),
+                vec![(IVec3::new(x, 0, 0), AIR, Voxel::from(BlockType::Limestone))],
+            );
+        }
+
+        assert_eq!(
+            history.undo_len(),
+            96,
+            "SketchUp-style building sessions need long undo history; dropping edits after 32 actions makes precise construction feel broken"
+        );
     }
 }

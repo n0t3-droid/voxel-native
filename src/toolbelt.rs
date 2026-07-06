@@ -670,6 +670,7 @@ fn draw_toolbelt(
     mut ui_focus: ResMut<SketchEditorUiFocus>,
     sketch_doc: Res<crate::sketch_model::SketchDocument>,
     mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut semantic_hover: ResMut<crate::sketch_model::SemanticHoverHit>,
     mut wheel: EventReader<MouseWheel>,
 ) {
     if !mode.is_build() {
@@ -815,10 +816,25 @@ fn draw_toolbelt(
             HistoryCommand::Undo => history.pop_undo(&mut world),
             HistoryCommand::Redo => history.pop_redo(&mut world),
         };
+        let changed_history = result.is_some();
         let status = format_history_command_status(command, result);
+        if changed_history {
+            clear_editor_selection_after_toolbelt_history_step(
+                &mut tool_controller,
+                &mut semantic_hover,
+            );
+        }
         toolbelt.status = status.clone();
         mode.status = status;
     }
+}
+
+fn clear_editor_selection_after_toolbelt_history_step(
+    tool_controller: &mut crate::sketch_model::ToolController,
+    semantic_hover: &mut crate::sketch_model::SemanticHoverHit,
+) {
+    let _ = tool_controller.clear_selection();
+    semantic_hover.0 = None;
 }
 
 impl ToolbeltTool {
@@ -3476,6 +3492,26 @@ mod tests {
         assert!(undo.contains("Undo 'Sketch Fill 12 cells'"));
         assert!(undo.contains("Click Redo"));
         assert!(redo.contains("no undone build edits"));
+    }
+
+    #[test]
+    fn toolbelt_history_step_clears_stale_selection_and_hover() {
+        let entity = crate::sketch_model::SketchId::new_for_test(144);
+        let mut controller = crate::sketch_model::ToolController::default();
+        let hit = crate::sketch_model::HitRecord::new(
+            entity,
+            [],
+            crate::sketch_model::HitKind::Face,
+            Vec3::new(2.0, 3.0, 4.0),
+            0.0,
+        );
+        controller.selection_mut().select(entity);
+        let mut hover = crate::sketch_model::SemanticHoverHit(Some(hit));
+
+        clear_editor_selection_after_toolbelt_history_step(&mut controller, &mut hover);
+
+        assert!(controller.selection().is_empty());
+        assert!(hover.0.is_none());
     }
 
     #[test]

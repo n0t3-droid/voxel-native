@@ -7,6 +7,7 @@ mod animation;
 mod blocks;
 pub mod bots;
 mod builder;
+mod celestial;
 mod chunk;
 mod city;
 mod commands;
@@ -132,6 +133,7 @@ fn main() {
             world::WorldPlugin,
             player::PlayerPlugin,
             daynight::DayNightPlugin,
+            celestial::CelestialPlugin,
             sky::SkyPlugin,
             weather::WeatherPlugin,
             hud::HudPlugin,
@@ -142,8 +144,8 @@ fn main() {
             director::DirectorPlugin,
             animation::AnimationPlugin,
             selection::SelectionPlugin,
-            city::CityPlugin,
         ))
+        .add_plugins(city::CityPlugin)
         .add_plugins(bots::BotsPlugin)
         .add_plugins(ships::ShipPlugin)
         .add_plugins(mode::ModePlugin)

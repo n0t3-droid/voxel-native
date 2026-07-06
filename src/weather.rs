@@ -14,7 +14,7 @@ use rand_chacha::ChaCha8Rng;
 use crate::daynight::WorldIntelRuntime;
 use crate::neurocore::RuntimeBudget;
 use crate::player::Player;
-use crate::settings::{WeatherSettings, WorldSettings};
+use crate::settings::{WeatherPreset, WeatherSettings, WorldSettings};
 
 /// Radius (world units) of the particle ring around the player.
 const PARTICLE_RADIUS: f32 = 36.0;
@@ -56,8 +56,8 @@ fn fog_recipe(
     let rd_blocks = (render_distance_chunks.max(8) as f32) * CHUNK_WORLD_SIZE;
 
     if weather_density <= 0.001 {
-        let end = (rd_blocks * 1.75).clamp(900.0, 2200.0);
-        let start = (rd_blocks * 0.92).clamp(500.0, end - 260.0);
+        let end = (rd_blocks * 2.55).clamp(1600.0, 2600.0);
+        let start = (rd_blocks * 1.08).clamp(640.0, end - 420.0);
         return FogRecipe {
             weather_density,
             start,
@@ -72,6 +72,17 @@ fn fog_recipe(
         weather_density,
         start,
         end,
+    }
+}
+
+fn effective_weather_fog_density(preset: WeatherPreset, fog_density: f32) -> f32 {
+    // New clean worlds intentionally carry a tiny atmosphere value for
+    // long-distance blending. Treat that as clear-sky haze, not as an
+    // active fog preset that shortens the visible world.
+    if matches!(preset, WeatherPreset::Clear) && fog_density <= 0.08 {
+        0.0
+    } else {
+        fog_density
     }
 }
 
@@ -162,7 +173,7 @@ fn apply_fog(
         return;
     };
     let recipe = fog_recipe(
-        settings.weather.fog_density,
+        effective_weather_fog_density(settings.weather.preset, settings.weather.fog_density),
         budget.render_distance,
         budget.weather_fx_scale,
         intel.profile.weather_fx_mul,
@@ -304,6 +315,20 @@ mod tests {
     }
 
     #[test]
+    fn clear_weather_fog_stays_beyond_normal_chunk_edge() {
+        let recipe = fog_recipe(0.0, 40, 1.0, 1.0, 1.0);
+
+        assert!(
+            recipe.start >= 640.0,
+            "clear weather fog should not begin before a 40-chunk world edge"
+        );
+        assert!(
+            recipe.end >= 1600.0,
+            "clear weather should avoid a short white linear-fog veil"
+        );
+    }
+
+    #[test]
     fn weather_fog_shortens_the_distance_veil() {
         let clear = fog_recipe(0.0, 40, 1.0, 1.0, 1.0);
         let foggy = fog_recipe(0.8, 40, 1.0, 1.0, 1.0);
@@ -318,6 +343,26 @@ mod tests {
         assert!(
             foggy.start >= 130.0,
             "heavy fog should not wash out everything right in front of the player"
+        );
+    }
+
+    #[test]
+    fn clear_world_default_haze_does_not_activate_weather_fog() {
+        assert_eq!(
+            effective_weather_fog_density(WeatherPreset::Clear, 0.06),
+            0.0
+        );
+        assert_eq!(
+            effective_weather_fog_density(WeatherPreset::Fog, 0.06),
+            0.06
+        );
+        assert_eq!(
+            effective_weather_fog_density(WeatherPreset::Custom, 0.06),
+            0.06
+        );
+        assert_eq!(
+            effective_weather_fog_density(WeatherPreset::Clear, 0.25),
+            0.25
         );
     }
 }

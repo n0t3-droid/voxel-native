@@ -118,6 +118,7 @@ struct SkyMaterials {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SkyShowcasePolicy {
+    classic_sun_moon: bool,
     nebula: bool,
     second_moon: bool,
     ringed_planet: bool,
@@ -126,6 +127,7 @@ struct SkyShowcasePolicy {
 
 fn default_sky_showcase_policy() -> SkyShowcasePolicy {
     SkyShowcasePolicy {
+        classic_sun_moon: false,
         nebula: false,
         second_moon: false,
         ringed_planet: false,
@@ -208,17 +210,19 @@ fn setup_sky(
         unlit: true,
         ..default()
     });
-    commands.spawn((
-        PbrBundle {
-            mesh: sun_mesh,
-            material: sun_mat.clone(),
-            ..default()
-        },
-        NotShadowCaster,
-        sky_layer.clone(),
-        SunDisc,
-        Name::new("SunDisc"),
-    ));
+    if showcase.classic_sun_moon {
+        commands.spawn((
+            PbrBundle {
+                mesh: sun_mesh,
+                material: sun_mat.clone(),
+                ..default()
+            },
+            NotShadowCaster,
+            sky_layer.clone(),
+            SunDisc,
+            Name::new("SunDisc"),
+        ));
+    }
 
     // ----- Moon disc ---------------------------------------------------
     let moon_mesh = meshes.add(
@@ -233,17 +237,19 @@ fn setup_sky(
         unlit: true,
         ..default()
     });
-    commands.spawn((
-        PbrBundle {
-            mesh: moon_mesh,
-            material: moon_mat.clone(),
-            ..default()
-        },
-        NotShadowCaster,
-        sky_layer.clone(),
-        MoonDisc,
-        Name::new("MoonDisc"),
-    ));
+    if showcase.classic_sun_moon {
+        commands.spawn((
+            PbrBundle {
+                mesh: moon_mesh,
+                material: moon_mat.clone(),
+                ..default()
+            },
+            NotShadowCaster,
+            sky_layer.clone(),
+            MoonDisc,
+            Name::new("MoonDisc"),
+        ));
+    }
 
     // ----- Star field --------------------------------------------------
     // Dense, colour-varied star shell. Count scales with graphics tier.
@@ -978,6 +984,7 @@ mod tests {
     fn default_sky_keeps_only_realistic_sun_moon() {
         let policy = default_sky_showcase_policy();
 
+        assert!(!policy.classic_sun_moon);
         assert!(!policy.nebula);
         assert!(!policy.second_moon);
         assert!(!policy.ringed_planet);

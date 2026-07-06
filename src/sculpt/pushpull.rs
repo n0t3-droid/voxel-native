@@ -241,31 +241,39 @@ fn semantic_hover_active(
             || editor_tool_needs_semantic_hover(active_editor_tool))
 }
 
+fn semantic_hover_requires_pointer(
+    build_tool: Option<ToolbeltTool>,
+    active_editor_tool: crate::sketch_model::EditorToolId,
+) -> bool {
+    matches!(
+        build_tool,
+        Some(
+            ToolbeltTool::Navigate
+                | ToolbeltTool::DrawRect
+                | ToolbeltTool::Sculpt
+                | ToolbeltTool::TransformMove
+                | ToolbeltTool::TransformScale
+                | ToolbeltTool::TransformRotate
+                | ToolbeltTool::MaterialPicker
+        )
+    ) || editor_tool_needs_semantic_hover(active_editor_tool)
+}
+
+#[cfg(test)]
 fn semantic_hover_uses_pointer_ray(
     build_tool: Option<ToolbeltTool>,
     active_editor_tool: crate::sketch_model::EditorToolId,
-    cursor_locked: bool,
+    _cursor_locked: bool,
 ) -> bool {
-    !cursor_locked
-        && (matches!(
-            build_tool,
-            Some(
-                ToolbeltTool::Navigate
-                    | ToolbeltTool::DrawRect
-                    | ToolbeltTool::TransformMove
-                    | ToolbeltTool::TransformScale
-                    | ToolbeltTool::TransformRotate
-                    | ToolbeltTool::MaterialPicker
-            )
-        ) || editor_tool_needs_semantic_hover(active_editor_tool))
+    semantic_hover_requires_pointer(build_tool, active_editor_tool)
 }
 
 fn semantic_hover_allows_crosshair_fallback(
     build_tool: Option<ToolbeltTool>,
     active_editor_tool: crate::sketch_model::EditorToolId,
-    cursor_locked: bool,
+    _cursor_locked: bool,
 ) -> bool {
-    !semantic_hover_uses_pointer_ray(build_tool, active_editor_tool, cursor_locked)
+    !semantic_hover_requires_pointer(build_tool, active_editor_tool)
 }
 
 fn semantic_hover_ray(
@@ -276,17 +284,26 @@ fn semantic_hover_ray(
     cam_tf: &GlobalTransform,
 ) -> Option<(Vec3, Vec3)> {
     let cursor_locked = window.map(crate::mode::cursor_is_captured).unwrap_or(false);
+    if semantic_hover_requires_pointer(mode.build_tool(), active_editor_tool) {
+        let Some(window) = window else {
+            return None;
+        };
+        if !window.cursor.visible {
+            return None;
+        }
+        let Some(ray) = window
+            .cursor_position()
+            .and_then(|cursor| camera.viewport_to_world(cam_tf, cursor))
+        else {
+            return None;
+        };
+        return Some((ray.origin, *ray.direction));
+    }
     if !semantic_hover_allows_crosshair_fallback(
         mode.build_tool(),
         active_editor_tool,
         cursor_locked,
     ) {
-        if let Some(ray) = window
-            .and_then(|window| window.cursor_position())
-            .and_then(|cursor| camera.viewport_to_world(cam_tf, cursor))
-        {
-            return Some((ray.origin, *ray.direction));
-        }
         return None;
     }
     Some((cam_tf.translation(), cam_tf.forward().as_vec3()))
@@ -481,9 +498,6 @@ fn semantic_select_input_active(
             || matches!(
                 active_editor_tool,
                 crate::sketch_model::EditorToolId::Select
-                    | crate::sketch_model::EditorToolId::Move
-                    | crate::sketch_model::EditorToolId::Scale
-                    | crate::sketch_model::EditorToolId::Rotate
             ))
 }
 
@@ -1320,6 +1334,8 @@ pub fn universal_undo_input(
     mut toolbelt: ResMut<ToolbeltState>,
     mut mode: ResMut<ModeContext>,
     drag: Res<PushPullDrag>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut semantic_hover: ResMut<crate::sketch_model::SemanticHoverHit>,
 ) {
     // Don't undo mid-drag — the preview owns the world's current state.
     if drag.active {
@@ -1330,20 +1346,42 @@ pub fn universal_undo_input(
         return;
     }
     if keys.just_pressed(KeyCode::KeyZ) {
-        state.status = match history.pop_undo(&mut world) {
+        let undone = history.pop_undo(&mut world);
+        if undone.is_some() {
+            clear_stale_editor_selection_after_history_step(
+                &mut tool_controller,
+                &mut semantic_hover,
+            );
+        }
+        state.status = match undone {
             Some((label, n)) => format!("Undo '{label}': {n} Voxel."),
             None => "Undo: nichts vorhanden.".into(),
         };
         toolbelt.status = state.status.clone();
         mode.status = state.status.clone();
     } else if keys.just_pressed(KeyCode::KeyY) || keys.just_pressed(KeyCode::KeyR) {
-        state.status = match history.pop_redo(&mut world) {
+        let redone = history.pop_redo(&mut world);
+        if redone.is_some() {
+            clear_stale_editor_selection_after_history_step(
+                &mut tool_controller,
+                &mut semantic_hover,
+            );
+        }
+        state.status = match redone {
             Some((label, n)) => format!("Redo '{label}': {n} Voxel."),
             None => "Redo: nichts vorhanden.".into(),
         };
         toolbelt.status = state.status.clone();
         mode.status = state.status.clone();
     }
+}
+
+fn clear_stale_editor_selection_after_history_step(
+    tool_controller: &mut crate::sketch_model::ToolController,
+    semantic_hover: &mut crate::sketch_model::SemanticHoverHit,
+) {
+    let _ = tool_controller.clear_selection();
+    semantic_hover.0 = None;
 }
 
 /// Draw the boundary outline of the current hover face. We trace just
@@ -1562,11 +1600,19 @@ mod tests {
             crate::sketch_model::EditorToolId::Move,
             false
         ));
-        assert!(!semantic_hover_uses_pointer_ray(
-            Some(ToolbeltTool::DrawRect),
-            crate::sketch_model::EditorToolId::Rectangle,
-            true
+        assert!(semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::Sculpt),
+            crate::sketch_model::EditorToolId::PushPull,
+            false
         ));
+        assert!(
+            semantic_hover_uses_pointer_ray(
+                Some(ToolbeltTool::DrawRect),
+                crate::sketch_model::EditorToolId::Rectangle,
+                true
+            ),
+            "a confined but visible Windows cursor is still the editor pointer"
+        );
     }
 
     #[test]
@@ -1591,11 +1637,14 @@ mod tests {
             crate::sketch_model::EditorToolId::Pencil,
             false
         ));
-        assert!(semantic_hover_allows_crosshair_fallback(
-            Some(ToolbeltTool::DrawRect),
-            crate::sketch_model::EditorToolId::Rectangle,
-            true
-        ));
+        assert!(
+            !semantic_hover_allows_crosshair_fallback(
+                Some(ToolbeltTool::DrawRect),
+                crate::sketch_model::EditorToolId::Rectangle,
+                true
+            ),
+            "mouse-first editor tools must not jump back to the crosshair when Windows confines the cursor"
+        );
     }
 
     #[test]
@@ -1881,6 +1930,26 @@ mod tests {
             true,
             false
         ));
+        assert!(
+            !semantic_select_input_active(
+                true,
+                Some(ToolbeltTool::DrawRect),
+                crate::sketch_model::EditorToolId::Move,
+                true,
+                false
+            ),
+            "Move starts a transform from the existing selection; selection clicks must not steal the same press"
+        );
+        assert!(
+            !semantic_select_input_active(
+                true,
+                Some(ToolbeltTool::DrawRect),
+                crate::sketch_model::EditorToolId::Rotate,
+                true,
+                false
+            ),
+            "Rotate must not have its first click reinterpreted as selection"
+        );
         assert!(!semantic_select_input_active(
             true,
             Some(ToolbeltTool::Navigate),
@@ -1895,6 +1964,26 @@ mod tests {
             true,
             false
         ));
+    }
+
+    #[test]
+    fn undo_history_step_clears_stale_editor_selection_and_hover() {
+        let entity = crate::sketch_model::SketchId::new_for_test(91);
+        let mut controller = crate::sketch_model::ToolController::default();
+        controller.selection_mut().select(entity);
+        let hit = crate::sketch_model::HitRecord::new(
+            entity,
+            [],
+            crate::sketch_model::HitKind::Face,
+            Vec3::new(1.0, 2.0, 3.0),
+            0.0,
+        );
+        let mut hover = crate::sketch_model::SemanticHoverHit(Some(hit));
+
+        clear_stale_editor_selection_after_history_step(&mut controller, &mut hover);
+
+        assert!(controller.selection().is_empty());
+        assert!(hover.0.is_none());
     }
 
     #[test]
