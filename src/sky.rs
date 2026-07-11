@@ -486,6 +486,7 @@ fn follow_and_animate_sky(
         (
             With<SunDisc>,
             Without<SkyCamera>,
+            Without<Player>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
             Without<StarField>,
@@ -499,6 +500,7 @@ fn follow_and_animate_sky(
         (
             With<MoonDisc>,
             Without<SkyCamera>,
+            Without<Player>,
             Without<SunDisc>,
             Without<MoonDiscB>,
             Without<StarField>,
@@ -512,6 +514,7 @@ fn follow_and_animate_sky(
         (
             With<MoonDiscB>,
             Without<SkyCamera>,
+            Without<Player>,
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<StarField>,
@@ -525,6 +528,7 @@ fn follow_and_animate_sky(
         (
             With<StarField>,
             Without<SkyCamera>,
+            Without<Player>,
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
@@ -538,6 +542,7 @@ fn follow_and_animate_sky(
         (
             With<RingedPlanet>,
             Without<SkyCamera>,
+            Without<Player>,
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
@@ -551,6 +556,7 @@ fn follow_and_animate_sky(
         (
             With<PlanetB>,
             Without<SkyCamera>,
+            Without<Player>,
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
@@ -564,6 +570,7 @@ fn follow_and_animate_sky(
         (
             With<Nebula>,
             Without<SkyCamera>,
+            Without<Player>,
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
@@ -1107,5 +1114,19 @@ mod tests {
         assert!((sky.aspect_ratio - 21.0 / 9.0).abs() < 1.0e-6);
         assert_eq!(sky.near, 1.0);
         assert_eq!(sky.far, SKY_DISTANCE * 8.0);
+    }
+
+    #[test]
+    fn sky_follow_system_initializes_without_conflicting_camera_queries() {
+        let mut app = App::new();
+        app.insert_resource(WorldSettings::default())
+            .insert_resource(WorldIntelRuntime::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .add_systems(Update, follow_and_animate_sky);
+
+        // Bevy validates mutable query disjointness when the system first
+        // initializes. This guards the real executable startup path, which a
+        // pure projection helper test cannot cover.
+        app.update();
     }
 }
