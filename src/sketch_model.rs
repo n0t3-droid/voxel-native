@@ -971,6 +971,13 @@ pub struct SketchVoxelLinkIndex {
     face_links: BTreeMap<SketchVoxelFaceKey, BTreeSet<SketchVoxelLink>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SketchVoxelEntityLinkSnapshot {
+    pub entity: SketchId,
+    pub cell_links: Vec<(IVec3, SketchVoxelLink)>,
+    pub face_links: Vec<(IVec3, IVec3, SketchVoxelLink)>,
+}
+
 impl SketchVoxelLinkIndex {
     pub fn clear(&mut self) {
         self.cell_links.clear();
@@ -1079,6 +1086,37 @@ impl SketchVoxelLinkIndex {
             .collect()
     }
 
+    pub fn snapshot_entities(
+        &self,
+        entities: impl IntoIterator<Item = SketchId>,
+    ) -> Vec<SketchVoxelEntityLinkSnapshot> {
+        let entities: BTreeSet<SketchId> = entities.into_iter().collect();
+        entities
+            .into_iter()
+            .map(|entity| {
+                let mut cell_links = Vec::new();
+                for (cell, links) in &self.cell_links {
+                    for link in links.iter().filter(|link| link.entity == entity) {
+                        cell_links.push((cell.as_ivec3(), *link));
+                    }
+                }
+
+                let mut face_links = Vec::new();
+                for (face, links) in &self.face_links {
+                    for link in links.iter().filter(|link| link.entity == entity) {
+                        face_links.push((face.cell.as_ivec3(), face.normal(), *link));
+                    }
+                }
+
+                SketchVoxelEntityLinkSnapshot {
+                    entity,
+                    cell_links,
+                    face_links,
+                }
+            })
+            .collect()
+    }
+
     pub fn translate_entities(
         &mut self,
         entities: impl IntoIterator<Item = SketchId>,
@@ -1137,6 +1175,33 @@ impl SketchVoxelLinkIndex {
             links.retain(|link| link.entity != entity);
         }
         self.face_links.retain(|_, links| !links.is_empty());
+    }
+
+    pub fn remove_entities(&mut self, entities: impl IntoIterator<Item = SketchId>) {
+        let entities: BTreeSet<SketchId> = entities.into_iter().collect();
+        if entities.is_empty() {
+            return;
+        }
+        for links in self.cell_links.values_mut() {
+            links.retain(|link| !entities.contains(&link.entity));
+        }
+        self.cell_links.retain(|_, links| !links.is_empty());
+        for links in self.face_links.values_mut() {
+            links.retain(|link| !entities.contains(&link.entity));
+        }
+        self.face_links.retain(|_, links| !links.is_empty());
+    }
+
+    pub fn restore_entity_snapshots(&mut self, snapshots: &[SketchVoxelEntityLinkSnapshot]) {
+        self.remove_entities(snapshots.iter().map(|snapshot| snapshot.entity));
+        for snapshot in snapshots {
+            for (cell, link) in &snapshot.cell_links {
+                self.link_cell(*cell, *link);
+            }
+            for (cell, normal, link) in &snapshot.face_links {
+                self.link_face_cell(*cell, *normal, *link);
+            }
+        }
     }
 }
 
@@ -6007,6 +6072,54 @@ mod tests {
         assert_eq!(hit.entity, entity);
         assert_eq!(hit.kind, HitKind::Edge);
         assert_eq!(hit.world_point, Vec3::new(5.5, 5.5, 6.5));
+    }
+
+    #[test]
+    fn voxel_link_index_snapshots_remove_and_restore_entity_links() {
+        let mut links = SketchVoxelLinkIndex::default();
+        let context = SketchId::new_for_test(1);
+        let entity = SketchId::new_for_test(20);
+        let other = SketchId::new_for_test(21);
+        let stroke = SketchVoxelLink::new(entity, context, SketchVoxelLinkRole::Stroke);
+        let face = SketchVoxelLink::new(entity, context, SketchVoxelLinkRole::Face);
+        let other_link = SketchVoxelLink::new(other, context, SketchVoxelLinkRole::Stroke);
+
+        links.link_cell(IVec3::new(4, 5, 6), stroke);
+        links.link_face_cell(IVec3::new(5, 5, 6), IVec3::Y, face);
+        links.link_cell(IVec3::new(9, 9, 9), other_link);
+
+        let snapshots = links.snapshot_entities([entity]);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].entity, entity);
+        assert_eq!(
+            snapshots[0].cell_links,
+            vec![(IVec3::new(4, 5, 6), stroke), (IVec3::new(5, 5, 6), face)]
+        );
+        assert_eq!(
+            snapshots[0].face_links,
+            vec![(IVec3::new(5, 5, 6), IVec3::Y, face)]
+        );
+
+        links.remove_entities([entity]);
+        assert!(links.links_for_cell(IVec3::new(4, 5, 6)).is_empty());
+        assert!(links
+            .links_for_face(IVec3::new(5, 5, 6), IVec3::Y)
+            .is_empty());
+        assert_eq!(
+            links.primary_cell_link(IVec3::new(9, 9, 9)),
+            Some(other_link)
+        );
+
+        links.restore_entity_snapshots(&snapshots);
+        assert_eq!(links.primary_cell_link(IVec3::new(4, 5, 6)), Some(stroke));
+        assert_eq!(
+            links.primary_face_link(IVec3::new(5, 5, 6), IVec3::Y),
+            Some(face)
+        );
+        assert_eq!(
+            links.primary_cell_link(IVec3::new(9, 9, 9)),
+            Some(other_link)
+        );
     }
 
     #[test]

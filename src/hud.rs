@@ -59,6 +59,7 @@ impl Plugin for HudPlugin {
                     draw_workflow_rail,
                     update_hint,
                     hotbar_input.run_if(in_state(crate::menu::GameState::InGame)),
+                    refresh_hotbar_contents,
                     hotbar_highlight,
                     toggle_hud_visibility,
                     update_scope_overlay,
@@ -986,6 +987,29 @@ mod tests {
     fn focused_hud_hides_workflow_rail() {
         assert!(workflow_steps_for_profile(HudProfile::Focused).is_empty());
     }
+
+    #[test]
+    fn default_hotbar_keeps_typed_weapon_identity() {
+        let hotbar = HotbarState::default();
+
+        for (slot, kind) in hotbar.slots.iter().zip(crate::weapons::WeaponKind::ALL) {
+            assert_eq!(slot.item, HotbarItem::Weapon(kind));
+            assert_eq!(slot.label(), kind.name());
+        }
+    }
+
+    #[test]
+    fn creative_assignment_stores_the_selected_block_type() {
+        let mut hotbar = HotbarState::default();
+
+        assert!(hotbar.assign_block(2, crate::blocks::BlockType::ShojiLamp));
+        assert_eq!(
+            hotbar.slots[2].item,
+            HotbarItem::Block(crate::blocks::BlockType::ShojiLamp)
+        );
+        assert_eq!(hotbar.slots[2].label(), "Lantern");
+        assert_eq!(hotbar.active, 2);
+    }
 }
 
 fn hud_text(painter: &egui::Painter, pos: egui::Pos2, text: &str, color: egui::Color32, size: f32) {
@@ -1145,6 +1169,12 @@ fn update_hint(
 
 // -------------------------------- Hotbar ----------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotbarItem {
+    Weapon(crate::weapons::WeaponKind),
+    Block(crate::blocks::BlockType),
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct HotbarState {
     pub slots: [HotbarBlock; 9],
@@ -1153,22 +1183,52 @@ pub struct HotbarState {
 
 #[derive(Debug, Clone, Copy)]
 pub struct HotbarBlock {
+    pub item: HotbarItem,
     pub color: Color,
+}
+
+impl HotbarBlock {
+    pub fn weapon(kind: crate::weapons::WeaponKind) -> Self {
+        Self {
+            item: HotbarItem::Weapon(kind),
+            color: kind.color(),
+        }
+    }
+
+    pub fn block(block: crate::blocks::BlockType) -> Self {
+        let rgba = crate::blocks::voxel_color(block.into());
+        Self {
+            item: HotbarItem::Block(block),
+            color: Color::srgb(rgba[0], rgba[1], rgba[2]),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self.item {
+            HotbarItem::Weapon(kind) => kind.name(),
+            HotbarItem::Block(block) => crate::blocks::block_label(block),
+        }
+    }
+}
+
+impl HotbarState {
+    pub fn assign_block(&mut self, index: usize, block: crate::blocks::BlockType) -> bool {
+        let Some(slot) = self.slots.get_mut(index) else {
+            return false;
+        };
+        *slot = HotbarBlock::block(block);
+        self.active = index;
+        true
+    }
 }
 
 impl Default for HotbarState {
     fn default() -> Self {
-        // Weapons-only hotbar — 9 slots, each keyed to the WeaponKind
+        // The default loadout is weapons-only — 9 slots keyed to WeaponKind
         // with that index in `WeaponKind::ALL`. The slot colour mirrors
         // the weapon's accent tint so the gun silhouette, the muzzle
         // flash and the HUD chip all agree.
-        use crate::weapons::WeaponKind;
-        let mut slots = [HotbarBlock {
-            color: Color::WHITE,
-        }; 9];
-        for (i, k) in WeaponKind::ALL.iter().enumerate() {
-            slots[i] = HotbarBlock { color: k.color() };
-        }
+        let slots = crate::weapons::WeaponKind::ALL.map(HotbarBlock::weapon);
         Self { slots, active: 5 }
     }
 }
@@ -1178,6 +1238,12 @@ pub struct HotbarRoot;
 
 #[derive(Component)]
 pub struct HotbarSlot(pub usize);
+
+#[derive(Component)]
+struct HotbarSlotFill(pub usize);
+
+#[derive(Component)]
+struct HotbarSlotLabel(pub usize);
 
 fn spawn_hotbar(mut commands: Commands, hotbar: Res<HotbarState>) {
     // Slim command-deck hotbar: stable slot sizes, high contrast and
@@ -1225,24 +1291,25 @@ fn spawn_hotbar(mut commands: Commands, hotbar: Res<HotbarState>) {
                     HotbarSlot(i),
                 ))
                 .with_children(|c| {
-                    use crate::weapons::WeaponKind;
-                    let kind = WeaponKind::ALL[i];
-                    // Inner weapon chip: dark background with the
+                    // Inner item chip: dark background with the
                     // accent colour as a glowing border strip.
-                    c.spawn(NodeBundle {
-                        style: Style {
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
-                            flex_direction: FlexDirection::Column,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::SpaceBetween,
-                            padding: UiRect::all(Val::Px(3.0)),
+                    c.spawn((
+                        NodeBundle {
+                            style: Style {
+                                width: Val::Percent(100.0),
+                                height: Val::Percent(100.0),
+                                flex_direction: FlexDirection::Column,
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::SpaceBetween,
+                                padding: UiRect::all(Val::Px(3.0)),
+                                ..default()
+                            },
+                            background_color: BackgroundColor(slot.color.with_alpha(0.22)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
                             ..default()
                         },
-                        background_color: BackgroundColor(slot.color.with_alpha(0.22)),
-                        border_radius: BorderRadius::all(Val::Px(4.0)),
-                        ..default()
-                    })
+                        HotbarSlotFill(i),
+                    ))
                     .with_children(|cc| {
                         cc.spawn(TextBundle::from_section(
                             format!("{}", i + 1),
@@ -1252,13 +1319,16 @@ fn spawn_hotbar(mut commands: Commands, hotbar: Res<HotbarState>) {
                                 ..default()
                             },
                         ));
-                        cc.spawn(TextBundle::from_section(
-                            kind.name(),
-                            TextStyle {
-                                font_size: 10.0,
-                                color: slot.color,
-                                ..default()
-                            },
+                        cc.spawn((
+                            TextBundle::from_section(
+                                compact_hud_line(slot.label(), 8),
+                                TextStyle {
+                                    font_size: 10.0,
+                                    color: slot.color,
+                                    ..default()
+                                },
+                            ),
+                            HotbarSlotLabel(i),
                         ));
                         cc.spawn(TextBundle::from_section(
                             "∞",
@@ -1272,6 +1342,34 @@ fn spawn_hotbar(mut commands: Commands, hotbar: Res<HotbarState>) {
                 });
             }
         });
+}
+
+fn refresh_hotbar_contents(
+    hotbar: Res<HotbarState>,
+    mut fills: Query<(&HotbarSlotFill, &mut BackgroundColor)>,
+    mut labels: Query<(&HotbarSlotLabel, &mut Text)>,
+) {
+    if !hotbar.is_changed() {
+        return;
+    }
+
+    for (marker, mut background) in fills.iter_mut() {
+        let Some(slot) = hotbar.slots.get(marker.0) else {
+            continue;
+        };
+        background.0 = slot.color.with_alpha(0.22);
+    }
+
+    for (marker, mut text) in labels.iter_mut() {
+        let Some(slot) = hotbar.slots.get(marker.0) else {
+            continue;
+        };
+        let Some(section) = text.sections.first_mut() else {
+            continue;
+        };
+        section.value = compact_hud_line(slot.label(), 8);
+        section.style.color = slot.color;
+    }
 }
 
 fn hotbar_input(
@@ -1312,9 +1410,10 @@ fn hotbar_input(
             }
         }
     }
-    if let Some(idx) = crate::weapons::WeaponKind::ALL
+    if let Some(idx) = hotbar
+        .slots
         .iter()
-        .position(|k| *k == active.kind)
+        .position(|slot| slot.item == HotbarItem::Weapon(active.kind))
     {
         if hotbar.active != idx {
             hotbar.active = idx;

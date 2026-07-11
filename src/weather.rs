@@ -56,8 +56,8 @@ fn fog_recipe(
     let rd_blocks = (render_distance_chunks.max(8) as f32) * CHUNK_WORLD_SIZE;
 
     if weather_density <= 0.001 {
-        let end = (rd_blocks * 2.55).clamp(1600.0, 2600.0);
-        let start = (rd_blocks * 1.08).clamp(640.0, end - 420.0);
+        let end = (rd_blocks * 3.75).clamp(2200.0, 5200.0);
+        let start = (rd_blocks * 2.15).clamp(1200.0, end - 760.0);
         return FogRecipe {
             weather_density,
             start,
@@ -325,6 +325,20 @@ mod tests {
         assert!(
             recipe.end >= 1600.0,
             "clear weather should avoid a short white linear-fog veil"
+        );
+    }
+
+    #[test]
+    fn clear_weather_keeps_zen_world_horizon_readable() {
+        let recipe = fog_recipe(0.0, 40, 1.0, 1.0, 1.0);
+
+        assert!(
+            recipe.start >= 1200.0,
+            "clear weather should not put the blue fog wall right behind nearby mountains"
+        );
+        assert!(
+            recipe.end >= 2200.0,
+            "clear weather should leave large scenic terrain readable before fading out"
         );
     }
 

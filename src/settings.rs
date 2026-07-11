@@ -600,9 +600,9 @@ impl WorldSettings {
         self.graphics = GraphicsMode::High;
         self.scenery_quality = SceneryQuality::Lush;
         self.time_mode = TimeMode::Fixed;
-        self.time_of_day = 17.8;
+        self.time_of_day = 14.15;
         self.weather.apply_preset(WeatherPreset::Clear);
-        self.weather.fog_density = 0.06;
+        self.weather.fog_density = 0.04;
         self.weather.wind_x = 1.4;
         self.weather.wind_z = 0.8;
         self.theme.style = crate::theme::ThemeStyle::LiquidGlass;
@@ -805,7 +805,7 @@ impl WorldMeta {
         Self {
             name,
             seed,
-            time_of_day: 17.8,
+            time_of_day: 14.15,
             time_mode: TimeMode::Fixed,
             cycle_speed: 0.01,
             weather,
@@ -1344,8 +1344,8 @@ mod tests {
         assert!(settings.weather.fog_density <= 0.24);
         assert_eq!(settings.time_mode, TimeMode::Fixed);
         assert!(
-            (17.0..=18.5).contains(&settings.time_of_day),
-            "zen look should start in a bright cinematic golden hour"
+            (12.5..=15.25).contains(&settings.time_of_day),
+            "zen look should start in bright editable sakura daylight"
         );
     }
 
@@ -1362,6 +1362,18 @@ mod tests {
     }
 
     #[test]
+    fn zen_garden_look_starts_in_bright_editable_daylight() {
+        let mut settings = WorldSettings::default();
+
+        settings.apply_zen_garden_look();
+
+        assert!(
+            (12.5..=15.25).contains(&settings.time_of_day),
+            "editor worlds should start in readable daylight instead of low-angle dark shadow bands"
+        );
+    }
+
+    #[test]
     fn new_world_meta_starts_as_lush_zen_garden() {
         let meta = WorldMeta::new("garden".to_string(), 930514);
 
@@ -1369,8 +1381,8 @@ mod tests {
         assert_eq!(meta.weather.preset, WeatherPreset::Clear);
         assert!(meta.weather.fog_density <= 0.08);
         assert!(
-            (17.0..=18.5).contains(&meta.time_of_day),
-            "new worlds should open in bright golden-hour Zen scenery, not old flat noon defaults"
+            (12.5..=15.25).contains(&meta.time_of_day),
+            "new worlds should open in bright Zen editing light, not dark low-angle shadows"
         );
     }
 

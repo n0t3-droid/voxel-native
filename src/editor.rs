@@ -26,8 +26,8 @@ use crate::settings::{
 use crate::textures::{bake_all_block_swatches, BlockSwatch, TEX_DIR};
 use crate::theme::{
     apply_hacker_theme, draw_banner, draw_status_bar, draw_theme_preview_card, paint_scanlines,
-    section_box, selected_theme_preset, status_line, term_button, ThemeColor, ThemeStyle,
-    UiDensity, ALERT, AMBER, THEME_PRESETS,
+    section_box, selected_theme_preset, set_reduced_motion, status_line, term_button, ThemeColor,
+    ThemeStyle, UiDensity, ALERT, AMBER, THEME_PRESETS,
 };
 use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
 
@@ -186,7 +186,9 @@ struct EditorWorldTools<'w> {
 /// Apply the hacker terminal theme. Re-runs whenever the user picks a
 /// new colour variant in the SYSTEM tab so the change is instant.
 fn style_egui(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
-    apply_hacker_theme(contexts.ctx_mut(), settings.theme);
+    let ctx = contexts.ctx_mut();
+    set_reduced_motion(ctx, settings.reduce_motion);
+    apply_hacker_theme(ctx, settings.theme);
 }
 
 /// Re-apply theme when the user changes the colour / scanline / beep
@@ -194,7 +196,9 @@ fn style_egui(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
 /// cost) so we just listen for `WorldSettings` changes.
 fn restyle_on_change(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
     if settings.is_changed() {
-        apply_hacker_theme(contexts.ctx_mut(), settings.theme);
+        let ctx = contexts.ctx_mut();
+        set_reduced_motion(ctx, settings.reduce_motion);
+        apply_hacker_theme(ctx, settings.theme);
     }
 }
 

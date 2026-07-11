@@ -1086,6 +1086,7 @@ fn stream_chunks(
     anchors: Query<&Transform, With<ChunkAnchor>>,
     settings: Res<WorldSettings>,
     budget: Res<RuntimeBudget>,
+    celestial_travel: Option<Res<crate::celestial::CelestialTravel>>,
     mut world: ResMut<VoxelWorld>,
     mut streamer: ResMut<ChunkStreamer>,
     mut governor: ResMut<StreamingGovernor>,
@@ -1093,6 +1094,21 @@ fn stream_chunks(
     let Ok(transform) = anchors.get_single() else {
         return;
     };
+
+    // During orbital transit the ground is no longer the relevant
+    // destination. Holding the current frontier avoids turning every
+    // boost frame into unload/generate/mesh churn as the carrier crosses
+    // thousands of blocks per second. Existing terrain remains resident
+    // for a seamless return; streaming resumes automatically on approach.
+    let rd = sync_streaming_governor(&mut governor, &budget, &streamer);
+    if celestial_travel
+        .as_deref()
+        .is_some_and(crate::celestial::CelestialTravel::suspends_ground_streaming)
+    {
+        governor.status = "Orbital transit // ground frontier held".to_string();
+        return;
+    }
+
     let (px, _py, pz) = (
         crate::chunk::to_i32_safe(transform.translation.x),
         crate::chunk::to_i32_safe(transform.translation.y),
@@ -1101,7 +1117,6 @@ fn stream_chunks(
     let pcx = px.div_euclid(CHUNK_SIZE_I);
     let pcz = pz.div_euclid(CHUNK_SIZE_I);
 
-    let rd = sync_streaming_governor(&mut governor, &budget, &streamer);
     let retain = rd + 2;
     let retain2 = retain * retain;
     let vertical = settings.vertical_chunks as i32;

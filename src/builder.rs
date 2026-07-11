@@ -23,6 +23,10 @@ use serde::{Deserialize, Serialize};
 use crate::blocks::{BlockType, Voxel, AIR};
 use crate::director::UnifiedTelemetry;
 use crate::player::Player;
+use crate::sketch_model::{
+    SketchDocument, SketchEditSummary, SketchId, SketchVoxelEntityLinkSnapshot,
+    SketchVoxelLinkIndex,
+};
 use crate::world::{VoxelWorld, WorldEditBatch};
 
 /// Root resource for the in-game builder. The editor UI reads/writes
@@ -166,18 +170,28 @@ impl BuilderHistory {
         label: impl Into<String>,
         changes: Vec<(IVec3, Voxel, Voxel)>,
     ) {
+        self.record_external_with_sketch_meta(label, changes, None);
+    }
+
+    pub fn record_external_with_sketch_meta(
+        &mut self,
+        label: impl Into<String>,
+        changes: Vec<(IVec3, Voxel, Voxel)>,
+        sketch_meta: Option<BuilderHistorySketchMeta>,
+    ) {
         let filtered: Vec<VoxelChange> = changes
             .into_iter()
             .filter(|(_, b, a)| b != a)
             .take(UNDO_CHANGE_LIMIT)
             .map(|(pos, before, after)| VoxelChange { pos, before, after })
             .collect();
-        if filtered.is_empty() {
+        if filtered.is_empty() && sketch_meta.is_none() {
             return;
         }
         self.undo.push(EditHistoryBatch {
             label: label.into(),
             changes: filtered,
+            sketch_meta,
         });
         if self.undo.len() > UNDO_STACK_LIMIT {
             self.undo.remove(0);
@@ -190,20 +204,118 @@ impl BuilderHistory {
     /// the (label, voxel-count). Used by [`crate::sculpt`] for the
     /// universal Ctrl+Z handler. Returns `None` when the stack is empty.
     pub fn pop_undo(&mut self, world: &mut VoxelWorld) -> Option<(String, usize)> {
+        self.pop_undo_detailed(world)
+            .map(|step| (step.label, step.voxel_count))
+    }
+
+    pub fn pop_undo_detailed(&mut self, world: &mut VoxelWorld) -> Option<BuilderHistoryStep> {
         let batch = self.undo.pop()?;
         let n = apply_history_batch(world, &batch, true);
-        let label = batch.label.clone();
+        let step = BuilderHistoryStep {
+            label: batch.label.clone(),
+            voxel_count: n,
+            sketch_meta: batch.sketch_meta.clone(),
+        };
         self.redo.push(batch);
-        Some((label, n))
+        Some(step)
     }
 
     /// Mirror of [`Self::pop_undo`] for redo.
     pub fn pop_redo(&mut self, world: &mut VoxelWorld) -> Option<(String, usize)> {
+        self.pop_redo_detailed(world)
+            .map(|step| (step.label, step.voxel_count))
+    }
+
+    pub fn pop_redo_detailed(&mut self, world: &mut VoxelWorld) -> Option<BuilderHistoryStep> {
         let batch = self.redo.pop()?;
         let n = apply_history_batch(world, &batch, false);
-        let label = batch.label.clone();
+        let step = BuilderHistoryStep {
+            label: batch.label.clone(),
+            voxel_count: n,
+            sketch_meta: batch.sketch_meta.clone(),
+        };
         self.undo.push(batch);
-        Some((label, n))
+        Some(step)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuilderHistoryStep {
+    pub label: String,
+    pub voxel_count: usize,
+    pub sketch_meta: Option<BuilderHistorySketchMeta>,
+}
+
+impl BuilderHistoryStep {
+    pub fn label_and_voxels(&self) -> (String, usize) {
+        (self.label.clone(), self.voxel_count)
+    }
+
+    pub fn apply_sketch_undo(
+        &self,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Option<SketchEditSummary> {
+        self.sketch_meta.as_ref()?.apply_undo(doc, links)
+    }
+
+    pub fn apply_sketch_redo(
+        &self,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Option<SketchEditSummary> {
+        self.sketch_meta.as_ref()?.apply_redo(doc, links)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuilderHistorySketchMeta {
+    SketchMove {
+        entities: Vec<SketchId>,
+        delta: IVec3,
+    },
+    SketchCreated {
+        link_snapshots: Vec<SketchVoxelEntityLinkSnapshot>,
+    },
+}
+
+impl BuilderHistorySketchMeta {
+    fn apply_undo(
+        &self,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Option<SketchEditSummary> {
+        match self {
+            Self::SketchMove { entities, delta } => {
+                let summary = doc.undo_last()?;
+                links.translate_entities(entities.iter().copied(), -*delta);
+                Some(summary)
+            }
+            Self::SketchCreated { link_snapshots } => {
+                let summary = doc.undo_last()?;
+                links.remove_entities(link_snapshots.iter().map(|snapshot| snapshot.entity));
+                Some(summary)
+            }
+        }
+    }
+
+    fn apply_redo(
+        &self,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Option<SketchEditSummary> {
+        match self {
+            Self::SketchMove { entities, delta } => {
+                let summary = doc.redo_last()?;
+                links.translate_entities(entities.iter().copied(), *delta);
+                Some(summary)
+            }
+            Self::SketchCreated { link_snapshots } => {
+                let summary = doc.redo_last()?;
+                links.restore_entity_snapshots(link_snapshots);
+                Some(summary)
+            }
+        }
     }
 }
 
@@ -211,6 +323,7 @@ impl BuilderHistory {
 struct EditHistoryBatch {
     label: String,
     changes: Vec<VoxelChange>,
+    sketch_meta: Option<BuilderHistorySketchMeta>,
 }
 
 #[derive(Clone, Copy)]
@@ -626,22 +739,18 @@ fn apply_build_actions(
                 state.status = "Gespiegelt: Z-Achse.".into();
             }
             BuildAction::Undo => {
-                let Some(batch) = history.undo.pop() else {
+                let Some((label, n)) = history.pop_undo(&mut world) else {
                     state.status = "Undo: nichts vorhanden.".into();
                     continue;
                 };
-                let n = apply_history_batch(&mut world, &batch, true);
-                state.status = format!("Undo '{}': {} Bloecke.", batch.label, n);
-                history.redo.push(batch);
+                state.status = format!("Undo '{}': {} Bloecke.", label, n);
             }
             BuildAction::Redo => {
-                let Some(batch) = history.redo.pop() else {
+                let Some((label, n)) = history.pop_redo(&mut world) else {
                     state.status = "Redo: nichts vorhanden.".into();
                     continue;
                 };
-                let n = apply_history_batch(&mut world, &batch, false);
-                state.status = format!("Redo '{}': {} Bloecke.", batch.label, n);
-                history.undo.push(batch);
+                state.status = format!("Redo '{}': {} Bloecke.", label, n);
             }
         }
     }
@@ -1379,7 +1488,11 @@ fn commit_history(
     if changes.is_empty() {
         return "Keine Aenderung.".into();
     }
-    history.undo.push(EditHistoryBatch { label, changes });
+    history.undo.push(EditHistoryBatch {
+        label,
+        changes,
+        sketch_meta: None,
+    });
     if history.undo.len() > UNDO_STACK_LIMIT {
         history.undo.remove(0);
     }

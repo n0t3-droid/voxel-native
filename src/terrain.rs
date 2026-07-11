@@ -98,6 +98,22 @@ pub enum Region {
     AlienReef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TreeProfile {
+    trunk_height: i32,
+    canopy_radius: i32,
+    branch_reach: i32,
+    tiers: usize,
+    max_extent: i32,
+    crown_lift: i32,
+}
+
+impl TreeProfile {
+    fn total_height(self) -> i32 {
+        self.trunk_height + self.crown_lift + 1
+    }
+}
+
 pub struct TerrainGenerator {
     pub seed: u32,
     scenery_quality: crate::settings::SceneryQuality,
@@ -180,45 +196,77 @@ impl TerrainGenerator {
     }
 
     pub fn tree_height_for_biome(&self, biome: Biome, r: f64) -> (i32, BlockType) {
-        let bonus = self.scenery_quality.height_bonus();
-        match biome {
-            Biome::Jungle => (
-                9 + ((r * 997.0) as i32 % 4) + bonus,
-                BlockType::JungleLeaves,
-            ),
-            Biome::Plains => {
-                if self.scenery_quality == crate::settings::SceneryQuality::Lush {
-                    let leaves = if r < 0.65 {
-                        BlockType::BlossomLeaves
-                    } else {
-                        BlockType::Leaves
-                    };
-                    (7 + ((r * 997.0) as i32 % 3) + bonus, leaves)
-                } else {
-                    (4 + ((r * 997.0) as i32 % 2) + bonus, BlockType::Leaves)
-                }
-            }
-            Biome::Forest => {
-                let leaves =
-                    if self.scenery_quality == crate::settings::SceneryQuality::Lush && r < 0.65 {
-                        BlockType::BlossomLeaves
-                    } else {
-                        BlockType::Leaves
-                    };
-                (7 + ((r * 997.0) as i32 % 4) + bonus, leaves)
-            }
-            Biome::Karst => (
-                8 + ((r * 997.0) as i32 % 4) + bonus,
-                if self.scenery_quality == crate::settings::SceneryQuality::Lush && r < 0.50 {
-                    BlockType::BlossomLeaves
-                } else {
-                    BlockType::Leaves
-                },
-            ),
-            Biome::Savanna => (4 + bonus / 2, BlockType::Leaves),
-            Biome::Tundra => (3 + bonus / 2, BlockType::Leaves),
-            _ => (4 + ((r * 997.0) as i32 % 2) + bonus, BlockType::Leaves),
+        use crate::settings::SceneryQuality;
+
+        let variance = (r * 997.0) as i32;
+        let (lean, balanced, lush, variance_span) = match biome {
+            Biome::Jungle => (8, 10, 14, 4),
+            Biome::Forest => (6, 9, 13, 4),
+            Biome::Karst => (7, 9, 13, 4),
+            Biome::Plains => (5, 7, 12, 3),
+            Biome::Savanna => (5, 6, 8, 2),
+            Biome::Tundra => (4, 5, 6, 2),
+            _ => (5, 6, 8, 2),
+        };
+        let base = match self.scenery_quality {
+            SceneryQuality::Off | SceneryQuality::Lean => lean,
+            SceneryQuality::Balanced => balanced,
+            SceneryQuality::Lush => lush,
+        };
+        let blossom_chance = match self.scenery_quality {
+            SceneryQuality::Lush => 0.72,
+            SceneryQuality::Balanced => 0.22,
+            SceneryQuality::Off | SceneryQuality::Lean => 0.0,
+        };
+        let leaves = if biome == Biome::Jungle {
+            BlockType::JungleLeaves
+        } else if matches!(biome, Biome::Plains | Biome::Forest | Biome::Karst)
+            && r < blossom_chance
+        {
+            BlockType::BlossomLeaves
+        } else {
+            BlockType::Leaves
+        };
+
+        (base + variance.rem_euclid(variance_span), leaves)
+    }
+
+    fn tree_profile(&self, biome: Biome, style_roll: f64) -> Option<(TreeProfile, BlockType)> {
+        use crate::settings::SceneryQuality;
+
+        if self.scenery_quality == SceneryQuality::Off || self.tree_density_for_biome(biome) == 0.0
+        {
+            return None;
         }
+        let (trunk_height, leaves) = self.tree_height_for_biome(biome, style_roll);
+        let profile = match self.scenery_quality {
+            SceneryQuality::Off => return None,
+            SceneryQuality::Lean => TreeProfile {
+                trunk_height,
+                canopy_radius: 2,
+                branch_reach: 1,
+                tiers: 2,
+                max_extent: 3,
+                crown_lift: 2,
+            },
+            SceneryQuality::Balanced => TreeProfile {
+                trunk_height,
+                canopy_radius: 2,
+                branch_reach: 2,
+                tiers: 4,
+                max_extent: 5,
+                crown_lift: 3,
+            },
+            SceneryQuality::Lush => TreeProfile {
+                trunk_height,
+                canopy_radius: 3,
+                branch_reach: 3,
+                tiers: 6,
+                max_extent: 7,
+                crown_lift: 4,
+            },
+        };
+        Some((profile, leaves))
     }
 
     /// Fractional Brownian Motion (stacked octaves of Perlin noise, in [-1,1]).
@@ -320,27 +368,28 @@ impl TerrainGenerator {
         }
     }
 
-    /// Height of the terrain surface at world (x,z), in blocks.
-    fn surface_height(&self, wx: f64, wz: f64) -> (i32, f64) {
+    /// Broad unfiltered height field. Keep high-amplitude octaves wide enough
+    /// that a feature cannot collapse to a single surface column.
+    fn raw_surface_height(&self, wx: f64, wz: f64) -> (i32, f64) {
         // 1. Continentalness â€” very low frequency, defines ocean vs land.
         //    Halved frequency so continents stretch ~2Ã— wider â€” bigger
         //    plains, longer coastlines, gentler oceanâ†’land transitions.
-        let cont = self.fbm2(&self.continent, wx * 0.0002, wz * 0.0002, 4, 2.0, 0.5);
+        let cont = self.fbm2(&self.continent, wx * 0.00024, wz * 0.00024, 4, 2.0, 0.5);
 
         // 2. Erosion â€” smooths out where it's high, carves where it's low.
-        let erod = self.fbm2(&self.erosion, wx * 0.0005, wz * 0.0005, 3, 2.0, 0.5);
+        let erod = self.fbm2(&self.erosion, wx * 0.00055, wz * 0.00055, 3, 2.0, 0.5);
 
         // 3. Domain-warped hills â€” the "lumpy" medium-scale terrain.
         //    Lower frequency + bigger warp = wider, more flowing hills
         //    instead of bumpy fields.
-        let warp_scale = 120.0;
-        let dx = self.warp_x.get([wx * 0.001, wz * 0.001]) * warp_scale;
-        let dz = self.warp_z.get([wx * 0.001, wz * 0.001]) * warp_scale;
+        let warp_scale = 96.0;
+        let dx = self.warp_x.get([wx * 0.0008, wz * 0.0008]) * warp_scale;
+        let dz = self.warp_z.get([wx * 0.0008, wz * 0.0008]) * warp_scale;
         let hills = self.fbm2(
             &self.hills_a,
-            (wx + dx) * 0.003,
-            (wz + dz) * 0.003,
-            5,
+            (wx + dx) * 0.0019,
+            (wz + dz) * 0.0019,
+            4,
             2.0,
             0.5,
         );
@@ -348,19 +397,18 @@ impl TerrainGenerator {
         // 4. Ridged mountains â€” only "felt" where continentalness is high.
         //    Lower frequency = wider mountain ranges with broad foothills
         //    rather than tightly-packed spires.
-        let ridges = self.ridged_fbm(&self.ridges, wx * 0.0015, wz * 0.0015, 5);
-        let mountain_mask = ((cont - 0.1).max(0.0) * 2.5).min(1.0);
+        let ridges = self.ridged_fbm(&self.ridges, wx * 0.00095, wz * 0.00095, 4);
+        let continental_mask = smoothstep(0.08, 0.52, cont);
+        let ridge_mask = smoothstep(0.40, 0.76, ridges);
+        let mountain_mask = continental_mask * ridge_mask;
 
-        // Combine. Tuned for a more balanced world: lots of flat plains
-        // and wide beaches, gentle rolling hills, and mountains that
-        // ramp up gradually over hundreds of blocks. Hill amplitude
-        // dropped from 18 â†’ 12 (calmer fields) and the quadratic peak
-        // boost stretched (threshold 0.55â†’0.62, coefficient 110â†’90) so
-        // mountains rise more slowly across a wider footprint.
-        let peak_boost = (cont - 0.62).max(0.0);
-        let peak_boost = peak_boost * peak_boost * 80.0;
-        let base = 50.0 + cont * 32.0 + (1.0 - erod.abs()) * 8.0;
-        let mut h = base + hills * 14.0 + ridges * 72.0 * mountain_mask + peak_boost;
+        // Erosion controls rolling relief while smooth masks reserve the
+        // stronger uplift for broad continental ridges. This keeps plains
+        // legible and mountain approaches gradual over many chunks.
+        let peak_boost = smoothstep(0.48, 0.78, cont) * 18.0;
+        let rolling_relief = 7.0 + (1.0 - erod.abs()) * 7.0;
+        let base = 50.0 + cont * 34.0 + erod * 4.0;
+        let mut h = base + hills * rolling_relief + mountain_mask * 52.0 + peak_boost;
 
         // ----------- Macro-region modifier -----------
         // Apply ONE geographic-province transform with high strength
@@ -398,7 +446,7 @@ impl TerrainGenerator {
                 // Alpine: strong enough for skyline silhouettes, capped
                 // so normal worlds do not turn into vertical walls that
                 // hitch low-end machines when approached.
-                h += rs * ridges.abs() * 58.0;
+                h += rs * ridge_mask * 34.0;
             }
             Region::Wetland => {
                 // Floodplain: pull to just above water level.
@@ -408,22 +456,17 @@ impl TerrainGenerator {
                 h += rs * hills * 4.5;
             }
             Region::Karst => {
-                // Chinese karst: vertical pillars rising 30-60 blocks
-                // out of a flat jungle floor. We compute a "pillar
-                // mask" from cubed ridged noise (sharp and isolated)
-                // and add it as additional height. The flat base also
-                // gets pulled slightly upward so pillars rise from
-                // verdant ground rather than ocean.
+                // Wide limestone towers rise from a calm jungle floor. Two
+                // low-frequency masks retain a karst skyline without the
+                // single-column peaks created by cubed high-frequency noise.
                 let base_pull = rs * 0.4;
                 let karst_floor = WATER_LEVEL as f64 + 6.0;
                 h = h * (1.0 - base_pull) + karst_floor * base_pull;
-                let pillar_n = self.ridged_fbm(&self.ridges, wx * 0.008, wz * 0.008, 4); // wider pillars
-                                                                                         // Cube to make pillars sharp & isolated rather than
-                                                                                         // continuous ridges. Threshold so only the strongest
-                                                                                         // peaks become pillars.
-                let pillar = (pillar_n - 0.62).max(0.0);
-                let pillar = pillar * pillar * pillar * 520.0;
-                h += rs * pillar;
+                let broad = self.ridged_fbm(&self.ridges, wx * 0.0022, wz * 0.0022, 3);
+                let shoulder =
+                    self.ridged_fbm(&self.hills_b, wx * 0.0037 + 31.0, wz * 0.0037 - 17.0, 2);
+                let tower = smoothstep(0.48, 0.76, broad * 0.72 + shoulder * 0.28);
+                h += rs * tower * tower * 44.0;
             }
             Region::CrystalSpires => {
                 // Towering hex-prism-feel pillars on a flat glow-sand
@@ -497,7 +540,30 @@ impl TerrainGenerator {
             }
         }
 
-        (h.round() as i32, cont)
+        (h.clamp(8.0, 208.0).round() as i32, cont)
+    }
+
+    /// Canonical surface used by filling, decoration, spawn lookup, and
+    /// public queries. Shoreline cleanup lives here so later passes cannot
+    /// decorate a raw column that the terrain pass already submerged.
+    fn surface_height(&self, wx: f64, wz: f64) -> (i32, f64) {
+        let (mut surface, cont) = self.raw_surface_height(wx, wz);
+        if (WATER_LEVEL..=WATER_LEVEL + 2).contains(&surface) {
+            let mut land_neighbours = 0;
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+                    let neighbour = self.raw_surface_height(wx + dx as f64, wz + dz as f64).0;
+                    land_neighbours += (neighbour >= WATER_LEVEL) as i32;
+                }
+            }
+            if land_neighbours < 2 {
+                surface = WATER_LEVEL - 1;
+            }
+        }
+        (surface, cont)
     }
 
     /// 3D narrow-band cave noise. Returns `true` if this world cell is
@@ -745,7 +811,7 @@ impl TerrainGenerator {
         &self,
         biome: Biome,
         current: BlockType,
-        _slope: i32,
+        slope: i32,
         wx: i32,
         wz: i32,
     ) -> BlockType {
@@ -760,73 +826,72 @@ impl TerrainGenerator {
             _ => {}
         }
 
-        let r = column_rand(self.seed ^ 0xA17E_577, wx, wz);
         let grain = self
             .hills_b
-            .get([wx as f64 * 0.033 + 19.0, wz as f64 * 0.033 - 31.0]);
+            .get([wx as f64 * 0.018 + 19.0, wz as f64 * 0.018 - 31.0]);
 
         match biome {
             Biome::Tundra => {
-                if r < 0.035 {
+                if grain > 0.42 {
                     BlockType::Snow
-                } else if r < 0.050 {
+                } else if grain < -0.56 && slope >= 1 {
                     BlockType::Gravel
                 } else {
                     current
                 }
             }
             Biome::Mountains | Biome::SnowyMountains => {
-                if r < 0.060 {
+                if slope >= 2 && grain < -0.28 {
                     BlockType::Gravel
-                } else if matches!(biome, Biome::SnowyMountains) && r < 0.140 {
+                } else if matches!(biome, Biome::SnowyMountains) && grain > -0.18 {
                     BlockType::Snow
                 } else {
                     current
                 }
             }
             Biome::Mesa => {
-                if r < 0.030 {
+                if grain > 0.56 {
                     BlockType::MesaClay
-                } else if grain > 0.58 && r < 0.060 {
+                } else if grain < -0.62 {
                     BlockType::RedStone
                 } else {
                     current
                 }
             }
             Biome::Karst => {
-                if grain > 0.60 && r < 0.020 {
+                if grain > 0.58 {
                     BlockType::Limestone
                 } else {
                     current
                 }
             }
             Biome::CrystalSpires => {
-                if r < 0.16 {
+                if grain > 0.45 {
                     BlockType::LuminiteCrystal
-                } else if r < 0.26 {
+                } else if grain > 0.18 {
                     BlockType::Crystal
                 } else {
                     current
                 }
             }
             Biome::VolcanicWaste => {
-                if grain > 0.58 && r < 0.18 {
+                if grain > 0.67 && slope == 0 {
                     BlockType::Lava
                 } else {
                     current
                 }
             }
             Biome::GlacierShards => {
-                if r < 0.20 {
+                if grain > 0.20 {
                     BlockType::Ice
                 } else {
                     current
                 }
             }
             Biome::AlienReef => {
-                if r < 0.14 {
+                if grain > 0.52 {
                     BlockType::IridiumVein
-                } else if r < 0.24 {
+                } else if grain < -0.48 {
                     BlockType::BoneRock
                 } else {
                     current
@@ -854,30 +919,7 @@ impl TerrainGenerator {
             for lx in 0..CHUNK_SIZE {
                 let wx = cx * CHUNK_SIZE_I + lx as i32;
                 let wz = cz * CHUNK_SIZE_I + lz as i32;
-                let (mut surface, cont) = self.surface_height(wx as f64, wz as f64);
-
-                // --------- Ocean isolation cleanup ---------
-                // A single column sticking 1-2 blocks out of the water
-                // with all 4 cardinal neighbours submerged is a floating
-                // sand pebble â€” jarring and unrealistic. Pull it back
-                // beneath the water line so oceans look clean. We only
-                // fix the "just-barely-above-water" band; real islands
-                // rise > 3 blocks above water and have at least one
-                // land neighbour.
-                if surface <= WATER_LEVEL + 2 && surface >= WATER_LEVEL {
-                    let (hn, _) = self.surface_height(wx as f64, (wz - 1) as f64);
-                    let (hs, _) = self.surface_height(wx as f64, (wz + 1) as f64);
-                    let (he, _) = self.surface_height((wx + 1) as f64, wz as f64);
-                    let (hw, _) = self.surface_height((wx - 1) as f64, wz as f64);
-                    let land_neighbours = (hn >= WATER_LEVEL) as i32
-                        + (hs >= WATER_LEVEL) as i32
-                        + (he >= WATER_LEVEL) as i32
-                        + (hw >= WATER_LEVEL) as i32;
-                    if land_neighbours == 0 {
-                        // Floating island: submerge it.
-                        surface = WATER_LEVEL - 1;
-                    }
-                }
+                let (surface, cont) = self.surface_height(wx as f64, wz as f64);
 
                 // --------- Slope analysis ---------
                 // Compute the local gradient from 4 cardinal height
@@ -1027,14 +1069,12 @@ impl TerrainGenerator {
         chunk.finalize_uniform_flags();
     }
 
-    /// Place trees, flowers, rocks inside the chunk. Only features that
-    /// fit entirely inside the chunk are placed â€” cross-chunk trees would
-    /// need a deferred population pass and we want to keep the terrain
-    /// generator cleanly per-chunk. The result is still dense forests
-    /// (16Ã—16 column is wide enough for many trees) with ~1-block gaps
-    /// at chunk seams, which is visually imperceptible at normal render
-    /// distance.
+    /// Paint deterministic tree slices. Horizontal crowns stay chunk-local;
+    /// vertical slices repeat in every height chunk so large trees are never
+    /// clipped by a 16-block boundary.
     fn decorate(&self, chunk: &mut Chunk) {
+        use crate::settings::SceneryQuality;
+
         let ChunkPos {
             x: cx,
             y: cy,
@@ -1042,140 +1082,85 @@ impl TerrainGenerator {
         } = chunk.pos;
         let origin_y = cy * CHUNK_SIZE_I;
 
-        // Margin so leaf canopy (radius 2) never pokes out horizontally.
-        for lz in 2..(CHUNK_SIZE - 2) {
-            for lx in 2..(CHUNK_SIZE - 2) {
-                let wx = cx * CHUNK_SIZE_I + lx as i32;
-                let wz = cz * CHUNK_SIZE_I + lz as i32;
-                let (surface, cont) = self.surface_height(wx as f64, wz as f64);
-                let biome = self.biome(wx as f64, wz as f64, surface, cont);
+        let (candidate_budget, margin, chance_scale) = match self.scenery_quality {
+            SceneryQuality::Off => return,
+            SceneryQuality::Lean => (2usize, 3usize, 10.0),
+            SceneryQuality::Balanced => (2usize, 5usize, 8.0),
+            SceneryQuality::Lush => (1usize, 7usize, 7.0),
+        };
+        let interior = CHUNK_SIZE - margin * 2;
 
-                // Trees can't grow on cliffs / steep slopes. Same slope
-                // test as the main generator â€” if any cardinal neighbour
-                // is >= 3 blocks lower/higher, skip.
-                let (hn, _) = self.surface_height(wx as f64, (wz - 1) as f64);
-                let (hs, _) = self.surface_height(wx as f64, (wz + 1) as f64);
-                let (he, _) = self.surface_height((wx + 1) as f64, wz as f64);
-                let (hw, _) = self.surface_height((wx - 1) as f64, wz as f64);
-                let slope = (surface - hn)
-                    .abs()
-                    .max((surface - hs).abs())
-                    .max((surface - he).abs())
-                    .max((surface - hw).abs());
-                if slope >= 3 {
-                    continue;
-                }
+        for candidate in 0..candidate_budget {
+            let x_roll = column_rand(
+                self.seed ^ 0x71EE_1001_u32.wrapping_add(candidate as u32 * 977),
+                cx,
+                cz,
+            );
+            let z_roll = column_rand(
+                self.seed ^ 0x71EE_2002_u32.wrapping_add(candidate as u32 * 991),
+                cx,
+                cz,
+            );
+            let lx = margin + ((x_roll * interior as f64) as usize).min(interior - 1);
+            let lz = margin + ((z_roll * interior as f64) as usize).min(interior - 1);
+            let wx = cx * CHUNK_SIZE_I + lx as i32;
+            let wz = cz * CHUNK_SIZE_I + lz as i32;
+            let (surface, cont) = self.surface_height(wx as f64, wz as f64);
+            let biome = self.biome(wx as f64, wz as f64, surface, cont);
 
-                // Density scales with SceneryQuality so low-end PCs can
-                // keep foliage sparse while cinematic worlds get larger
-                // bonsai/blossom silhouettes.
-                let density = self.tree_density_for_biome(biome);
-                if density == 0.0 {
-                    continue;
-                }
-
-                // Deterministic hash-based "random" per column.
-                let r = column_rand(self.seed, wx, wz);
-                if r > density {
-                    continue;
-                }
-
-                // Surface must be inside this chunk (we only place the
-                // trunk base at `surface + 1`, above the top block).
-                let base_y = surface + 1;
-                if base_y < origin_y || base_y >= origin_y + CHUNK_SIZE_I {
-                    continue;
-                }
-                // And we need room for the whole tree above.
-                let (trunk_h, leaf_kind) = self.tree_height_for_biome(biome, r);
-                let wants_bonsai = self.scenery_quality == crate::settings::SceneryQuality::Lush
-                    && matches!(
-                        biome,
-                        Biome::Forest | Biome::Karst | Biome::Jungle | Biome::Plains
-                    )
-                    && lx >= 5
-                    && lz >= 5
-                    && lx + 5 < CHUNK_SIZE
-                    && lz + 5 < CHUNK_SIZE;
-                let top_y = base_y + trunk_h + if wants_bonsai { 4 } else { 2 };
-                if top_y >= origin_y + CHUNK_SIZE_I {
-                    continue;
-                }
-
-                // Don't plant on water/sand (no trees on beaches).
-                let surface_ly = (surface - origin_y) as i32;
-                if surface_ly < 0 || surface_ly >= CHUNK_SIZE_I {
-                    // Surface block sits in a different chunk: skip to
-                    // avoid floating trees when the ground chunk below
-                    // turns out to be water/sand. Safer to skip.
-                    continue;
-                }
-                let ground = chunk.get(lx, surface_ly as usize, lz);
-                if ground != <BlockType as Into<Voxel>>::into(BlockType::Grass)
-                    && ground != <BlockType as Into<Voxel>>::into(BlockType::SavannaGrass)
-                    && ground != <BlockType as Into<Voxel>>::into(BlockType::TundraGrass)
-                {
-                    continue;
-                }
-
-                if wants_bonsai
-                    && self.try_place_bonsai_tree(chunk, lx, lz, base_y, origin_y, leaf_kind)
-                {
-                    continue;
-                }
-
-                // Trunk.
-                for dy in 0..trunk_h {
-                    let ly = (base_y + dy - origin_y) as usize;
-                    chunk.set(lx, ly, lz, BlockType::Wood.into());
-                }
-
-                // Canopy: 5Ã—5 at two middle levels, 3Ã—3 above, 1 on top.
-                let crown_y = base_y + trunk_h - 1;
-                for (radius, layer) in [(2i32, 0i32), (2, 1), (1, 2), (0, 3)] {
-                    let ly_world = crown_y + layer;
-                    if ly_world < origin_y || ly_world >= origin_y + CHUNK_SIZE_I {
-                        continue;
-                    }
-                    let ly = (ly_world - origin_y) as usize;
-                    for dz in -radius..=radius {
-                        for dx in -radius..=radius {
-                            // Slight corner trimming for a rounder crown.
-                            if dx.abs() == radius && dz.abs() == radius && radius == 2 {
-                                continue;
-                            }
-                            let nx = (lx as i32 + dx) as usize;
-                            let nz = (lz as i32 + dz) as usize;
-                            if nx >= CHUNK_SIZE || nz >= CHUNK_SIZE {
-                                continue;
-                            }
-                            // Don't overwrite the trunk itself.
-                            if chunk.get(nx, ly, nz) == AIR {
-                                chunk.set(nx, ly, nz, leaf_kind.into());
-                            }
-                        }
-                    }
-                }
+            // Trees can't grow on cliffs / steep slopes. Same slope
+            // test as the main generator â€” if any cardinal neighbour
+            // is >= 3 blocks lower/higher, skip.
+            let (hn, _) = self.surface_height(wx as f64, (wz - 1) as f64);
+            let (hs, _) = self.surface_height(wx as f64, (wz + 1) as f64);
+            let (he, _) = self.surface_height((wx + 1) as f64, wz as f64);
+            let (hw, _) = self.surface_height((wx - 1) as f64, wz as f64);
+            let slope = (surface - hn)
+                .abs()
+                .max((surface - hs).abs())
+                .max((surface - he).abs())
+                .max((surface - hw).abs());
+            if slope >= 3 {
+                continue;
             }
+
+            // Density scales with SceneryQuality so low-end PCs can
+            // keep foliage sparse while cinematic worlds get larger
+            // bonsai/blossom silhouettes.
+            let density = self.tree_density_for_biome(biome);
+            if density == 0.0 {
+                continue;
+            }
+
+            let gate_roll = column_rand(
+                self.seed ^ 0x71EE_3003_u32.wrapping_add(candidate as u32 * 997),
+                wx,
+                wz,
+            );
+            if gate_roll > (density * chance_scale).min(0.98) {
+                continue;
+            }
+
+            let style_roll = column_rand(self.seed ^ 0x71EE_4004, wx, wz);
+            let Some((profile, leaf_kind)) = self.tree_profile(biome, style_roll) else {
+                continue;
+            };
+            let base_y = surface + 1;
+            let tree_top = base_y + profile.total_height() - 1;
+            if tree_top < origin_y || base_y >= origin_y + CHUNK_SIZE_I {
+                continue;
+            }
+            let fits_horizontally = lx >= profile.max_extent as usize
+                && lz >= profile.max_extent as usize
+                && lx + (profile.max_extent as usize) < CHUNK_SIZE
+                && lz + (profile.max_extent as usize) < CHUNK_SIZE;
+            debug_assert!(fits_horizontally);
+            self.try_place_bonsai_tree(chunk, lx, lz, base_y, origin_y, profile, leaf_kind);
         }
 
-        // ----------------------- Structures -------------------------
-        // A second pass for the "cool stuff": natural stone arches,
-        // ruined pillar clusters, and boulder piles in rocky biomes.
-        // Deterministic per-seed, chunk-local, no cross-chunk writes.
-        self.decorate_structures(chunk);
-
-        // ----------------------- Futuristic Cities ------------------
-        // Rare skyscraper districts that flatten local terrain and
-        // scatter sci-fi towers with glowing crystal crowns.
-        self.try_place_city(chunk);
-
-        // ----------------------- Flora Scatter ----------------------
-        // Dense pass: flowers, tall grass, cacti, bushes, pebbles,
-        // kelp, coral, crystals, glowing moss â€” whatever fits the
-        // biome. Runs on every column (including margins) at high
-        // density so no area ever feels bare.
-        self.decorate_flora(chunk);
+        // Artificial ruins and one-block scatter are intentionally excluded
+        // from natural generation. They obscured the terrain silhouette and
+        // produced unsupported-looking debris for no gameplay benefit.
     }
 
     fn try_place_bonsai_tree(
@@ -1185,91 +1170,109 @@ impl TerrainGenerator {
         lz: usize,
         base_y: i32,
         origin_y: i32,
+        profile: TreeProfile,
         leaf_kind: BlockType,
     ) -> bool {
         let wx = chunk.pos.x * CHUNK_SIZE_I + lx as i32;
         let wz = chunk.pos.z * CHUNK_SIZE_I + lz as i32;
-        let height_roll = column_rand(self.seed ^ 0xB05A_1001, wx, wz);
         let lean_roll = column_rand(self.seed ^ 0xB05A_2002, wx, wz);
-        let trunk_h = 8 + (height_roll * 4.0) as i32;
-        if base_y < origin_y || base_y + trunk_h + 4 >= origin_y + CHUNK_SIZE_I {
+        if lx < profile.max_extent as usize
+            || lz < profile.max_extent as usize
+            || lx + profile.max_extent as usize >= CHUNK_SIZE
+            || lz + profile.max_extent as usize >= CHUNK_SIZE
+        {
+            return false;
+        }
+        let local_ground_y = base_y - 1 - origin_y;
+        if (0..CHUNK_SIZE_I).contains(&local_ground_y)
+            && !BlockType::from_voxel(chunk.get(lx, local_ground_y as usize, lz)).is_solid()
+        {
             return false;
         }
 
-        let lean_x = if lean_roll < 0.33 {
-            -1
-        } else if lean_roll > 0.66 {
-            1
+        let (lean_x, lean_z) = if profile.max_extent >= 5 {
+            match (lean_roll * 4.0) as i32 {
+                0 => (-1, 0),
+                1 => (1, 0),
+                2 => (0, -1),
+                _ => (0, 1),
+            }
         } else {
-            0
+            (0, 0)
         };
-        let mut trunk_x = lx as i32;
-        let trunk_z = lz as i32;
-        for dy in 0..trunk_h {
-            if dy == trunk_h / 2 {
-                trunk_x += lean_x;
+
+        let trunk_offset = |dy: i32| {
+            if dy >= profile.trunk_height / 2 {
+                (lean_x, lean_z)
+            } else {
+                (0, 0)
             }
-            if trunk_x < 0 || trunk_z < 0 {
-                return false;
+        };
+
+        for dy in 0..profile.trunk_height {
+            let (ox, oz) = trunk_offset(dy);
+            if dy == profile.trunk_height / 2 && (lean_x != 0 || lean_z != 0) {
+                set_tree_wood(chunk, lx as i32, base_y + dy, lz as i32, origin_y);
             }
-            set_safe(
-                chunk,
-                trunk_x as usize,
-                base_y + dy,
-                trunk_z as usize,
-                BlockType::Wood,
-                origin_y,
-            );
-            if dy >= 3 && dy % 3 == 0 {
-                for side in [-1, 1] {
-                    let bx = trunk_x + side * 2;
-                    if bx >= 0 {
-                        set_safe(
-                            chunk,
-                            bx as usize,
-                            base_y + dy,
-                            trunk_z as usize,
-                            BlockType::Wood,
-                            origin_y,
-                        );
-                    }
-                }
-            }
+            set_tree_wood(chunk, lx as i32 + ox, base_y + dy, lz as i32 + oz, origin_y);
         }
 
-        let crown_block = if leaf_kind == BlockType::BlossomLeaves
-            || column_rand(self.seed ^ 0xB05A_3003, wx, wz) < 0.35
-        {
-            BlockType::BlossomLeaves
-        } else {
-            leaf_kind
-        };
-        let tiers: [(i32, i32, i32, i32); 6] = [
-            (0, 0, trunk_h - 1, 4),
-            (-3, 0, trunk_h - 2, 3),
-            (3, 1, trunk_h, 3),
-            (0, -3, trunk_h + 1, 3),
-            (2, -2, trunk_h + 2, 2),
-            (0, 0, trunk_h + 3, 1),
-        ];
-        for (ox, oz, dy, radius) in tiers {
-            let cx = trunk_x + ox;
-            let cz = trunk_z + oz;
-            let cy = base_y + dy;
-            for dz in -radius..=radius {
-                for dx in -radius..=radius {
-                    if dx.abs() + dz.abs() > radius + 1 {
-                        continue;
-                    }
-                    let nx = cx + dx;
-                    let nz = cz + dz;
-                    if nx < 0 || nz < 0 {
-                        continue;
-                    }
-                    set_safe(chunk, nx as usize, cy, nz as usize, crown_block, origin_y);
-                }
+        let rotation = (column_rand(self.seed ^ 0xB05A_3003, wx, wz) * 4.0) as usize;
+        let directions = [(1, 0), (0, 1), (-1, 0), (0, -1)];
+        let lower_dy = (profile.trunk_height / 2).max(3);
+        let branch_span = (profile.trunk_height - lower_dy - 2).max(1);
+        let mut crowns = [(0i32, 0i32, 0i32, 0i32); 6];
+
+        for tier in 0..profile.tiers {
+            let tier_divisor = (profile.tiers - 1).max(1) as i32;
+            let branch_dy = lower_dy + tier as i32 * branch_span / tier_divisor;
+            let (trunk_ox, trunk_oz) = trunk_offset(branch_dy);
+            let (dir_x, dir_z) = directions[(tier + rotation) % directions.len()];
+            let reach = (profile.branch_reach - tier as i32 / 3).max(1);
+            let branch_y = base_y + branch_dy;
+
+            for step in 0..=reach {
+                set_tree_wood(
+                    chunk,
+                    lx as i32 + trunk_ox + dir_x * step,
+                    branch_y,
+                    lz as i32 + trunk_oz + dir_z * step,
+                    origin_y,
+                );
             }
+            let upturn = (tier % 2 == 0) as i32;
+            let crown_x = lx as i32 + trunk_ox + dir_x * reach;
+            let crown_z = lz as i32 + trunk_oz + dir_z * reach;
+            if upturn == 1 {
+                set_tree_wood(chunk, crown_x, branch_y + 1, crown_z, origin_y);
+            }
+            crowns[tier] = (crown_x, branch_y + upturn, crown_z, profile.canopy_radius);
         }
+
+        let (top_ox, top_oz) = trunk_offset(profile.trunk_height - 1);
+        let top_x = lx as i32 + top_ox;
+        let top_z = lz as i32 + top_oz;
+        let trunk_top_y = base_y + profile.trunk_height - 1;
+        for lift in 1..=profile.crown_lift {
+            set_tree_wood(chunk, top_x, trunk_top_y + lift, top_z, origin_y);
+        }
+
+        let pad_layers = if profile.canopy_radius >= 2 { 2 } else { 1 };
+        for &(crown_x, crown_y, crown_z, radius) in crowns.iter().take(profile.tiers) {
+            place_leaf_pad(
+                chunk, crown_x, crown_y, crown_z, radius, pad_layers, leaf_kind, origin_y,
+            );
+        }
+        place_leaf_pad(
+            chunk,
+            top_x,
+            trunk_top_y + profile.crown_lift,
+            top_z,
+            (profile.canopy_radius - 1).max(1),
+            2,
+            leaf_kind,
+            origin_y,
+        );
 
         true
     }
@@ -1277,6 +1280,7 @@ impl TerrainGenerator {
     /// Low-density single-block tufts for atmosphere. Deliberately
     /// sparse so the ground stays smooth and walkable â€” the player
     /// must never have to jump over decoration. No 2-tall stacks.
+    #[allow(dead_code)]
     fn decorate_flora(&self, chunk: &mut Chunk) {
         let ChunkPos {
             x: cx,
@@ -2039,6 +2043,7 @@ impl TerrainGenerator {
     /// Scatter natural arches, ruin pillars and boulder piles in
     /// mountain/mesa/karst biomes. Purely chunk-local: anything that
     /// would poke past the chunk boundary is skipped.
+    #[allow(dead_code)]
     fn decorate_structures(&self, chunk: &mut Chunk) {
         let ChunkPos {
             x: cx,
@@ -2707,6 +2712,55 @@ impl TerrainGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn paint_tree_for_test(
+        generator: &TerrainGenerator,
+        biome: Biome,
+        style_roll: f64,
+        base_y: i32,
+    ) -> (TreeProfile, Vec<(i32, i32, i32, Voxel)>) {
+        let (profile, leaf_kind) = generator
+            .tree_profile(biome, style_roll)
+            .expect("quality and biome should produce a tree profile");
+        let first_cy = (base_y - 1).div_euclid(CHUNK_SIZE_I);
+        let last_cy = (base_y + profile.total_height() - 1).div_euclid(CHUNK_SIZE_I);
+        let mut blocks = Vec::new();
+
+        for cy in first_cy..=last_cy {
+            let origin_y = cy * CHUNK_SIZE_I;
+            let mut chunk = Chunk::new(ChunkPos::new(0, cy, 0));
+            if (base_y - 1).div_euclid(CHUNK_SIZE_I) == cy {
+                chunk.set(
+                    8,
+                    (base_y - 1 - origin_y) as usize,
+                    8,
+                    BlockType::Grass.into(),
+                );
+            }
+            assert!(generator
+                .try_place_bonsai_tree(&mut chunk, 8, 8, base_y, origin_y, profile, leaf_kind,));
+
+            for ly in 0..CHUNK_SIZE {
+                for lz in 0..CHUNK_SIZE {
+                    for lx in 0..CHUNK_SIZE {
+                        let voxel = chunk.get(lx, ly, lz);
+                        if matches!(
+                            BlockType::from_voxel(voxel),
+                            BlockType::Wood
+                                | BlockType::Leaves
+                                | BlockType::JungleLeaves
+                                | BlockType::BlossomLeaves
+                        ) {
+                            blocks.push((lx as i32, origin_y + ly as i32, lz as i32, voxel));
+                        }
+                    }
+                }
+            }
+        }
+
+        (profile, blocks)
+    }
 
     #[test]
     fn default_world_regions_stay_natural_not_alien_showcases() {
@@ -2844,6 +2898,184 @@ mod tests {
     }
 
     #[test]
+    fn off_quality_has_no_blocks_above_the_canonical_surface() {
+        let generator =
+            TerrainGenerator::new(12345).with_scenery_quality(crate::settings::SceneryQuality::Off);
+        let sample_columns = [(-8, -8), (-3, 5), (0, 0), (6, -4), (11, 9)];
+
+        for (cx, cz) in sample_columns {
+            let mut surfaces = [[0i32; CHUNK_SIZE]; CHUNK_SIZE];
+            for (lz, row) in surfaces.iter_mut().enumerate() {
+                for (lx, surface) in row.iter_mut().enumerate() {
+                    let wx = cx * CHUNK_SIZE_I + lx as i32;
+                    let wz = cz * CHUNK_SIZE_I + lz as i32;
+                    *surface = generator.surface_height_at(wx, wz);
+                }
+            }
+
+            for cy in 0..14 {
+                let mut chunk = Chunk::new(ChunkPos::new(cx, cy, cz));
+                generator.generate(&mut chunk);
+                let origin_y = cy * CHUNK_SIZE_I;
+                for (lz, row) in surfaces.iter().enumerate() {
+                    for (lx, &surface) in row.iter().enumerate() {
+                        for ly in 0..CHUNK_SIZE {
+                            let wy = origin_y + ly as i32;
+                            if wy <= surface {
+                                continue;
+                            }
+                            let expected = if wy <= WATER_LEVEL {
+                                BlockType::Water.into()
+                            } else {
+                                AIR
+                            };
+                            assert_eq!(
+                                chunk.get(lx, ly, lz),
+                                expected,
+                                "off quality placed a block above canonical surface at {wx},{wy},{wz}",
+                                wx = cx * CHUNK_SIZE_I + lx as i32,
+                                wz = cz * CHUNK_SIZE_I + lz as i32,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn macro_height_field_has_no_single_column_spikes() {
+        for seed in [7, 12345, 0xA11C_E551] {
+            let generator = TerrainGenerator::new(seed);
+            for z in (-512..=512).step_by(17) {
+                for x in (-512..=512).step_by(19) {
+                    let height = generator.surface_height_at(x, z);
+                    if height <= WATER_LEVEL + 2 {
+                        continue;
+                    }
+                    let mut neighbour_max = i32::MIN;
+                    for dz in -1..=1 {
+                        for dx in -1..=1 {
+                            if dx == 0 && dz == 0 {
+                                continue;
+                            }
+                            neighbour_max =
+                                neighbour_max.max(generator.surface_height_at(x + dx, z + dz));
+                        }
+                    }
+                    assert!(
+                        height - neighbour_max <= 3,
+                        "isolated terrain spike at {x},{z}: {height} vs neighbour {neighbour_max}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_profiles_scale_under_fixed_geometry_budgets() {
+        use crate::settings::SceneryQuality;
+
+        assert!(TerrainGenerator::new(12345)
+            .with_scenery_quality(SceneryQuality::Off)
+            .tree_profile(Biome::Forest, 0.4)
+            .is_none());
+
+        let mut counts = Vec::new();
+        let mut profiles = Vec::new();
+        for (quality, budget) in [
+            (SceneryQuality::Lean, 100usize),
+            (SceneryQuality::Balanced, 220usize),
+            (SceneryQuality::Lush, 480usize),
+        ] {
+            let generator = TerrainGenerator::new(12345).with_scenery_quality(quality);
+            let (profile, blocks) = paint_tree_for_test(&generator, Biome::Forest, 0.4, 14);
+            assert!(
+                blocks.len() <= budget,
+                "{quality:?} tree used {} blocks, budget is {budget}",
+                blocks.len()
+            );
+            counts.push(blocks.len());
+            profiles.push(profile);
+        }
+
+        assert!(counts[0] < counts[1] && counts[1] < counts[2]);
+        assert!(profiles[0].tiers < profiles[1].tiers && profiles[1].tiers < profiles[2].tiers);
+        assert!(
+            profiles[0].total_height() < profiles[1].total_height()
+                && profiles[1].total_height() < profiles[2].total_height()
+        );
+    }
+
+    #[test]
+    fn tree_trunk_rejects_missing_local_ground_support() {
+        let generator = TerrainGenerator::new(12345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Balanced);
+        let (profile, leaf_kind) = generator.tree_profile(Biome::Forest, 0.4).unwrap();
+        let mut empty_chunk = Chunk::new(ChunkPos::new(0, 0, 0));
+
+        assert!(!generator.try_place_bonsai_tree(
+            &mut empty_chunk,
+            8,
+            8,
+            14,
+            0,
+            profile,
+            leaf_kind,
+        ));
+        assert_eq!(empty_chunk.get(8, 14, 8), AIR);
+    }
+
+    #[test]
+    fn lush_bonsai_is_large_grounded_and_fully_connected() {
+        let generator = TerrainGenerator::new(12345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush);
+        let (profile, blocks) = paint_tree_for_test(&generator, Biome::Forest, 0.4, 14);
+        let positions: HashSet<_> = blocks.iter().map(|&(x, y, z, _)| (x, y, z)).collect();
+        let root = (8, 14, 8);
+        assert!(
+            positions.contains(&root),
+            "trunk must start directly above ground"
+        );
+
+        let mut seen = HashSet::new();
+        let mut pending = vec![root];
+        seen.insert(root);
+        while let Some((x, y, z)) = pending.pop() {
+            for (dx, dy, dz) in [
+                (1, 0, 0),
+                (-1, 0, 0),
+                (0, 1, 0),
+                (0, -1, 0),
+                (0, 0, 1),
+                (0, 0, -1),
+            ] {
+                let neighbour = (x + dx, y + dy, z + dz);
+                if positions.contains(&neighbour) && seen.insert(neighbour) {
+                    pending.push(neighbour);
+                }
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            positions.len(),
+            "every branch and leaf pad must connect to the grounded trunk"
+        );
+
+        let min_x = positions.iter().map(|p| p.0).min().unwrap();
+        let max_x = positions.iter().map(|p| p.0).max().unwrap();
+        let min_y = positions.iter().map(|p| p.1).min().unwrap();
+        let max_y = positions.iter().map(|p| p.1).max().unwrap();
+        let min_z = positions.iter().map(|p| p.2).min().unwrap();
+        let max_z = positions.iter().map(|p| p.2).max().unwrap();
+        assert!(max_x - min_x + 1 >= 11);
+        assert!(max_z - min_z + 1 >= 11);
+        assert!(max_y - min_y + 1 >= 18);
+        assert!(min_y.div_euclid(CHUNK_SIZE_I) != max_y.div_euclid(CHUNK_SIZE_I));
+        assert_eq!(max_y - min_y + 1, profile.total_height());
+    }
+
+    #[test]
     fn lush_plains_and_forests_get_large_blossom_tree_scale() {
         let lush = TerrainGenerator::new(12345)
             .with_scenery_quality(crate::settings::SceneryQuality::Lush);
@@ -2851,9 +3083,9 @@ mod tests {
         let (plains_h, plains_leaves) = lush.tree_height_for_biome(Biome::Plains, 0.40);
         let (forest_h, forest_leaves) = lush.tree_height_for_biome(Biome::Forest, 0.40);
 
-        assert!(plains_h >= 9, "lush plains bonsai should not be tiny");
+        assert!(plains_h >= 12, "lush plains bonsai should not be tiny");
         assert!(
-            forest_h >= 9,
+            forest_h >= 13,
             "lush forest bonsai should read as a real canopy"
         );
         assert_eq!(plains_leaves, BlockType::BlossomLeaves);
@@ -2868,6 +3100,12 @@ impl Clone for TerrainGenerator {
     }
 }
 
+#[inline]
+fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// Cheap deterministic hash â†’ float in [0,1) keyed by (seed, x, z).
 /// Used by the decoration pass so tree placement is stable per-seed.
 #[inline]
@@ -2879,6 +3117,67 @@ fn column_rand(seed: u32, x: i32, z: i32) -> f64 {
     h = h.rotate_left(31).wrapping_mul(0x94D0_49BB_1331_11EB);
     h ^= h >> 31;
     ((h >> 11) as f64) * (1.0 / (1u64 << 53) as f64)
+}
+
+fn set_tree_wood(chunk: &mut Chunk, lx: i32, wy: i32, lz: i32, origin_y: i32) {
+    if lx < 0 || lz < 0 || lx >= CHUNK_SIZE_I || lz >= CHUNK_SIZE_I {
+        return;
+    }
+    let ly = wy - origin_y;
+    if ly < 0 || ly >= CHUNK_SIZE_I {
+        return;
+    }
+    let current = chunk.get(lx as usize, ly as usize, lz as usize);
+    let replaceable = [
+        AIR,
+        BlockType::Leaves.into(),
+        BlockType::JungleLeaves.into(),
+        BlockType::BlossomLeaves.into(),
+    ];
+    if replaceable.contains(&current) {
+        chunk.set(
+            lx as usize,
+            ly as usize,
+            lz as usize,
+            BlockType::Wood.into(),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_leaf_pad(
+    chunk: &mut Chunk,
+    centre_x: i32,
+    centre_y: i32,
+    centre_z: i32,
+    radius: i32,
+    layers: i32,
+    leaf_kind: BlockType,
+    origin_y: i32,
+) {
+    for layer in 0..layers {
+        let layer_radius = (radius - layer).max(1);
+        for dz in -layer_radius..=layer_radius {
+            for dx in -layer_radius..=layer_radius {
+                if dx * dx + dz * dz > layer_radius * layer_radius + 1 {
+                    continue;
+                }
+                let nx = centre_x + dx;
+                let nz = centre_z + dz;
+                if nx < 0 || nz < 0 {
+                    continue;
+                }
+                set_safe(
+                    chunk,
+                    nx as usize,
+                    centre_y + layer,
+                    nz as usize,
+                    leaf_kind,
+                    origin_y,
+                );
+            }
+        }
+    }
 }
 
 /// Safe block-set for the sci-fi prop pass. Writes `block` into the

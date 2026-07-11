@@ -57,6 +57,19 @@ const COMPANION_FOLLOW_DEFAULT: f32 = 8.0;
 const COMPANION_FOLLOW_MIN: f32 = 5.0;
 const COMPANION_FOLLOW_MAX: f32 = 28.0;
 const COMPANION_FOLLOW_STEP: f32 = 2.25;
+const BOT_LOD_REFRESH_SECONDS: f32 = 0.25;
+const BOT_LOD_DISTANCE_BUCKET: f32 = 4.0;
+const BOT_FULL_DETAIL_DISTANCE: f32 = 48.0;
+const BOT_REDUCED_DETAIL_DISTANCE: f32 = 112.0;
+const BOT_PROXY_DISTANCE: f32 = 256.0;
+const BOT_FULL_DETAIL_LIMIT: usize = 4;
+const BOT_REDUCED_DETAIL_LIMIT: usize = 6;
+const BOT_PROXY_LIMIT: usize = 32;
+const BOT_UPDATE_GROUP_COUNT: u64 = 8;
+const BOT_MAX_FRAME_PERCEPTION_BOTS: usize = 4;
+const BOT_MAX_FRAME_ROOT_SYNCS: usize = 10;
+const BOT_MAX_FRAME_ANIMATED_RIGS: usize = 6;
+const BOT_MAX_FRAME_FX_BOTS: usize = 2;
 
 fn companion_workers_per_leader() -> u8 {
     COMPANION_WORKERS_PER_LEADER
@@ -119,12 +132,15 @@ impl Plugin for BotsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FriendlyWorldBrain::default())
             .insert_resource(BotVisualCache::default())
+            .insert_resource(BotRuntimeControl::default())
             .add_systems(OnEnter(GameState::InGame), load_or_seed_bot_world)
             .add_systems(OnEnter(GameState::MainMenu), cleanup_bot_entities)
             .add_systems(
                 Update,
                 (
+                    update_bot_runtime_control,
                     spawn_missing_bot_entities,
+                    apply_bot_visual_lod,
                     tick_friendly_world,
                     process_bot_visit_request,
                     process_companion_command,
@@ -2015,6 +2031,204 @@ struct FriendlyBotEntity {
     id: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BotRuntimeTier {
+    Full,
+    Reduced,
+    Proxy,
+    Culled,
+}
+
+impl BotRuntimeTier {
+    fn cadence(self, work: BotRuntimeWork) -> Option<u64> {
+        match (self, work) {
+            (Self::Full, BotRuntimeWork::Perception) => Some(2),
+            (Self::Full, BotRuntimeWork::RootSync | BotRuntimeWork::Animation) => Some(1),
+            (Self::Full, BotRuntimeWork::Fx) => Some(2),
+            (Self::Reduced, BotRuntimeWork::Perception) => Some(6),
+            (Self::Reduced, BotRuntimeWork::RootSync) => Some(3),
+            (Self::Reduced, BotRuntimeWork::Animation) => Some(4),
+            (Self::Reduced, BotRuntimeWork::Fx) => Some(8),
+            (Self::Proxy, BotRuntimeWork::Perception) => Some(18),
+            (Self::Proxy, BotRuntimeWork::RootSync) => Some(8),
+            (Self::Proxy, BotRuntimeWork::Animation | BotRuntimeWork::Fx) => None,
+            (Self::Culled, BotRuntimeWork::Perception) => Some(30),
+            (Self::Culled, _) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotRuntimeWork {
+    Perception,
+    RootSync,
+    Animation,
+    Fx,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BotLodSample {
+    id: u64,
+    distance: f32,
+    companion: bool,
+}
+
+#[derive(Resource)]
+struct BotRuntimeControl {
+    frame: u64,
+    lod_refresh_timer: f32,
+    tiers: AHashMap<u64, BotRuntimeTier>,
+}
+
+impl Default for BotRuntimeControl {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            lod_refresh_timer: 0.0,
+            tiers: AHashMap::new(),
+        }
+    }
+}
+
+impl BotRuntimeControl {
+    fn tier(&self, bot_id: u64) -> BotRuntimeTier {
+        self.tiers
+            .get(&bot_id)
+            .copied()
+            .unwrap_or(BotRuntimeTier::Culled)
+    }
+
+    fn due_ids(&self, work: BotRuntimeWork, budget: usize) -> HashSet<u64> {
+        budgeted_bot_update_ids(&self.tiers, self.frame, work, budget)
+    }
+}
+
+#[derive(Component)]
+struct BotDetailedRig {
+    bot_id: u64,
+}
+
+#[derive(Component)]
+struct BotLodProxy {
+    bot_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BotVisualVariant {
+    chassis: u8,
+    armor: u8,
+    sensor: u8,
+    marking: u8,
+}
+
+fn stable_bot_mix(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn bot_role_seed(role: BotRole) -> u64 {
+    match role {
+        BotRole::CompanionGuide => 0x11,
+        BotRole::CompanionMaker => 0x23,
+        BotRole::Planner => 0x35,
+        BotRole::Surveyor => 0x47,
+        BotRole::Builder => 0x59,
+        BotRole::Architect => 0x6b,
+        BotRole::RoadCrew => 0x7d,
+        BotRole::ParkKeeper => 0x8f,
+        BotRole::RepairTech => 0xa1,
+    }
+}
+
+fn bot_visual_variant(bot_id: u64, role: BotRole) -> BotVisualVariant {
+    let seed = stable_bot_mix(bot_id ^ bot_role_seed(role).rotate_left(17));
+    BotVisualVariant {
+        chassis: (seed % 3) as u8,
+        armor: ((seed >> 11) % 3) as u8,
+        sensor: ((seed >> 23) % 3) as u8,
+        marking: ((seed >> 37) % 4) as u8,
+    }
+}
+
+fn bot_update_group(bot_id: u64) -> u64 {
+    stable_bot_mix(bot_id) % BOT_UPDATE_GROUP_COUNT
+}
+
+fn assign_bot_runtime_tiers(samples: &[BotLodSample]) -> AHashMap<u64, BotRuntimeTier> {
+    let mut ordered = samples.to_vec();
+    ordered.sort_by_key(|sample| {
+        let distance_bucket = (sample.distance.max(0.0) / BOT_LOD_DISTANCE_BUCKET).floor() as u32;
+        (
+            distance_bucket,
+            !sample.companion,
+            bot_update_group(sample.id),
+            stable_bot_mix(sample.id),
+            sample.id,
+        )
+    });
+
+    let mut full = 0usize;
+    let mut reduced = 0usize;
+    let mut proxy = 0usize;
+    let mut tiers = AHashMap::with_capacity(ordered.len());
+    for sample in ordered {
+        let full_distance = if sample.companion {
+            BOT_REDUCED_DETAIL_DISTANCE
+        } else {
+            BOT_FULL_DETAIL_DISTANCE
+        };
+        let reduced_distance = if sample.companion {
+            BOT_PROXY_DISTANCE
+        } else {
+            BOT_REDUCED_DETAIL_DISTANCE
+        };
+        let tier = if full < BOT_FULL_DETAIL_LIMIT && sample.distance <= full_distance {
+            full += 1;
+            BotRuntimeTier::Full
+        } else if reduced < BOT_REDUCED_DETAIL_LIMIT && sample.distance <= reduced_distance {
+            reduced += 1;
+            BotRuntimeTier::Reduced
+        } else if proxy < BOT_PROXY_LIMIT && sample.distance <= BOT_PROXY_DISTANCE {
+            proxy += 1;
+            BotRuntimeTier::Proxy
+        } else {
+            BotRuntimeTier::Culled
+        };
+        tiers.insert(sample.id, tier);
+    }
+    tiers
+}
+
+fn budgeted_bot_update_ids(
+    tiers: &AHashMap<u64, BotRuntimeTier>,
+    frame: u64,
+    work: BotRuntimeWork,
+    budget: usize,
+) -> HashSet<u64> {
+    if budget == 0 {
+        return HashSet::new();
+    }
+    let schedule_epoch = frame / BOT_UPDATE_GROUP_COUNT;
+    let mut due: Vec<(u64, BotRuntimeTier)> = tiers
+        .iter()
+        .filter_map(|(&id, &tier)| {
+            let cadence = tier.cadence(work)?;
+            ((frame + bot_update_group(id)) % cadence == 0).then_some((id, tier))
+        })
+        .collect();
+    due.sort_by_key(|(id, tier)| {
+        (
+            *tier,
+            stable_bot_mix(*id ^ schedule_epoch.wrapping_mul(0xd134_2543_de82_ef95)),
+            *id,
+        )
+    });
+    due.truncate(budget);
+    due.into_iter().map(|(id, _)| id).collect()
+}
+
 /// Marks a child of a companion bot so we can keep the saucer ring spinning
 /// independently of the body. Stores spin speed (rad/sec) and a phase offset
 /// so two companions don't pulse in lockstep.
@@ -2115,11 +2329,26 @@ struct WorkerBotPart {
     base_scale: Vec3,
 }
 
+#[derive(Clone, Copy)]
+struct WorkerAnimationPose {
+    phase: f32,
+    gait: f32,
+    activity: f32,
+    pulse: f32,
+    head_yaw_local: f32,
+    walking: bool,
+    state: BotState,
+}
+
 #[derive(Resource, Default)]
 #[allow(dead_code)]
 struct BotVisualCache {
     cube: Option<Handle<Mesh>>,
     mats: HashMap<BotRole, Handle<StandardMaterial>>,
+    worker_chassis: Option<Handle<Mesh>>,
+    worker_joint: Option<Handle<Mesh>>,
+    worker_sensor: Option<Handle<Mesh>>,
+    worker_materials: HashMap<BotRole, WorkerMaterialSet>,
     companion_shell: Option<Handle<StandardMaterial>>,
     saucer_disc: Option<Handle<Mesh>>,
     saucer_rim: Option<Handle<Mesh>>,
@@ -2174,6 +2403,16 @@ struct BotVisualCache {
     mat_iris_highlight: Option<Handle<StandardMaterial>>,
     mat_holo_aura: Option<Handle<StandardMaterial>>,
     mat_holo_bolt: Option<Handle<StandardMaterial>>,
+}
+
+#[derive(Clone)]
+struct WorkerMaterialSet {
+    body: Handle<StandardMaterial>,
+    trim: Handle<StandardMaterial>,
+    visor: Handle<StandardMaterial>,
+    sensor: Handle<StandardMaterial>,
+    thruster: Handle<StandardMaterial>,
+    chest: Handle<StandardMaterial>,
 }
 
 fn load_or_seed_bot_world(
@@ -2248,11 +2487,96 @@ fn cleanup_bot_entities(
     mut commands: Commands,
     query: Query<Entity, With<FriendlyBotEntity>>,
     mut brain: ResMut<FriendlyWorldBrain>,
+    mut runtime: ResMut<BotRuntimeControl>,
 ) {
     for entity in &query {
         despawn(&mut commands, entity);
     }
     brain.world_name.clear();
+    *runtime = BotRuntimeControl::default();
+}
+
+fn update_bot_runtime_control(
+    time: Res<Time>,
+    brain: Res<FriendlyWorldBrain>,
+    player_q: Query<&Transform, With<Player>>,
+    mut runtime: ResMut<BotRuntimeControl>,
+) {
+    runtime.frame = runtime.frame.wrapping_add(1);
+    runtime.lod_refresh_timer -= time.delta_seconds().min(0.1);
+    if runtime.lod_refresh_timer > 0.0 {
+        return;
+    }
+
+    let player_pos = player_q
+        .get_single()
+        .ok()
+        .map(|transform| transform.translation);
+    let samples: Vec<BotLodSample> = brain
+        .save
+        .agents
+        .iter()
+        .filter(|bot| bot_should_spawn_visual(bot))
+        .map(|bot| {
+            let distance = player_pos
+                .map(|player| vec3_from_arr(bot.position).distance(player))
+                .unwrap_or(0.0);
+            BotLodSample {
+                id: bot.id,
+                distance,
+                companion: bot.companion,
+            }
+        })
+        .collect();
+    runtime.tiers = assign_bot_runtime_tiers(&samples);
+    runtime.lod_refresh_timer = BOT_LOD_REFRESH_SECONDS;
+}
+
+fn apply_bot_visual_lod(
+    runtime: Res<BotRuntimeControl>,
+    mut roots: Query<
+        (&FriendlyBotEntity, &mut Visibility),
+        (Without<BotDetailedRig>, Without<BotLodProxy>),
+    >,
+    mut detailed: Query<
+        (&BotDetailedRig, &mut Visibility),
+        (Without<FriendlyBotEntity>, Without<BotLodProxy>),
+    >,
+    mut proxies: Query<
+        (&BotLodProxy, &mut Visibility),
+        (Without<FriendlyBotEntity>, Without<BotDetailedRig>),
+    >,
+) {
+    for (bot, mut visibility) in &mut roots {
+        let desired = if runtime.tier(bot.id) == BotRuntimeTier::Culled {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *visibility != desired {
+            *visibility = desired;
+        }
+    }
+    for (rig, mut visibility) in &mut detailed {
+        let desired = if runtime.tier(rig.bot_id) <= BotRuntimeTier::Reduced {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != desired {
+            *visibility = desired;
+        }
+    }
+    for (proxy, mut visibility) in &mut proxies {
+        let desired = if runtime.tier(proxy.bot_id) == BotRuntimeTier::Proxy {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != desired {
+            *visibility = desired;
+        }
+    }
 }
 
 fn spawn_missing_bot_entities(
@@ -2260,6 +2584,7 @@ fn spawn_missing_bot_entities(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: ResMut<BotVisualCache>,
+    runtime: Res<BotRuntimeControl>,
     brain: Res<FriendlyWorldBrain>,
     query: Query<&FriendlyBotEntity>,
 ) {
@@ -2271,7 +2596,14 @@ fn spawn_missing_bot_entities(
         if !bot_should_spawn_visual(bot) {
             continue;
         }
-        spawn_bot_entity(&mut commands, &mut meshes, &mut materials, &mut cache, bot);
+        spawn_bot_entity(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut cache,
+            bot,
+            runtime.tier(bot.id),
+        );
     }
 }
 
@@ -2298,15 +2630,89 @@ fn bot_by_id<'a>(
         .filter(|bot| bot.id == id)
 }
 
+fn worker_material_set(
+    cache: &mut BotVisualCache,
+    materials: &mut Assets<StandardMaterial>,
+    role: BotRole,
+) -> WorkerMaterialSet {
+    if let Some(set) = cache.worker_materials.get(&role) {
+        return set.clone();
+    }
+
+    let role_color = bot_role_color(role);
+    let role_lin = role_color.to_linear();
+    let set = WorkerMaterialSet {
+        body: materials.add(StandardMaterial {
+            base_color: role_color,
+            metallic: 0.72,
+            perceptual_roughness: 0.64,
+            ..default()
+        }),
+        trim: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.045, 0.052, 0.058),
+            metallic: 0.88,
+            perceptual_roughness: 0.60,
+            ..default()
+        }),
+        visor: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.008, 0.012, 0.014),
+            emissive: LinearRgba::rgb(
+                role_lin.red * 0.55,
+                role_lin.green * 0.55,
+                role_lin.blue * 0.55,
+            ),
+            metallic: 1.0,
+            perceptual_roughness: 0.18,
+            ..default()
+        }),
+        sensor: materials.add(StandardMaterial {
+            base_color: role_color,
+            emissive: LinearRgba::rgb(
+                role_lin.red * 7.0,
+                role_lin.green * 7.0,
+                role_lin.blue * 7.0,
+            ),
+            metallic: 0.35,
+            perceptual_roughness: 0.32,
+            ..default()
+        }),
+        thruster: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.10, 0.075, 0.045),
+            emissive: LinearRgba::rgb(
+                role_lin.red * 3.5,
+                role_lin.green * 3.5,
+                role_lin.blue * 3.5,
+            ),
+            metallic: 0.86,
+            perceptual_roughness: 0.74,
+            ..default()
+        }),
+        chest: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.12, 0.13, 0.14),
+            emissive: LinearRgba::rgb(
+                role_lin.red * 1.15,
+                role_lin.green * 1.15,
+                role_lin.blue * 1.15,
+            ),
+            metallic: 0.82,
+            perceptual_roughness: 0.52,
+            ..default()
+        }),
+    };
+    cache.worker_materials.insert(role, set.clone());
+    set
+}
+
 fn spawn_bot_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BotVisualCache,
     bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
 ) {
     if bot.companion {
-        spawn_companion_entity(commands, meshes, materials, cache, bot);
+        spawn_companion_entity(commands, meshes, materials, cache, bot, runtime_tier);
         return;
     }
     // --- Cached primitives. The worker droid is a real character rig: hover
@@ -2318,17 +2724,21 @@ fn spawn_bot_entity(
         .cube
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
-    let head_sphere = cache
-        .char_body_egg
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.55)))
+    let chassis_mesh = cache
+        .worker_chassis
+        .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
+        .clone();
+    let joint_mesh = cache
+        .worker_joint
+        .get_or_insert_with(|| meshes.add(Sphere::new(0.50)))
         .clone();
     let visor_mesh = cache
         .char_visor
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.05, 0.32, 0.62)))
         .clone();
     let eye_mesh = cache
-        .char_iris
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.16)))
+        .worker_sensor
+        .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
     let antenna_mesh = cache
         .char_antenna
@@ -2350,451 +2760,457 @@ fn spawn_bot_entity(
         .char_claw
         .get_or_insert_with(|| meshes.add(Cuboid::new(0.18, 0.12, 0.28)))
         .clone();
-    let role_color = bot_role_color(bot.role);
-    let mat = materials.add(StandardMaterial {
-        base_color: role_color,
-        metallic: 0.15,
-        perceptual_roughness: 0.65, // Star Wars realistic painted metal (matte/worn)
-        ..default()
-    });
-    let role_lin = role_color.to_linear();
-    // Dark gunmetal trim material — re-used for visor, panel seams, joints.
-    let trim_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.08, 0.08, 0.09), // Imperial grey-steel
-        emissive: LinearRgba::rgb(
-            role_lin.red * 0.1,
-            role_lin.green * 0.1,
-            role_lin.blue * 0.1,
-        ),
-        metallic: 0.90, // Scraped metal
-        perceptual_roughness: 0.55,
-        ..default()
-    });
-    let visor_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.01, 0.01, 0.01, 1.0),
-        emissive: LinearRgba::rgb(
-            role_lin.red * 1.5,
-            role_lin.green * 1.5,
-            role_lin.blue * 1.5,
-        ),
-        metallic: 1.0,
-        perceptual_roughness: 0.1, // Glassy but grim
-        ..default()
-    });
-    let eye_mat = materials.add(StandardMaterial {
-        base_color: role_color,
-        emissive: LinearRgba::rgb(
-            role_lin.red * 35.0,
-            role_lin.green * 35.0,
-            role_lin.blue * 35.0,
-        ), // Blindingly bright optic
-        ..default()
-    });
-    let thruster_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.15, 0.1, 0.05), // Scorched engine bell
-        emissive: LinearRgba::rgb(
-            role_lin.red * 12.0,
-            role_lin.green * 12.0,
-            role_lin.blue * 12.0,
-        ),
-        metallic: 0.8,
-        perceptual_roughness: 0.8,
-        ..default()
-    });
-    let chest_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.18, 0.18, 0.18), // Beskar / raw steel
-        emissive: LinearRgba::rgb(
-            role_lin.red * 3.0,
-            role_lin.green * 3.0,
-            role_lin.blue * 3.0,
-        ),
-        metallic: 0.85,
-        perceptual_roughness: 0.45,
-        ..default()
-    });
+    let variant = bot_visual_variant(bot.id, bot.role);
+    let chassis_width = [0.94, 1.0, 1.07][variant.chassis as usize];
+    let armor_depth = [0.92, 1.0, 1.08][variant.armor as usize];
+    let sensor_spread = [0.13, 0.18, 0.22][variant.sensor as usize];
+    let WorkerMaterialSet {
+        body: mat,
+        trim: trim_mat,
+        visor: visor_mat,
+        sensor: eye_mat,
+        thruster: thruster_mat,
+        chest: chest_mat,
+    } = worker_material_set(cache, materials, bot.role);
     let p = vec3_from_arr(bot.position);
     let bot_id = bot.id;
     commands
         .spawn((
             SpatialBundle {
                 transform: Transform::from_translation(p),
+                visibility: if runtime_tier == BotRuntimeTier::Culled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
             Name::new(format!("FriendlyBot_{}_{}", bot.id, bot.name)),
         ))
-        .with_children(|c| {
-            // ----- Hover pod / skirt -----
-            let ring_pos = Vec3::new(0.0, -0.55, 0.0);
-            let ring_scale = Vec3::new(1.6, 1.0, 1.6);
-            c.spawn((
+        .with_children(|root| {
+            root.spawn((
                 PbrBundle {
-                    mesh: hover_ring.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(ring_pos).with_scale(ring_scale),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::HoverRing,
-                    base_translation: ring_pos,
-                    base_scale: ring_scale,
-                },
-            ));
-            // Pod underside disc (the actual hover engine).
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.68, 0.0))
-                    .with_scale(Vec3::new(1.05, 1.0, 1.05)),
-                ..default()
-            });
-            // Hip ring above the pod (chamfered base of torso).
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.36, 0.0))
-                    .with_scale(Vec3::new(0.96, 0.18, 0.70)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.22, 0.0))
-                    .with_scale(Vec3::new(0.84, 0.22, 0.58)),
-                ..default()
-            });
-
-            // ----- Torso -----
-            let torso_pos = Vec3::new(0.0, 0.32, 0.0);
-            let torso_scale = Vec3::new(1.08, 1.35, 0.82);
-            c.spawn((
-                PbrBundle {
-                    mesh: head_sphere.clone(),
+                    mesh: chassis_mesh.clone(),
                     material: mat.clone(),
-                    transform: Transform::from_translation(torso_pos).with_scale(torso_scale),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.42, 0.0))
+                        .with_scale(Vec3::new(0.92 * chassis_width, 1.55, 0.72 * armor_depth)),
+                    visibility: if runtime_tier == BotRuntimeTier::Proxy {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
                     ..default()
                 },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::Torso,
-                    base_translation: torso_pos,
-                    base_scale: torso_scale,
-                },
+                BotLodProxy { bot_id },
             ));
-            // Torso seam belt.
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.10, 0.0))
-                    .with_scale(Vec3::new(1.16, 0.06, 0.90)),
-                ..default()
-            });
-            // Chest plate emissive (role badge).
-            let chest_pos = Vec3::new(0.0, 0.50, 0.42);
-            let chest_scale = Vec3::new(0.52, 0.46, 0.04);
-            c.spawn((
-                PbrBundle {
+            root.spawn((
+                SpatialBundle {
+                    visibility: if runtime_tier <= BotRuntimeTier::Reduced {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotDetailedRig { bot_id },
+            ))
+            .with_children(|c| {
+                // ----- Hover pod / skirt -----
+                let ring_pos = Vec3::new(0.0, -0.55, 0.0);
+                let ring_scale = Vec3::new(1.35 * chassis_width, 1.0, 1.28 * armor_depth);
+                c.spawn((
+                    PbrBundle {
+                        mesh: hover_ring.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(ring_pos).with_scale(ring_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::HoverRing,
+                        base_translation: ring_pos,
+                        base_scale: ring_scale,
+                    },
+                ));
+                // Pod underside disc (the actual hover engine).
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.68, 0.0))
+                        .with_scale(Vec3::new(1.05, 1.0, 1.05)),
+                    ..default()
+                });
+                // Hip ring above the pod (chamfered base of torso).
+                c.spawn(PbrBundle {
                     mesh: cube.clone(),
-                    material: chest_mat.clone(),
-                    transform: Transform::from_translation(chest_pos).with_scale(chest_scale),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.36, 0.0))
+                        .with_scale(Vec3::new(0.96, 0.18, 0.70)),
                     ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::ChestPanel,
-                    base_translation: chest_pos,
-                    base_scale: chest_scale,
-                },
-            ));
-            // Chest seam rivets.
-            for cx in [-0.20_f32, 0.20] {
-                for cy in [0.34_f32, 0.66] {
+                });
+                c.spawn(PbrBundle {
+                    mesh: cube.clone(),
+                    material: mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.22, 0.0))
+                        .with_scale(Vec3::new(0.84, 0.22, 0.58)),
+                    ..default()
+                });
+
+                // ----- Torso -----
+                let torso_pos = Vec3::new(0.0, 0.32, 0.0);
+                let torso_scale = Vec3::new(
+                    0.96 * chassis_width,
+                    1.18 + variant.armor as f32 * 0.05,
+                    0.72 * armor_depth,
+                );
+                c.spawn((
+                    PbrBundle {
+                        mesh: chassis_mesh.clone(),
+                        material: mat.clone(),
+                        transform: Transform::from_translation(torso_pos).with_scale(torso_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::Torso,
+                        base_translation: torso_pos,
+                        base_scale: torso_scale,
+                    },
+                ));
+                // Torso seam belt.
+                c.spawn(PbrBundle {
+                    mesh: cube.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.10, 0.0))
+                        .with_scale(Vec3::new(1.16, 0.06, 0.90)),
+                    ..default()
+                });
+                // Chest plate emissive (role badge).
+                let chest_pos = Vec3::new(0.0, 0.50, 0.42);
+                let chest_scale = Vec3::new(
+                    (0.40 + variant.marking as f32 * 0.025) * chassis_width,
+                    0.30,
+                    0.035,
+                );
+                c.spawn((
+                    PbrBundle {
+                        mesh: cube.clone(),
+                        material: chest_mat.clone(),
+                        transform: Transform::from_translation(chest_pos).with_scale(chest_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::ChestPanel,
+                        base_translation: chest_pos,
+                        base_scale: chest_scale,
+                    },
+                ));
+                // Chest seam rivets.
+                for cx in [-0.20_f32, 0.20] {
+                    for cy in [0.34_f32, 0.66] {
+                        c.spawn(PbrBundle {
+                            mesh: eye_mesh.clone(),
+                            material: trim_mat.clone(),
+                            transform: Transform::from_translation(Vec3::new(cx, cy, 0.42))
+                                .with_scale(Vec3::splat(0.18)),
+                            ..default()
+                        });
+                    }
+                }
+                // Backpack.
+                c.spawn(PbrBundle {
+                    mesh: backpack.clone(),
+                    material: mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.56, -0.44))
+                        .with_scale(Vec3::splat(1.0)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: backpack.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.56, -0.55))
+                        .with_scale(Vec3::new(0.85, 0.90, 0.20)),
+                    ..default()
+                });
+                // Backpack vent (pulses with work intensity).
+                let vent_pos = Vec3::new(0.0, 0.28, -0.58);
+                let vent_scale = Vec3::new(0.38, 0.10, 0.04);
+                c.spawn((
+                    PbrBundle {
+                        mesh: cube.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(vent_pos).with_scale(vent_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::BackpackVent,
+                        base_translation: vent_pos,
+                        base_scale: vent_scale,
+                    },
+                ));
+                // Side vents on the backpack.
+                for sx in [-0.22_f32, 0.22] {
                     c.spawn(PbrBundle {
-                        mesh: eye_mesh.clone(),
-                        material: trim_mat.clone(),
-                        transform: Transform::from_translation(Vec3::new(cx, cy, 0.42))
-                            .with_scale(Vec3::splat(0.18)),
+                        mesh: cube.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, 0.78, -0.55))
+                            .with_scale(Vec3::new(0.06, 0.30, 0.04)),
                         ..default()
                     });
                 }
-            }
-            // Backpack.
-            c.spawn(PbrBundle {
-                mesh: backpack.clone(),
-                material: mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.56, -0.44))
-                    .with_scale(Vec3::splat(1.0)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: backpack.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.56, -0.55))
-                    .with_scale(Vec3::new(0.85, 0.90, 0.20)),
-                ..default()
-            });
-            // Backpack vent (pulses with work intensity).
-            let vent_pos = Vec3::new(0.0, 0.28, -0.58);
-            let vent_scale = Vec3::new(0.38, 0.10, 0.04);
-            c.spawn((
-                PbrBundle {
-                    mesh: cube.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(vent_pos).with_scale(vent_scale),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::BackpackVent,
-                    base_translation: vent_pos,
-                    base_scale: vent_scale,
-                },
-            ));
-            // Side vents on the backpack.
-            for sx in [-0.22_f32, 0.22] {
-                c.spawn(PbrBundle {
-                    mesh: cube.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, 0.78, -0.55))
-                        .with_scale(Vec3::new(0.06, 0.30, 0.04)),
-                    ..default()
-                });
-            }
 
-            // ----- Shoulders + arms (two-bone, animated) -----
-            for (side_sign, side) in [(-1.0_f32, -1.0_f32), (1.0_f32, 1.0_f32)] {
-                let shoulder_pos = Vec3::new(0.64 * side, 0.78, 0.0);
-                let shoulder_part = if side_sign < 0.0 {
-                    WorkerPart::ShoulderL
-                } else {
-                    WorkerPart::ShoulderR
-                };
-                c.spawn((
-                    PbrBundle {
-                        mesh: head_sphere.clone(),
-                        material: mat.clone(),
-                        transform: Transform::from_translation(shoulder_pos)
-                            .with_scale(Vec3::splat(0.36)),
+                // ----- Shoulders + arms (two-bone, animated) -----
+                for (side_sign, side) in [(-1.0_f32, -1.0_f32), (1.0_f32, 1.0_f32)] {
+                    let shoulder_x = (0.58 + variant.armor as f32 * 0.035) * chassis_width;
+                    let shoulder_pos = Vec3::new(shoulder_x * side, 0.76, 0.0);
+                    let shoulder_part = if side_sign < 0.0 {
+                        WorkerPart::ShoulderL
+                    } else {
+                        WorkerPart::ShoulderR
+                    };
+                    c.spawn((
+                        PbrBundle {
+                            mesh: joint_mesh.clone(),
+                            material: mat.clone(),
+                            transform: Transform::from_translation(shoulder_pos)
+                                .with_scale(Vec3::splat(0.36)),
+                            ..default()
+                        },
+                        WorkerBotPart {
+                            bot_id,
+                            part: shoulder_part,
+                            base_translation: shoulder_pos,
+                            base_scale: Vec3::splat(0.36),
+                        },
+                    ));
+                    let upper_pos = Vec3::new((shoulder_x + 0.14) * side, 0.40, 0.0);
+                    let upper_part = if side_sign < 0.0 {
+                        WorkerPart::ArmUpperL
+                    } else {
+                        WorkerPart::ArmUpperR
+                    };
+                    c.spawn((
+                        PbrBundle {
+                            mesh: cube.clone(),
+                            material: mat.clone(),
+                            transform: Transform::from_translation(upper_pos)
+                                .with_scale(Vec3::new(0.26, 0.55, 0.26)),
+                            ..default()
+                        },
+                        WorkerBotPart {
+                            bot_id,
+                            part: upper_part,
+                            base_translation: upper_pos,
+                            base_scale: Vec3::new(0.26, 0.55, 0.26),
+                        },
+                    ));
+                    // Elbow joint.
+                    c.spawn(PbrBundle {
+                        mesh: joint_mesh.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(
+                            (shoulder_x + 0.16) * side,
+                            0.10,
+                            0.0,
+                        ))
+                        .with_scale(Vec3::splat(0.22)),
                         ..default()
-                    },
-                    WorkerBotPart {
-                        bot_id,
-                        part: shoulder_part,
-                        base_translation: shoulder_pos,
-                        base_scale: Vec3::splat(0.36),
-                    },
-                ));
-                let upper_pos = Vec3::new(0.78 * side, 0.42, 0.0);
-                let upper_part = if side_sign < 0.0 {
-                    WorkerPart::ArmUpperL
-                } else {
-                    WorkerPart::ArmUpperR
-                };
+                    });
+                    let fore_pos = Vec3::new((shoulder_x + 0.18) * side, -0.18, 0.04);
+                    let fore_part = if side_sign < 0.0 {
+                        WorkerPart::ArmForeL
+                    } else {
+                        WorkerPart::ArmForeR
+                    };
+                    c.spawn((
+                        PbrBundle {
+                            mesh: cube.clone(),
+                            material: mat.clone(),
+                            transform: Transform::from_translation(fore_pos)
+                                .with_scale(Vec3::new(0.24, 0.50, 0.24)),
+                            ..default()
+                        },
+                        WorkerBotPart {
+                            bot_id,
+                            part: fore_part,
+                            base_translation: fore_pos,
+                            base_scale: Vec3::new(0.24, 0.50, 0.24),
+                        },
+                    ));
+                    // Wrist + claw / tool.
+                    c.spawn(PbrBundle {
+                        mesh: joint_mesh.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(
+                            (shoulder_x + 0.20) * side,
+                            -0.44,
+                            0.04,
+                        ))
+                        .with_scale(Vec3::splat(0.22)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: claw_mesh.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(
+                            (shoulder_x + 0.20) * side,
+                            -0.60,
+                            0.10,
+                        ))
+                        .with_scale(Vec3::splat(0.95)),
+                        ..default()
+                    });
+                    let _ = side; // suppress unused warning for clarity.
+                }
+
+                // Glowing held tool on the left hand (welder / scanner — flicks
+                // on while building/surveying).
+                let tool_pos = Vec3::new(-0.84, -0.74, 0.18);
                 c.spawn((
                     PbrBundle {
                         mesh: cube.clone(),
-                        material: mat.clone(),
-                        transform: Transform::from_translation(upper_pos)
-                            .with_scale(Vec3::new(0.26, 0.55, 0.26)),
+                        material: eye_mat.clone(),
+                        transform: Transform::from_translation(tool_pos)
+                            .with_scale(Vec3::new(0.10, 0.10, 0.30)),
                         ..default()
                     },
                     WorkerBotPart {
                         bot_id,
-                        part: upper_part,
-                        base_translation: upper_pos,
-                        base_scale: Vec3::new(0.26, 0.55, 0.26),
+                        part: WorkerPart::ToolL,
+                        base_translation: tool_pos,
+                        base_scale: Vec3::new(0.10, 0.10, 0.30),
                     },
                 ));
-                // Elbow joint.
+
+                // ----- Neck -----
                 c.spawn(PbrBundle {
-                    mesh: head_sphere.clone(),
+                    mesh: cube.clone(),
                     material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.80 * side, 0.12, 0.0))
-                        .with_scale(Vec3::splat(0.22)),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.99, 0.0))
+                        .with_scale(Vec3::new(0.22, 0.14, 0.22)),
                     ..default()
                 });
-                let fore_pos = Vec3::new(0.82 * side, -0.18, 0.04);
-                let fore_part = if side_sign < 0.0 {
-                    WorkerPart::ArmForeL
-                } else {
-                    WorkerPart::ArmForeR
-                };
+
+                // ----- Head (animated as a unit via its WorkerPart::Head tag) -----
+                let head_pos = Vec3::new(0.0, 1.24, 0.0);
+                let head_scale = Vec3::new(0.84 * chassis_width, 0.58, 0.68 * armor_depth);
                 c.spawn((
                     PbrBundle {
-                        mesh: cube.clone(),
+                        mesh: chassis_mesh.clone(),
                         material: mat.clone(),
-                        transform: Transform::from_translation(fore_pos)
-                            .with_scale(Vec3::new(0.24, 0.50, 0.24)),
+                        transform: Transform::from_translation(head_pos).with_scale(head_scale),
                         ..default()
                     },
                     WorkerBotPart {
                         bot_id,
-                        part: fore_part,
-                        base_translation: fore_pos,
-                        base_scale: Vec3::new(0.24, 0.50, 0.24),
+                        part: WorkerPart::Head,
+                        base_translation: head_pos,
+                        base_scale: head_scale,
                     },
                 ));
-                // Wrist + claw / tool.
+                // Jaw / chin trim.
                 c.spawn(PbrBundle {
-                    mesh: head_sphere.clone(),
+                    mesh: cube.clone(),
                     material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.84 * side, -0.44, 0.04))
-                        .with_scale(Vec3::splat(0.22)),
+                    transform: Transform::from_translation(Vec3::new(0.0, 1.05, 0.18))
+                        .with_scale(Vec3::new(0.46, 0.10, 0.34)),
                     ..default()
                 });
+                // Visor — large emissive band; animated to scan when surveying.
+                let visor_pos = Vec3::new(0.0, 1.26, 0.34);
+                let visor_scale = Vec3::new(0.62 * chassis_width, 0.42, 0.30 * armor_depth);
+                c.spawn((
+                    PbrBundle {
+                        mesh: visor_mesh.clone(),
+                        material: visor_mat.clone(),
+                        transform: Transform::from_translation(visor_pos).with_scale(visor_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::Visor,
+                        base_translation: visor_pos,
+                        base_scale: visor_scale,
+                    },
+                ));
+                // Two binocular eyes — pulse-animated.
+                let eye_l_pos = Vec3::new(-sensor_spread, 1.28, 0.51 * armor_depth);
+                let eye_r_pos = Vec3::new(sensor_spread, 1.28, 0.51 * armor_depth);
+                let eye_scale = Vec3::new(0.12, 0.045, 0.035);
+                c.spawn((
+                    PbrBundle {
+                        mesh: eye_mesh.clone(),
+                        material: eye_mat.clone(),
+                        transform: Transform::from_translation(eye_l_pos).with_scale(eye_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::EyeL,
+                        base_translation: eye_l_pos,
+                        base_scale: eye_scale,
+                    },
+                ));
+                c.spawn((
+                    PbrBundle {
+                        mesh: eye_mesh.clone(),
+                        material: eye_mat.clone(),
+                        transform: Transform::from_translation(eye_r_pos).with_scale(eye_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::EyeR,
+                        base_translation: eye_r_pos,
+                        base_scale: eye_scale,
+                    },
+                ));
+                // Cheek vents.
+                for sx in [-0.42_f32, 0.42] {
+                    c.spawn(PbrBundle {
+                        mesh: cube.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, 1.22, 0.20))
+                            .with_scale(Vec3::new(0.06, 0.18, 0.10)),
+                        ..default()
+                    });
+                }
+                // Cranial fin.
                 c.spawn(PbrBundle {
-                    mesh: claw_mesh.clone(),
+                    mesh: cube.clone(),
                     material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.84 * side, -0.60, 0.10))
+                    transform: Transform::from_translation(Vec3::new(0.0, 1.56, -0.10))
+                        .with_scale(Vec3::new(0.12, 0.34, 0.42)),
+                    ..default()
+                });
+                // Antenna mast.
+                c.spawn(PbrBundle {
+                    mesh: antenna_mesh.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.18, 1.72, -0.04))
                         .with_scale(Vec3::splat(0.95)),
                     ..default()
                 });
-                let _ = side; // suppress unused warning for clarity.
-            }
-
-            // Glowing held tool on the left hand (welder / scanner — flicks
-            // on while building/surveying).
-            let tool_pos = Vec3::new(-0.84, -0.74, 0.18);
-            c.spawn((
-                PbrBundle {
-                    mesh: cube.clone(),
-                    material: eye_mat.clone(),
-                    transform: Transform::from_translation(tool_pos)
-                        .with_scale(Vec3::new(0.10, 0.10, 0.30)),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::ToolL,
-                    base_translation: tool_pos,
-                    base_scale: Vec3::new(0.10, 0.10, 0.30),
-                },
-            ));
-
-            // ----- Neck -----
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.99, 0.0))
-                    .with_scale(Vec3::new(0.22, 0.14, 0.22)),
-                ..default()
+                let ant_pos = Vec3::new(0.18, 2.02, -0.04);
+                c.spawn((
+                    PbrBundle {
+                        mesh: antenna_tip_mesh.clone(),
+                        material: eye_mat.clone(),
+                        transform: Transform::from_translation(ant_pos)
+                            .with_scale(Vec3::splat(0.95)),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::AntennaTip,
+                        base_translation: ant_pos,
+                        base_scale: Vec3::splat(0.95),
+                    },
+                ));
             });
-
-            // ----- Head (animated as a unit via its WorkerPart::Head tag) -----
-            let head_pos = Vec3::new(0.0, 1.24, 0.0);
-            let head_scale = Vec3::new(0.94, 0.96, 0.94);
-            c.spawn((
-                PbrBundle {
-                    mesh: head_sphere.clone(),
-                    material: mat.clone(),
-                    transform: Transform::from_translation(head_pos).with_scale(head_scale),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::Head,
-                    base_translation: head_pos,
-                    base_scale: head_scale,
-                },
-            ));
-            // Jaw / chin trim.
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 1.05, 0.18))
-                    .with_scale(Vec3::new(0.46, 0.10, 0.34)),
-                ..default()
-            });
-            // Visor — large emissive band; animated to scan when surveying.
-            let visor_pos = Vec3::new(0.0, 1.26, 0.34);
-            let visor_scale = Vec3::new(0.54, 0.56, 0.46);
-            c.spawn((
-                PbrBundle {
-                    mesh: visor_mesh.clone(),
-                    material: visor_mat.clone(),
-                    transform: Transform::from_translation(visor_pos).with_scale(visor_scale),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::Visor,
-                    base_translation: visor_pos,
-                    base_scale: visor_scale,
-                },
-            ));
-            // Two binocular eyes — pulse-animated.
-            let eye_l_pos = Vec3::new(-0.18, 1.28, 0.48);
-            let eye_r_pos = Vec3::new(0.18, 1.28, 0.48);
-            c.spawn((
-                PbrBundle {
-                    mesh: eye_mesh.clone(),
-                    material: eye_mat.clone(),
-                    transform: Transform::from_translation(eye_l_pos).with_scale(Vec3::splat(0.55)),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::EyeL,
-                    base_translation: eye_l_pos,
-                    base_scale: Vec3::splat(0.55),
-                },
-            ));
-            c.spawn((
-                PbrBundle {
-                    mesh: eye_mesh.clone(),
-                    material: eye_mat.clone(),
-                    transform: Transform::from_translation(eye_r_pos).with_scale(Vec3::splat(0.55)),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::EyeR,
-                    base_translation: eye_r_pos,
-                    base_scale: Vec3::splat(0.55),
-                },
-            ));
-            // Cheek vents.
-            for sx in [-0.42_f32, 0.42] {
-                c.spawn(PbrBundle {
-                    mesh: cube.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, 1.22, 0.20))
-                        .with_scale(Vec3::new(0.06, 0.18, 0.10)),
-                    ..default()
-                });
-            }
-            // Cranial fin.
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 1.56, -0.10))
-                    .with_scale(Vec3::new(0.12, 0.34, 0.42)),
-                ..default()
-            });
-            // Antenna mast.
-            c.spawn(PbrBundle {
-                mesh: antenna_mesh.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.18, 1.72, -0.04))
-                    .with_scale(Vec3::splat(0.95)),
-                ..default()
-            });
-            let ant_pos = Vec3::new(0.18, 2.02, -0.04);
-            c.spawn((
-                PbrBundle {
-                    mesh: antenna_tip_mesh.clone(),
-                    material: eye_mat.clone(),
-                    transform: Transform::from_translation(ant_pos).with_scale(Vec3::splat(0.95)),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::AntennaTip,
-                    base_translation: ant_pos,
-                    base_scale: Vec3::splat(0.95),
-                },
-            ));
         });
 }
 
@@ -2804,25 +3220,27 @@ fn spawn_companion_entity(
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BotVisualCache,
     bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
 ) {
     if bot.companion_order == 0 {
-        spawn_aura_companion(commands, meshes, materials, cache, bot);
+        spawn_aura_companion(commands, meshes, materials, cache, bot, runtime_tier);
     } else {
-        spawn_bolt_companion(commands, meshes, materials, cache, bot);
+        spawn_bolt_companion(commands, meshes, materials, cache, bot, runtime_tier);
     }
 }
 
-/// AURA — pearl-white egg companion (EVE / Rodney style).
+/// AURA — cool-alloy survey companion with an armored sensor housing.
 fn spawn_aura_companion(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BotVisualCache,
     bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
 ) {
     let body = cache
         .char_body_egg
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.55)))
+        .get_or_insert_with(|| meshes.add(Cuboid::new(0.92, 1.16, 0.78)))
         .clone();
     let visor = cache
         .char_visor
@@ -2830,7 +3248,7 @@ fn spawn_aura_companion(
         .clone();
     let iris = cache
         .char_iris
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.16)))
+        .get_or_insert_with(|| meshes.add(Cuboid::new(0.18, 0.07, 0.05)))
         .clone();
     let pupil = cache
         .char_iris_pupil
@@ -2915,245 +3333,291 @@ fn spawn_aura_companion(
 
     let p = vec3_from_arr(bot.position);
     let bot_id = bot.id;
+    let variant = bot_visual_variant(bot.id, bot.role);
+    let rig_scale = 0.96 + variant.chassis as f32 * 0.025;
 
     commands
         .spawn((
             SpatialBundle {
                 transform: Transform::from_translation(p),
+                visibility: if runtime_tier == BotRuntimeTier::Culled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
             Name::new(format!("AURA_{}_{}", bot_id, bot.name)),
         ))
-        .with_children(|c| {
-            // Ground shadow disc — fakes AO under the floating bot.
-            c.spawn(PbrBundle {
-                mesh: shadow.clone(),
-                material: shadow_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.95, 0.0))
-                    .with_scale(Vec3::new(1.0, 1.0, 1.4)),
-                ..default()
-            });
-            // Hover-glow ring — emissive disc just below the body.
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: hover_ring_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.72, 0.0)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: holo_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 1.42, -0.05))
-                    .with_scale(Vec3::new(0.72, 1.0, 0.72)),
-                ..default()
-            });
-            for &(sx, yaw) in &[(-0.72_f32, 0.18_f32), (0.72, -0.18)] {
-                c.spawn(PbrBundle {
-                    mesh: holo_blade.clone(),
-                    material: holo_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, 0.04, -0.05))
-                        .with_rotation(Quat::from_rotation_z(yaw))
-                        .with_scale(Vec3::new(1.15, 1.0, 1.0)),
-                    ..default()
-                });
-            }
-            for &(x, y, z) in &[
-                (-0.38_f32, 1.28_f32, 0.22_f32),
-                (0.38, 1.28, 0.22),
-                (-0.28, 1.18, -0.34),
-                (0.28, 1.18, -0.34),
-            ] {
-                c.spawn(PbrBundle {
-                    mesh: orbit_dot.clone(),
-                    material: holo_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(x, y, z)),
-                    ..default()
-                });
-            }
-            // Lower belly (mirrored egg).
-            c.spawn(PbrBundle {
-                mesh: body.clone(),
-                material: shell_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.18, 0.0))
-                    .with_scale(Vec3::new(0.78, 0.95, 0.78)),
-                ..default()
-            });
-            // Shoulder seam — thin dark trim ring at belly join.
-            c.spawn(PbrBundle {
-                mesh: panel_seam.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.20, 0.0))
-                    .with_scale(Vec3::new(0.60, 1.0, 0.60)),
-                ..default()
-            });
-
-            // HEAD assembly — visor + iris + antenna ride together so we can
-            // tilt the head independently.
-            c.spawn(PbrBundle {
-                mesh: backpack.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.10, -0.56))
-                    .with_scale(Vec3::new(1.0, 1.0, 0.85)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: sensor_bar.clone(),
-                material: visor_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.95, 0.48))
-                    .with_scale(Vec3::new(1.25, 1.0, 1.0)),
-                ..default()
-            });
-            for &sx in &[-1.0_f32, 1.0_f32] {
-                c.spawn(PbrBundle {
-                    mesh: arm_segment.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.72, -0.12, 0.12))
-                        .with_rotation(Quat::from_rotation_z(sx * -0.42)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: claw.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.86, -0.54, 0.18))
-                        .with_rotation(Quat::from_rotation_z(sx * -0.55)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: leg_strut.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.28, -0.86, 0.08))
-                        .with_rotation(Quat::from_rotation_z(sx * 0.20)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: foot_pad.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.34, -1.18, 0.16))
-                        .with_rotation(Quat::from_rotation_y(sx * 0.08)),
-                    ..default()
-                });
-            }
-
-            c.spawn((
-                SpatialBundle {
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.42, 0.0)),
-                    ..default()
-                },
-                CompanionHead { bot_id, kind: 0 },
-            ))
-            .with_children(|h| {
-                // Head shell — taller egg.
-                h.spawn(PbrBundle {
+        .with_children(|root| {
+            root.spawn((
+                PbrBundle {
                     mesh: body.clone(),
                     material: shell_mat.clone(),
-                    transform: Transform::from_scale(Vec3::new(0.92, 1.05, 0.85)),
+                    transform: Transform::from_scale(Vec3::new(
+                        1.05 * rig_scale,
+                        1.12,
+                        0.92 * rig_scale,
+                    )),
+                    visibility: if runtime_tier == BotRuntimeTier::Proxy {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotLodProxy { bot_id },
+            ));
+            root.spawn((
+                SpatialBundle {
+                    transform: Transform::from_scale(Vec3::new(
+                        rig_scale,
+                        0.97 + variant.armor as f32 * 0.02,
+                        rig_scale,
+                    )),
+                    visibility: if runtime_tier <= BotRuntimeTier::Reduced {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotDetailedRig { bot_id },
+            ))
+            .with_children(|c| {
+                // Ground shadow disc — fakes AO under the floating bot.
+                c.spawn(PbrBundle {
+                    mesh: shadow.clone(),
+                    material: shadow_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.95, 0.0))
+                        .with_scale(Vec3::new(1.0, 1.0, 1.4)),
+                    ..default()
+                });
+                // Hover-glow ring — emissive disc just below the body.
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: hover_ring_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.72, 0.0)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: holo_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 1.42, -0.05))
+                        .with_scale(Vec3::new(0.72, 1.0, 0.72)),
+                    ..default()
+                });
+                for &(sx, yaw) in &[(-0.72_f32, 0.18_f32), (0.72, -0.18)] {
+                    c.spawn(PbrBundle {
+                        mesh: holo_blade.clone(),
+                        material: holo_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, 0.04, -0.05))
+                            .with_rotation(Quat::from_rotation_z(yaw))
+                            .with_scale(Vec3::new(1.15, 1.0, 1.0)),
+                        ..default()
+                    });
+                }
+                for &(x, y, z) in &[
+                    (-0.38_f32, 1.28_f32, 0.22_f32),
+                    (0.38, 1.28, 0.22),
+                    (-0.28, 1.18, -0.34),
+                    (0.28, 1.18, -0.34),
+                ] {
+                    c.spawn(PbrBundle {
+                        mesh: orbit_dot.clone(),
+                        material: holo_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(x, y, z)),
+                        ..default()
+                    });
+                }
+                // Lower belly (mirrored egg).
+                c.spawn(PbrBundle {
+                    mesh: body.clone(),
+                    material: shell_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.18, 0.0))
+                        .with_scale(Vec3::new(0.78, 0.95, 0.78)),
+                    ..default()
+                });
+                // Shoulder seam — thin dark trim ring at belly join.
+                c.spawn(PbrBundle {
+                    mesh: panel_seam.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.20, 0.0))
+                        .with_scale(Vec3::new(0.60, 1.0, 0.60)),
                     ..default()
                 });
 
-                // Dark visor band.
-                h.spawn(PbrBundle {
-                    mesh: visor.clone(),
+                // HEAD assembly — visor + iris + antenna ride together so we can
+                // tilt the head independently.
+                c.spawn(PbrBundle {
+                    mesh: backpack.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.10, -0.56))
+                        .with_scale(Vec3::new(1.0, 1.0, 0.85)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: sensor_bar.clone(),
                     material: visor_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.05, 0.36))
-                        .with_scale(Vec3::new(0.78, 1.0, 0.55)),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.95, 0.48))
+                        .with_scale(Vec3::new(1.25, 1.0, 1.0)),
                     ..default()
                 });
-
-                // Two glowing iris spheres (left + right).
-                for &(sx, side) in &[(-0.30_f32, -1_i8), (0.30_f32, 1_i8)] {
-                    let base = Vec3::new(sx, 0.06, 0.52);
-                    let base_scale = Vec3::splat(1.0);
-                    h.spawn((
-                        PbrBundle {
-                            mesh: iris.clone(),
-                            material: iris_mat.clone(),
-                            transform: Transform::from_translation(base).with_scale(base_scale),
-                            ..default()
-                        },
-                        CompanionEyeIris {
-                            bot_id,
-                            side,
-                            base,
-                            base_scale,
-                        },
-                    ))
-                    .with_children(|e| {
-                        // Pupil dot — sits slightly forward on the iris.
-                        e.spawn(PbrBundle {
-                            mesh: pupil.clone(),
-                            material: pupil_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.13)),
-                            ..default()
-                        });
-                        // Cartoon shine highlight — small white dot on top-front.
-                        e.spawn(PbrBundle {
-                            mesh: iris_highlight.clone(),
-                            material: highlight_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(-0.05, 0.07, 0.135)),
-                            ..default()
-                        });
+                for &sx in &[-1.0_f32, 1.0_f32] {
+                    c.spawn(PbrBundle {
+                        mesh: arm_segment.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.72, -0.12, 0.12))
+                            .with_rotation(Quat::from_rotation_z(sx * -0.42)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: claw.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.86, -0.54, 0.18))
+                            .with_rotation(Quat::from_rotation_z(sx * -0.55)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: leg_strut.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.28, -0.86, 0.08))
+                            .with_rotation(Quat::from_rotation_z(sx * 0.20)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: foot_pad.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.34, -1.18, 0.16))
+                            .with_rotation(Quat::from_rotation_y(sx * 0.08)),
+                        ..default()
                     });
                 }
 
-                // Slim antenna.
-                h.spawn(PbrBundle {
-                    mesh: antenna.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.55, -0.05)),
-                    ..default()
-                });
-                // Antenna tip — pulses.
-                h.spawn((
-                    PbrBundle {
-                        mesh: antenna_tip.clone(),
-                        material: antenna_tip_mat.clone(),
-                        transform: Transform::from_translation(Vec3::new(0.0, 0.88, -0.05)),
+                c.spawn((
+                    SpatialBundle {
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.42, 0.0)),
                         ..default()
                     },
-                    CompanionAntennaTip {
+                    CompanionHead { bot_id, kind: 0 },
+                ))
+                .with_children(|h| {
+                    // Head shell — taller egg.
+                    h.spawn(PbrBundle {
+                        mesh: body.clone(),
+                        material: shell_mat.clone(),
+                        transform: Transform::from_scale(Vec3::new(0.92, 1.05, 0.85)),
+                        ..default()
+                    });
+
+                    // Dark visor band.
+                    h.spawn(PbrBundle {
+                        mesh: visor.clone(),
+                        material: visor_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.05, 0.36))
+                            .with_scale(Vec3::new(0.78, 1.0, 0.55)),
+                        ..default()
+                    });
+
+                    // Twin recessed sensor apertures.
+                    for &(sx, side) in &[(-0.30_f32, -1_i8), (0.30_f32, 1_i8)] {
+                        let base = Vec3::new(sx, 0.06, 0.52);
+                        let base_scale = Vec3::splat(1.0);
+                        h.spawn((
+                            PbrBundle {
+                                mesh: iris.clone(),
+                                material: iris_mat.clone(),
+                                transform: Transform::from_translation(base).with_scale(base_scale),
+                                ..default()
+                            },
+                            CompanionEyeIris {
+                                bot_id,
+                                side,
+                                base,
+                                base_scale,
+                            },
+                        ))
+                        .with_children(|e| {
+                            // Pupil dot — sits slightly forward on the iris.
+                            e.spawn(PbrBundle {
+                                mesh: pupil.clone(),
+                                material: pupil_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.13)),
+                                ..default()
+                            });
+                            // Cartoon shine highlight — small white dot on top-front.
+                            e.spawn(PbrBundle {
+                                mesh: iris_highlight.clone(),
+                                material: highlight_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(
+                                    -0.05, 0.07, 0.135,
+                                )),
+                                ..default()
+                            });
+                        });
+                    }
+
+                    // Slim antenna.
+                    h.spawn(PbrBundle {
+                        mesh: antenna.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.55, -0.05)),
+                        ..default()
+                    });
+                    // Antenna tip — pulses.
+                    h.spawn((
+                        PbrBundle {
+                            mesh: antenna_tip.clone(),
+                            material: antenna_tip_mat.clone(),
+                            transform: Transform::from_translation(Vec3::new(0.0, 0.88, -0.05)),
+                            ..default()
+                        },
+                        CompanionAntennaTip {
+                            bot_id,
+                            base_scale: 1.0,
+                        },
+                    ));
+                });
+
+                // Chest mood disc — color is driven each frame from the active
+                // companion mode.
+                c.spawn((
+                    PbrBundle {
+                        mesh: mood_disc.clone(),
+                        material: mood_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, -0.05, 0.55))
+                            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                            .with_scale(Vec3::splat(1.0)),
+                        ..default()
+                    },
+                    CompanionMoodLight {
                         bot_id,
-                        base_scale: 1.0,
+                        mat: mood_mat.clone(),
                     },
                 ));
+
+                // Side hover-thrusters (warm glows tucked at the bot's hips).
+                for &sx in &[-0.55_f32, 0.55_f32] {
+                    c.spawn(PbrBundle {
+                        mesh: side_thruster.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, -0.45, 0.0)),
+                        ..default()
+                    });
+                }
             });
-
-            // Chest mood disc — color is driven each frame from the active
-            // companion mode.
-            c.spawn((
-                PbrBundle {
-                    mesh: mood_disc.clone(),
-                    material: mood_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, -0.05, 0.55))
-                        .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                        .with_scale(Vec3::splat(1.0)),
-                    ..default()
-                },
-                CompanionMoodLight {
-                    bot_id,
-                    mat: mood_mat.clone(),
-                },
-            ));
-
-            // Side hover-thrusters (warm glows tucked at the bot's hips).
-            for &sx in &[-0.55_f32, 0.55_f32] {
-                c.spawn(PbrBundle {
-                    mesh: side_thruster.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, -0.45, 0.0)),
-                    ..default()
-                });
-            }
         });
 }
 
-/// BOLT — warm-yellow stalk-eyed companion (WALL-E / Fender style).
+/// BOLT — warm-alloy field companion with a reinforced utility chassis.
 fn spawn_bolt_companion(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BotVisualCache,
     bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
 ) {
     let body = cache
         .char_body_barrel
@@ -3169,7 +3633,7 @@ fn spawn_bolt_companion(
         .clone();
     let iris = cache
         .char_iris
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.16)))
+        .get_or_insert_with(|| meshes.add(Cuboid::new(0.18, 0.07, 0.05)))
         .clone();
     let pupil = cache
         .char_iris_pupil
@@ -3259,243 +3723,290 @@ fn spawn_bolt_companion(
 
     let p = vec3_from_arr(bot.position);
     let bot_id = bot.id;
+    let variant = bot_visual_variant(bot.id, bot.role);
+    let rig_scale = 0.96 + variant.chassis as f32 * 0.025;
 
     commands
         .spawn((
             SpatialBundle {
                 transform: Transform::from_translation(p),
+                visibility: if runtime_tier == BotRuntimeTier::Culled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
             Name::new(format!("BOLT_{}_{}", bot_id, bot.name)),
         ))
-        .with_children(|c| {
-            // Ground shadow + hover ring (under the body).
-            c.spawn(PbrBundle {
-                mesh: shadow.clone(),
-                material: shadow_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.95, 0.0))
-                    .with_scale(Vec3::new(1.05, 1.0, 1.5)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: hover_ring_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.65, 0.0))
-                    .with_scale(Vec3::new(1.1, 1.0, 1.1)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: holo_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.78, -0.10))
-                    .with_scale(Vec3::new(0.82, 1.0, 0.82)),
-                ..default()
-            });
-            for &(sx, yaw) in &[(-0.70_f32, -0.14_f32), (0.70, 0.14)] {
+        .with_children(|root| {
+            root.spawn((
+                PbrBundle {
+                    mesh: body.clone(),
+                    material: shell_mat.clone(),
+                    transform: Transform::from_scale(Vec3::new(
+                        1.02 * rig_scale,
+                        1.05,
+                        0.96 * rig_scale,
+                    )),
+                    visibility: if runtime_tier == BotRuntimeTier::Proxy {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotLodProxy { bot_id },
+            ));
+            root.spawn((
+                SpatialBundle {
+                    transform: Transform::from_scale(Vec3::new(
+                        rig_scale,
+                        0.97 + variant.armor as f32 * 0.02,
+                        rig_scale,
+                    )),
+                    visibility: if runtime_tier <= BotRuntimeTier::Reduced {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotDetailedRig { bot_id },
+            ))
+            .with_children(|c| {
+                // Ground shadow + hover ring (under the body).
                 c.spawn(PbrBundle {
-                    mesh: holo_blade.clone(),
+                    mesh: shadow.clone(),
+                    material: shadow_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.95, 0.0))
+                        .with_scale(Vec3::new(1.05, 1.0, 1.5)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: hover_ring_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.65, 0.0))
+                        .with_scale(Vec3::new(1.1, 1.0, 1.1)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
                     material: holo_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, -0.10, -0.03))
-                        .with_rotation(Quat::from_rotation_z(yaw))
-                        .with_scale(Vec3::new(1.05, 1.0, 1.0)),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.78, -0.10))
+                        .with_scale(Vec3::new(0.82, 1.0, 0.82)),
                     ..default()
                 });
+                for &(sx, yaw) in &[(-0.70_f32, -0.14_f32), (0.70, 0.14)] {
+                    c.spawn(PbrBundle {
+                        mesh: holo_blade.clone(),
+                        material: holo_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, -0.10, -0.03))
+                            .with_rotation(Quat::from_rotation_z(yaw))
+                            .with_scale(Vec3::new(1.05, 1.0, 1.0)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: orbit_dot.clone(),
+                        material: holo_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.58, 0.72, 0.30)),
+                        ..default()
+                    });
+                }
+                // Body — main barrel shell.
                 c.spawn(PbrBundle {
-                    mesh: orbit_dot.clone(),
-                    material: holo_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.58, 0.72, 0.30)),
+                    mesh: body.clone(),
+                    material: shell_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
                     ..default()
                 });
-            }
-            // Body — main barrel shell.
-            c.spawn(PbrBundle {
-                mesh: body.clone(),
-                material: shell_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
-                ..default()
-            });
-            // Subtle inner bevel for chamfered look.
-            c.spawn(PbrBundle {
-                mesh: bevel.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0))
-                    .with_scale(Vec3::new(1.02, 0.65, 1.05)),
-                ..default()
-            });
-            // Chest rivets — 4 small dark cubes in a + pattern.
-            for &(rx, ry) in &[(0.0_f32, 0.20_f32), (0.0, -0.20), (-0.20, 0.0), (0.20, 0.0)] {
-                c.spawn(PbrBundle {
-                    mesh: rivet.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(rx, ry, 0.49)),
-                    ..default()
-                });
-            }
-
-            // HEAD — stalk-eye head sits on top.
-            c.spawn(PbrBundle {
-                mesh: backpack.clone(),
-                material: ear_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.02, -0.58))
-                    .with_scale(Vec3::new(1.15, 1.05, 0.9)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: sensor_bar.clone(),
-                material: ear_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.36, 0.54))
-                    .with_scale(Vec3::new(1.55, 1.0, 1.0)),
-                ..default()
-            });
-            for &sx in &[-1.0_f32, 1.0_f32] {
-                c.spawn(PbrBundle {
-                    mesh: arm_segment.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.68, -0.10, 0.16))
-                        .with_rotation(Quat::from_rotation_z(sx * -0.28)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: claw.clone(),
-                    material: ear_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.82, -0.50, 0.25))
-                        .with_rotation(Quat::from_rotation_z(sx * -0.38)),
-                    ..default()
-                });
+                // Subtle inner bevel for chamfered look.
                 c.spawn(PbrBundle {
                     mesh: bevel.clone(),
-                    material: ear_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.72, -0.40, -0.04))
-                        .with_scale(Vec3::new(0.22, 0.42, 0.86)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: leg_strut.clone(),
                     material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.28, -0.82, 0.05))
-                        .with_rotation(Quat::from_rotation_z(sx * 0.10)),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0))
+                        .with_scale(Vec3::new(1.02, 0.65, 1.05)),
                     ..default()
                 });
-                c.spawn(PbrBundle {
-                    mesh: foot_pad.clone(),
-                    material: ear_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.34, -1.12, 0.10))
-                        .with_scale(Vec3::new(1.15, 1.0, 0.95)),
-                    ..default()
-                });
-            }
-
-            c.spawn((
-                SpatialBundle {
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.55, 0.05)),
-                    ..default()
-                },
-                CompanionHead { bot_id, kind: 1 },
-            ))
-            .with_children(|h| {
-                // Two stalk eyes (left + right), tipped forward.
-                for &(sx, side) in &[(-0.22_f32, -1_i8), (0.22_f32, 1_i8)] {
-                    h.spawn(PbrBundle {
-                        mesh: stalk.clone(),
+                // Chest rivets — 4 small dark cubes in a + pattern.
+                for &(rx, ry) in &[(0.0_f32, 0.20_f32), (0.0, -0.20), (-0.20, 0.0), (0.20, 0.0)] {
+                    c.spawn(PbrBundle {
+                        mesh: rivet.clone(),
                         material: trim_mat.clone(),
-                        transform: Transform::from_translation(Vec3::new(sx, 0.10, 0.10))
-                            .with_rotation(Quat::from_rotation_x(0.35)),
+                        transform: Transform::from_translation(Vec3::new(rx, ry, 0.49)),
                         ..default()
                     });
-                    let base = Vec3::new(sx, 0.22, 0.20);
-                    let base_scale = Vec3::splat(1.0);
-                    h.spawn((
-                        PbrBundle {
-                            mesh: iris.clone(),
-                            material: iris_mat.clone(),
-                            transform: Transform::from_translation(base).with_scale(base_scale),
-                            ..default()
-                        },
-                        CompanionEyeIris {
-                            bot_id,
-                            side,
-                            base,
-                            base_scale,
-                        },
-                    ))
-                    .with_children(|e| {
-                        e.spawn(PbrBundle {
-                            mesh: pupil.clone(),
-                            material: pupil_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.13)),
-                            ..default()
-                        });
-                        e.spawn(PbrBundle {
-                            mesh: iris_highlight.clone(),
-                            material: highlight_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(-0.05, 0.07, 0.135)),
-                            ..default()
-                        });
+                }
+
+                // HEAD — stalk-eye head sits on top.
+                c.spawn(PbrBundle {
+                    mesh: backpack.clone(),
+                    material: ear_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.02, -0.58))
+                        .with_scale(Vec3::new(1.15, 1.05, 0.9)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: sensor_bar.clone(),
+                    material: ear_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.36, 0.54))
+                        .with_scale(Vec3::new(1.55, 1.0, 1.0)),
+                    ..default()
+                });
+                for &sx in &[-1.0_f32, 1.0_f32] {
+                    c.spawn(PbrBundle {
+                        mesh: arm_segment.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.68, -0.10, 0.16))
+                            .with_rotation(Quat::from_rotation_z(sx * -0.28)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: claw.clone(),
+                        material: ear_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.82, -0.50, 0.25))
+                            .with_rotation(Quat::from_rotation_z(sx * -0.38)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: bevel.clone(),
+                        material: ear_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.72, -0.40, -0.04))
+                            .with_scale(Vec3::new(0.22, 0.42, 0.86)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: leg_strut.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.28, -0.82, 0.05))
+                            .with_rotation(Quat::from_rotation_z(sx * 0.10)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: foot_pad.clone(),
+                        material: ear_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.34, -1.12, 0.10))
+                            .with_scale(Vec3::new(1.15, 1.0, 0.95)),
+                        ..default()
                     });
                 }
 
-                // Headphone-style ear caps.
-                for &(sx, side) in &[(-0.55_f32, -1_i8), (0.55_f32, 1_i8)] {
-                    h.spawn((
-                        PbrBundle {
-                            mesh: ear.clone(),
-                            material: ear_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(sx, 0.0, 0.0))
-                                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-                            ..default()
-                        },
-                        CompanionEarCap { bot_id, side },
-                    ));
-                }
-
-                // Tail-rotor antenna at the back of the head.
-                h.spawn(PbrBundle {
-                    mesh: antenna.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.18, -0.35))
-                        .with_rotation(Quat::from_rotation_x(0.6)),
-                    ..default()
-                });
-                h.spawn((
-                    PbrBundle {
-                        mesh: antenna_tip.clone(),
-                        material: antenna_tip_mat.clone(),
-                        transform: Transform::from_translation(Vec3::new(0.0, 0.40, -0.55)),
+                c.spawn((
+                    SpatialBundle {
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.55, 0.05)),
                         ..default()
                     },
-                    CompanionAntennaTip {
+                    CompanionHead { bot_id, kind: 1 },
+                ))
+                .with_children(|h| {
+                    // Two stalk eyes (left + right), tipped forward.
+                    for &(sx, side) in &[(-0.22_f32, -1_i8), (0.22_f32, 1_i8)] {
+                        h.spawn(PbrBundle {
+                            mesh: stalk.clone(),
+                            material: trim_mat.clone(),
+                            transform: Transform::from_translation(Vec3::new(sx, 0.10, 0.10))
+                                .with_rotation(Quat::from_rotation_x(0.35)),
+                            ..default()
+                        });
+                        let base = Vec3::new(sx, 0.22, 0.20);
+                        let base_scale = Vec3::splat(1.0);
+                        h.spawn((
+                            PbrBundle {
+                                mesh: iris.clone(),
+                                material: iris_mat.clone(),
+                                transform: Transform::from_translation(base).with_scale(base_scale),
+                                ..default()
+                            },
+                            CompanionEyeIris {
+                                bot_id,
+                                side,
+                                base,
+                                base_scale,
+                            },
+                        ))
+                        .with_children(|e| {
+                            e.spawn(PbrBundle {
+                                mesh: pupil.clone(),
+                                material: pupil_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.13)),
+                                ..default()
+                            });
+                            e.spawn(PbrBundle {
+                                mesh: iris_highlight.clone(),
+                                material: highlight_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(
+                                    -0.05, 0.07, 0.135,
+                                )),
+                                ..default()
+                            });
+                        });
+                    }
+
+                    // Headphone-style ear caps.
+                    for &(sx, side) in &[(-0.55_f32, -1_i8), (0.55_f32, 1_i8)] {
+                        h.spawn((
+                            PbrBundle {
+                                mesh: ear.clone(),
+                                material: ear_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(sx, 0.0, 0.0))
+                                    .with_rotation(Quat::from_rotation_z(
+                                        std::f32::consts::FRAC_PI_2,
+                                    )),
+                                ..default()
+                            },
+                            CompanionEarCap { bot_id, side },
+                        ));
+                    }
+
+                    // Tail-rotor antenna at the back of the head.
+                    h.spawn(PbrBundle {
+                        mesh: antenna.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.18, -0.35))
+                            .with_rotation(Quat::from_rotation_x(0.6)),
+                        ..default()
+                    });
+                    h.spawn((
+                        PbrBundle {
+                            mesh: antenna_tip.clone(),
+                            material: antenna_tip_mat.clone(),
+                            transform: Transform::from_translation(Vec3::new(0.0, 0.40, -0.55)),
+                            ..default()
+                        },
+                        CompanionAntennaTip {
+                            bot_id,
+                            base_scale: 1.0,
+                        },
+                    ));
+                });
+
+                // Chest mood plate — wide warm-amber on BOLT.
+                c.spawn((
+                    PbrBundle {
+                        mesh: mood_disc.clone(),
+                        material: mood_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, -0.05, 0.50))
+                            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                            .with_scale(Vec3::new(1.2, 1.0, 1.0)),
+                        ..default()
+                    },
+                    CompanionMoodLight {
                         bot_id,
-                        base_scale: 1.0,
+                        mat: mood_mat.clone(),
                     },
                 ));
+
+                // Ducted side fans (small warm thruster glows under the body).
+                for &sx in &[-0.55_f32, 0.55_f32] {
+                    c.spawn(PbrBundle {
+                        mesh: side_thruster.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, -0.50, 0.0)),
+                        ..default()
+                    });
+                }
             });
-
-            // Chest mood plate — wide warm-amber on BOLT.
-            c.spawn((
-                PbrBundle {
-                    mesh: mood_disc.clone(),
-                    material: mood_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, -0.05, 0.50))
-                        .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                        .with_scale(Vec3::new(1.2, 1.0, 1.0)),
-                    ..default()
-                },
-                CompanionMoodLight {
-                    bot_id,
-                    mat: mood_mat.clone(),
-                },
-            ));
-
-            // Ducted side fans (small warm thruster glows under the body).
-            for &sx in &[-0.55_f32, 0.55_f32] {
-                c.spawn(PbrBundle {
-                    mesh: side_thruster.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, -0.50, 0.0)),
-                    ..default()
-                });
-            }
         });
 }
 
@@ -3914,15 +4425,15 @@ fn companion_iris_highlight_material(
 
 fn bot_role_color(role: BotRole) -> Color {
     match role {
-        BotRole::CompanionGuide => Color::srgb(0.82, 0.96, 1.0),
-        BotRole::CompanionMaker => Color::srgb(0.62, 0.88, 1.0),
-        BotRole::Planner => Color::srgb(0.20, 0.95, 1.0),
-        BotRole::Surveyor => Color::srgb(0.25, 1.0, 0.60),
-        BotRole::Builder => Color::srgb(1.0, 0.70, 0.20),
-        BotRole::Architect => Color::srgb(1.0, 0.15, 0.85),
-        BotRole::RoadCrew => Color::srgb(0.90, 0.95, 1.0),
-        BotRole::ParkKeeper => Color::srgb(0.20, 0.95, 0.35),
-        BotRole::RepairTech => Color::srgb(1.0, 0.35, 0.20),
+        BotRole::CompanionGuide => Color::srgb(0.30, 0.39, 0.42),
+        BotRole::CompanionMaker => Color::srgb(0.25, 0.36, 0.40),
+        BotRole::Planner => Color::srgb(0.22, 0.33, 0.41),
+        BotRole::Surveyor => Color::srgb(0.18, 0.38, 0.35),
+        BotRole::Builder => Color::srgb(0.46, 0.31, 0.12),
+        BotRole::Architect => Color::srgb(0.36, 0.20, 0.28),
+        BotRole::RoadCrew => Color::srgb(0.38, 0.42, 0.44),
+        BotRole::ParkKeeper => Color::srgb(0.21, 0.34, 0.23),
+        BotRole::RepairTech => Color::srgb(0.43, 0.20, 0.12),
     }
 }
 
@@ -3933,6 +4444,7 @@ fn tick_friendly_world(
     mut world: ResMut<VoxelWorld>,
     mut history: ResMut<BuilderHistory>,
     budget: Res<RuntimeBudget>,
+    runtime: Res<BotRuntimeControl>,
     active: Option<Res<ActiveWorld>>,
     city: Option<Res<crate::city::CityState>>,
     player_q: Query<&Transform, With<Player>>,
@@ -3960,7 +4472,8 @@ fn tick_friendly_world(
         }
     }
 
-    keep_bots_visible_and_busy(&mut brain, &world, player_pos);
+    let perception_ids = runtime.due_ids(BotRuntimeWork::Perception, BOT_MAX_FRAME_PERCEPTION_BOTS);
+    keep_bots_visible_and_busy(&mut brain, &world, player_pos, &perception_ids);
     if !brain.queued_commands.is_empty() {
         brain.save.autonomy.bots_active = true;
         brain.save.autonomy.enabled = false;
@@ -4003,7 +4516,7 @@ fn tick_friendly_world(
         }
     }
 
-    move_bot_memories(&mut brain.save, &world, dt);
+    move_bot_memories(&mut brain.save, &world, dt, &perception_ids);
 
     let mut completed = Vec::new();
     let mut blocked = Vec::new();
@@ -4376,12 +4889,13 @@ fn keep_bots_visible_and_busy(
     brain: &mut FriendlyWorldBrain,
     world: &VoxelWorld,
     player_pos: Option<Vec3>,
+    perception_ids: &HashSet<u64>,
 ) {
     if brain.save.agents.is_empty() {
         return;
     }
     if brain.save.agents.iter().any(|b| b.companion) {
-        update_companion_targets(&mut brain.save, world, player_pos);
+        update_companion_targets(&mut brain.save, world, player_pos, perception_ids);
         return;
     }
 
@@ -4436,13 +4950,22 @@ fn keep_bots_visible_and_busy(
     );
 }
 
-fn update_companion_targets(save: &mut BotWorldSave, world: &VoxelWorld, player_pos: Option<Vec3>) {
+fn update_companion_targets(
+    save: &mut BotWorldSave,
+    world: &VoxelWorld,
+    player_pos: Option<Vec3>,
+    perception_ids: &HashSet<u64>,
+) {
     let Some(player_pos) = player_pos else {
         return;
     };
     let elapsed = now_epoch() as f32 * 0.001;
     let companion_count = save.agents.iter().filter(|b| b.companion).count().max(1) as f32;
-    for bot in save.agents.iter_mut().filter(|b| b.companion) {
+    for bot in save
+        .agents
+        .iter_mut()
+        .filter(|bot| bot.companion && perception_ids.contains(&bot.id))
+    {
         bot.memory.preferred_follow_distance = bot
             .memory
             .preferred_follow_distance
@@ -4556,12 +5079,19 @@ fn set_bot_air_target(bot: &mut BotAgent, world: &VoxelWorld, target: Vec3, min_
 
 fn draw_companion_preview_gizmos(
     brain: Res<FriendlyWorldBrain>,
+    runtime: Res<BotRuntimeControl>,
     mut gizmos: Gizmos,
     time: Res<Time>,
 ) {
     let elapsed = time.elapsed_seconds();
     let pulse = (elapsed * 3.4).sin() * 0.5 + 0.5;
-    for bot in brain.save.agents.iter().filter(|b| b.companion) {
+    let fx_ids = runtime.due_ids(BotRuntimeWork::Fx, BOT_MAX_FRAME_FX_BOTS);
+    for bot in brain
+        .save
+        .agents
+        .iter()
+        .filter(|bot| bot.companion && fx_ids.contains(&bot.id))
+    {
         let pos = vec3_from_arr(bot.position);
         let target = vec3_from_arr(bot.target);
         match bot.companion_mode {
@@ -9715,7 +10245,12 @@ fn protected_project_area(
         .any(|s| xz_distance_to_project(origin, size, *s) < BOT_SHIP_PROJECT_MARGIN)
 }
 
-fn move_bot_memories(save: &mut BotWorldSave, world: &VoxelWorld, dt: f32) {
+fn move_bot_memories(
+    save: &mut BotWorldSave,
+    world: &VoxelWorld,
+    dt: f32,
+    terrain_probe_ids: &HashSet<u64>,
+) {
     for bot in &mut save.agents {
         let pos = vec3_from_arr(bot.position);
         let target = vec3_from_arr(bot.target);
@@ -9740,11 +10275,11 @@ fn move_bot_memories(save: &mut BotWorldSave, world: &VoxelWorld, dt: f32) {
         } else {
             pos
         };
-        if !bot.companion {
+        if !bot.companion && terrain_probe_ids.contains(&bot.id) {
             let sx = next.x.round() as i32;
             let sz = next.z.round() as i32;
             next.y = world.surface_height_at(sx, sz) as f32 + 2.1;
-        } else {
+        } else if bot.companion && terrain_probe_ids.contains(&bot.id) {
             // Soft floor: never let a companion clip the terrain.
             let sx = next.x.round() as i32;
             let sz = next.z.round() as i32;
@@ -10287,14 +10822,21 @@ fn face_player_toward(transform: &mut Transform, player: &mut Player, target: Ve
 fn animate_worker_bots(
     time: Res<Time>,
     brain: Res<FriendlyWorldBrain>,
+    runtime: Res<BotRuntimeControl>,
     player_q: Query<&Transform, (With<Player>, Without<WorkerBotPart>)>,
+    rigs: Query<(&BotDetailedRig, &Children)>,
     mut parts: Query<(&WorkerBotPart, &mut Transform), Without<Player>>,
 ) {
     let elapsed = time.elapsed_seconds();
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
-    let bot_index = bot_agent_index(&brain.save);
-    for (part, mut tf) in &mut parts {
-        let Some(bot) = bot_by_id(&brain.save, &bot_index, part.bot_id) else {
+    let animation_ids = runtime.due_ids(BotRuntimeWork::Animation, BOT_MAX_FRAME_ANIMATED_RIGS);
+    if animation_ids.is_empty() {
+        return;
+    }
+
+    let mut poses = AHashMap::with_capacity(animation_ids.len());
+    for bot_id in animation_ids {
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == bot_id) else {
             continue;
         };
         if bot.companion {
@@ -10304,24 +10846,21 @@ fn animate_worker_bots(
         let target = vec3_from_arr(bot.target);
         let to_target = target - p;
         let move_speed = Vec3::new(to_target.x, 0.0, to_target.z).length().min(6.0);
-        let phase = elapsed * 2.4 + part.bot_id as f32 * 0.73;
+        let phase = elapsed * 2.4 + bot_id as f32 * 0.73;
         let walking = move_speed > 0.25;
         let gait = if walking {
-            (elapsed * 7.5 + part.bot_id as f32 * 1.31).sin()
+            (elapsed * 7.5 + bot_id as f32 * 1.31).sin()
         } else {
             0.0
         };
-        // Activity intensity for emissive / vent pulses.
         let activity = match bot.state {
             BotState::Building => 1.0,
             BotState::Surveying | BotState::Inspecting => 0.75,
             BotState::Planning | BotState::Returning => 0.4,
             BotState::Idle => 0.18,
         };
-        let pulse = (elapsed * 4.2 + part.bot_id as f32 * 1.7).sin() * 0.5 + 0.5;
+        let pulse = (elapsed * 4.2 + bot_id as f32 * 1.7).sin() * 0.5 + 0.5;
 
-        // What the bot wants to look at: nearest player when idle/returning,
-        // otherwise its work target.
         let look_world = match bot.state {
             BotState::Idle | BotState::Returning => player_pos.unwrap_or(target),
             _ => target,
@@ -10346,126 +10885,159 @@ fn animate_worker_bots(
         };
         let head_yaw_local = head_yaw_local.clamp(-0.9, 0.9);
 
-        match part.part {
-            WorkerPart::Head => {
-                tf.translation =
-                    part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
-                let pitch = (elapsed * 1.1 + part.bot_id as f32).sin() * 0.05;
-                tf.rotation =
-                    Quat::from_rotation_y(head_yaw_local * 0.85) * Quat::from_rotation_x(pitch);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::Visor => {
-                tf.translation =
-                    part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
-                tf.rotation = Quat::from_rotation_y(head_yaw_local * 0.85);
-                // Scanning shimmer when surveying/inspecting.
-                let scan = if matches!(bot.state, BotState::Surveying | BotState::Inspecting) {
-                    1.0 + pulse * 0.18
-                } else {
-                    1.0 + pulse * 0.04
-                };
-                tf.scale = part.base_scale * Vec3::new(scan, 1.0, 1.0);
-            }
-            WorkerPart::EyeL | WorkerPart::EyeR => {
-                tf.translation =
-                    part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
-                tf.rotation = Quat::from_rotation_y(head_yaw_local * 0.85);
-                let s = 1.0 + 0.18 * pulse * activity + 0.05 * (elapsed * 9.0).sin();
-                tf.scale = part.base_scale * s;
-            }
-            WorkerPart::AntennaTip => {
-                let sway = Vec3::new(
-                    (elapsed * 2.3 + part.bot_id as f32).sin() * 0.05,
-                    (elapsed * 3.1).sin() * 0.02,
-                    (elapsed * 1.9 + part.bot_id as f32 * 0.5).cos() * 0.05,
-                );
-                tf.translation = part.base_translation + sway;
-                let s = 1.0 + 0.35 * pulse * activity;
-                tf.scale = part.base_scale * s;
-            }
-            WorkerPart::ShoulderL => {
-                tf.translation = part.base_translation;
-                tf.rotation = Quat::from_rotation_x(gait * 0.18);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ShoulderR => {
-                tf.translation = part.base_translation;
-                tf.rotation = Quat::from_rotation_x(-gait * 0.18);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ArmUpperL => {
-                tf.translation = part.base_translation;
-                let work_swing = if matches!(bot.state, BotState::Building) {
-                    (elapsed * 9.5).sin() * 0.7
-                } else {
-                    gait * 0.55
-                };
-                tf.rotation = Quat::from_rotation_x(work_swing);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ArmUpperR => {
-                tf.translation = part.base_translation;
-                let work_swing = if matches!(bot.state, BotState::Building) {
-                    (elapsed * 9.5 + std::f32::consts::PI).sin() * 0.7
-                } else {
-                    -gait * 0.55
-                };
-                tf.rotation = Quat::from_rotation_x(work_swing);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ArmForeL => {
-                tf.translation = part.base_translation;
-                let bend = if matches!(bot.state, BotState::Building) {
-                    0.6 + (elapsed * 9.5).sin().abs() * 0.4
-                } else {
-                    0.25 + gait.abs() * 0.15
-                };
-                tf.rotation = Quat::from_rotation_x(bend);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ArmForeR => {
-                tf.translation = part.base_translation;
-                let bend = if matches!(bot.state, BotState::Building) {
-                    0.6 + (elapsed * 9.5 + std::f32::consts::PI).sin().abs() * 0.4
-                } else {
-                    0.25 + gait.abs() * 0.15
-                };
-                tf.rotation = Quat::from_rotation_x(bend);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::HoverRing => {
-                let breathe = 1.0 + 0.06 * (elapsed * 2.0 + part.bot_id as f32).sin();
-                tf.translation = part.base_translation + Vec3::Y * ((elapsed * 1.4).sin() * 0.015);
-                tf.scale = part.base_scale * Vec3::new(breathe, 1.0, breathe);
-            }
-            WorkerPart::BackpackVent => {
-                let intensity = 0.85 + 0.55 * pulse * activity;
-                tf.translation = part.base_translation;
-                tf.scale = part.base_scale * Vec3::new(intensity, intensity, 1.0);
-            }
-            WorkerPart::ChestPanel => {
-                let s = 1.0 + 0.06 * pulse * activity;
-                tf.translation = part.base_translation;
-                tf.scale = part.base_scale * Vec3::new(s, s, 1.0);
-            }
-            WorkerPart::Torso => {
-                tf.translation =
-                    part.base_translation + Vec3::Y * (gait.abs() * 0.03 + phase.sin() * 0.01);
-                let lean = if walking { gait * 0.05 } else { 0.0 };
-                tf.rotation = Quat::from_rotation_z(lean);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ToolL => {
-                tf.translation = part.base_translation;
-                let visible = matches!(
-                    bot.state,
-                    BotState::Building | BotState::Surveying | BotState::Inspecting
-                );
-                let s = if visible { 1.0 + 0.45 * pulse } else { 0.001 };
-                tf.scale = part.base_scale * s;
-                if visible {
-                    tf.rotation = Quat::from_rotation_z((elapsed * 6.0).sin() * 0.4);
+        poses.insert(
+            bot_id,
+            WorkerAnimationPose {
+                phase,
+                gait,
+                activity,
+                pulse,
+                head_yaw_local,
+                walking,
+                state: bot.state,
+            },
+        );
+    }
+
+    for (rig, children) in &rigs {
+        let Some(pose) = poses.get(&rig.bot_id).copied() else {
+            continue;
+        };
+        for &child in children.iter() {
+            let Ok((part, mut tf)) = parts.get_mut(child) else {
+                continue;
+            };
+            let WorkerAnimationPose {
+                phase,
+                gait,
+                activity,
+                pulse,
+                head_yaw_local,
+                walking,
+                state,
+            } = pose;
+            match part.part {
+                WorkerPart::Head => {
+                    tf.translation =
+                        part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
+                    let pitch = (elapsed * 1.1 + part.bot_id as f32).sin() * 0.05;
+                    tf.rotation =
+                        Quat::from_rotation_y(head_yaw_local * 0.85) * Quat::from_rotation_x(pitch);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::Visor => {
+                    tf.translation =
+                        part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
+                    tf.rotation = Quat::from_rotation_y(head_yaw_local * 0.85);
+                    // Scanning shimmer when surveying/inspecting.
+                    let scan = if matches!(state, BotState::Surveying | BotState::Inspecting) {
+                        1.0 + pulse * 0.18
+                    } else {
+                        1.0 + pulse * 0.04
+                    };
+                    tf.scale = part.base_scale * Vec3::new(scan, 1.0, 1.0);
+                }
+                WorkerPart::EyeL | WorkerPart::EyeR => {
+                    tf.translation =
+                        part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
+                    tf.rotation = Quat::from_rotation_y(head_yaw_local * 0.85);
+                    let s = 1.0 + 0.18 * pulse * activity + 0.05 * (elapsed * 9.0).sin();
+                    tf.scale = part.base_scale * s;
+                }
+                WorkerPart::AntennaTip => {
+                    let sway = Vec3::new(
+                        (elapsed * 2.3 + part.bot_id as f32).sin() * 0.05,
+                        (elapsed * 3.1).sin() * 0.02,
+                        (elapsed * 1.9 + part.bot_id as f32 * 0.5).cos() * 0.05,
+                    );
+                    tf.translation = part.base_translation + sway;
+                    let s = 1.0 + 0.35 * pulse * activity;
+                    tf.scale = part.base_scale * s;
+                }
+                WorkerPart::ShoulderL => {
+                    tf.translation = part.base_translation;
+                    tf.rotation = Quat::from_rotation_x(gait * 0.18);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ShoulderR => {
+                    tf.translation = part.base_translation;
+                    tf.rotation = Quat::from_rotation_x(-gait * 0.18);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ArmUpperL => {
+                    tf.translation = part.base_translation;
+                    let work_swing = if matches!(state, BotState::Building) {
+                        (elapsed * 9.5).sin() * 0.7
+                    } else {
+                        gait * 0.55
+                    };
+                    tf.rotation = Quat::from_rotation_x(work_swing);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ArmUpperR => {
+                    tf.translation = part.base_translation;
+                    let work_swing = if matches!(state, BotState::Building) {
+                        (elapsed * 9.5 + std::f32::consts::PI).sin() * 0.7
+                    } else {
+                        -gait * 0.55
+                    };
+                    tf.rotation = Quat::from_rotation_x(work_swing);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ArmForeL => {
+                    tf.translation = part.base_translation;
+                    let bend = if matches!(state, BotState::Building) {
+                        0.6 + (elapsed * 9.5).sin().abs() * 0.4
+                    } else {
+                        0.25 + gait.abs() * 0.15
+                    };
+                    tf.rotation = Quat::from_rotation_x(bend);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ArmForeR => {
+                    tf.translation = part.base_translation;
+                    let bend = if matches!(state, BotState::Building) {
+                        0.6 + (elapsed * 9.5 + std::f32::consts::PI).sin().abs() * 0.4
+                    } else {
+                        0.25 + gait.abs() * 0.15
+                    };
+                    tf.rotation = Quat::from_rotation_x(bend);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::HoverRing => {
+                    let breathe = 1.0 + 0.06 * (elapsed * 2.0 + part.bot_id as f32).sin();
+                    tf.translation =
+                        part.base_translation + Vec3::Y * ((elapsed * 1.4).sin() * 0.015);
+                    tf.scale = part.base_scale * Vec3::new(breathe, 1.0, breathe);
+                }
+                WorkerPart::BackpackVent => {
+                    let intensity = 0.85 + 0.55 * pulse * activity;
+                    tf.translation = part.base_translation;
+                    tf.scale = part.base_scale * Vec3::new(intensity, intensity, 1.0);
+                }
+                WorkerPart::ChestPanel => {
+                    let s = 1.0 + 0.06 * pulse * activity;
+                    tf.translation = part.base_translation;
+                    tf.scale = part.base_scale * Vec3::new(s, s, 1.0);
+                }
+                WorkerPart::Torso => {
+                    tf.translation =
+                        part.base_translation + Vec3::Y * (gait.abs() * 0.03 + phase.sin() * 0.01);
+                    let lean = if walking { gait * 0.05 } else { 0.0 };
+                    tf.rotation = Quat::from_rotation_z(lean);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ToolL => {
+                    tf.translation = part.base_translation;
+                    let visible = matches!(
+                        state,
+                        BotState::Building | BotState::Surveying | BotState::Inspecting
+                    );
+                    let s = if visible { 1.0 + 0.45 * pulse } else { 0.001 };
+                    tf.scale = part.base_scale * s;
+                    if visible {
+                        tf.rotation = Quat::from_rotation_z((elapsed * 6.0).sin() * 0.4);
+                    }
                 }
             }
         }
@@ -10475,6 +11047,7 @@ fn animate_worker_bots(
 fn sync_bot_visuals(
     time: Res<Time>,
     brain: Res<FriendlyWorldBrain>,
+    runtime: Res<BotRuntimeControl>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     player_q: Query<&Transform, (With<Player>, Without<FriendlyBotEntity>)>,
     mut bot_q: Query<
@@ -10595,6 +11168,8 @@ fn sync_bot_visuals(
     let dt = time.delta_seconds().clamp(0.0, 0.1);
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
     let bot_index = bot_agent_index(&brain.save);
+    let root_sync_ids = runtime.due_ids(BotRuntimeWork::RootSync, BOT_MAX_FRAME_ROOT_SYNCS);
+    let animation_ids = runtime.due_ids(BotRuntimeWork::Animation, BOT_MAX_FRAME_ANIMATED_RIGS);
 
     // Per-bot world rotation cache so head/iris systems can transform world
     // vectors into local space (used for eye tracking + head tilt direction).
@@ -10605,6 +11180,13 @@ fn sync_bot_visuals(
         let Some(bot) = bot_by_id(&brain.save, &bot_index, entity.id) else {
             continue;
         };
+        if !root_sync_ids.contains(&entity.id) {
+            if bot.companion {
+                bot_world_rot.insert(entity.id, transform.rotation);
+                bot_pos.insert(entity.id, transform.translation);
+            }
+            continue;
+        }
         let p = vec3_from_arr(bot.position);
         let target = vec3_from_arr(bot.target);
 
@@ -10715,6 +11297,9 @@ fn sync_bot_visuals(
 
     // Head tilt — pitch toward the look target a few degrees.
     for (head, mut tf) in &mut head_q {
+        if !animation_ids.contains(&head.bot_id) {
+            continue;
+        }
         let Some(bot) = bot_by_id(&brain.save, &bot_index, head.bot_id) else {
             continue;
         };
@@ -10751,6 +11336,9 @@ fn sync_bot_visuals(
 
     // Iris tracking + blink. Each bot blinks on its own deterministic phase.
     for (iris, mut tf) in &mut iris_q {
+        if !animation_ids.contains(&iris.bot_id) {
+            continue;
+        }
         let Some(bot) = bot_by_id(&brain.save, &bot_index, iris.bot_id) else {
             continue;
         };
@@ -10798,6 +11386,9 @@ fn sync_bot_visuals(
     // active companion mode. Each `CompanionMoodLight` has its OWN material so
     // mutating one doesn't affect the other companion.
     for mood in &mood_q {
+        if !animation_ids.contains(&mood.bot_id) {
+            continue;
+        }
         let Some(bot) = bot_by_id(&brain.save, &bot_index, mood.bot_id) else {
             continue;
         };
@@ -10822,12 +11413,18 @@ fn sync_bot_visuals(
 
     // Antenna tip — soft pulse that matches the mood-light cadence.
     for (tip, mut tf) in &mut antenna_q {
+        if !animation_ids.contains(&tip.bot_id) {
+            continue;
+        }
         let s = tip.base_scale * (1.0 + (elapsed * 2.6 + tip.bot_id as f32).sin() * 0.10);
         tf.scale = Vec3::splat(s);
     }
 
     // Ear caps — slow rotation around their axis (chunky, characterful).
     for (ear, mut tf) in &mut ear_q {
+        if !animation_ids.contains(&ear.bot_id) {
+            continue;
+        }
         let speed = 0.6 * ear.side as f32;
         tf.rotate_local_y(speed * dt);
     }
@@ -13310,6 +13907,153 @@ mod tests {
             Some("Nine")
         );
         assert!(bot_by_id(&save, &index, 99).is_none());
+    }
+
+    #[test]
+    fn dense_nearby_bot_group_has_hard_lod_caps() {
+        let samples: Vec<BotLodSample> = (1..=64)
+            .map(|id| BotLodSample {
+                id,
+                distance: 6.0,
+                companion: id <= 4,
+            })
+            .collect();
+
+        let tiers = assign_bot_runtime_tiers(&samples);
+        let count = |tier| tiers.values().filter(|&&value| value == tier).count();
+
+        assert_eq!(count(BotRuntimeTier::Full), BOT_FULL_DETAIL_LIMIT);
+        assert_eq!(count(BotRuntimeTier::Reduced), BOT_REDUCED_DETAIL_LIMIT);
+        assert_eq!(count(BotRuntimeTier::Proxy), BOT_PROXY_LIMIT);
+        assert_eq!(
+            count(BotRuntimeTier::Full) + count(BotRuntimeTier::Reduced),
+            BOT_FULL_DETAIL_LIMIT + BOT_REDUCED_DETAIL_LIMIT,
+            "proximity must not promote every bot to an expensive detail rig"
+        );
+        assert!(count(BotRuntimeTier::Culled) > 0);
+    }
+
+    #[test]
+    fn bot_lod_assignment_is_distance_aware_and_order_independent() {
+        let samples = vec![
+            BotLodSample {
+                id: 11,
+                distance: 12.0,
+                companion: false,
+            },
+            BotLodSample {
+                id: 22,
+                distance: 80.0,
+                companion: false,
+            },
+            BotLodSample {
+                id: 33,
+                distance: 180.0,
+                companion: false,
+            },
+            BotLodSample {
+                id: 44,
+                distance: 320.0,
+                companion: false,
+            },
+        ];
+        let mut reversed = samples.clone();
+        reversed.reverse();
+
+        let tiers = assign_bot_runtime_tiers(&samples);
+        assert_eq!(tiers, assign_bot_runtime_tiers(&reversed));
+        assert_eq!(tiers[&11], BotRuntimeTier::Full);
+        assert_eq!(tiers[&22], BotRuntimeTier::Reduced);
+        assert_eq!(tiers[&33], BotRuntimeTier::Proxy);
+        assert_eq!(tiers[&44], BotRuntimeTier::Culled);
+    }
+
+    #[test]
+    fn bot_update_cadence_staggers_groups_and_honors_frame_budgets() {
+        let dense_tiers: AHashMap<u64, BotRuntimeTier> =
+            (1..=96).map(|id| (id, BotRuntimeTier::Full)).collect();
+        for frame in 0..32 {
+            assert!(
+                budgeted_bot_update_ids(
+                    &dense_tiers,
+                    frame,
+                    BotRuntimeWork::Perception,
+                    BOT_MAX_FRAME_PERCEPTION_BOTS,
+                )
+                .len()
+                    <= BOT_MAX_FRAME_PERCEPTION_BOTS
+            );
+            assert_eq!(
+                budgeted_bot_update_ids(
+                    &dense_tiers,
+                    frame,
+                    BotRuntimeWork::Animation,
+                    BOT_MAX_FRAME_ANIMATED_RIGS,
+                )
+                .len(),
+                BOT_MAX_FRAME_ANIMATED_RIGS
+            );
+            assert!(
+                budgeted_bot_update_ids(
+                    &dense_tiers,
+                    frame,
+                    BotRuntimeWork::Fx,
+                    BOT_MAX_FRAME_FX_BOTS,
+                )
+                .len()
+                    <= BOT_MAX_FRAME_FX_BOTS
+            );
+        }
+
+        let bot_id = 31;
+        let reduced = AHashMap::from_iter([(bot_id, BotRuntimeTier::Reduced)]);
+        let due_frames: Vec<u64> = (0..24)
+            .filter(|&frame| {
+                budgeted_bot_update_ids(&reduced, frame, BotRuntimeWork::Animation, 1)
+                    .contains(&bot_id)
+            })
+            .collect();
+        assert_eq!(due_frames.len(), 6);
+        assert!(due_frames.windows(2).all(|pair| pair[1] - pair[0] == 4));
+
+        let groups: HashSet<u64> = (1..=64).map(bot_update_group).collect();
+        assert!(
+            groups.len() > 4,
+            "stable IDs should spread across update groups"
+        );
+    }
+
+    #[test]
+    fn bot_visual_variants_are_deterministic_and_not_uniform() {
+        let expected = bot_visual_variant(77, BotRole::Builder);
+        assert_eq!(expected, bot_visual_variant(77, BotRole::Builder));
+        assert_ne!(expected, bot_visual_variant(77, BotRole::Architect));
+
+        let variants: HashSet<BotVisualVariant> = (1..=48)
+            .map(|id| bot_visual_variant(id, BotRole::Builder))
+            .collect();
+        assert!(variants.len() >= 12);
+        assert!(variants.iter().all(|variant| {
+            variant.chassis < 3 && variant.armor < 3 && variant.sensor < 3 && variant.marking < 4
+        }));
+    }
+
+    #[test]
+    fn worker_materials_are_reused_per_role() {
+        let mut cache = BotVisualCache::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+
+        let first = worker_material_set(&mut cache, &mut materials, BotRole::Builder);
+        let asset_count = materials.len();
+        let second = worker_material_set(&mut cache, &mut materials, BotRole::Builder);
+
+        assert_eq!(materials.len(), asset_count);
+        assert_eq!(first.body, second.body);
+        assert_eq!(first.trim, second.trim);
+        assert_eq!(first.sensor, second.sensor);
+        let body = materials.get(&first.body).unwrap();
+        assert!(body.metallic >= 0.7);
+        assert!(body.perceptual_roughness >= 0.6);
     }
 
     #[test]

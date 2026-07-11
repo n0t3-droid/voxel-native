@@ -35,7 +35,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
 use crate::blocks::{voxel_is_solid, Voxel, AIR};
-use crate::builder::BuilderHistory;
+use crate::builder::{BuilderHistory, BuilderHistorySketchMeta};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::player::Player;
 use crate::sculpt::face::{collect_face, FaceRegion};
@@ -1143,20 +1143,18 @@ pub fn end_drag(
     }
     let n = changes.len();
     let changed_cells: Vec<_> = changes.iter().map(|(pos, _, _)| *pos).collect();
-    history.record_external(&label, changes);
+    let sketch_meta = if n > 0 {
+        record_pushpull_semantics_for_history(
+            &drag,
+            &changed_cells,
+            &mut sketch_doc,
+            &mut sketch_links,
+        )
+    } else {
+        None
+    };
+    history.record_external_with_sketch_meta(&label, changes, sketch_meta);
     if n > 0 {
-        match record_pushpull_semantics(&drag, &mut sketch_doc) {
-            Ok(records) => register_pushpull_semantic_links(
-                &drag,
-                &changed_cells,
-                sketch_doc.active_context(),
-                &records,
-                &mut sketch_links,
-            ),
-            Err(error) => {
-                warn!("sketch model: could not record push/pull semantic extrusion: {error}");
-            }
-        }
         tool_controller.begin_transaction(label.clone());
         let _ = tool_controller.commit_transaction();
     }
@@ -1164,6 +1162,34 @@ pub fn end_drag(
     toolbelt.status = state.status.clone();
     drag.clear();
     gesture_lock.release(PUSH_PULL_OWNER);
+}
+
+fn record_pushpull_semantics_for_history(
+    drag: &PushPullDrag,
+    changed_cells: &[IVec3],
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+) -> Option<BuilderHistorySketchMeta> {
+    let records = match record_pushpull_semantics(drag, sketch_doc) {
+        Ok(records) => records,
+        Err(error) => {
+            warn!("sketch model: could not record push/pull semantic extrusion: {error}");
+            return None;
+        }
+    };
+    if records.is_empty() {
+        return None;
+    }
+    register_pushpull_semantic_links(
+        drag,
+        changed_cells,
+        sketch_doc.active_context(),
+        &records,
+        sketch_links,
+    );
+    Some(BuilderHistorySketchMeta::SketchCreated {
+        link_snapshots: sketch_links.snapshot_entities(records.iter().map(|(entity, _)| *entity)),
+    })
 }
 
 fn record_pushpull_semantics(
@@ -1336,6 +1362,8 @@ pub fn universal_undo_input(
     drag: Res<PushPullDrag>,
     mut tool_controller: ResMut<crate::sketch_model::ToolController>,
     mut semantic_hover: ResMut<crate::sketch_model::SemanticHoverHit>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
 ) {
     // Don't undo mid-drag — the preview owns the world's current state.
     if drag.active {
@@ -1346,29 +1374,35 @@ pub fn universal_undo_input(
         return;
     }
     if keys.just_pressed(KeyCode::KeyZ) {
-        let undone = history.pop_undo(&mut world);
+        let undone = history.pop_undo_detailed(&mut world);
         if undone.is_some() {
+            if let Some(step) = &undone {
+                step.apply_sketch_undo(&mut *sketch_doc, &mut *sketch_links);
+            }
             clear_stale_editor_selection_after_history_step(
                 &mut tool_controller,
                 &mut semantic_hover,
             );
         }
         state.status = match undone {
-            Some((label, n)) => format!("Undo '{label}': {n} Voxel."),
+            Some(step) => format!("Undo '{}': {} Voxel.", step.label, step.voxel_count),
             None => "Undo: nichts vorhanden.".into(),
         };
         toolbelt.status = state.status.clone();
         mode.status = state.status.clone();
     } else if keys.just_pressed(KeyCode::KeyY) || keys.just_pressed(KeyCode::KeyR) {
-        let redone = history.pop_redo(&mut world);
+        let redone = history.pop_redo_detailed(&mut world);
         if redone.is_some() {
+            if let Some(step) = &redone {
+                step.apply_sketch_redo(&mut *sketch_doc, &mut *sketch_links);
+            }
             clear_stale_editor_selection_after_history_step(
                 &mut tool_controller,
                 &mut semantic_hover,
             );
         }
         state.status = match redone {
-            Some((label, n)) => format!("Redo '{label}': {n} Voxel."),
+            Some(step) => format!("Redo '{}': {} Voxel.", step.label, step.voxel_count),
             None => "Redo: nichts vorhanden.".into(),
         };
         toolbelt.status = state.status.clone();
@@ -2086,6 +2120,91 @@ mod tests {
             pushpull_inference_kind(InferenceSnapKind::FaceCenter).tooltip(),
             "Face center"
         );
+    }
+
+    #[test]
+    fn pushpull_history_restores_semantic_face_and_extrusion_links() {
+        let stone = Voxel::from(BlockType::Stone);
+        let drag = PushPullDrag {
+            active: true,
+            face_cells: vec![IVec3::ZERO],
+            normal: IVec3::Y,
+            voxel: stone,
+            anchor_world: Vec3::ZERO,
+            screen_dir: Vec2::X,
+            motion_accum: Vec2::ZERO,
+            motion_len: 0.0,
+            click_finish: false,
+            tool_generation: 0,
+            last_d: 2,
+            reference_d: None,
+            preview: AHashMap::new(),
+        };
+        let changed_cell = IVec3::new(0, 1, 0);
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        let meta = record_pushpull_semantics_for_history(
+            &drag,
+            &[changed_cell],
+            &mut sketch_doc,
+            &mut sketch_links,
+        )
+        .expect("push/pull semantic history meta");
+
+        let context_entities = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .clone();
+        assert_eq!(context_entities.len(), 2);
+        let face_entity = context_entities[0];
+        let extrusion_entity = context_entities[1];
+        assert!(sketch_links
+            .links_for_face(IVec3::ZERO, IVec3::Y)
+            .iter()
+            .any(|link| link.entity == face_entity));
+        assert!(sketch_links
+            .links_for_cell(changed_cell)
+            .iter()
+            .any(|link| link.entity == extrusion_entity));
+
+        let mut history = BuilderHistory::default();
+        let mut world = VoxelWorld::new();
+        history.record_external_with_sketch_meta(
+            "Push/Pull semantic test",
+            vec![(changed_cell, AIR, stone)],
+            Some(meta),
+        );
+
+        let undo_step = history
+            .pop_undo_detailed(&mut world)
+            .expect("push/pull undo step");
+        undo_step
+            .apply_sketch_undo(&mut sketch_doc, &mut sketch_links)
+            .expect("push/pull semantic undo");
+        assert!(sketch_doc.entity(face_entity).is_none());
+        assert!(sketch_doc.entity(extrusion_entity).is_none());
+        assert!(sketch_links
+            .links_for_face(IVec3::ZERO, IVec3::Y)
+            .is_empty());
+        assert!(sketch_links.links_for_cell(changed_cell).is_empty());
+
+        let redo_step = history
+            .pop_redo_detailed(&mut world)
+            .expect("push/pull redo step");
+        redo_step
+            .apply_sketch_redo(&mut sketch_doc, &mut sketch_links)
+            .expect("push/pull semantic redo");
+        assert!(sketch_doc.entity(face_entity).is_some());
+        assert!(sketch_doc.entity(extrusion_entity).is_some());
+        assert!(sketch_links
+            .links_for_face(IVec3::ZERO, IVec3::Y)
+            .iter()
+            .any(|link| link.entity == face_entity));
+        assert!(sketch_links
+            .links_for_cell(changed_cell)
+            .iter()
+            .any(|link| link.entity == extrusion_entity));
     }
 
     #[test]

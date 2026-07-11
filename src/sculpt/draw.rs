@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::blocks::{voxel_is_solid, Voxel, AIR};
-use crate::builder::{BuilderHistory, BuilderState};
+use crate::builder::{BuilderHistory, BuilderHistorySketchMeta, BuilderState};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::player::Player;
 use crate::sculpt::raycast::dda_voxel;
@@ -33,6 +33,8 @@ const RECT_EQUAL_LENGTH_TOLERANCE: i32 = 2;
 const RECT_FACE_SNAP_RADIUS: f32 = 0.30;
 const SEMANTIC_DRAW_POINT_RADIUS: f32 = 1.25;
 const SEMANTIC_DRAW_SCREEN_RADIUS: f32 = 22.0;
+const RECT_ACQUISITION_FEEDBACK_SECONDS: f32 = 0.24;
+const RECT_COMMIT_FEEDBACK_SECONDS: f32 = 0.34;
 
 #[derive(Resource, Default)]
 pub struct RectDrawState {
@@ -60,6 +62,62 @@ pub struct RectDrawState {
     reference_span: IVec2,
     voxel: Voxel,
     status_cells: usize,
+    pointer_valid: bool,
+    visual_acquisition: Option<RectVisualAcquisition>,
+    visual_feedback: RectVisualFeedback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RectVisualAcquisition {
+    Snap(RectFaceSnapKind, IVec3),
+    Axis(RectAxisLock),
+    Inference(RectEndpointInference),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum RectVisualFeedbackKind {
+    #[default]
+    None,
+    Acquisition,
+    Commit,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RectVisualFeedback {
+    kind: RectVisualFeedbackKind,
+    point: Vec3,
+    normal: IVec3,
+    snap_kind: Option<RectFaceSnapKind>,
+    remaining: f32,
+    duration: f32,
+}
+
+impl RectVisualFeedback {
+    fn begin(
+        &mut self,
+        kind: RectVisualFeedbackKind,
+        point: Vec3,
+        normal: IVec3,
+        snap_kind: Option<RectFaceSnapKind>,
+    ) {
+        let duration = match kind {
+            RectVisualFeedbackKind::Acquisition => RECT_ACQUISITION_FEEDBACK_SECONDS,
+            RectVisualFeedbackKind::Commit => RECT_COMMIT_FEEDBACK_SECONDS,
+            RectVisualFeedbackKind::None => 0.0,
+        };
+        *self = Self {
+            kind,
+            point,
+            normal,
+            snap_kind,
+            remaining: duration,
+            duration,
+        };
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -487,17 +545,17 @@ fn update_rect_axis_lock(
     keys: &ButtonInput<KeyCode>,
     current: Option<RectAxisLock>,
 ) -> Option<RectAxisLock> {
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        return None;
+    }
     if keys.just_pressed(KeyCode::ArrowRight) {
         return toggle_rect_axis_lock(current, RectAxisLock::X);
     }
-    if keys.just_pressed(KeyCode::ArrowUp) {
+    if keys.just_pressed(KeyCode::ArrowLeft) {
         return toggle_rect_axis_lock(current, RectAxisLock::Y);
     }
-    if keys.just_pressed(KeyCode::ArrowLeft) {
+    if keys.just_pressed(KeyCode::ArrowUp) {
         return toggle_rect_axis_lock(current, RectAxisLock::Z);
-    }
-    if keys.just_pressed(KeyCode::ArrowDown) {
-        return None;
     }
     current
 }
@@ -530,6 +588,7 @@ fn active_shape_workflow(toolbelt: &ToolbeltState) -> SketchShapeWorkflow {
 fn rect_should_commit_on_start_intent(intent: RectStartIntent, draw: &RectDrawState) -> bool {
     draw.active
         && draw.click_finish
+        && draw.pointer_valid
         && matches!(intent.button, RectDragButton::Left)
         && (intent.fill || intent.cut)
 }
@@ -540,6 +599,30 @@ fn rect_should_commit_on_release(draw: &RectDrawState) -> bool {
 
 fn rect_should_cancel_for_tool_selection(draw: &RectDrawState, current_generation: u64) -> bool {
     draw.active && draw.tool_generation != current_generation
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RectPointerLossDisposition {
+    None,
+    SuspendForOrbit,
+    Cancel,
+}
+
+fn rect_pointer_loss_disposition(
+    draw: &RectDrawState,
+    active_tool: ToolbeltTool,
+    pointer_ray_available: bool,
+    cursor_locked: bool,
+    right_held: bool,
+) -> RectPointerLossDisposition {
+    if !draw.active || !editor_pointer_tool_requires_cursor(active_tool) || pointer_ray_available {
+        return RectPointerLossDisposition::None;
+    }
+    if cursor_locked && right_held {
+        RectPointerLossDisposition::SuspendForOrbit
+    } else {
+        RectPointerLossDisposition::Cancel
+    }
 }
 
 fn rect_should_ignore_world_click_for_editor_ui(
@@ -559,6 +642,9 @@ fn clear_rect_preview(draw: &mut RectDrawState) {
     draw.start_snap_kind = None;
     draw.axis_lock = None;
     draw.inference = RectEndpointInference::None;
+    draw.pointer_valid = false;
+    draw.visual_acquisition = None;
+    draw.visual_feedback.clear();
 }
 
 fn sync_pointer_marker_from_active_draw(
@@ -758,7 +844,14 @@ pub fn rect_draw_input(
 
     let cam_q = view_q.p1();
     let Ok((camera, cam_tf)) = cam_q.get_single() else {
-        if mouse.just_pressed(MouseButton::Left) {
+        if draw.active {
+            clear_rect_preview(&mut draw);
+            tool_controller
+                .cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
+            gesture_lock.release(RECT_FILL_OWNER);
+            toolbelt.status =
+                "Sketch preview cancelled because the player camera became unavailable.".into();
+        } else if mouse.just_pressed(MouseButton::Left) {
             toolbelt.status = "Smart Build could not find the player camera this frame.".into();
         }
         motion_evr.clear();
@@ -780,14 +873,42 @@ pub fn rect_draw_input(
                 (cursor, view_projection, viewport)
             })
     };
-    let Some((origin, dir)) = draw_input_ray(
+    let input_ray = draw_input_ray(
         active_tool,
         cursor_locked,
         cursor_visible,
         cursor_position,
         camera,
         cam_tf,
-    ) else {
+    );
+    match rect_pointer_loss_disposition(
+        &draw,
+        active_tool,
+        input_ray.is_some(),
+        cursor_locked,
+        mouse.pressed(MouseButton::Right),
+    ) {
+        RectPointerLossDisposition::SuspendForOrbit => {
+            draw.pointer_valid = false;
+            toolbelt.status =
+                "Sketch Draw orbiting: endpoint held. Release RMB to reacquire the pointer.".into();
+            motion_evr.clear();
+            return;
+        }
+        RectPointerLossDisposition::Cancel => {
+            clear_rect_preview(&mut draw);
+            tool_controller
+                .cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
+            gesture_lock.release(RECT_FILL_OWNER);
+            toolbelt.status =
+                "Sketch preview cancelled because the pointer left the game window. Click a new start point."
+                    .into();
+            motion_evr.clear();
+            return;
+        }
+        RectPointerLossDisposition::None => {}
+    }
+    let Some((origin, dir)) = input_ray else {
         if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {
             toolbelt.status =
                 "Sketch Draw needs the pointer inside the game window to pick endpoints.".into();
@@ -931,6 +1052,7 @@ pub fn rect_draw_input(
             builder.block.into()
         };
         draw.status_cells = 1;
+        draw.pointer_valid = true;
         draw.click_finish = sketch_tool_uses_click_finish(active_tool, smart_tool);
         gesture_lock.lock(RECT_FILL_OWNER);
         tool_controller.begin_transaction(rect_preview_transaction_label(&draw));
@@ -945,7 +1067,7 @@ pub fn rect_draw_input(
             )
         } else if draw.pencil_line {
             format!(
-                "Pencil start set.{} Move to Endpoint/Midpoint/Face Center. Right locks red X, Left locks green depth, Up locks vertical height. RMB orbits.",
+                "Pencil start set.{} Move to Endpoint/Midpoint/Face Center. Right locks X, Left locks Y, Up locks Z, Down returns to relative inference. RMB orbits.",
                 start_status_suffix
             )
         } else if draw.shape_workflow != SketchShapeWorkflow::Rectangle {
@@ -966,7 +1088,7 @@ pub fn rect_draw_input(
             )
         } else {
             format!(
-                "Rectangle start set.{} Move to Endpoint/Midpoint/Face Center. Right locks red X, Left locks green depth, Up locks vertical height. RMB orbits.",
+                "Rectangle start set.{} Move to Endpoint/Midpoint/Face Center. Right locks X, Left locks Y, Up locks Z, Down returns to relative inference. RMB orbits.",
                 start_status_suffix
             )
         };
@@ -974,6 +1096,7 @@ pub fn rect_draw_input(
 
     if draw.active {
         gesture_lock.lock(RECT_FILL_OWNER);
+        draw.pointer_valid = true;
         draw.axis_lock = update_rect_axis_lock(&keys, draw.axis_lock);
         if rect_draw_endpoint_updates(draw.smart_gesture, mouse.pressed(MouseButton::Right)) {
             for ev in motion_evr.read() {
@@ -1015,8 +1138,12 @@ pub fn rect_draw_input(
                         )
                     });
                 if let (Some(axis_lock), Some(input)) = (draw.axis_lock, semantic_input) {
-                    let (endpoint, point) =
-                        semantic_axis_locked_endpoint(draw.start, input, axis_lock);
+                    let (endpoint, point) = semantic_axis_locked_endpoint(
+                        draw.start,
+                        draw.start_point,
+                        input,
+                        axis_lock,
+                    );
                     draw.current = endpoint;
                     draw.current_point = point;
                     draw.inference = RectEndpointInference::Axis;
@@ -1024,6 +1151,7 @@ pub fn rect_draw_input(
                 } else if let Some((endpoint, point)) =
                     snap_pencil_axis_endpoint_and_marker_from_ray(
                         draw.start,
+                        draw.start_point,
                         draw.axis_lock,
                         origin,
                         dir,
@@ -1097,19 +1225,17 @@ pub fn rect_draw_input(
                         apply_face_input_point_to_cell(endpoint, input, draw.axis_u, draw.axis_v)
                     })
                     .unwrap_or(endpoint);
+                let semantic_snap = semantic_input.is_some();
                 let endpoint = semantic_input.map(|input| input.cell).unwrap_or(endpoint);
-                let endpoint = apply_axis_lock_to_endpoint(draw.start, endpoint, draw.axis_lock);
-                let (endpoint, inference) = if draw.axis_lock.is_some() {
-                    (endpoint, RectEndpointInference::Axis)
-                } else {
-                    infer_rect_endpoint_with_reference(
-                        draw.start,
-                        endpoint,
-                        draw.axis_u,
-                        draw.axis_v,
-                        draw.reference_span,
-                    )
-                };
+                let (endpoint, inference) = resolve_rect_endpoint_after_snap(
+                    draw.start,
+                    endpoint,
+                    semantic_snap,
+                    draw.axis_lock,
+                    draw.axis_u,
+                    draw.axis_v,
+                    draw.reference_span,
+                );
                 draw.current = endpoint;
                 draw.inference = inference;
                 draw.current_point = if draw.pencil_line {
@@ -1118,6 +1244,7 @@ pub fn rect_draw_input(
                         semantic_input,
                         input,
                         draw.start,
+                        draw.start_point,
                         draw.normal,
                         inference,
                         draw.axis_lock,
@@ -1177,19 +1304,17 @@ pub fn rect_draw_input(
                             None,
                         )
                     });
+                let semantic_snap = semantic_input.is_some();
                 let endpoint = semantic_input.map(|input| input.cell).unwrap_or(endpoint);
-                let endpoint = apply_axis_lock_to_endpoint(draw.start, endpoint, draw.axis_lock);
-                let (endpoint, inference) = if draw.axis_lock.is_some() {
-                    (endpoint, RectEndpointInference::Axis)
-                } else {
-                    infer_rect_endpoint_with_reference(
-                        draw.start,
-                        endpoint,
-                        draw.axis_u,
-                        draw.axis_v,
-                        draw.reference_span,
-                    )
-                };
+                let (endpoint, inference) = resolve_rect_endpoint_after_snap(
+                    draw.start,
+                    endpoint,
+                    semantic_snap,
+                    draw.axis_lock,
+                    draw.axis_u,
+                    draw.axis_v,
+                    draw.reference_span,
+                );
                 draw.current = endpoint;
                 draw.inference = inference;
                 draw.current_point = semantic_input
@@ -1197,7 +1322,13 @@ pub fn rect_draw_input(
                         input.cell == endpoint && inference == RectEndpointInference::None
                     })
                     .map(|input| input.point)
-                    .unwrap_or_else(|| endpoint.as_vec3());
+                    .unwrap_or_else(|| {
+                        if draw.pencil_line {
+                            pencil_cell_marker_point(endpoint)
+                        } else {
+                            endpoint.as_vec3()
+                        }
+                    });
                 draw.snap_kind = semantic_input.map(|input| input.kind);
             }
             let raw_cells = draw_preview_cell_count(&draw);
@@ -1346,6 +1477,13 @@ fn commit_rect_fill(
 ) {
     let should_chain_pencil = draw.pencil_line && draw.action == RectDrawAction::Fill;
     let chain_start = draw.current;
+    let chain_start_point = if draw.current_point.is_finite() {
+        draw.current_point
+    } else {
+        pencil_cell_marker_point(chain_start)
+    };
+    let commit_normal = draw.normal;
+    let commit_snap_kind = draw.snap_kind;
     let next_reference_span =
         rect_reference_span(draw.start, draw.current, draw.axis_u, draw.axis_v);
     let cells = match draw.action {
@@ -1403,17 +1541,8 @@ fn commit_rect_fill(
         } else {
             format!("{} {} cells", draw.action.history_label(), changed)
         };
-        history.record_external(label.clone(), changes);
-        match record_rect_semantics(draw, sketch_doc) {
-            Ok(records) => register_rect_semantic_links(
-                draw,
-                &cells,
-                sketch_doc.active_context(),
-                &records,
-                sketch_links,
-            ),
-            Err(error) => warn!("sketch model: could not record draw semantic entity: {error}"),
-        }
+        let sketch_meta = record_rect_semantics_for_history(draw, &cells, sketch_doc, sketch_links);
+        history.record_external_with_sketch_meta(label.clone(), changes, sketch_meta);
         tool_controller.begin_transaction(label);
         let _ = tool_controller.commit_transaction();
         toolbelt.status = if should_chain_pencil {
@@ -1459,16 +1588,8 @@ fn commit_rect_fill(
                 selected
             )
         };
-        match record_rect_semantics(draw, sketch_doc) {
-            Ok(records) => register_rect_semantic_links(
-                draw,
-                &cells,
-                sketch_doc.active_context(),
-                &records,
-                sketch_links,
-            ),
-            Err(error) => warn!("sketch model: could not record matched draw semantics: {error}"),
-        }
+        let sketch_meta = record_rect_semantics_for_history(draw, &cells, sketch_doc, sketch_links);
+        history.record_external_with_sketch_meta(label.clone(), Vec::new(), sketch_meta);
         tool_controller.begin_transaction(label.clone());
         let _ = tool_controller.commit_transaction();
 
@@ -1498,10 +1619,11 @@ fn commit_rect_fill(
         draw.click_finish = true;
         draw.start = chain_start;
         draw.current = chain_start;
-        draw.start_point = pencil_cell_marker_point(chain_start);
+        draw.start_point = chain_start_point;
         draw.current_point = draw.start_point;
         draw.motion_len = 0.0;
         draw.status_cells = 1;
+        draw.pointer_valid = true;
         draw.inference = RectEndpointInference::None;
         draw.snap_kind = Some(RectFaceSnapKind::Endpoint);
         draw.start_snap_kind = Some(RectFaceSnapKind::Endpoint);
@@ -1511,6 +1633,41 @@ fn commit_rect_fill(
     if next_reference_span != IVec2::ZERO {
         draw.reference_span = next_reference_span;
     }
+    begin_rect_visual_feedback(
+        draw,
+        RectVisualFeedbackKind::Commit,
+        chain_start_point,
+        commit_normal,
+        commit_snap_kind,
+    );
+}
+
+fn record_rect_semantics_for_history(
+    draw: &RectDrawState,
+    cells: &[IVec3],
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+) -> Option<BuilderHistorySketchMeta> {
+    let records = match record_rect_semantics(draw, sketch_doc) {
+        Ok(records) => records,
+        Err(error) => {
+            warn!("sketch model: could not record draw semantic entity: {error}");
+            return None;
+        }
+    };
+    if records.is_empty() {
+        return None;
+    }
+    register_rect_semantic_links(
+        draw,
+        cells,
+        sketch_doc.active_context(),
+        &records,
+        sketch_links,
+    );
+    Some(BuilderHistorySketchMeta::SketchCreated {
+        link_snapshots: sketch_links.snapshot_entities(records.iter().map(|(entity, _)| *entity)),
+    })
 }
 
 fn record_rect_semantics(
@@ -1942,18 +2099,24 @@ fn snap_pencil_endpoint_to_axis_from_ray(
     ray_origin: Vec3,
     ray_dir: Vec3,
 ) -> Option<IVec3> {
-    snap_pencil_axis_endpoint_and_marker_from_ray(start, axis_lock, ray_origin, ray_dir)
-        .map(|(endpoint, _)| endpoint)
+    snap_pencil_axis_endpoint_and_marker_from_ray(
+        start,
+        pencil_cell_marker_point(start),
+        axis_lock,
+        ray_origin,
+        ray_dir,
+    )
+    .map(|(endpoint, _)| endpoint)
 }
 
 fn snap_pencil_axis_endpoint_and_marker_from_ray(
     start: IVec3,
+    start_marker: Vec3,
     axis_lock: Option<RectAxisLock>,
     ray_origin: Vec3,
     ray_dir: Vec3,
 ) -> Option<(IVec3, Vec3)> {
     let axis_lock = axis_lock?;
-    let start_marker = pencil_cell_marker_point(start);
     let locked_point = crate::sketch_model::closest_point_on_locked_axis_from_ray(
         ray_origin,
         ray_dir,
@@ -1993,6 +2156,25 @@ fn apply_axis_lock_to_endpoint(
         component_by_axis(endpoint, axis_lock.axis()),
     );
     locked
+}
+
+fn resolve_rect_endpoint_after_snap(
+    start: IVec3,
+    endpoint: IVec3,
+    semantic_snap: bool,
+    axis_lock: Option<RectAxisLock>,
+    axis_u: IVec3,
+    axis_v: IVec3,
+    reference_span: IVec2,
+) -> (IVec3, RectEndpointInference) {
+    let endpoint = apply_axis_lock_to_endpoint(start, endpoint, axis_lock);
+    if axis_lock.is_some() {
+        return (endpoint, RectEndpointInference::Axis);
+    }
+    if semantic_snap {
+        return (endpoint, RectEndpointInference::None);
+    }
+    infer_rect_endpoint_with_reference(start, endpoint, axis_u, axis_v, reference_span)
 }
 
 #[cfg(test)]
@@ -2439,6 +2621,7 @@ fn project_semantic_draw_candidate_point(
 
 fn semantic_axis_locked_endpoint(
     start: IVec3,
+    start_marker: Vec3,
     input: SemanticDrawInputPoint,
     axis_lock: RectAxisLock,
 ) -> (IVec3, Vec3) {
@@ -2451,7 +2634,7 @@ fn semantic_axis_locked_endpoint(
             component_by_axis(start, axis_lock.axis()),
         ),
     );
-    let mut marker = pencil_cell_marker_point(start);
+    let mut marker = start_marker;
     set_vec_component_by_axis(
         &mut marker,
         axis_lock.axis(),
@@ -2465,6 +2648,7 @@ fn pencil_display_point_for_endpoint(
     semantic_input: Option<SemanticDrawInputPoint>,
     face_input: Option<RectFaceInputPoint>,
     start: IVec3,
+    start_marker: Vec3,
     normal: IVec3,
     inference: RectEndpointInference,
     axis_lock: Option<RectAxisLock>,
@@ -2472,10 +2656,22 @@ fn pencil_display_point_for_endpoint(
     if inference == RectEndpointInference::Axis {
         if let Some(axis_lock) = axis_lock {
             if let Some(input) = semantic_input {
-                return pencil_axis_locked_marker_from_point(start, normal, axis_lock, input.point);
+                return pencil_axis_locked_marker_from_point_with_start(
+                    start,
+                    start_marker,
+                    normal,
+                    axis_lock,
+                    input.point,
+                );
             }
             if let Some(input) = face_input {
-                return pencil_axis_locked_marker_from_point(start, normal, axis_lock, input.point);
+                return pencil_axis_locked_marker_from_point_with_start(
+                    start,
+                    start_marker,
+                    normal,
+                    axis_lock,
+                    input.point,
+                );
             }
         }
     }
@@ -2490,15 +2686,16 @@ fn pencil_display_point_for_endpoint(
     pencil_cell_marker_point(endpoint)
 }
 
-fn pencil_axis_locked_marker_from_point(
+fn pencil_axis_locked_marker_from_point_with_start(
     start: IVec3,
+    start_marker: Vec3,
     normal: IVec3,
     axis_lock: RectAxisLock,
     point: Vec3,
 ) -> Vec3 {
     let projected =
         project_semantic_draw_candidate_point(point, start, normal, true, Some(axis_lock));
-    let mut marker = pencil_cell_marker_point(start);
+    let mut marker = start_marker;
     set_vec_component_by_axis(
         &mut marker,
         axis_lock.axis(),
@@ -2939,8 +3136,6 @@ fn smart_room_cut_depth(span_u: i32, span_v: i32) -> i32 {
     (broad * 2 / 3).clamp(RECT_ROOM_CUT_MIN_DEPTH, RECT_ROOM_CUT_DEPTH_CAP)
 }
 
-const SNAP_MARKER_ORB_COUNT: usize = 5;
-
 fn rect_snap_marker_color(kind: Option<RectFaceSnapKind>) -> Color {
     match kind {
         Some(RectFaceSnapKind::Endpoint) => Color::srgb(0.2, 1.0, 0.28),
@@ -2950,7 +3145,7 @@ fn rect_snap_marker_color(kind: Option<RectFaceSnapKind>) -> Color {
     }
 }
 
-fn rect_snap_marker_radius(kind: Option<RectFaceSnapKind>, current: bool, pulse: f32) -> f32 {
+fn rect_snap_marker_radius(kind: Option<RectFaceSnapKind>, current: bool) -> f32 {
     let base = match kind {
         Some(RectFaceSnapKind::Endpoint) => 0.16,
         Some(RectFaceSnapKind::Midpoint) => 0.13,
@@ -2958,17 +3153,16 @@ fn rect_snap_marker_radius(kind: Option<RectFaceSnapKind>, current: bool, pulse:
         None => 0.085,
     };
     let focus = if current { 0.035 } else { 0.0 };
-    base + focus + pulse.clamp(0.0, 1.0) * 0.035
+    base + focus
 }
 
-fn rect_snap_marker_halo_radius(kind: Option<RectFaceSnapKind>, pulse: f32) -> f32 {
-    let base = match kind {
+fn rect_snap_marker_halo_radius(kind: Option<RectFaceSnapKind>) -> f32 {
+    match kind {
         Some(RectFaceSnapKind::Endpoint) => 0.48,
         Some(RectFaceSnapKind::Midpoint) => 0.42,
         Some(RectFaceSnapKind::FaceCenter) => 0.36,
         None => 0.30,
-    };
-    base + pulse.clamp(0.0, 1.0) * 0.11
+    }
 }
 
 fn rect_snap_marker_plane_basis(normal: IVec3) -> (Vec3, Vec3) {
@@ -2987,26 +3181,18 @@ fn rect_snap_marker_normal_dir(normal: IVec3) -> Dir3 {
     }
 }
 
-fn rect_snap_marker_orb_offset(index: usize, normal: IVec3, radius: f32, angle: f32) -> Vec3 {
-    let (u, v) = rect_snap_marker_plane_basis(normal);
-    let phase = angle + index as f32 * std::f32::consts::TAU / SNAP_MARKER_ORB_COUNT as f32;
-    u * phase.cos() * radius + v * phase.sin() * radius
-}
-
 fn draw_input_point_marker(
     gizmos: &mut Gizmos,
     point: Vec3,
     normal: IVec3,
     kind: Option<RectFaceSnapKind>,
     current: bool,
-    pulse: f32,
-    orbit_angle: f32,
     color: Color,
 ) {
     let offset = normal.as_vec3() * 0.06;
     let center = point + offset;
-    let marker_radius = rect_snap_marker_radius(kind, current, pulse);
-    let halo_radius = rect_snap_marker_halo_radius(kind, pulse);
+    let marker_radius = rect_snap_marker_radius(kind, current);
+    let halo_radius = rect_snap_marker_halo_radius(kind);
 
     gizmos.circle(
         center,
@@ -3014,32 +3200,19 @@ fn draw_input_point_marker(
         halo_radius,
         color.with_alpha(if current { 0.55 } else { 0.35 }),
     );
-    for index in 0..SNAP_MARKER_ORB_COUNT {
-        let orb_center =
-            center + rect_snap_marker_orb_offset(index, normal, halo_radius, orbit_angle);
-        let orb_scale = marker_radius * if index == 0 && current { 1.22 } else { 0.78 };
-        gizmos.sphere(
-            orb_center,
-            Quat::IDENTITY,
-            orb_scale,
-            color.with_alpha(if current { 0.92 } else { 0.62 }),
-        );
-    }
     gizmos.cuboid(
         Transform::from_translation(center).with_scale(Vec3::splat(marker_radius * 1.35)),
         color.with_alpha(if current { 0.95 } else { 0.70 }),
     );
 }
 
-fn draw_rect_input_point_gizmos(draw: &RectDrawState, gizmos: &mut Gizmos, pulse: f32) {
+fn draw_rect_input_point_gizmos(draw: &RectDrawState, gizmos: &mut Gizmos) {
     draw_input_point_marker(
         gizmos,
         draw.start_point,
         draw.normal,
         draw.start_snap_kind,
         false,
-        pulse,
-        pulse * 1.5,
         rect_snap_marker_color(draw.start_snap_kind),
     );
     draw_input_point_marker(
@@ -3048,8 +3221,6 @@ fn draw_rect_input_point_gizmos(draw: &RectDrawState, gizmos: &mut Gizmos, pulse
         draw.normal,
         draw.snap_kind,
         true,
-        pulse,
-        pulse * 2.2 + 0.6,
         rect_snap_marker_color(draw.snap_kind),
     );
     gizmos.line(
@@ -3060,7 +3231,7 @@ fn draw_rect_input_point_gizmos(draw: &RectDrawState, gizmos: &mut Gizmos, pulse
     if let Some(axis_lock) = draw.axis_lock {
         let axis = axis_lock.axis_vec3();
         let start = draw.start_point + draw.normal.as_vec3() * 0.10;
-        let reach = 96.0 + 24.0 * pulse;
+        let reach = 120.0;
         gizmos.line(
             start - axis * reach,
             start + axis * reach,
@@ -3069,16 +3240,147 @@ fn draw_rect_input_point_gizmos(draw: &RectDrawState, gizmos: &mut Gizmos, pulse
     }
 }
 
-pub fn draw_rect_gizmo(draw: Res<RectDrawState>, mut gizmos: Gizmos, time: Res<Time>) {
+fn rect_visual_acquisition(draw: &RectDrawState) -> Option<RectVisualAcquisition> {
+    if !draw.active {
+        return None;
+    }
+    if let Some(kind) = draw.snap_kind {
+        return Some(RectVisualAcquisition::Snap(kind, draw.current));
+    }
+    if let Some(axis_lock) = draw.axis_lock {
+        return Some(RectVisualAcquisition::Axis(axis_lock));
+    }
+    (draw.inference != RectEndpointInference::None)
+        .then_some(RectVisualAcquisition::Inference(draw.inference))
+}
+
+fn begin_rect_visual_feedback(
+    draw: &mut RectDrawState,
+    kind: RectVisualFeedbackKind,
+    point: Vec3,
+    normal: IVec3,
+    snap_kind: Option<RectFaceSnapKind>,
+) {
+    if kind == RectVisualFeedbackKind::Commit {
+        draw.visual_acquisition = rect_visual_acquisition(draw);
+    }
+    draw.visual_feedback.begin(kind, point, normal, snap_kind);
+}
+
+fn tick_rect_visual_feedback(
+    draw: &mut RectDrawState,
+    delta_seconds: f32,
+) -> Option<(RectVisualFeedback, f32)> {
+    if draw.visual_feedback.kind != RectVisualFeedbackKind::None {
+        draw.visual_feedback.remaining =
+            (draw.visual_feedback.remaining - delta_seconds.max(0.0)).max(0.0);
+        if draw.visual_feedback.remaining <= 0.0 {
+            draw.visual_feedback.clear();
+        }
+    }
+
+    let acquisition = rect_visual_acquisition(draw);
+    if draw.visual_feedback.kind != RectVisualFeedbackKind::Commit
+        && acquisition != draw.visual_acquisition
+    {
+        draw.visual_acquisition = acquisition;
+        if acquisition.is_some() {
+            let point = draw.current_point;
+            let normal = draw.normal;
+            let snap_kind = draw.snap_kind;
+            begin_rect_visual_feedback(
+                draw,
+                RectVisualFeedbackKind::Acquisition,
+                point,
+                normal,
+                snap_kind,
+            );
+        } else if draw.visual_feedback.kind == RectVisualFeedbackKind::Acquisition {
+            draw.visual_feedback.clear();
+        }
+    }
+
+    let feedback = draw.visual_feedback;
+    if feedback.kind == RectVisualFeedbackKind::None || feedback.duration <= 0.0 {
+        return None;
+    }
+    let progress = (1.0 - feedback.remaining / feedback.duration).clamp(0.0, 1.0);
+    Some((feedback, progress))
+}
+
+fn rect_visual_feedback_radius(
+    kind: RectVisualFeedbackKind,
+    progress: f32,
+    reduce_motion: bool,
+) -> f32 {
+    if reduce_motion {
+        return match kind {
+            RectVisualFeedbackKind::Acquisition => 0.54,
+            RectVisualFeedbackKind::Commit => 0.68,
+            RectVisualFeedbackKind::None => 0.0,
+        };
+    }
+    let progress = progress.clamp(0.0, 1.0);
+    match kind {
+        RectVisualFeedbackKind::Acquisition => 0.28 + 0.34 * progress,
+        RectVisualFeedbackKind::Commit => 0.34 + 0.62 * progress,
+        RectVisualFeedbackKind::None => 0.0,
+    }
+}
+
+fn draw_rect_visual_feedback(
+    gizmos: &mut Gizmos,
+    feedback: RectVisualFeedback,
+    progress: f32,
+    reduce_motion: bool,
+) {
+    let radius = rect_visual_feedback_radius(feedback.kind, progress, reduce_motion);
+    if radius <= 0.0 {
+        return;
+    }
+    let alpha = if reduce_motion {
+        0.78
+    } else {
+        (1.0 - progress).clamp(0.0, 1.0) * 0.90
+    };
+    let color = match feedback.kind {
+        RectVisualFeedbackKind::Acquisition => rect_snap_marker_color(feedback.snap_kind),
+        RectVisualFeedbackKind::Commit => Color::srgb(1.0, 0.92, 0.24),
+        RectVisualFeedbackKind::None => return,
+    };
+    let center = feedback.point + feedback.normal.as_vec3() * 0.08;
+    let normal = rect_snap_marker_normal_dir(feedback.normal);
+    gizmos.circle(center, normal, radius, color.with_alpha(alpha));
+    if feedback.kind == RectVisualFeedbackKind::Commit {
+        gizmos.circle(
+            center,
+            normal,
+            radius * 0.68,
+            color.with_alpha(alpha * 0.72),
+        );
+    }
+}
+
+pub fn draw_rect_gizmo(
+    mut draw: ResMut<RectDrawState>,
+    mut gizmos: Gizmos,
+    time: Res<Time>,
+    settings: Option<Res<crate::settings::WorldSettings>>,
+) {
+    let reduce_motion = settings
+        .as_deref()
+        .is_some_and(|settings| settings.reduce_motion);
+    if let Some((feedback, progress)) = tick_rect_visual_feedback(&mut draw, time.delta_seconds()) {
+        draw_rect_visual_feedback(&mut gizmos, feedback, progress, reduce_motion);
+    }
     if !draw.active {
         return;
     }
-    let pulse = 0.55 + 0.45 * (time.elapsed_seconds() * 7.0).sin().abs();
     let color = match draw.action {
-        RectDrawAction::Fill => Color::srgb(0.15 + 0.25 * pulse, 0.95, 1.0),
-        RectDrawAction::Cut => Color::srgb(1.0, 0.15 + 0.25 * pulse, 0.05),
+        RectDrawAction::Fill => Color::srgb(0.32, 0.95, 1.0),
+        RectDrawAction::Cut => Color::srgb(1.0, 0.32, 0.05),
     };
-    draw_rect_input_point_gizmos(&draw, &mut gizmos, pulse);
+    draw_rect_input_point_gizmos(&draw, &mut gizmos);
     if draw.pencil_line || draw.shape_workflow != SketchShapeWorkflow::Rectangle {
         let cells = if draw.pencil_line {
             pencil_line_cells(draw.start, draw.current, draw.normal, 768)
@@ -3170,16 +3472,10 @@ pub fn refresh_editor_pointer_marker(
     );
 }
 
-pub fn draw_editor_pointer_marker(
-    marker: Res<SketchEditorPointerMarker>,
-    mut gizmos: Gizmos,
-    time: Res<Time>,
-) {
+pub fn draw_editor_pointer_marker(marker: Res<SketchEditorPointerMarker>, mut gizmos: Gizmos) {
     if !marker.active {
         return;
     }
-    let pulse = 0.55 + 0.45 * (time.elapsed_seconds() * 8.5).sin().abs();
-    let spin = time.elapsed_seconds() * if marker.drawing { 4.6 } else { 3.2 };
     let base_color = rect_snap_marker_color(marker.snap_kind);
     let color = if marker.drawing {
         base_color
@@ -3192,15 +3488,13 @@ pub fn draw_editor_pointer_marker(
         marker.normal,
         marker.snap_kind,
         true,
-        pulse,
-        spin,
         color,
     );
 
     let normal = marker.normal.as_vec3();
     let (u, v) = rect_snap_marker_plane_basis(marker.normal);
     let center = marker.point + normal * 0.14;
-    let cross_radius = if marker.drawing { 0.42 } else { 0.34 } + pulse * 0.08;
+    let cross_radius = if marker.drawing { 0.42 } else { 0.34 };
     gizmos.line(
         center - u * cross_radius,
         center + u * cross_radius,
@@ -3211,11 +3505,7 @@ pub fn draw_editor_pointer_marker(
         center + v * cross_radius,
         color.with_alpha(0.92),
     );
-    gizmos.line(
-        center,
-        center + normal * (0.76 + pulse * 0.18),
-        color.with_alpha(0.72),
-    );
+    gizmos.line(center, center + normal * 0.82, color.with_alpha(0.72));
 }
 
 pub fn refresh_editor_screen_cursor(
@@ -3280,7 +3570,6 @@ fn marker_screen_target(
 pub fn draw_editor_screen_cursor(
     mut contexts: EguiContexts,
     screen_cursor: Res<SketchEditorScreenCursor>,
-    time: Res<Time>,
 ) {
     if !screen_cursor.active {
         return;
@@ -3297,8 +3586,7 @@ pub fn draw_editor_screen_cursor(
         screen_cursor.drawing,
         screen_cursor.over_ui,
     );
-    let pulse = 0.55 + 0.45 * (time.elapsed_seconds() * 9.0).sin().abs();
-    let radius = if screen_cursor.drawing { 8.5 } else { 7.0 } + pulse * 2.0;
+    let radius = if screen_cursor.drawing { 9.5 } else { 8.0 };
     let stroke = egui::Stroke::new(1.6, color);
 
     painter.circle_stroke(pos, radius, stroke);
@@ -3326,7 +3614,7 @@ pub fn draw_editor_screen_cursor(
                 [pos, target_pos],
                 egui::Stroke::new(1.0, color.gamma_multiply(0.45)),
             );
-            painter.circle_stroke(target_pos, 5.5 + pulse, egui::Stroke::new(1.2, color));
+            painter.circle_stroke(target_pos, 6.5, egui::Stroke::new(1.2, color));
         }
     }
 
@@ -3486,6 +3774,7 @@ mod tests {
         let mut draw = RectDrawState::default();
         draw.active = true;
         draw.click_finish = sketch_tool_uses_click_finish(ToolbeltTool::DrawRect, false);
+        draw.pointer_valid = true;
 
         assert!(!rect_should_commit_on_release(&draw));
 
@@ -3506,6 +3795,7 @@ mod tests {
         let mut draw = RectDrawState::default();
         draw.active = true;
         draw.click_finish = true;
+        draw.pointer_valid = true;
 
         let second_click = rect_start_intent(
             ToolbeltTool::DrawRect,
@@ -3539,6 +3829,50 @@ mod tests {
 
         assert!(!rect_should_commit_on_start_intent(orbit, &draw));
         assert!(!orbit.cut);
+    }
+
+    #[test]
+    fn stale_preview_cannot_commit_after_pointer_loss() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = true;
+        draw.pointer_valid = false;
+        draw.current = IVec3::new(40, 12, -7);
+
+        let second_click = rect_start_intent(
+            ToolbeltTool::DrawRect,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        assert!(!rect_should_commit_on_start_intent(second_click, &draw));
+        assert_eq!(
+            rect_pointer_loss_disposition(&draw, ToolbeltTool::DrawRect, false, false, false,),
+            RectPointerLossDisposition::Cancel
+        );
+        clear_rect_preview(&mut draw);
+        assert!(!draw.active);
+        assert!(!draw.pointer_valid);
+    }
+
+    #[test]
+    fn captured_rmb_orbit_suspends_instead_of_committing_or_cancelling() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.pointer_valid = true;
+
+        assert_eq!(
+            rect_pointer_loss_disposition(&draw, ToolbeltTool::DrawRect, false, true, true,),
+            RectPointerLossDisposition::SuspendForOrbit
+        );
+        assert_eq!(
+            rect_pointer_loss_disposition(&draw, ToolbeltTool::DrawRect, true, true, false,),
+            RectPointerLossDisposition::None
+        );
     }
 
     #[test]
@@ -3624,6 +3958,63 @@ mod tests {
     }
 
     #[test]
+    fn committed_pencil_line_chains_from_exact_snap_point_not_cell_center() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.click_finish = true;
+        draw.pencil_line = true;
+        draw.action = RectDrawAction::Fill;
+        draw.start = IVec3::new(0, 4, 0);
+        draw.current = IVec3::new(3, 4, 0);
+        draw.normal = IVec3::Y;
+        draw.axis_u = IVec3::X;
+        draw.axis_v = IVec3::Z;
+        draw.voxel = Voxel::from(BlockType::Limestone);
+        draw.start_point = Vec3::new(0.0, 4.5, 0.5);
+        let exact_endpoint = Vec3::new(3.0, 4.5, 0.5);
+        draw.current_point = exact_endpoint;
+
+        let mut world = VoxelWorld::new();
+        let mut history = BuilderHistory::default();
+        let mut toolbelt = ToolbeltState::default();
+        let mut tool_controller = crate::sketch_model::ToolController::default();
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
+
+        commit_rect_fill(
+            &mut draw,
+            &mut world,
+            &mut history,
+            &mut toolbelt,
+            &mut tool_controller,
+            &mut sketch_doc,
+            &mut sketch_links,
+        );
+
+        assert!(draw.active, "pencil should remain armed for the next edge");
+        assert_eq!(draw.visual_feedback.kind, RectVisualFeedbackKind::Commit);
+        assert_eq!(draw.visual_feedback.point, exact_endpoint);
+        assert_eq!(draw.start, IVec3::new(3, 4, 0));
+        assert_eq!(
+            draw.start_point, exact_endpoint,
+            "SketchUp-style chained pencil lines must continue from the visible snap point, not the committed voxel cell center"
+        );
+        assert_eq!(draw.current_point, exact_endpoint);
+        let semantic_edge = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .last()
+            .copied()
+            .expect("semantic pencil edge");
+        assert!(matches!(
+            &sketch_doc.entity(semantic_edge).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::new(0.0, 4.5, 0.5) && *b == exact_endpoint
+        ));
+    }
+
+    #[test]
     fn pencil_connection_records_semantic_edge_even_when_voxels_already_exist() {
         let mut draw = RectDrawState::default();
         draw.active = true;
@@ -3659,9 +4050,10 @@ mod tests {
             &mut sketch_links,
         );
 
-        assert!(
-            history.undo_len() == 0,
-            "existing-voxel connection should not create a no-op voxel undo batch"
+        assert_eq!(
+            history.undo_len(),
+            1,
+            "existing-voxel connection still needs a semantic undo step for the selectable line"
         );
         assert!(draw.active, "pencil remains armed after connecting");
         assert_eq!(draw.start, IVec3::new(3, 4, 0));
@@ -3681,6 +4073,47 @@ mod tests {
             crate::sketch_model::SketchEntityKind::Edge { a, b }
                 if *a == Vec3::new(0.5, 4.5, 0.5) && *b == Vec3::new(3.5, 4.5, 0.5)
         ));
+        assert!(sketch_links
+            .links_for_face(IVec3::new(1, 4, 0), IVec3::Y)
+            .iter()
+            .any(|link| link.entity == semantic_edge));
+
+        let undo_step = history
+            .pop_undo_detailed(&mut world)
+            .expect("semantic-only pencil undo step");
+        assert_eq!(
+            undo_step.voxel_count, 0,
+            "semantic-only undo must not rewrite already-matching voxels"
+        );
+        undo_step
+            .apply_sketch_undo(&mut sketch_doc, &mut sketch_links)
+            .expect("semantic pencil undo");
+        assert!(sketch_doc.entity(semantic_edge).is_none());
+        assert!(
+            !sketch_links
+                .links_for_face(IVec3::new(1, 4, 0), IVec3::Y)
+                .iter()
+                .any(|link| link.entity == semantic_edge),
+            "undo must remove stale selectable links"
+        );
+        assert_eq!(
+            world.voxel_at(
+                IVec3::new(1, 4, 0).x,
+                IVec3::new(1, 4, 0).y,
+                IVec3::new(1, 4, 0).z
+            ),
+            draw.voxel,
+            "semantic-only undo must leave the existing blocks in place"
+        );
+
+        let redo_step = history
+            .pop_redo_detailed(&mut world)
+            .expect("semantic-only pencil redo step");
+        assert_eq!(redo_step.voxel_count, 0);
+        redo_step
+            .apply_sketch_redo(&mut sketch_doc, &mut sketch_links)
+            .expect("semantic pencil redo");
+        assert!(sketch_doc.entity(semantic_edge).is_some());
         assert!(sketch_links
             .links_for_face(IVec3::new(1, 4, 0), IVec3::Y)
             .iter()
@@ -3731,8 +4164,8 @@ mod tests {
 
         assert_eq!(
             history.undo_len(),
-            0,
-            "no-op voxel writes should not create a fake voxel undo batch"
+            1,
+            "no-op voxel writes still need a semantic undo step for the selectable face"
         );
         let semantic_face = sketch_doc
             .context(sketch_doc.active_context())
@@ -3749,6 +4182,33 @@ mod tests {
                     && link.role == crate::sketch_model::SketchVoxelLinkRole::Face
             }));
         assert!(toolbelt.status.contains("selectable"));
+
+        let undo_step = history
+            .pop_undo_detailed(&mut world)
+            .expect("semantic-only rectangle undo step");
+        assert_eq!(undo_step.voxel_count, 0);
+        undo_step
+            .apply_sketch_undo(&mut sketch_doc, &mut sketch_links)
+            .expect("semantic rectangle undo");
+        assert!(sketch_doc.entity(semantic_face).is_none());
+        assert!(!sketch_links
+            .links_for_face(IVec3::new(2, 4, 1), IVec3::Y)
+            .iter()
+            .any(|link| link.entity == semantic_face));
+        assert_eq!(world.voxel_at(2, 4, 1), draw.voxel);
+
+        let redo_step = history
+            .pop_redo_detailed(&mut world)
+            .expect("semantic-only rectangle redo step");
+        assert_eq!(redo_step.voxel_count, 0);
+        redo_step
+            .apply_sketch_redo(&mut sketch_doc, &mut sketch_links)
+            .expect("semantic rectangle redo");
+        assert!(sketch_doc.entity(semantic_face).is_some());
+        assert!(sketch_links
+            .links_for_face(IVec3::new(2, 4, 1), IVec3::Y)
+            .iter()
+            .any(|link| link.entity == semantic_face));
     }
 
     #[test]
@@ -3812,6 +4272,56 @@ mod tests {
                     }),
                 "both already-existing and newly-written cells need semantic face links for stable select/move"
             );
+        }
+
+        let undo_step = history
+            .pop_undo_detailed(&mut world)
+            .expect("partial rectangle undo step");
+        assert!(
+            undo_step.voxel_count > 0,
+            "partial-overlap undo should rewind newly-written cells"
+        );
+        undo_step
+            .apply_sketch_undo(&mut sketch_doc, &mut sketch_links)
+            .expect("partial rectangle semantic undo");
+        assert_eq!(
+            world.voxel_at(new_cell.x, new_cell.y, new_cell.z),
+            AIR,
+            "undo should remove newly-written cells"
+        );
+        assert_eq!(
+            world.voxel_at(prefilled.x, prefilled.y, prefilled.z),
+            draw.voxel,
+            "undo must keep pre-existing cells"
+        );
+        assert!(sketch_doc.entity(semantic_face).is_none());
+        for cell in [prefilled, new_cell] {
+            assert!(
+                !sketch_links
+                    .links_for_face(cell, IVec3::Y)
+                    .iter()
+                    .any(|link| link.entity == semantic_face),
+                "undo must remove all stale links for the semantic face"
+            );
+        }
+
+        let redo_step = history
+            .pop_redo_detailed(&mut world)
+            .expect("partial rectangle redo step");
+        assert!(redo_step.voxel_count > 0);
+        redo_step
+            .apply_sketch_redo(&mut sketch_doc, &mut sketch_links)
+            .expect("partial rectangle semantic redo");
+        assert_eq!(
+            world.voxel_at(new_cell.x, new_cell.y, new_cell.z),
+            draw.voxel
+        );
+        assert!(sketch_doc.entity(semantic_face).is_some());
+        for cell in [prefilled, new_cell] {
+            assert!(sketch_links
+                .links_for_face(cell, IVec3::Y)
+                .iter()
+                .any(|link| link.entity == semantic_face));
         }
     }
 
@@ -4408,16 +4918,23 @@ mod tests {
         assert_eq!(update_rect_axis_lock(&keys, None), Some(RectAxisLock::X));
 
         let mut keys = ButtonInput::<KeyCode>::default();
-        keys.press(KeyCode::ArrowUp);
+        keys.press(KeyCode::ArrowLeft);
         assert_eq!(update_rect_axis_lock(&keys, None), Some(RectAxisLock::Y));
 
         let mut keys = ButtonInput::<KeyCode>::default();
-        keys.press(KeyCode::ArrowLeft);
+        keys.press(KeyCode::ArrowUp);
         assert_eq!(update_rect_axis_lock(&keys, None), Some(RectAxisLock::Z));
 
         let mut keys = ButtonInput::<KeyCode>::default();
         keys.press(KeyCode::ArrowDown);
         assert_eq!(update_rect_axis_lock(&keys, Some(RectAxisLock::X)), None);
+        assert_eq!(update_rect_axis_lock(&keys, None), None);
+        keys.press(KeyCode::ArrowRight);
+        assert_eq!(
+            update_rect_axis_lock(&keys, Some(RectAxisLock::Z)),
+            None,
+            "Down is the explicit relative-mode fallback"
+        );
     }
 
     #[test]
@@ -4437,6 +4954,7 @@ mod tests {
     fn pencil_axis_lock_marker_tracks_projected_cursor_coordinate() {
         let (endpoint, marker) = snap_pencil_axis_endpoint_and_marker_from_ray(
             IVec3::ZERO,
+            Vec3::splat(0.5),
             Some(RectAxisLock::X),
             Vec3::new(0.5, 10.5, 0.5),
             Vec3::new(1.0, -1.0, 0.0).normalize(),
@@ -4448,6 +4966,27 @@ mod tests {
             marker,
             Vec3::new(10.5, 0.5, 0.5),
             "the visible Pencil marker should stay under the cursor-projected lock point instead of falling back to the committed voxel center"
+        );
+    }
+
+    #[test]
+    fn pencil_axis_lock_preserves_exact_chained_start_marker() {
+        let start = IVec3::new(3, 4, 0);
+        let exact_start_marker = Vec3::new(3.0, 4.5, 0.5);
+        let (endpoint, marker) = snap_pencil_axis_endpoint_and_marker_from_ray(
+            start,
+            exact_start_marker,
+            Some(RectAxisLock::X),
+            Vec3::new(3.0, 10.5, 0.5),
+            Vec3::new(1.0, -1.0, 0.0).normalize(),
+        )
+        .expect("locked endpoint and marker");
+
+        assert_eq!(endpoint, IVec3::new(9, 4, 0));
+        assert_eq!(
+            marker,
+            Vec3::new(9.0, 4.5, 0.5),
+            "axis-locked chained Pencil previews must preserve the exact visible start point on non-locked axes"
         );
     }
 
@@ -4637,13 +5176,11 @@ mod tests {
     }
 
     #[test]
-    fn snap_marker_visuals_use_five_orbs_with_endpoint_priority() {
-        assert_eq!(SNAP_MARKER_ORB_COUNT, 5);
-
-        let endpoint = rect_snap_marker_radius(Some(RectFaceSnapKind::Endpoint), true, 1.0);
-        let midpoint = rect_snap_marker_radius(Some(RectFaceSnapKind::Midpoint), true, 1.0);
-        let face = rect_snap_marker_radius(Some(RectFaceSnapKind::FaceCenter), true, 1.0);
-        let fallback = rect_snap_marker_radius(None, true, 1.0);
+    fn static_snap_markers_keep_endpoint_priority_without_animation() {
+        let endpoint = rect_snap_marker_radius(Some(RectFaceSnapKind::Endpoint), true);
+        let midpoint = rect_snap_marker_radius(Some(RectFaceSnapKind::Midpoint), true);
+        let face = rect_snap_marker_radius(Some(RectFaceSnapKind::FaceCenter), true);
+        let fallback = rect_snap_marker_radius(None, true);
 
         assert!(endpoint > midpoint);
         assert!(midpoint > face);
@@ -4651,16 +5188,58 @@ mod tests {
     }
 
     #[test]
-    fn snap_marker_orbs_orbit_inside_the_snap_plane() {
-        let radius = rect_snap_marker_halo_radius(Some(RectFaceSnapKind::Endpoint), 1.0);
-        let first = rect_snap_marker_orb_offset(0, IVec3::Y, radius, 0.0);
-        let rotated = rect_snap_marker_orb_offset(0, IVec3::Y, radius, std::f32::consts::FRAC_PI_2);
+    fn snap_acquisition_feedback_expires_and_does_not_restart_perpetually() {
+        let mut draw = RectDrawState::default();
+        draw.active = true;
+        draw.current = IVec3::new(3, 4, 5);
+        draw.current_point = Vec3::new(3.5, 4.5, 5.5);
+        draw.normal = IVec3::Y;
+        draw.snap_kind = Some(RectFaceSnapKind::Endpoint);
 
-        assert!(first.y.abs() < 0.0001);
-        assert!(rotated.y.abs() < 0.0001);
-        assert!((first.length() - radius).abs() < 0.0001);
-        assert!((rotated.length() - radius).abs() < 0.0001);
-        assert_ne!(first, rotated);
+        let (feedback, progress) =
+            tick_rect_visual_feedback(&mut draw, 0.0).expect("initial acquisition feedback");
+        assert_eq!(feedback.kind, RectVisualFeedbackKind::Acquisition);
+        assert_eq!(progress, 0.0);
+
+        assert!(
+            tick_rect_visual_feedback(&mut draw, RECT_ACQUISITION_FEEDBACK_SECONDS + 0.01,)
+                .is_none()
+        );
+        assert!(
+            tick_rect_visual_feedback(&mut draw, 0.0).is_none(),
+            "an unchanged snap must not restart a perpetual pulse"
+        );
+
+        draw.current = IVec3::new(4, 4, 5);
+        assert!(tick_rect_visual_feedback(&mut draw, 0.0).is_some());
+    }
+
+    #[test]
+    fn commit_feedback_is_finite_and_reduce_motion_keeps_it_stationary() {
+        let mut draw = RectDrawState::default();
+        begin_rect_visual_feedback(
+            &mut draw,
+            RectVisualFeedbackKind::Commit,
+            Vec3::new(2.0, 3.0, 4.0),
+            IVec3::Y,
+            Some(RectFaceSnapKind::Endpoint),
+        );
+
+        let (feedback, progress) =
+            tick_rect_visual_feedback(&mut draw, 0.0).expect("commit feedback");
+        assert_eq!(feedback.kind, RectVisualFeedbackKind::Commit);
+        assert_eq!(
+            rect_visual_feedback_radius(feedback.kind, progress, true),
+            rect_visual_feedback_radius(feedback.kind, 0.9, true),
+            "reduced-motion feedback should not expand"
+        );
+        assert_ne!(
+            rect_visual_feedback_radius(feedback.kind, progress, false),
+            rect_visual_feedback_radius(feedback.kind, 0.9, false)
+        );
+        assert!(
+            tick_rect_visual_feedback(&mut draw, RECT_COMMIT_FEEDBACK_SECONDS + 0.01,).is_none()
+        );
     }
 
     #[test]
@@ -4820,8 +5399,12 @@ mod tests {
             kind: RectFaceSnapKind::Endpoint,
         };
 
-        let (endpoint, marker) =
-            semantic_axis_locked_endpoint(IVec3::new(2, 4, 8), input, RectAxisLock::X);
+        let (endpoint, marker) = semantic_axis_locked_endpoint(
+            IVec3::new(2, 4, 8),
+            pencil_cell_marker_point(IVec3::new(2, 4, 8)),
+            input,
+            RectAxisLock::X,
+        );
 
         assert_eq!(endpoint, IVec3::new(12, 4, 8));
         assert_eq!(marker, Vec3::new(12.5, 4.5, 8.5));
@@ -4835,8 +5418,12 @@ mod tests {
             kind: RectFaceSnapKind::Endpoint,
         };
 
-        let (endpoint, marker) =
-            semantic_axis_locked_endpoint(IVec3::new(2, 4, 8), input, RectAxisLock::X);
+        let (endpoint, marker) = semantic_axis_locked_endpoint(
+            IVec3::new(2, 4, 8),
+            pencil_cell_marker_point(IVec3::new(2, 4, 8)),
+            input,
+            RectAxisLock::X,
+        );
 
         assert_eq!(endpoint, IVec3::new(12, 4, 8));
         assert_eq!(
@@ -4859,6 +5446,7 @@ mod tests {
             None,
             Some(face_input),
             endpoint,
+            pencil_cell_marker_point(endpoint),
             IVec3::Y,
             RectEndpointInference::None,
             None,
@@ -4884,6 +5472,7 @@ mod tests {
             None,
             Some(face_input),
             IVec3::new(2, 4, 8),
+            pencil_cell_marker_point(IVec3::new(2, 4, 8)),
             IVec3::Y,
             RectEndpointInference::Axis,
             Some(RectAxisLock::X),
@@ -5024,6 +5613,32 @@ mod tests {
 
         assert_eq!(snapped, IVec3::new(17, 64, 0));
         assert_eq!(inference, RectEndpointInference::None);
+    }
+
+    #[test]
+    fn semantic_endpoint_snap_wins_over_rect_auto_inference() {
+        let start = IVec3::new(0, 64, 0);
+        let semantic_endpoint = IVec3::new(11, 64, 1);
+
+        let (snapped, inference) = resolve_rect_endpoint_after_snap(
+            start,
+            semantic_endpoint,
+            true,
+            None,
+            IVec3::X,
+            IVec3::Z,
+            IVec2::new(12, 0),
+        );
+
+        assert_eq!(
+            snapped, semantic_endpoint,
+            "a visible endpoint/midpoint/face-center snap must keep the exact hovered cell"
+        );
+        assert_eq!(
+            inference,
+            RectEndpointInference::None,
+            "semantic snaps should not be relabeled as hidden reference-length inference"
+        );
     }
 
     #[test]

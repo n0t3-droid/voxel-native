@@ -1,30 +1,42 @@
 //! World-space celestial bodies and boost travel.
 //!
-//! `sky.rs` renders camera-relative impostors for a clean background. This
-//! module adds the missing gameplay layer: large, fixed world-space bodies the
-//! player can actually boost toward. The bodies are intentionally one mesh plus
-//! one atmosphere shell each, not thousands of cubes, so the feature stays
-//! friendly to low-end PCs.
+//! These are real world-space bodies, not camera-relative billboard discs: the
+//! same object seen from the ground is the one a ship reaches. Each body stays
+//! one mesh plus small atmosphere/cloud shells instead of thousands of entities,
+//! preserving the huge silhouette without sacrificing low-end hardware.
 
 use bevy::pbr::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::texture::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::render::view::RenderLayers;
 use bevy::transform::TransformSystem;
 use noise::{NoiseFn, Perlin};
 
 use crate::menu::GameState;
+use crate::mode::{ActiveMode, ModeContext};
 use crate::player::Player;
 use crate::settings::{GraphicsMode, WorldSettings};
+use crate::ships::{PilotState, ShipInstance};
 
-const SKY_IMPOSTOR_DISTANCE: f32 = 910.0;
-const BOOST_ACCEL: f32 = 950.0;
-const BOOST_MAX_SPEED: f32 = 1650.0;
-const BOOST_SURFACE_OFFSET: f32 = 220.0;
-const BOOST_ARRIVAL_DISTANCE: f32 = 260.0;
-const BOOST_FOV_BONUS: f32 = 18.0;
+/// Gameplay-space distances are deliberately compressed while body radii and
+/// angular size remain coherent. One terrain block is still one metre near the
+/// player; interplanetary travel uses a cinematic navigation scale so a trip is
+/// measured in seconds rather than real-world days.
+///
+/// Ground-truth anchors (NASA): the Moon's mean orbital distance is 384,400 km
+/// and equatorial radius is 1,737.5 km; the Sun's radius is roughly 700,000 km
+/// and Earth distance roughly 150 million km. Sources:
+/// <https://science.nasa.gov/moon/by-the-numbers/> and
+/// <https://science.nasa.gov/sun/facts/>. The runtime values below are an
+/// explicit cinematic compression, never presented as SI astronomy.
+const BOOST_ACCEL_BLOCKS_PER_S2: f32 = 760.0;
+const BOOST_MAX_SPEED_BLOCKS_PER_S: f32 = 1_850.0;
+const BOOST_SURFACE_OFFSET_BLOCKS: f32 = 22.0;
+const BOOST_ARRIVAL_DISTANCE_BLOCKS: f32 = 10.0;
+const BOOST_FOV_BONUS_DEG: f32 = 8.0;
+const TRANSIT_STREAMING_SPEED_BLOCKS_PER_S: f32 = 280.0;
+const TRANSIT_GUIDE_LENGTH_BLOCKS: f32 = 140.0;
 
 pub struct CelestialPlugin;
 
@@ -37,8 +49,8 @@ impl Plugin for CelestialPlugin {
                 (
                     planet_boost_input,
                     update_planet_boost,
+                    maintain_celestial_surface_clearance,
                     animate_celestial_bodies,
-                    update_sky_impostors,
                     draw_boost_guides,
                 )
                     .chain()
@@ -62,7 +74,6 @@ pub(crate) struct CelestialBodySpec {
     pub center: Vec3,
     pub radius: f32,
     pub atmosphere_radius: f32,
-    pub sky_radius: f32,
     pub seed: u32,
     pub spin_speed: f32,
 }
@@ -81,9 +92,18 @@ struct CelestialAtmosphere {
 }
 
 #[derive(Component)]
-struct CelestialSkyImpostor {
+struct CelestialCloudLayer {
     index: usize,
-    direction: Vec3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CelestialTravelPhase {
+    #[default]
+    Idle,
+    Accelerating,
+    Cruise,
+    Approach,
+    Arrived,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -91,6 +111,8 @@ pub(crate) struct CelestialTravel {
     pub target_index: usize,
     pub boosting: bool,
     speed: f32,
+    pub phase: CelestialTravelPhase,
+    pub distance_remaining: f32,
 }
 
 impl Default for CelestialTravel {
@@ -99,7 +121,22 @@ impl Default for CelestialTravel {
             target_index: 0,
             boosting: false,
             speed: 0.0,
+            phase: CelestialTravelPhase::Idle,
+            distance_remaining: 0.0,
         }
+    }
+}
+
+impl CelestialTravel {
+    pub(crate) fn suspends_ground_streaming(&self) -> bool {
+        self.boosting && self.speed >= TRANSIT_STREAMING_SPEED_BLOCKS_PER_S
+    }
+
+    fn cancel(&mut self) {
+        self.boosting = false;
+        self.speed = 0.0;
+        self.distance_remaining = 0.0;
+        self.phase = CelestialTravelPhase::Idle;
     }
 }
 
@@ -108,30 +145,29 @@ pub(crate) fn default_celestial_bodies() -> [CelestialBodySpec; 3] {
         CelestialBodySpec {
             kind: CelestialKind::Moon,
             name: "Aomi Moon",
-            center: Vec3::new(3_200.0, 1_750.0, -5_100.0),
-            radius: 520.0,
-            atmosphere_radius: 610.0,
-            sky_radius: 34.0,
+            center: Vec3::new(6_900.0, 4_300.0, -10_600.0),
+            radius: 900.0,
+            atmosphere_radius: 958.0,
             seed: 0xA0_41_19,
             spin_speed: 0.012,
         },
         CelestialBodySpec {
             kind: CelestialKind::SakuraPlanet,
             name: "Sakura World",
-            center: Vec3::new(-5_400.0, 2_850.0, -6_900.0),
-            radius: 880.0,
-            atmosphere_radius: 1_040.0,
-            sky_radius: 58.0,
+            center: Vec3::new(-14_800.0, 8_600.0, -18_400.0),
+            radius: 2_850.0,
+            atmosphere_radius: 3_080.0,
             seed: 0x5A_CA_02,
             spin_speed: -0.006,
         },
         CelestialBodySpec {
             kind: CelestialKind::Sun,
             name: "Helios Core",
-            center: Vec3::new(9_200.0, 4_600.0, 9_800.0),
-            radius: 1_150.0,
-            atmosphere_radius: 1_560.0,
-            sky_radius: 72.0,
+            // Only the length is authoritative. Its direction is shared with
+            // the daylight system so the visible star and lighting agree.
+            center: Vec3::new(0.0, 0.0, 36_000.0),
+            radius: 4_100.0,
+            atmosphere_radius: 4_680.0,
             seed: 0xFE_ED_51,
             spin_speed: 0.02,
         },
@@ -146,18 +182,17 @@ fn setup_celestial_bodies(
     mut images: ResMut<Assets<Image>>,
 ) {
     let texture_size = match settings.graphics {
-        GraphicsMode::Fast => (96, 48),
-        GraphicsMode::Balanced => (160, 80),
-        GraphicsMode::High => (256, 128),
+        GraphicsMode::Fast => (192, 96),
+        GraphicsMode::Balanced => (384, 192),
+        GraphicsMode::High => (640, 320),
     };
     let subdivisions = match settings.graphics {
         GraphicsMode::Fast => 3,
         GraphicsMode::Balanced => 4,
         GraphicsMode::High => 5,
     };
-    let sky_layer = RenderLayers::layer(crate::sky::SKY_LAYER);
-
     for (index, spec) in default_celestial_bodies().into_iter().enumerate() {
+        let center = celestial_center(spec, settings.time_of_day);
         let texture = images.add(build_body_texture(
             spec.kind,
             texture_size.0,
@@ -175,14 +210,14 @@ fn setup_celestial_bodies(
             PbrBundle {
                 mesh,
                 material,
-                transform: Transform::from_translation(spec.center),
+                transform: Transform::from_translation(center),
                 ..default()
             },
             NotShadowCaster,
             CelestialBody {
                 index,
                 kind: spec.kind,
-                center: spec.center,
+                center,
                 radius: spec.radius,
             },
             Name::new(format!("Celestial.{}", spec.name)),
@@ -199,7 +234,7 @@ fn setup_celestial_bodies(
             PbrBundle {
                 mesh: atmosphere_mesh,
                 material: atmosphere_material,
-                transform: Transform::from_translation(spec.center),
+                transform: Transform::from_translation(center),
                 ..default()
             },
             NotShadowCaster,
@@ -207,30 +242,33 @@ fn setup_celestial_bodies(
             Name::new(format!("Celestial.{}.Atmosphere", spec.name)),
         ));
 
-        let sky_mesh = meshes.add(
-            Sphere::new(spec.sky_radius)
-                .mesh()
-                .ico(4)
-                .expect("sky impostor ico subdivision is in Bevy's supported range"),
-        );
-        let sky_material = materials.add(sky_impostor_material(spec.kind, texture));
-        commands.spawn((
-            PbrBundle {
-                mesh: sky_mesh,
-                material: sky_material,
-                transform: Transform::from_translation(
-                    spec.center.normalize_or_zero() * SKY_IMPOSTOR_DISTANCE,
-                ),
-                ..default()
-            },
-            NotShadowCaster,
-            sky_layer.clone(),
-            CelestialSkyImpostor {
-                index,
-                direction: spec.center.normalize_or_zero(),
-            },
-            Name::new(format!("Celestial.{}.SkyImpostor", spec.name)),
-        ));
+        // The inhabited world gets a separate slowly rotating cloud veil.
+        // It is a single mesh and texture, so the cinematic layer adds one
+        // draw call rather than thousands of decorative entities.
+        if spec.kind == CelestialKind::SakuraPlanet {
+            let cloud_texture = images.add(build_cloud_texture(
+                texture_size.0,
+                texture_size.1,
+                spec.seed.wrapping_add(0xC10D_5EED),
+            ));
+            let cloud_mesh = meshes.add(
+                Sphere::new(spec.radius * 1.018)
+                    .mesh()
+                    .ico(subdivisions)
+                    .expect("cloud ico subdivision is in Bevy's supported range"),
+            );
+            commands.spawn((
+                PbrBundle {
+                    mesh: cloud_mesh,
+                    material: materials.add(cloud_layer_material(cloud_texture)),
+                    transform: Transform::from_translation(center),
+                    ..default()
+                },
+                NotShadowCaster,
+                CelestialCloudLayer { index },
+                Name::new(format!("Celestial.{}.Clouds", spec.name)),
+            ));
+        }
     }
 }
 
@@ -239,22 +277,25 @@ fn body_material(kind: CelestialKind, texture: Handle<Image>) -> StandardMateria
         CelestialKind::Sun => StandardMaterial {
             base_color_texture: Some(texture.clone()),
             emissive_texture: Some(texture),
-            emissive: LinearRgba::rgb(45.0, 24.0, 8.0),
+            emissive: LinearRgba::rgb(34.0, 19.0, 5.5),
             unlit: true,
+            fog_enabled: false,
             ..default()
         },
         CelestialKind::Moon => StandardMaterial {
             base_color_texture: Some(texture),
             perceptual_roughness: 0.95,
             reflectance: 0.18,
-            emissive: LinearRgba::rgb(0.18, 0.22, 0.28),
+            emissive: LinearRgba::rgb(0.035, 0.045, 0.060),
+            fog_enabled: false,
             ..default()
         },
         CelestialKind::SakuraPlanet => StandardMaterial {
             base_color_texture: Some(texture),
             perceptual_roughness: 0.72,
             reflectance: 0.28,
-            emissive: LinearRgba::rgb(0.10, 0.04, 0.13),
+            emissive: LinearRgba::rgb(0.045, 0.018, 0.060),
+            fog_enabled: false,
             ..default()
         },
     }
@@ -279,66 +320,87 @@ fn atmosphere_material(kind: CelestialKind) -> StandardMaterial {
         base_color: color,
         emissive,
         unlit: true,
-        alpha_mode: AlphaMode::Add,
-        cull_mode: None,
+        alpha_mode: AlphaMode::Blend,
+        // Back-face culling prevents the front and rear shell from adding
+        // into a flat ring when viewed from the surface.
+        cull_mode: Some(bevy::render::render_resource::Face::Back),
+        double_sided: false,
+        fog_enabled: false,
+        depth_bias: -2.0,
         ..default()
     }
 }
 
-fn sky_impostor_material(kind: CelestialKind, texture: Handle<Image>) -> StandardMaterial {
-    let emissive = match kind {
-        CelestialKind::Sun => LinearRgba::rgb(55.0, 28.0, 9.0),
-        CelestialKind::Moon => LinearRgba::rgb(5.0, 6.0, 8.0),
-        CelestialKind::SakuraPlanet => LinearRgba::rgb(7.0, 2.2, 8.5),
-    };
+fn cloud_layer_material(texture: Handle<Image>) -> StandardMaterial {
     StandardMaterial {
+        base_color: Color::srgba(1.0, 0.92, 0.98, 0.72),
         base_color_texture: Some(texture.clone()),
         emissive_texture: Some(texture),
-        emissive,
+        emissive: LinearRgba::rgb(0.14, 0.07, 0.16),
         unlit: true,
         alpha_mode: AlphaMode::Blend,
+        cull_mode: Some(bevy::render::render_resource::Face::Back),
+        fog_enabled: false,
+        depth_bias: -1.0,
         ..default()
     }
 }
 
 fn planet_boost_input(
     keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<ModeContext>,
+    pilot: Res<PilotState>,
     mut travel: ResMut<CelestialTravel>,
     player_q: Query<&Transform, With<Player>>,
+    ship_q: Query<&Transform, (With<ShipInstance>, Without<Player>)>,
     bodies: Query<&CelestialBody>,
 ) {
+    if keys.just_pressed(KeyCode::Escape) && travel.boosting {
+        travel.cancel();
+        return;
+    }
+    if !celestial_input_allowed(mode.mode) {
+        return;
+    }
     if keys.just_pressed(KeyCode::KeyN) {
         let count = bodies.iter().count().max(1);
         travel.target_index = (travel.target_index + 1) % count;
         travel.speed = 0.0;
+        travel.phase = CelestialTravelPhase::Idle;
     }
     if keys.just_pressed(KeyCode::KeyB) {
         if travel.boosting {
-            travel.boosting = false;
-            travel.speed = 0.0;
+            travel.cancel();
             return;
         }
-        if let Ok(player_tf) = player_q.get_single() {
+        let carrier = pilot
+            .active_ship
+            .and_then(|entity| ship_q.get(entity).ok())
+            .or_else(|| player_q.get_single().ok());
+        if let Some(carrier_tf) = carrier {
             travel.target_index = select_boost_target(
-                player_tf.translation,
-                player_tf.rotation * -Vec3::Z,
+                carrier_tf.translation,
+                carrier_tf.rotation * -Vec3::Z,
                 bodies.iter().map(|b| (b.index, b.center)),
             )
             .unwrap_or(travel.target_index);
         }
         travel.boosting = true;
         travel.speed = 0.0;
+        travel.phase = CelestialTravelPhase::Accelerating;
     }
-    if keys.just_pressed(KeyCode::Escape) {
-        travel.boosting = false;
-        travel.speed = 0.0;
-    }
+}
+
+fn celestial_input_allowed(mode: ActiveMode) -> bool {
+    matches!(mode, ActiveMode::Combat | ActiveMode::ShipFlight { .. })
 }
 
 fn update_planet_boost(
     time: Res<Time>,
     mut travel: ResMut<CelestialTravel>,
+    mut pilot: ResMut<PilotState>,
     bodies: Query<&CelestialBody>,
+    mut ship_q: Query<&mut Transform, (With<ShipInstance>, Without<Player>)>,
     mut player_q: Query<(&mut Transform, &mut Player)>,
 ) {
     if !travel.boosting {
@@ -348,42 +410,184 @@ fn update_planet_boost(
         return;
     };
     let Some(body) = bodies.iter().find(|body| body.index == travel.target_index) else {
-        travel.boosting = false;
-        travel.speed = 0.0;
+        travel.cancel();
         return;
     };
     let dt = time.delta_seconds().min(1.0 / 30.0);
-    let approach = boost_approach_point(player_tf.translation, body.center, body.radius);
-    let to_approach = approach - player_tf.translation;
+    let active_ship = pilot.active_ship;
+    let carrier_position = active_ship
+        .and_then(|entity| ship_q.get_mut(entity).ok().map(|tf| tf.translation))
+        .unwrap_or(player_tf.translation);
+    let approach = boost_approach_point(carrier_position, body.center, body.radius);
+    let to_approach = approach - carrier_position;
     let distance = to_approach.length();
-    if distance <= BOOST_ARRIVAL_DISTANCE {
+    travel.distance_remaining = distance;
+    if distance <= BOOST_ARRIVAL_DISTANCE_BLOCKS {
         travel.boosting = false;
         travel.speed = 0.0;
+        travel.distance_remaining = 0.0;
+        travel.phase = CelestialTravelPhase::Arrived;
         player.velocity = Vec3::ZERO;
         player.fov_bonus = 0.0;
+        pilot.speed = 0.0;
+        pilot.status = format!(
+            "{} orbital hold.",
+            default_celestial_bodies()[body.index].name
+        );
         return;
     }
 
     let dir = to_approach.normalize_or_zero();
-    travel.speed = (travel.speed + BOOST_ACCEL * dt).min(BOOST_MAX_SPEED);
+    // Kinematic braking envelope: v <= sqrt(2*a*d). It prevents the carrier
+    // from snapping or overshooting at the surface while retaining a fast
+    // cruise through empty space. Units reduce to blocks/second.
+    let braking_speed = (2.0 * BOOST_ACCEL_BLOCKS_PER_S2 * distance).sqrt();
+    let target_speed = braking_speed.min(BOOST_MAX_SPEED_BLOCKS_PER_S);
+    let speed_step = BOOST_ACCEL_BLOCKS_PER_S2 * dt;
+    travel.speed = move_towards(travel.speed, target_speed, speed_step);
+    travel.phase = if distance < body.radius * 0.32 {
+        CelestialTravelPhase::Approach
+    } else if travel.speed >= BOOST_MAX_SPEED_BLOCKS_PER_S * 0.98 {
+        CelestialTravelPhase::Cruise
+    } else {
+        CelestialTravelPhase::Accelerating
+    };
     let step = travel.speed.min(distance / dt.max(1e-4)) * dt;
-    player_tf.translation += dir * step;
+    let delta = dir * step;
+    if let Some(entity) = active_ship {
+        if let Ok(mut ship_tf) = ship_q.get_mut(entity) {
+            ship_tf.translation += delta;
+            // The player camera is the cockpit child in world terms, but is a
+            // separate ECS transform. Move it by the identical delta now so
+            // the ship-flight system cannot produce a one-frame camera tear.
+            player_tf.translation += delta;
+        } else {
+            pilot.active_ship = None;
+            player_tf.translation += delta;
+        }
+    } else {
+        player_tf.translation += delta;
+    }
     // Direct boost motion bypasses normal collision scans; keep velocity zero
     // so the next movement tick does not spend time sweeping huge distances.
     player.velocity = Vec3::ZERO;
     player.flying = true;
     player.placed_on_surface = true;
-    player.fov_bonus += (BOOST_FOV_BONUS - player.fov_bonus) * (dt * 4.0).min(1.0);
+    player.fov_bonus += (BOOST_FOV_BONUS_DEG - player.fov_bonus) * (dt * 4.0).min(1.0);
+    pilot.speed = travel.speed;
+    pilot.status = format!(
+        "{}  {:.0} m  {:?}",
+        default_celestial_bodies()[body.index].name,
+        distance,
+        travel.phase
+    );
+}
+
+fn move_towards(current: f32, target: f32, max_delta: f32) -> f32 {
+    if (target - current).abs() <= max_delta {
+        target
+    } else {
+        current + (target - current).signum() * max_delta
+    }
+}
+
+fn maintain_celestial_surface_clearance(
+    pilot: Res<PilotState>,
+    bodies: Query<&CelestialBody>,
+    mut ship_q: Query<&mut Transform, (With<ShipInstance>, Without<Player>)>,
+    mut player_q: Query<(&mut Transform, &mut Player)>,
+) {
+    let Ok((mut player_tf, mut player)) = player_q.get_single_mut() else {
+        return;
+    };
+    if let Some(entity) = pilot.active_ship {
+        if let Ok(mut ship_tf) = ship_q.get_mut(entity) {
+            let mut total = Vec3::ZERO;
+            for body in &bodies {
+                let clearance = if body.kind == CelestialKind::Sun {
+                    180.0
+                } else {
+                    14.0
+                };
+                total += surface_clearance_delta(
+                    ship_tf.translation + total,
+                    body.center,
+                    body.radius + clearance,
+                );
+            }
+            if total.length_squared() > 0.0 {
+                ship_tf.translation += total;
+                player_tf.translation += total;
+                player.velocity = Vec3::ZERO;
+            }
+            return;
+        }
+    }
+
+    let mut total = Vec3::ZERO;
+    for body in &bodies {
+        let clearance = if body.kind == CelestialKind::Sun {
+            120.0
+        } else {
+            2.2
+        };
+        total += surface_clearance_delta(
+            player_tf.translation + total,
+            body.center,
+            body.radius + clearance,
+        );
+    }
+    if total.length_squared() > 0.0 {
+        player_tf.translation += total;
+        player.velocity = Vec3::ZERO;
+        player.flying = true;
+    }
+}
+
+fn surface_clearance_delta(position: Vec3, center: Vec3, minimum_radius: f32) -> Vec3 {
+    let from_center = position - center;
+    let distance = from_center.length();
+    if distance >= minimum_radius {
+        return Vec3::ZERO;
+    }
+    let normal = if distance > 1e-5 {
+        from_center / distance
+    } else {
+        Vec3::Y
+    };
+    normal * (minimum_radius - distance)
+}
+
+fn celestial_center(spec: CelestialBodySpec, time_of_day: f32) -> Vec3 {
+    if spec.kind == CelestialKind::Sun {
+        crate::daynight::sun_direction_for_time(time_of_day) * spec.center.length()
+    } else {
+        spec.center
+    }
 }
 
 fn animate_celestial_bodies(
     time: Res<Time>,
-    mut bodies: Query<(&CelestialBody, &mut Transform), Without<CelestialSkyImpostor>>,
-    mut atmospheres: Query<(&CelestialAtmosphere, &mut Transform), Without<CelestialBody>>,
+    settings: Res<WorldSettings>,
+    mut bodies: Query<
+        (&mut CelestialBody, &mut Transform),
+        (Without<CelestialAtmosphere>, Without<CelestialCloudLayer>),
+    >,
+    mut atmospheres: Query<
+        (&CelestialAtmosphere, &mut Transform),
+        (Without<CelestialBody>, Without<CelestialCloudLayer>),
+    >,
+    mut clouds: Query<
+        (&CelestialCloudLayer, &mut Transform),
+        (Without<CelestialBody>, Without<CelestialAtmosphere>),
+    >,
 ) {
     let specs = default_celestial_bodies();
-    for (body, mut transform) in &mut bodies {
+    for (mut body, mut transform) in &mut bodies {
         let spec = specs[body.index];
+        let center = celestial_center(spec, settings.time_of_day);
+        body.center = center;
+        transform.translation = center;
         let axis = match body.kind {
             CelestialKind::Sun => Vec3::Y,
             CelestialKind::Moon => Vec3::new(0.2, 1.0, 0.1).normalize(),
@@ -396,35 +600,13 @@ fn animate_celestial_bodies(
     }
     for (atmosphere, mut transform) in &mut atmospheres {
         let spec = specs[atmosphere.index];
+        transform.translation = celestial_center(spec, settings.time_of_day);
         transform.rotate_y(-spec.spin_speed * 0.45 * time.delta_seconds());
     }
-}
-
-fn update_sky_impostors(
-    time: Res<Time>,
-    main_cam: Query<&GlobalTransform, (With<Camera3d>, Without<CelestialSkyImpostor>)>,
-    player_q: Query<&Transform, With<Player>>,
-    mut impostors: Query<(&CelestialSkyImpostor, &mut Transform, &mut Visibility)>,
-) {
-    let Some(main_tf) = main_cam.iter().next() else {
-        return;
-    };
-    let (_, _, camera_translation) = main_tf.to_scale_rotation_translation();
-    let player_pos = player_q
-        .get_single()
-        .map(|tf| tf.translation)
-        .unwrap_or(camera_translation);
-    let specs = default_celestial_bodies();
-    for (impostor, mut transform, mut visibility) in &mut impostors {
-        let spec = specs[impostor.index];
-        transform.translation = camera_translation + impostor.direction * SKY_IMPOSTOR_DISTANCE;
-        transform.rotate_y(spec.spin_speed * 0.35 * time.delta_seconds());
-        let near_real_body = player_pos.distance(spec.center) < spec.radius * 4.2;
-        *visibility = if near_real_body {
-            Visibility::Hidden
-        } else {
-            Visibility::Visible
-        };
+    for (cloud, mut transform) in &mut clouds {
+        let spec = specs[cloud.index];
+        transform.translation = celestial_center(spec, settings.time_of_day);
+        transform.rotate_y(-spec.spin_speed * 0.72 * time.delta_seconds());
     }
 }
 
@@ -449,8 +631,12 @@ fn draw_boost_guides(
         CelestialKind::Moon => Color::srgb(0.55, 0.88, 1.0),
         CelestialKind::SakuraPlanet => Color::srgb(1.0, 0.42, 0.92),
     };
-    gizmos.line(player_tf.translation, approach, color);
-    gizmos.sphere(approach, Quat::IDENTITY, 26.0, color);
+    let to_target = approach - player_tf.translation;
+    let distance = to_target.length();
+    let direction = to_target.normalize_or_zero();
+    let guide_start = approach - direction * distance.min(TRANSIT_GUIDE_LENGTH_BLOCKS);
+    gizmos.line(guide_start, approach, color);
+    gizmos.sphere(approach, Quat::IDENTITY, 8.0, color);
 }
 
 pub(crate) fn select_boost_target(
@@ -478,7 +664,7 @@ pub(crate) fn boost_approach_point(player_pos: Vec3, center: Vec3, radius: f32) 
     } else {
         outward
     };
-    center + outward * (radius + BOOST_SURFACE_OFFSET)
+    center + outward * (radius + BOOST_SURFACE_OFFSET_BLOCKS)
 }
 
 fn build_body_texture(kind: CelestialKind, w: u32, h: u32, seed: u32) -> Image {
@@ -563,6 +749,47 @@ fn build_body_texture(kind: CelestialKind, w: u32, h: u32, seed: u32) -> Image {
     image
 }
 
+fn build_cloud_texture(w: u32, h: u32, seed: u32) -> Image {
+    let primary = Perlin::new(seed);
+    let detail = Perlin::new(seed.wrapping_add(0x9E37_79B9));
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        let latitude = (y as f64 / h as f64) * std::f64::consts::PI - std::f64::consts::FRAC_PI_2;
+        let (sin_lat, cos_lat) = latitude.sin_cos();
+        for x in 0..w {
+            let longitude = (x as f64 / w as f64) * std::f64::consts::TAU;
+            let (sin_lon, cos_lon) = longitude.sin_cos();
+            let p = [cos_lat * cos_lon, sin_lat, cos_lat * sin_lon];
+            let broad = primary.get([p[0] * 2.1, p[1] * 2.1, p[2] * 2.1]);
+            let wisps = detail.get([p[0] * 7.3, p[1] * 4.6, p[2] * 7.3]);
+            let coverage = (broad * 0.72 + wisps * 0.28) * 0.5 + 0.5;
+            let alpha = ((coverage - 0.54) / 0.26).clamp(0.0, 1.0).powf(1.35);
+            let warmth = ((broad * 0.5 + 0.5) * 0.12) as f32;
+            data.push(((0.92 + warmth).min(1.0) * 255.0) as u8);
+            data.push(((0.88 + warmth * 0.45).min(1.0) * 255.0) as u8);
+            data.push(((0.96 + warmth * 0.25).min(1.0) * 255.0) as u8);
+            data.push((alpha * 205.0) as u8);
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,7 +797,7 @@ mod tests {
     #[test]
     fn celestial_bodies_are_large_and_reachable() {
         let specs = default_celestial_bodies();
-        assert!(specs.iter().all(|spec| spec.radius >= 500.0));
+        assert!(specs.iter().all(|spec| spec.radius >= 850.0));
         assert!(specs
             .iter()
             .all(|spec| spec.center.length() < crate::player::WORLD_CAMERA_FAR * 0.5));
@@ -598,7 +825,61 @@ mod tests {
         let approach = boost_approach_point(player, center, 300.0);
 
         let distance_from_center = approach.distance(center);
-        assert!((distance_from_center - (300.0 + BOOST_SURFACE_OFFSET)).abs() < 0.01);
+        assert!((distance_from_center - (300.0 + BOOST_SURFACE_OFFSET_BLOCKS)).abs() < 0.01);
         assert!(approach.z < center.z);
+    }
+
+    #[test]
+    fn sun_center_uses_the_same_direction_as_daylight() {
+        let sun = default_celestial_bodies()[2];
+        let time = 14.15;
+        let center = celestial_center(sun, time);
+        let expected = crate::daynight::sun_direction_for_time(time);
+
+        assert!(center.normalize().dot(expected) > 0.99999);
+        assert!((center.length() - sun.center.length()).abs() < 0.01);
+    }
+
+    #[test]
+    fn surface_clearance_projects_out_without_teleporting_safe_points() {
+        let center = Vec3::new(100.0, 50.0, -20.0);
+        let radius = 40.0;
+        let inside = center + Vec3::X * 10.0;
+        let delta = surface_clearance_delta(inside, center, radius);
+        assert!(((inside + delta).distance(center) - radius).abs() < 0.001);
+        assert_eq!(
+            surface_clearance_delta(center + Vec3::X * 60.0, center, radius),
+            Vec3::ZERO
+        );
+    }
+
+    #[test]
+    fn high_speed_transit_suspends_ground_streaming_only_while_active() {
+        let mut travel = CelestialTravel::default();
+        travel.boosting = true;
+        travel.speed = TRANSIT_STREAMING_SPEED_BLOCKS_PER_S - 1.0;
+        assert!(!travel.suspends_ground_streaming());
+        travel.speed = TRANSIT_STREAMING_SPEED_BLOCKS_PER_S;
+        assert!(travel.suspends_ground_streaming());
+        travel.cancel();
+        assert!(!travel.suspends_ground_streaming());
+    }
+
+    #[test]
+    fn celestial_hotkeys_never_steal_builder_input() {
+        assert!(celestial_input_allowed(ActiveMode::Combat));
+        assert!(!celestial_input_allowed(ActiveMode::BuildLive {
+            tool: crate::toolbelt::ToolbeltTool::DrawRect,
+        }));
+        assert!(!celestial_input_allowed(ActiveMode::BuildPicker {
+            tool: crate::toolbelt::ToolbeltTool::Sculpt,
+        }));
+    }
+
+    #[test]
+    fn braking_envelope_converges_without_overshoot() {
+        assert_eq!(move_towards(0.0, 100.0, 20.0), 20.0);
+        assert_eq!(move_towards(95.0, 100.0, 20.0), 100.0);
+        assert_eq!(move_towards(120.0, 100.0, 5.0), 115.0);
     }
 }

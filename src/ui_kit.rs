@@ -7,28 +7,141 @@
 use bevy_egui::egui;
 
 use crate::icons::{paint_icon, Icon};
-use crate::theme::ThemeSettings;
+use crate::theme::{animate_bool_finite, MotionRole, SemanticColors, ThemeSettings, KANSO_VISUALS};
 
 fn alpha_u8(alpha: f32) -> u8 {
-    (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+    let alpha = if alpha.is_finite() {
+        alpha.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (alpha * 255.0).round() as u8
 }
 
 fn with_alpha(color: egui::Color32, alpha: f32) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha_u8(alpha))
+    let [red, green, blue, _] = color.to_srgba_unmultiplied();
+    egui::Color32::from_rgba_unmultiplied(red, green, blue, alpha_u8(alpha))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InteractionState {
+    selected: bool,
+    hovered: bool,
+    focused: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ControlVisuals {
+    fill: egui::Color32,
+    text: egui::Color32,
+    icon: egui::Color32,
+    outline: egui::Color32,
+    outline_width: f32,
+}
+
+fn control_visuals(theme: ThemeSettings, state: InteractionState) -> ControlVisuals {
+    let colors = theme.semantic();
+    let fill = if state.selected {
+        colors.selected
+    } else if state.hovered || state.focused {
+        colors.surface_strong
+    } else {
+        colors.surface
+    };
+    let text = if state.selected {
+        theme.text_on(fill)
+    } else {
+        colors.text
+    };
+    let (outline, outline_width) = if state.focused {
+        (colors.focus, KANSO_VISUALS.focus_width)
+    } else if state.selected || state.hovered {
+        (colors.accent, KANSO_VISUALS.focus_width)
+    } else {
+        (colors.outline, KANSO_VISUALS.outline_width)
+    };
+
+    ControlVisuals {
+        fill,
+        text,
+        icon: if state.selected || state.focused {
+            colors.focus
+        } else {
+            colors.accent
+        },
+        outline,
+        outline_width,
+    }
+}
+
+fn paint_control_outline(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    colors: SemanticColors,
+    visuals: ControlVisuals,
+    focus_amount: f32,
+    focused: bool,
+) {
+    if focus_amount > 0.001 {
+        let glow_rect = rect.expand(KANSO_VISUALS.focus_gap + focus_amount * 1.5);
+        painter.rect_stroke(
+            glow_rect,
+            egui::Rounding::same(KANSO_VISUALS.corner_radius + 2.0),
+            egui::Stroke::new(
+                KANSO_VISUALS.focus_width,
+                if focused {
+                    colors.focus_glow
+                } else {
+                    colors.focus_glow.linear_multiply(focus_amount * 0.72)
+                },
+            ),
+        );
+    }
+    if focused {
+        painter.rect_stroke(
+            rect.expand(KANSO_VISUALS.focus_gap),
+            egui::Rounding::same(KANSO_VISUALS.corner_radius + 1.0),
+            egui::Stroke::new(KANSO_VISUALS.focus_width, colors.focus),
+        );
+    }
+    painter.rect_stroke(
+        rect,
+        egui::Rounding::same(KANSO_VISUALS.corner_radius),
+        egui::Stroke::new(visuals.outline_width, visuals.outline),
+    );
+}
+
+fn paint_control_shell(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    colors: SemanticColors,
+    visuals: ControlVisuals,
+    focus_amount: f32,
+    focused: bool,
+) {
+    painter.rect_filled(
+        rect,
+        egui::Rounding::same(KANSO_VISUALS.corner_radius),
+        visuals.fill,
+    );
+    paint_control_outline(painter, rect, colors, visuals, focus_amount, focused);
 }
 
 pub fn toolbench_frame(theme: ThemeSettings) -> egui::Frame {
     let colors = theme.semantic();
     egui::Frame::none()
-        .fill(with_alpha(colors.surface_strong, 0.88))
-        .stroke(egui::Stroke::new(1.0, with_alpha(colors.stroke, 0.72)))
+        .fill(with_alpha(colors.surface_strong, 0.96))
+        .stroke(egui::Stroke::new(
+            KANSO_VISUALS.outline_width,
+            with_alpha(colors.outline_strong, 0.92),
+        ))
         .inner_margin(egui::Margin::symmetric(18.0, 16.0))
-        .rounding(egui::Rounding::same(8.0))
+        .rounding(egui::Rounding::same(KANSO_VISUALS.corner_radius))
         .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 12.0),
-            blur: 28.0,
+            offset: egui::vec2(0.0, 8.0),
+            blur: 20.0,
             spread: 0.0,
-            color: egui::Color32::from_black_alpha(185),
+            color: egui::Color32::from_black_alpha(168),
         })
 }
 
@@ -39,10 +152,13 @@ pub fn surface_panel<R>(
 ) -> egui::InnerResponse<R> {
     let colors = theme.semantic();
     egui::Frame::none()
-        .fill(with_alpha(colors.surface, 0.78))
-        .stroke(egui::Stroke::new(1.0, with_alpha(colors.stroke, 0.58)))
+        .fill(with_alpha(colors.surface, 0.94))
+        .stroke(egui::Stroke::new(
+            KANSO_VISUALS.outline_width,
+            with_alpha(colors.outline, 0.92),
+        ))
         .inner_margin(egui::Margin::symmetric(12.0, 10.0))
-        .rounding(egui::Rounding::same(8.0))
+        .rounding(egui::Rounding::same(KANSO_VISUALS.corner_radius))
         .show(ui, add_contents)
 }
 
@@ -55,14 +171,18 @@ pub fn hud_panel(
 ) {
     let colors = theme.semantic();
     let opacity = opacity.clamp(0.28, 0.94);
-    let rounding = egui::Rounding::same(9.0);
-    let base = with_alpha(colors.surface_strong, opacity * 0.82);
-    let deep = with_alpha(colors.background, opacity * 0.52);
-    let top_sheen = with_alpha(colors.text, opacity * 0.12);
-    let inner_sheen = egui::Color32::from_white_alpha(alpha_u8(opacity * 0.18));
+    let rounding = egui::Rounding::same(KANSO_VISUALS.corner_radius);
+    let base = with_alpha(colors.surface_strong, opacity * 0.92);
+    let deep = with_alpha(colors.background, opacity * 0.72);
+    let top_sheen = with_alpha(colors.text, opacity * 0.06);
+    let inner_outline = with_alpha(colors.outline_strong, opacity * 0.78);
 
     painter.rect_filled(rect, rounding, base);
-    painter.rect_filled(rect.shrink(1.0), egui::Rounding::same(7.5), deep);
+    painter.rect_filled(
+        rect.shrink(1.0),
+        egui::Rounding::same(KANSO_VISUALS.corner_radius - 1.0),
+        deep,
+    );
 
     let top = egui::Rect::from_min_max(
         rect.left_top() + egui::vec2(1.0, 1.0),
@@ -70,13 +190,17 @@ pub fn hud_panel(
     );
     painter.rect_filled(top, rounding, top_sheen);
 
-    let rim = with_alpha(accent, opacity * 0.78);
-    let cool_rim = with_alpha(colors.info, opacity * 0.44);
-    painter.rect_stroke(rect, rounding, egui::Stroke::new(1.0, rim));
+    let rim = with_alpha(colors.outline_strong, opacity);
+    let signal = with_alpha(accent, opacity * 0.82);
+    painter.rect_stroke(
+        rect,
+        rounding,
+        egui::Stroke::new(KANSO_VISUALS.outline_width, rim),
+    );
     painter.rect_stroke(
         rect.shrink(1.5),
-        egui::Rounding::same(7.0),
-        egui::Stroke::new(1.0, inner_sheen),
+        egui::Rounding::same(KANSO_VISUALS.corner_radius - 1.0),
+        egui::Stroke::new(KANSO_VISUALS.outline_width, inner_outline),
     );
 
     painter.line_segment(
@@ -84,7 +208,7 @@ pub fn hud_panel(
             egui::pos2(rect.left() + 12.0, rect.top() + 2.0),
             egui::pos2(rect.right() - 12.0, rect.top() + 2.0),
         ],
-        egui::Stroke::new(1.0, inner_sheen),
+        egui::Stroke::new(1.0, signal),
     );
     painter.line_segment(
         [
@@ -98,7 +222,7 @@ pub fn hud_panel(
     );
 
     let tick = rect.width().min(rect.height()).min(24.0) * 0.42;
-    let stroke = egui::Stroke::new(1.35, cool_rim);
+    let stroke = egui::Stroke::new(1.25, signal);
     let l = rect.left() + 5.0;
     let r = rect.right() - 5.0;
     let t = rect.top() + 5.0;
@@ -125,52 +249,33 @@ pub fn icon_action(
     let width = (label.chars().count() as f32 * 8.0 + 42.0).clamp(82.0, 170.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
     let hovered = response.hovered();
-    let glow = ui
-        .ctx()
-        .animate_bool(response.id.with("zen_hover"), hovered || selected);
-    let paint_rect = rect.translate(egui::vec2(0.0, -glow));
-    let fill = if selected {
-        colors.accent
-    } else if hovered {
-        colors.surface_strong
-    } else {
-        colors.surface
-    };
-    let text = if selected {
-        theme.text_on(fill)
-    } else {
-        colors.text
-    };
-    let stroke = if selected || hovered {
-        colors.accent
-    } else {
-        colors.stroke.linear_multiply(0.62)
-    };
-    let painter = ui.painter_at(rect.expand(4.0));
-    if glow > 0.01 {
-        painter.rect_stroke(
-            paint_rect.expand(1.0 + glow * 2.0),
-            egui::Rounding::same(7.0),
-            egui::Stroke::new(1.0 + glow * 0.6, with_alpha(colors.accent, glow * 0.28)),
-        );
-    }
-    painter.rect_filled(paint_rect, egui::Rounding::same(7.0), fill);
-    painter.rect_stroke(
-        paint_rect,
-        egui::Rounding::same(7.0),
-        egui::Stroke::new(1.0, stroke),
+    let focused = response.has_focus();
+    let focus_amount = animate_bool_finite(
+        ui.ctx(),
+        response.id.with("kanso_action_focus"),
+        hovered || focused,
+        MotionRole::Feedback,
     );
-    let icon_rect = egui::Rect::from_min_size(
-        paint_rect.min + egui::vec2(10.0, 8.0),
+    let paint_rect = rect.translate(egui::vec2(0.0, -focus_amount * KANSO_VISUALS.hover_lift));
+    let state = InteractionState {
+        selected,
+        hovered,
+        focused,
+    };
+    let visuals = control_visuals(theme, state);
+    let painter = ui.painter_at(rect.expand(KANSO_VISUALS.focus_gap + 4.0));
+    paint_control_shell(&painter, paint_rect, colors, visuals, focus_amount, focused);
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(paint_rect.left() + 20.0, paint_rect.center().y),
         egui::vec2(20.0, 20.0),
     );
-    paint_icon(&painter, icon_rect, icon, text);
+    paint_icon(&painter, icon_rect, icon, visuals.icon);
     painter.text(
         egui::pos2(paint_rect.left() + 38.0, paint_rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(12.0),
-        text,
+        visuals.text,
     );
     response.on_hover_text(format!("{label} - {}", icon.tooltip_de()))
 }
@@ -236,8 +341,11 @@ pub fn status_chip(ui: &mut egui::Ui, icon: Icon, label: &str, value: &str, them
     let colors = theme.semantic();
     egui::Frame::none()
         .fill(colors.surface)
-        .stroke(egui::Stroke::new(1.0, colors.stroke.linear_multiply(0.68)))
-        .rounding(egui::Rounding::same(6.0))
+        .stroke(egui::Stroke::new(
+            KANSO_VISUALS.outline_width,
+            colors.outline,
+        ))
+        .rounding(egui::Rounding::same(KANSO_VISUALS.corner_radius))
         .inner_margin(egui::Margin::symmetric(8.0, 5.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -265,57 +373,40 @@ pub fn tab_chip(
     let colors = theme.semantic();
     let width = (label.chars().count() as f32 * 8.5 + 44.0).clamp(96.0, 150.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
-    let glow = ui.ctx().animate_bool(
-        response.id.with("zen_chip_hover"),
-        response.hovered() || selected,
+    let hovered = response.hovered();
+    let focused = response.has_focus();
+    let focus_amount = animate_bool_finite(
+        ui.ctx(),
+        response.id.with("kanso_tab_focus"),
+        hovered || focused,
+        MotionRole::Feedback,
     );
-    let paint_rect = rect.translate(egui::vec2(0.0, -glow * 0.8));
-    let fill = if selected {
-        colors.accent
-    } else if response.hovered() {
-        colors.surface_strong
-    } else {
-        colors.surface
-    };
-    let text = if selected {
-        theme.text_on(fill)
-    } else {
-        colors.text
-    };
-    let stroke = if selected || response.hovered() {
-        colors.accent
-    } else {
-        colors.stroke.linear_multiply(0.55)
-    };
-    let painter = ui.painter_at(rect.expand(4.0));
-    if glow > 0.01 {
-        painter.rect_stroke(
-            paint_rect.expand(1.0 + glow * 2.0),
-            egui::Rounding::same(7.0),
-            egui::Stroke::new(1.0, with_alpha(colors.accent, glow * 0.24)),
-        );
-    }
-    painter.rect_filled(paint_rect, egui::Rounding::same(7.0), fill);
-    painter.rect_stroke(
-        paint_rect,
-        egui::Rounding::same(7.0),
-        egui::Stroke::new(1.0, stroke),
+    let paint_rect = rect.translate(egui::vec2(0.0, -focus_amount * KANSO_VISUALS.hover_lift));
+    let visuals = control_visuals(
+        theme,
+        InteractionState {
+            selected,
+            hovered,
+            focused,
+        },
     );
+    let painter = ui.painter_at(rect.expand(KANSO_VISUALS.focus_gap + 4.0));
+    paint_control_shell(&painter, paint_rect, colors, visuals, focus_amount, focused);
     paint_icon(
         &painter,
-        egui::Rect::from_min_size(
-            paint_rect.min + egui::vec2(9.0, 8.0),
+        egui::Rect::from_center_size(
+            egui::pos2(paint_rect.left() + 18.0, paint_rect.center().y),
             egui::vec2(18.0, 18.0),
         ),
         icon,
-        text,
+        visuals.icon,
     );
     painter.text(
         egui::pos2(paint_rect.left() + 35.0, paint_rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(11.5),
-        text,
+        visuals.text,
     );
     response.on_hover_text(label)
 }
@@ -329,33 +420,25 @@ pub fn icon_square(
 ) -> egui::Response {
     let colors = theme.semantic();
     let (rect, response) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::click());
-    let fill = if selected {
-        colors.accent
-    } else if response.hovered() {
-        colors.surface_strong
-    } else {
-        colors.surface
-    };
-    let icon_color = if selected {
-        theme.text_on(fill)
-    } else {
-        colors.accent
-    };
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, egui::Rounding::same(7.0), fill);
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(7.0),
-        egui::Stroke::new(
-            1.0,
-            if selected || response.hovered() {
-                colors.accent
-            } else {
-                colors.stroke.linear_multiply(0.55)
-            },
-        ),
+    let hovered = response.hovered();
+    let focused = response.has_focus();
+    let focus_amount = animate_bool_finite(
+        ui.ctx(),
+        response.id.with("kanso_square_focus"),
+        hovered || focused,
+        MotionRole::Feedback,
     );
-    paint_icon(&painter, rect.shrink(8.0), icon, icon_color);
+    let visuals = control_visuals(
+        theme,
+        InteractionState {
+            selected,
+            hovered,
+            focused,
+        },
+    );
+    let painter = ui.painter_at(rect.expand(KANSO_VISUALS.focus_gap + 3.0));
+    paint_control_shell(&painter, rect, colors, visuals, focus_amount, focused);
+    paint_icon(&painter, rect.shrink(8.0), icon, visuals.icon);
     response.on_hover_text(tooltip)
 }
 
@@ -371,12 +454,24 @@ pub fn search_box(
             .hint_text(hint)
             .desired_width(f32::INFINITY),
     );
-    let rect = response.rect.expand(2.0);
-    ui.painter().rect_stroke(
-        rect,
-        egui::Rounding::same(6.0),
-        egui::Stroke::new(1.0, colors.stroke.linear_multiply(0.55)),
+    let hovered = response.hovered();
+    let focused = response.has_focus();
+    let focus_amount = animate_bool_finite(
+        ui.ctx(),
+        response.id.with("kanso_search_focus"),
+        hovered || focused,
+        MotionRole::Feedback,
     );
+    let visuals = control_visuals(
+        theme,
+        InteractionState {
+            selected: false,
+            hovered,
+            focused,
+        },
+    );
+    let rect = response.rect.expand(1.0);
+    paint_control_outline(ui.painter(), rect, colors, visuals, focus_amount, focused);
     response
 }
 
@@ -389,8 +484,8 @@ pub fn danger_action(
     let colors = theme.semantic();
     let resp = icon_action(ui, icon, label, false, theme);
     ui.painter().rect_stroke(
-        resp.rect,
-        egui::Rounding::same(7.0),
+        resp.rect.shrink(1.5),
+        egui::Rounding::same(KANSO_VISUALS.corner_radius - 1.0),
         egui::Stroke::new(1.2, colors.danger),
     );
     resp
@@ -400,8 +495,7 @@ pub fn compact_separator(ui: &mut egui::Ui, theme: ThemeSettings) {
     let colors = theme.semantic();
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(rect, 0.0, colors.stroke.linear_multiply(0.55));
+    ui.painter().rect_filled(rect, 0.0, colors.outline);
 }
 
 pub fn advanced_section(
@@ -437,54 +531,44 @@ fn card_response(
     let colors = theme.semantic();
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let hovered = response.hovered();
-    let glow = ui
-        .ctx()
-        .animate_bool(response.id.with("zen_card_hover"), hovered || selected);
-    let paint_rect = rect.translate(egui::vec2(0.0, -glow * 1.5));
-    let fill = if selected {
-        colors.selected
-    } else if hovered {
-        colors.surface_strong
-    } else {
-        colors.surface
-    };
-    let stroke = if selected || hovered {
-        colors.accent
-    } else {
-        colors.stroke.linear_multiply(0.62)
-    };
-    let painter = ui.painter_at(rect.expand(8.0));
-    if glow > 0.01 {
-        painter.rect_stroke(
-            paint_rect.expand(2.0 + glow * 4.0),
-            egui::Rounding::same(8.0),
-            egui::Stroke::new(1.0 + glow * 0.8, with_alpha(colors.accent, glow * 0.26)),
-        );
+    let focused = response.has_focus();
+    let focus_amount = animate_bool_finite(
+        ui.ctx(),
+        response.id.with("kanso_card_focus"),
+        hovered || focused,
+        MotionRole::State,
+    );
+    let paint_rect = rect.translate(egui::vec2(0.0, -focus_amount * KANSO_VISUALS.hover_lift));
+    let visuals = control_visuals(
+        theme,
+        InteractionState {
+            selected,
+            hovered,
+            focused,
+        },
+    );
+    let painter = ui.painter_at(rect.expand(KANSO_VISUALS.focus_gap + 5.0));
+    paint_control_shell(&painter, paint_rect, colors, visuals, focus_amount, focused);
+    if selected || hovered || focused {
         painter.line_segment(
             [
                 egui::pos2(paint_rect.left() + 14.0, paint_rect.top() + 2.0),
                 egui::pos2(paint_rect.right() - 14.0, paint_rect.top() + 2.0),
             ],
-            egui::Stroke::new(1.0, with_alpha(colors.info, glow * 0.30)),
+            egui::Stroke::new(1.0, if focused { colors.focus } else { colors.accent }),
         );
     }
-    painter.rect_filled(paint_rect, egui::Rounding::same(8.0), fill);
-    painter.rect_stroke(
-        paint_rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.0, stroke),
-    );
     let icon_rect = egui::Rect::from_min_size(
-        paint_rect.min + egui::vec2(12.0, 14.0 - glow * 1.5),
+        paint_rect.min + egui::vec2(12.0, 14.0),
         egui::vec2(26.0, 26.0),
     );
-    paint_icon(&painter, icon_rect, icon, colors.accent);
+    paint_icon(&painter, icon_rect, icon, visuals.icon);
     painter.text(
         egui::pos2(paint_rect.left() + 48.0, paint_rect.top() + 18.0),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(13.0),
-        colors.text,
+        visuals.text,
     );
     painter.text(
         egui::pos2(paint_rect.left() + 48.0, paint_rect.top() + 42.0),
@@ -494,4 +578,71 @@ fn card_response(
         colors.text_muted,
     );
     response.on_hover_text(detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alpha_conversion_clamps_and_rounds() {
+        assert_eq!(alpha_u8(-1.0), 0);
+        assert_eq!(alpha_u8(f32::NAN), 0);
+        assert_eq!(alpha_u8(0.0), 0);
+        assert_eq!(alpha_u8(0.5), 128);
+        assert_eq!(alpha_u8(1.0), 255);
+        assert_eq!(alpha_u8(2.0), 255);
+    }
+
+    #[test]
+    fn interaction_tokens_have_stable_precedence() {
+        let theme = ThemeSettings::default();
+        let colors = theme.semantic();
+        let resting = control_visuals(
+            theme,
+            InteractionState {
+                selected: false,
+                hovered: false,
+                focused: false,
+            },
+        );
+        assert_eq!(resting.fill, colors.surface);
+        assert_eq!(resting.outline, colors.outline);
+        assert_eq!(resting.outline_width, KANSO_VISUALS.outline_width);
+
+        let hovered = control_visuals(
+            theme,
+            InteractionState {
+                selected: false,
+                hovered: true,
+                focused: false,
+            },
+        );
+        assert_eq!(hovered.fill, colors.surface_strong);
+        assert_eq!(hovered.outline, colors.accent);
+
+        let selected = control_visuals(
+            theme,
+            InteractionState {
+                selected: true,
+                hovered: false,
+                focused: false,
+            },
+        );
+        assert_eq!(selected.fill, colors.selected);
+        assert_eq!(selected.text, theme.text_on(colors.selected));
+
+        let focused_selected = control_visuals(
+            theme,
+            InteractionState {
+                selected: true,
+                hovered: true,
+                focused: true,
+            },
+        );
+        assert_eq!(focused_selected.fill, colors.selected);
+        assert_eq!(focused_selected.outline, colors.focus);
+        assert_eq!(focused_selected.icon, colors.focus);
+        assert_eq!(focused_selected.outline_width, KANSO_VISUALS.focus_width);
+    }
 }

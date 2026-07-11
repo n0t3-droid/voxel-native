@@ -242,6 +242,18 @@ fn advance_time(
     }
 }
 
+/// Unit direction from the world origin toward the visible sun.
+///
+/// Keep every solar consumer on this function: the directional light,
+/// the reachable Helios body, atmosphere effects, and future orbital UI.
+/// A single source of truth prevents the old failure where the bright sky
+/// object and the shadows moved on different trajectories.
+pub(crate) fn sun_direction_for_time(time_of_day: f32) -> Vec3 {
+    let t =
+        (time_of_day.rem_euclid(24.0) / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+    Vec3::new(t.cos(), t.sin(), 0.3).normalize()
+}
+
 fn update_sun(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
@@ -254,9 +266,7 @@ fn update_sun(
         return;
     };
 
-    // hour in radians, noon = π/2
-    let t = (settings.time_of_day / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-    let sun_dir = Vec3::new(t.cos(), t.sin(), 0.3).normalize();
+    let sun_dir = sun_direction_for_time(settings.time_of_day);
 
     // Directional lights in Bevy shine along their -Z. Orient so -Z == -sun_dir.
     let forward = -sun_dir;
@@ -429,5 +439,20 @@ mod tests {
             luminance >= 0.24,
             "evening sky should not collapse to an overly dark horizon"
         );
+    }
+
+    #[test]
+    fn shared_sun_direction_is_normalized_and_wraps_at_midnight() {
+        let before = sun_direction_for_time(0.0);
+        let after = sun_direction_for_time(24.0);
+
+        assert!((before.length() - 1.0).abs() < 1.0e-5);
+        assert!(before.distance(after) < 1.0e-5);
+    }
+
+    #[test]
+    fn shared_sun_direction_places_noon_above_the_horizon() {
+        assert!(sun_direction_for_time(12.0).y > 0.9);
+        assert!(sun_direction_for_time(0.0).y < -0.9);
     }
 }

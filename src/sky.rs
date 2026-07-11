@@ -1,5 +1,6 @@
-//! Celestial sky pass — visible animated sun & moon disc, ~2400 procedural
-//! stars, HDR + ACES tonemapping + bloom.
+//! Background sky pass with a graphics-tier-scaled procedural star field.
+//! Reachable sun, moon and planets are rendered by `celestial.rs`; the
+//! legacy showcase bodies in this module are disabled by default.
 //!
 //! ## Why a separate pass?
 //!
@@ -19,9 +20,9 @@
 //!    clear color (`ClearColorConfig::None`), so the sky pass shows
 //!    through wherever the world doesn't draw. Its fog is unchanged.
 //!
-//! Both cameras run HDR + ACES tonemapping; the sky camera additionally
-//! has [`BloomSettings`] so the emissive sun disc actually *glares*.
-//! Stars use a single procedural mesh (~2400 tiny tris on a sphere) with
+//! Both cameras run HDR + ACES tonemapping. Balanced and High add
+//! [`BloomSettings`] to the sky camera; Fast omits that pass. Stars use
+//! a single procedural mesh with a tier-scaled count on a sphere and
 //! an unlit emissive material whose intensity is animated by the
 //! day-factor each frame — one draw call for the whole night sky.
 
@@ -39,16 +40,17 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::daynight::WorldIntelRuntime;
-use crate::settings::WorldSettings;
+use crate::player::Player;
+use crate::settings::{GraphicsMode, WorldSettings};
 
 /// Render layer used exclusively by the sky pass. The world camera stays
 /// on the default layer 0 and never sees these meshes; the sky camera
 /// only sees these meshes and never sees the world.
 pub const SKY_LAYER: usize = 1;
 
-/// Distance from the camera at which the sun disc, moon disc and star
-/// shell are placed. Far enough that parallax is invisible during
-/// normal play, close enough that floating-point precision is fine.
+/// Radius of the star shell and optional legacy showcase bodies. Far
+/// enough that parallax is invisible during normal play, close enough
+/// that floating-point precision is fine.
 const SKY_DISTANCE: f32 = 950.0;
 
 pub struct SkyPlugin;
@@ -56,13 +58,9 @@ pub struct SkyPlugin;
 impl Plugin for SkyPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_sky)
-            // PostUpdate, BEFORE transform propagation. We write the
-            // sky camera's Transform from the main camera's
-            // GlobalTransform; if we ran AFTER propagation, the sky
-            // cam's own GlobalTransform would stay one frame stale and
-            // the player would see stars swing in the opposite
-            // direction of the mouse (because the sky view lagged the
-            // world view by exactly one frame).
+            // PostUpdate, BEFORE transform propagation. Both camera
+            // transforms are read/written in the same frame so the sky
+            // never trails mouse-look by one transform propagation.
             .add_systems(
                 PostUpdate,
                 follow_and_animate_sky.before(bevy::transform::TransformSystem::TransformPropagate),
@@ -106,17 +104,17 @@ struct Nebula;
 /// each frame without scanning queries.
 #[derive(Resource)]
 struct SkyMaterials {
-    sun: Handle<StandardMaterial>,
-    moon: Handle<StandardMaterial>,
-    moon_b: Handle<StandardMaterial>,
-    planet: Handle<StandardMaterial>,
-    ring: Handle<StandardMaterial>,
-    planet_b: Handle<StandardMaterial>,
+    sun: Option<Handle<StandardMaterial>>,
+    moon: Option<Handle<StandardMaterial>>,
+    moon_b: Option<Handle<StandardMaterial>>,
+    planet: Option<Handle<StandardMaterial>>,
+    ring: Option<Handle<StandardMaterial>>,
+    planet_b: Option<Handle<StandardMaterial>>,
     stars: Handle<StandardMaterial>,
-    nebula: Handle<StandardMaterial>,
+    nebula: Option<Handle<StandardMaterial>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct SkyShowcasePolicy {
     classic_sun_moon: bool,
     nebula: bool,
@@ -126,12 +124,35 @@ struct SkyShowcasePolicy {
 }
 
 fn default_sky_showcase_policy() -> SkyShowcasePolicy {
-    SkyShowcasePolicy {
-        classic_sun_moon: false,
-        nebula: false,
-        second_moon: false,
-        ringed_planet: false,
-        second_planet: false,
+    SkyShowcasePolicy::default()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SkyAssetPolicy {
+    star_count: usize,
+    bloom: bool,
+    classic_sun_moon: bool,
+    nebula_resolution: Option<u32>,
+    second_moon: bool,
+    ringed_planet: bool,
+    second_planet: bool,
+}
+
+fn sky_asset_policy(graphics: GraphicsMode, showcase: SkyShowcasePolicy) -> SkyAssetPolicy {
+    let (nebula_resolution, star_count, bloom) = match graphics {
+        GraphicsMode::Fast => (256, 1800, false),
+        GraphicsMode::Balanced => (512, 3200, true),
+        GraphicsMode::High => (1024, 5200, true),
+    };
+
+    SkyAssetPolicy {
+        star_count,
+        bloom,
+        classic_sun_moon: showcase.classic_sun_moon,
+        nebula_resolution: showcase.nebula.then_some(nebula_resolution),
+        second_moon: showcase.second_moon,
+        ringed_planet: showcase.ringed_planet,
+        second_planet: showcase.second_planet,
     }
 }
 
@@ -144,15 +165,7 @@ fn setup_sky(
 ) {
     let sky_layer = RenderLayers::layer(SKY_LAYER);
 
-    // Nebula resolution + star count scale with graphics tier so low-end
-    // GPUs still get the look for a fraction of the fill cost.
-    use crate::settings::GraphicsMode;
-    let (nebula_res, star_count) = match settings.graphics {
-        GraphicsMode::Fast => (256u32, 1800usize),
-        GraphicsMode::Balanced => (512, 3200),
-        GraphicsMode::High => (1024, 5200),
-    };
-    let showcase = default_sky_showcase_policy();
+    let asset_policy = sky_asset_policy(settings.graphics, default_sky_showcase_policy());
 
     // ----- Sky camera --------------------------------------------------
     // order = -1 → renders BEFORE the world camera in `player.rs` and
@@ -160,7 +173,7 @@ fn setup_sky(
     // existing daynight system already animates between sky/sunset/night
     // colours). The world camera then composites on top with
     // `ClearColorConfig::None`.
-    commands.spawn((
+    let mut sky_camera = commands.spawn((
         Camera3dBundle {
             camera: Camera {
                 order: -1,
@@ -169,8 +182,8 @@ fn setup_sky(
             },
             tonemapping: Tonemapping::AcesFitted,
             transform: Transform::IDENTITY,
-            // FOV slightly wider than typical world cam so the sky
-            // doesn't shrink when the player FOV is small.
+            // Fallback only: the player projection is mirrored in
+            // PostUpdate before this camera renders.
             projection: Projection::Perspective(PerspectiveProjection {
                 fov: 80.0f32.to_radians(),
                 near: 1.0,
@@ -179,38 +192,34 @@ fn setup_sky(
             }),
             ..default()
         },
-        // Bloom — what makes the sun read as a true light source rather
-        // than a flat circle. `OLD_SCHOOL` gives a pronounced halo,
-        // perfect for a stylised voxel sky. Threshold is non-zero in
-        // that preset, so only the high-intensity emissives (sun + the
-        // brightest stars) bloom; the gradient sky stays clean.
-        BloomSettings {
-            composite_mode: BloomCompositeMode::Additive,
-            ..BloomSettings::OLD_SCHOOL
-        },
         sky_layer.clone(),
         SkyCamera,
         Name::new("SkyCamera"),
     ));
+    if asset_policy.bloom {
+        // Fast omits the component entirely so Bevy can skip the bloom
+        // sub-pipeline. Higher tiers use it for the brightest stars.
+        sky_camera.insert(BloomSettings {
+            composite_mode: BloomCompositeMode::Additive,
+            ..BloomSettings::OLD_SCHOOL
+        });
+    }
 
-    // ----- Sun disc ----------------------------------------------------
-    // Smooth icosphere — subdivision 3 is plenty smooth at SKY_DISTANCE.
-    let sun_mesh = meshes.add(
-        Sphere::new(28.0)
-            .mesh()
-            .ico(3)
-            .expect("subdivision 3 is within ico limits"),
-    );
-    // Emissive intensities are intentionally *huge* (linear-RGB units,
-    // > 1.0). Bloom + tonemap turn this into a glaring yellow-white
-    // disc with a warm halo. Day/night system retunes this each frame.
-    let sun_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.95, 0.85),
-        emissive: LinearRgba::rgb(60.0, 50.0, 30.0),
-        unlit: true,
-        ..default()
-    });
-    if showcase.classic_sun_moon {
+    let (sun_mat, moon_mat) = if asset_policy.classic_sun_moon {
+        // Legacy sky discs remain available for showcase builds, but the
+        // default uses the reachable bodies owned by `celestial.rs`.
+        let sun_mesh = meshes.add(
+            Sphere::new(28.0)
+                .mesh()
+                .ico(3)
+                .expect("subdivision 3 is within ico limits"),
+        );
+        let sun_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.95, 0.85),
+            emissive: LinearRgba::rgb(60.0, 50.0, 30.0),
+            unlit: true,
+            ..default()
+        });
         commands.spawn((
             PbrBundle {
                 mesh: sun_mesh,
@@ -222,22 +231,19 @@ fn setup_sky(
             SunDisc,
             Name::new("SunDisc"),
         ));
-    }
 
-    // ----- Moon disc ---------------------------------------------------
-    let moon_mesh = meshes.add(
-        Sphere::new(20.0)
-            .mesh()
-            .ico(3)
-            .expect("subdivision 3 is within ico limits"),
-    );
-    let moon_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.92, 0.94, 1.0),
-        emissive: LinearRgba::rgb(6.0, 7.0, 11.0),
-        unlit: true,
-        ..default()
-    });
-    if showcase.classic_sun_moon {
+        let moon_mesh = meshes.add(
+            Sphere::new(20.0)
+                .mesh()
+                .ico(3)
+                .expect("subdivision 3 is within ico limits"),
+        );
+        let moon_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.92, 0.94, 1.0),
+            emissive: LinearRgba::rgb(6.0, 7.0, 11.0),
+            unlit: true,
+            ..default()
+        });
         commands.spawn((
             PbrBundle {
                 mesh: moon_mesh,
@@ -249,7 +255,10 @@ fn setup_sky(
             MoonDisc,
             Name::new("MoonDisc"),
         ));
-    }
+        (Some(sun_mat), Some(moon_mat))
+    } else {
+        (None, None)
+    };
 
     // ----- Star field --------------------------------------------------
     // Dense, colour-varied star shell. Count scales with graphics tier.
@@ -258,7 +267,7 @@ fn setup_sky(
     // red giants. The bloom pass on the sky cam turns the brightest
     // ones into genuine twinkling haloes.
     let stars_mesh = meshes.add(build_star_mesh(
-        star_count,
+        asset_policy.star_count,
         0xC0FFEE_u64,
         SKY_DISTANCE * 0.95,
     ));
@@ -289,38 +298,25 @@ fn setup_sky(
         Name::new("StarField"),
     ));
 
-    // ----- Nebula backdrop --------------------------------------------
-    // Huge inside-facing sphere painted with a procedural nebula image.
-    // Multi-channel Perlin produces billowing magenta/cyan/orange clouds
-    // exactly like the reference art. Cull front-face so we only see it
-    // from the inside, and keep it fully unlit/emissive.
-    let nebula_image = images.add(build_nebula_image(nebula_res, settings.seed as u64));
-    let nebula_mesh = meshes.add(
-        Sphere::new(SKY_DISTANCE * 2.6)
-            .mesh()
-            .ico(4)
-            .expect("subdivision 4 is within ico limits"),
-    );
-    let nebula_mat = materials.add(StandardMaterial {
-        // ADDITIVE blend so the nebula lays its colored clouds on top
-        // of the daynight-driven ClearColor instead of replacing it.
-        // Without this the inside-facing sphere completely wraps the
-        // camera and paints over the sky gradient → black sky at noon.
-        base_color: Color::srgba(1.0, 1.0, 1.0, 1.0),
-        base_color_texture: Some(nebula_image.clone()),
-        emissive_texture: Some(nebula_image),
-        // Strong emissive — with AlphaMode::Add the final on-screen
-        // colour is sky_clear + nebula_texture*emissive, so we want
-        // a punchy value. Day/night loop animates this per-frame.
-        emissive: LinearRgba::rgb(2.0, 1.6, 2.6),
-        unlit: true,
-        alpha_mode: AlphaMode::Add,
-        // Render from inside the sphere — show back faces.
-        cull_mode: Some(bevy::render::render_resource::Face::Front),
-        double_sided: true,
-        ..default()
-    });
-    if showcase.nebula {
+    let nebula_mat = if let Some(nebula_resolution) = asset_policy.nebula_resolution {
+        let nebula_image = images.add(build_nebula_image(nebula_resolution, settings.seed as u64));
+        let nebula_mesh = meshes.add(
+            Sphere::new(SKY_DISTANCE * 2.6)
+                .mesh()
+                .ico(4)
+                .expect("subdivision 4 is within ico limits"),
+        );
+        let nebula_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 1.0, 1.0, 1.0),
+            base_color_texture: Some(nebula_image.clone()),
+            emissive_texture: Some(nebula_image),
+            emissive: LinearRgba::rgb(2.0, 1.6, 2.6),
+            unlit: true,
+            alpha_mode: AlphaMode::Add,
+            cull_mode: Some(bevy::render::render_resource::Face::Front),
+            double_sided: true,
+            ..default()
+        });
         commands.spawn((
             PbrBundle {
                 mesh: nebula_mesh,
@@ -333,24 +329,27 @@ fn setup_sky(
             Nebula,
             Name::new("Nebula"),
         ));
-    }
+        Some(nebula_mat)
+    } else {
+        None
+    };
 
     // ----- Second (smaller) moon --------------------------------------
     // Slightly offset from the main moon to create the paired-crescent
     // look in the reference art.
-    let moon_b_mesh = meshes.add(
-        Sphere::new(13.0)
-            .mesh()
-            .ico(3)
-            .expect("subdivision 3 is within ico limits"),
-    );
-    let moon_b_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.88, 0.80, 0.95),
-        emissive: LinearRgba::rgb(4.0, 3.0, 8.0),
-        unlit: true,
-        ..default()
-    });
-    if showcase.second_moon {
+    let moon_b_mat = if asset_policy.second_moon {
+        let moon_b_mesh = meshes.add(
+            Sphere::new(13.0)
+                .mesh()
+                .ico(3)
+                .expect("subdivision 3 is within ico limits"),
+        );
+        let moon_b_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.88, 0.80, 0.95),
+            emissive: LinearRgba::rgb(4.0, 3.0, 8.0),
+            unlit: true,
+            ..default()
+        });
         commands.spawn((
             PbrBundle {
                 mesh: moon_b_mesh,
@@ -362,42 +361,35 @@ fn setup_sky(
             MoonDiscB,
             Name::new("MoonDiscB"),
         ));
-    }
+        Some(moon_b_mat)
+    } else {
+        None
+    };
 
-    // ----- Ringed gas-giant planet ------------------------------------
-    // Parked in a fixed sky direction; doesn't track the sun. Serves as
-    // a dramatic backdrop feature like in reference image 2.
-    let planet_mesh = meshes.add(
-        Sphere::new(78.0)
-            .mesh()
-            .ico(4)
-            .expect("subdivision 4 is within ico limits"),
-    );
-    let planet_mat = materials.add(StandardMaterial {
-        // Vibrant magenta–amber gas giant (matches the purple/teal ringed
-        // giant in the reference art). Very high emissive so it glows
-        // like a light source in its own right, not just reflects the sun.
-        base_color: Color::srgb(0.95, 0.55, 1.0),
-        emissive: LinearRgba::rgb(6.0, 2.2, 8.5),
-        unlit: true,
-        ..default()
-    });
-    // Ring: wide rainbow annulus with strong saturation and per-band
-    // colour variation (painted via vertex colours in build_ring_mesh).
-    let ring_mesh = meshes.add(build_ring_mesh(160.0, 270.0, 160));
-    let ring_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.9, 0.8, 1.0),
-        emissive: LinearRgba::rgb(5.5, 4.5, 6.5),
-        unlit: true,
-        cull_mode: None,
-        alpha_mode: AlphaMode::Blend,
-        ..default()
-    });
-    // Fixed sky direction: upper-right, high enough to dominate the
-    // horizon without blocking gameplay sight-lines.
-    let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-    let planet_pos = planet_dir * SKY_DISTANCE * 0.9;
-    if showcase.ringed_planet {
+    let (planet_mat, ring_mat) = if asset_policy.ringed_planet {
+        let planet_mesh = meshes.add(
+            Sphere::new(78.0)
+                .mesh()
+                .ico(4)
+                .expect("subdivision 4 is within ico limits"),
+        );
+        let planet_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.95, 0.55, 1.0),
+            emissive: LinearRgba::rgb(6.0, 2.2, 8.5),
+            unlit: true,
+            ..default()
+        });
+        let ring_mesh = meshes.add(build_ring_mesh(160.0, 270.0, 160));
+        let ring_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.9, 0.8, 1.0),
+            emissive: LinearRgba::rgb(5.5, 4.5, 6.5),
+            unlit: true,
+            cull_mode: None,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        });
+        let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
+        let planet_pos = planet_dir * SKY_DISTANCE * 0.9;
         commands
             .spawn((
                 PbrBundle {
@@ -429,25 +421,28 @@ fn setup_sky(
                     Name::new("RingedPlanet.Ring"),
                 ));
             });
-    }
+        (Some(planet_mat), Some(ring_mat))
+    } else {
+        (None, None)
+    };
 
     // ----- Second planet (ice-teal gas giant) -------------------------
     // Parked low on the opposite horizon. Smaller, cooler-coloured,
     // no rings — complements the main giant for a "binary system" feel.
-    let planet_b_mesh = meshes.add(
-        Sphere::new(72.0)
-            .mesh()
-            .ico(4)
-            .expect("subdivision 4 is within ico limits"),
-    );
-    let planet_b_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.45, 0.85, 1.0),
-        emissive: LinearRgba::rgb(2.5, 5.5, 7.5),
-        unlit: true,
-        ..default()
-    });
-    let planet_b_dir = Vec3::new(-0.72, 0.28, 0.55).normalize();
-    if showcase.second_planet {
+    let planet_b_mat = if asset_policy.second_planet {
+        let planet_b_mesh = meshes.add(
+            Sphere::new(72.0)
+                .mesh()
+                .ico(4)
+                .expect("subdivision 4 is within ico limits"),
+        );
+        let planet_b_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.45, 0.85, 1.0),
+            emissive: LinearRgba::rgb(2.5, 5.5, 7.5),
+            unlit: true,
+            ..default()
+        });
+        let planet_b_dir = Vec3::new(-0.72, 0.28, 0.55).normalize();
         commands.spawn((
             PbrBundle {
                 mesh: planet_b_mesh,
@@ -461,7 +456,10 @@ fn setup_sky(
             PlanetB,
             Name::new("PlanetB"),
         ));
-    }
+        Some(planet_b_mat)
+    } else {
+        None
+    };
 
     commands.insert_resource(SkyMaterials {
         sun: sun_mat,
@@ -475,15 +473,14 @@ fn setup_sky(
     });
 }
 
-/// Glue the sky camera to the player camera, place sun/moon on the
-/// celestial sphere using the same time-of-day formula as `daynight.rs`,
-/// rotate the star shell, and re-tint the emissives by day-factor.
+/// Mirror the player camera, rotate the star shell, and update the
+/// optional legacy showcase entities and emissives by day factor.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn follow_and_animate_sky(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
-    main_cam: Query<&GlobalTransform, (With<Camera3d>, Without<SkyCamera>)>,
-    mut sky_cam: Query<&mut Transform, With<SkyCamera>>,
+    main_cam: Query<(&Transform, &Projection), (With<Camera3d>, With<Player>)>,
+    mut sky_cam: Query<(&mut Transform, &mut Projection), (With<SkyCamera>, Without<Player>)>,
     mut sun_q: Query<
         &mut Transform,
         (
@@ -578,23 +575,21 @@ fn follow_and_animate_sky(
     sky_mats: Option<Res<SkyMaterials>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let Ok(main_tf) = main_cam.get_single() else {
+    let Ok((main_tf, main_projection)) = main_cam.get_single() else {
         return;
     };
-    let Ok(mut sky_tf) = sky_cam.get_single_mut() else {
+    let Ok((mut sky_tf, mut sky_projection)) = sky_cam.get_single_mut() else {
         return;
     };
 
-    // Mirror player camera transform exactly so screen-space alignment
-    // is identical and the sky moves correctly with mouse-look.
-    let (_, rot, trans) = main_tf.to_scale_rotation_translation();
-    sky_tf.translation = trans;
-    sky_tf.rotation = rot;
+    mirror_sky_camera(main_tf, main_projection, &mut sky_tf, &mut sky_projection);
+    let trans = main_tf.translation;
 
     // Same celestial-angle math as daynight.rs::update_sun. Keep these
     // formulas in sync; they share the same `time_of_day` resource.
-    let t = (settings.time_of_day / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-    let sun_dir = Vec3::new(t.cos(), t.sin(), 0.3).normalize();
+    let t = (settings.time_of_day.rem_euclid(24.0) / 24.0) * std::f32::consts::TAU
+        - std::f32::consts::FRAC_PI_2;
+    let sun_dir = crate::daynight::sun_direction_for_time(settings.time_of_day);
 
     if let Ok(mut sun_tf) = sun_q.get_single_mut() {
         sun_tf.translation = trans + sun_dir * SKY_DISTANCE;
@@ -639,25 +634,31 @@ fn follow_and_animate_sky(
 
     if let Some(sky_mats) = sky_mats {
         // Sun: warm white at noon → fiery red-orange at sunset.
-        if let Some(mat) = materials.get_mut(&sky_mats.sun) {
-            let noon = Vec3::new(60.0, 50.0, 30.0);
-            let dusk = Vec3::new(80.0, 22.0, 8.0);
-            let e = noon.lerp(dusk, sunset);
-            mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+        if let Some(handle) = &sky_mats.sun {
+            if let Some(mat) = materials.get_mut(handle) {
+                let noon = Vec3::new(60.0, 50.0, 30.0);
+                let dusk = Vec3::new(80.0, 22.0, 8.0);
+                let e = noon.lerp(dusk, sunset);
+                mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+            }
         }
 
         // Moon: cool blue, brightens slightly at night for a clearer disc.
-        if let Some(mat) = materials.get_mut(&sky_mats.moon) {
-            let base = Vec3::new(6.0, 7.0, 11.0);
-            let scaled = base * (0.6 + 0.6 * night);
-            mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
+        if let Some(handle) = &sky_mats.moon {
+            if let Some(mat) = materials.get_mut(handle) {
+                let base = Vec3::new(6.0, 7.0, 11.0);
+                let scaled = base * (0.6 + 0.6 * night);
+                mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
+            }
         }
 
         // Second moon — cool violet, slightly dimmer.
-        if let Some(mat) = materials.get_mut(&sky_mats.moon_b) {
-            let base = Vec3::new(4.0, 3.0, 8.0);
-            let scaled = base * (0.55 + 0.55 * night);
-            mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
+        if let Some(handle) = &sky_mats.moon_b {
+            if let Some(mat) = materials.get_mut(handle) {
+                let base = Vec3::new(4.0, 3.0, 8.0);
+                let scaled = base * (0.55 + 0.55 * night);
+                mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
+            }
         }
 
         // Ringed planet & rings — brightly emissive at all times so the
@@ -665,20 +666,26 @@ fn follow_and_animate_sky(
         // just like in the reference art. Slight extra glow at
         // night/sunset for the cinematic payoff.
         let planet_scale = 1.8 + 0.8 * night + sunset * 0.5;
-        if let Some(mat) = materials.get_mut(&sky_mats.planet) {
-            let base = Vec3::new(8.0, 3.0, 11.0);
-            let s = base * planet_scale;
-            mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
+        if let Some(handle) = &sky_mats.planet {
+            if let Some(mat) = materials.get_mut(handle) {
+                let base = Vec3::new(8.0, 3.0, 11.0);
+                let s = base * planet_scale;
+                mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
+            }
         }
-        if let Some(mat) = materials.get_mut(&sky_mats.ring) {
-            let base = Vec3::new(7.0, 6.0, 8.5);
-            let s = base * planet_scale;
-            mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
+        if let Some(handle) = &sky_mats.ring {
+            if let Some(mat) = materials.get_mut(handle) {
+                let base = Vec3::new(7.0, 6.0, 8.5);
+                let s = base * planet_scale;
+                mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
+            }
         }
-        if let Some(mat) = materials.get_mut(&sky_mats.planet_b) {
-            let base = Vec3::new(3.5, 7.5, 10.0);
-            let s = base * planet_scale;
-            mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
+        if let Some(handle) = &sky_mats.planet_b {
+            if let Some(mat) = materials.get_mut(handle) {
+                let base = Vec3::new(3.5, 7.5, 10.0);
+                let s = base * planet_scale;
+                mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
+            }
         }
 
         // Nebula — vivid magenta/cyan/orange at all times (additive
@@ -686,13 +693,15 @@ fn follow_and_animate_sky(
         // are pushed HARD so the cosmic backdrop reads clearly even
         // against the bright blue noon sky, just like in the reference
         // art where planets and nebulae are visible in broad daylight.
-        if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
-            let base_day = Vec3::new(9.0, 5.0, 13.0); // rich purple/magenta at noon
-            let base_night = Vec3::new(8.0, 5.5, 10.0); // full nebula glow at night
-            let base_sunset = Vec3::new(12.0, 5.0, 4.5); // warm dusk glow
-            let e = (base_day * day + base_night * night + base_sunset * sunset * 0.9)
-                * intel.profile.sky_saturation.max(0.7);
-            mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+        if let Some(handle) = &sky_mats.nebula {
+            if let Some(mat) = materials.get_mut(handle) {
+                let base_day = Vec3::new(9.0, 5.0, 13.0); // rich purple/magenta at noon
+                let base_night = Vec3::new(8.0, 5.5, 10.0); // full nebula glow at night
+                let base_sunset = Vec3::new(12.0, 5.0, 4.5); // warm dusk glow
+                let e = (base_day * day + base_night * night + base_sunset * sunset * 0.9)
+                    * intel.profile.sky_saturation.max(0.7);
+                mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+            }
         }
 
         // Stars: fade in linearly with night.
@@ -700,6 +709,28 @@ fn follow_and_animate_sky(
             let intensity = 14.0 * night * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(intensity, intensity, intensity * 1.15);
         }
+    }
+}
+
+fn mirror_sky_camera(
+    main_transform: &Transform,
+    main_projection: &Projection,
+    sky_transform: &mut Transform,
+    sky_projection: &mut Projection,
+) {
+    sky_transform.translation = main_transform.translation;
+    sky_transform.rotation = main_transform.rotation;
+    sky_transform.scale = Vec3::ONE;
+
+    sync_sky_projection(main_projection, sky_projection);
+}
+
+fn sync_sky_projection(main_projection: &Projection, sky_projection: &mut Projection) {
+    if let (Projection::Perspective(main), Projection::Perspective(sky)) =
+        (main_projection, sky_projection)
+    {
+        sky.fov = main.fov;
+        sky.aspect_ratio = main.aspect_ratio;
     }
 }
 
@@ -981,7 +1012,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_sky_keeps_only_realistic_sun_moon() {
+    fn default_showcase_policy_disables_duplicate_celestials() {
         let policy = default_sky_showcase_policy();
 
         assert!(!policy.classic_sun_moon);
@@ -989,5 +1020,92 @@ mod tests {
         assert!(!policy.second_moon);
         assert!(!policy.ringed_planet);
         assert!(!policy.second_planet);
+    }
+
+    #[test]
+    fn asset_policy_skips_default_showcase_allocations() {
+        for graphics in [
+            GraphicsMode::Fast,
+            GraphicsMode::Balanced,
+            GraphicsMode::High,
+        ] {
+            let policy = sky_asset_policy(graphics, default_sky_showcase_policy());
+
+            assert!(!policy.classic_sun_moon);
+            assert_eq!(policy.nebula_resolution, None);
+            assert!(!policy.second_moon);
+            assert!(!policy.ringed_planet);
+            assert!(!policy.second_planet);
+        }
+    }
+
+    #[test]
+    fn asset_policy_scales_stars_and_gates_fast_bloom() {
+        let fast = sky_asset_policy(GraphicsMode::Fast, default_sky_showcase_policy());
+        let balanced = sky_asset_policy(GraphicsMode::Balanced, default_sky_showcase_policy());
+        let high = sky_asset_policy(GraphicsMode::High, default_sky_showcase_policy());
+
+        assert_eq!(fast.star_count, 1800);
+        assert_eq!(balanced.star_count, 3200);
+        assert_eq!(high.star_count, 5200);
+        assert!(!fast.bloom);
+        assert!(balanced.bloom);
+        assert!(high.bloom);
+    }
+
+    #[test]
+    fn sky_camera_mirrors_player_pose_in_the_same_frame() {
+        let main_transform = Transform::from_translation(Vec3::new(12.0, 42.0, -7.0))
+            .with_rotation(Quat::from_rotation_y(0.8))
+            .with_scale(Vec3::splat(2.0));
+        let main_projection = Projection::Perspective(PerspectiveProjection {
+            fov: 61.0_f32.to_radians(),
+            aspect_ratio: 21.0 / 9.0,
+            ..default()
+        });
+        let mut sky_transform = Transform::IDENTITY;
+        let mut sky_projection = Projection::Perspective(PerspectiveProjection {
+            fov: 80.0_f32.to_radians(),
+            aspect_ratio: 1.0,
+            near: 1.0,
+            far: SKY_DISTANCE * 8.0,
+        });
+
+        mirror_sky_camera(
+            &main_transform,
+            &main_projection,
+            &mut sky_transform,
+            &mut sky_projection,
+        );
+
+        assert_eq!(sky_transform.translation, main_transform.translation);
+        assert_eq!(sky_transform.rotation, main_transform.rotation);
+        assert_eq!(sky_transform.scale, Vec3::ONE);
+    }
+
+    #[test]
+    fn projection_sync_copies_fov_and_aspect_but_preserves_sky_clip_planes() {
+        let main_projection = Projection::Perspective(PerspectiveProjection {
+            fov: 61.0_f32.to_radians(),
+            aspect_ratio: 21.0 / 9.0,
+            near: 0.1,
+            far: 80_000.0,
+        });
+        let mut sky_projection = Projection::Perspective(PerspectiveProjection {
+            fov: 80.0_f32.to_radians(),
+            aspect_ratio: 1.0,
+            near: 1.0,
+            far: SKY_DISTANCE * 8.0,
+        });
+
+        sync_sky_projection(&main_projection, &mut sky_projection);
+
+        let Projection::Perspective(sky) = sky_projection else {
+            panic!("sky camera should stay perspective");
+        };
+        assert!((sky.fov - 61.0_f32.to_radians()).abs() < 1.0e-6);
+        assert!((sky.aspect_ratio - 21.0 / 9.0).abs() < 1.0e-6);
+        assert_eq!(sky.near, 1.0);
+        assert_eq!(sky.far, SKY_DISTANCE * 8.0);
     }
 }

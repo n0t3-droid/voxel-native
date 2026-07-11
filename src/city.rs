@@ -17,19 +17,20 @@
 //!   the editor or live Toolbelt city tools are active. Shows what
 //!   each mouse button / key is bound to.
 //!
-//! All mutation goes through [`VoxelWorld::edit_set_voxel`] so the
-//! existing async mesher picks changes up within a frame or two; no
-//! coupling to the builder state machine needed.
+//! All mutation goes through the [`VoxelWorld`] edit APIs so the existing
+//! async mesher picks changes up within a frame or two; road operations use
+//! one batch per component edit.
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
+use std::collections::HashMap;
 
-use crate::blocks::{voxel_is_solid, BlockType, Voxel, AIR};
+use crate::blocks::{voxel_is_solid, BlockType, Voxel, AIR, DEFAULT_MATERIAL};
 use crate::director::UnifiedTelemetry;
 use crate::editor::{EditorState, EditorTab};
 use crate::player::Player;
-use crate::world::VoxelWorld;
+use crate::world::{VoxelWorld, WorldEditBatch};
 
 // ---------------------------------------------------------------------
 // Public types
@@ -809,8 +810,9 @@ fn city_input(
     mut bots: Option<ResMut<crate::bots::FriendlyWorldBrain>>,
     mut telemetry: ResMut<UnifiedTelemetry>,
     mut world: ResMut<VoxelWorld>,
+    mut contexts: EguiContexts,
     windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
-    cam_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
+    cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
 ) {
     let editor_city_active = editor.open && editor.tab == EditorTab::City;
     let live_city_active = mode
@@ -821,16 +823,6 @@ fn city_input(
     if !editor_city_active && !live_city_active {
         wheel.clear();
         return;
-    }
-    if live_city_active {
-        let cursor_locked = windows
-            .get_single()
-            .map(crate::mode::cursor_is_captured)
-            .unwrap_or(false);
-        if !cursor_locked {
-            wheel.clear();
-            return;
-        }
     }
 
     // Modifier state — we use a no-mods guard so Ctrl+N etc. stay free
@@ -939,13 +931,22 @@ fn city_input(
         }
     }
 
-    // --- Crosshair pick -----------------------------------------------
-    let Ok(cam_tf) = cam_q.get_single() else {
+    // --- Pointer / crosshair pick -------------------------------------
+    let Ok((camera, cam_tf)) = cam_q.get_single() else {
         wheel.clear();
         return;
     };
-    let origin = cam_tf.translation();
-    let dir = cam_tf.forward().as_vec3();
+    let window = windows.get_single().ok();
+    let cursor_visible = window.is_some_and(|window| window.cursor.visible);
+    let pointer_over_ui = cursor_visible && {
+        let ctx = contexts.ctx_mut();
+        ctx.is_pointer_over_area() || ctx.wants_pointer_input()
+    };
+    let Some((origin, dir)) = city_placement_ray(window, camera, cam_tf) else {
+        wheel.clear();
+        city.selected_road = None;
+        return;
+    };
     let picked = raycast_voxel(&world, origin, dir, 100.0).unwrap_or_else(|| {
         let fwd = origin + dir * 12.0;
         let c = IVec3::new(
@@ -967,13 +968,16 @@ fn city_input(
         snap_cell(ground, city.snap, &city.roads)
     };
 
-    city.selected_road = if city.tool == CityTool::Road {
+    city.selected_road = if city.tool == CityTool::Road && !pointer_over_ui {
         nearest_road_component(&city.roads, snapped, 5.0)
     } else {
         None
     };
 
     let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
+    if pointer_over_ui {
+        return;
+    }
     if city.tool == CityTool::Road && wheel_delta.abs() > f32::EPSILON {
         let mut steps = wheel_delta.round() as i32;
         if steps == 0 {
@@ -2035,12 +2039,111 @@ fn road_width_axis_at(cells: &[IVec2], index: usize) -> (i32, i32) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoadRestampKind {
+    ReassignStyle,
+    RebuildGeometry,
+}
+
+fn road_restamp_kind(before: &RoadSegment, after: &RoadSegment) -> RoadRestampKind {
+    if road_geometry_matches(before, after) {
+        RoadRestampKind::ReassignStyle
+    } else {
+        RoadRestampKind::RebuildGeometry
+    }
+}
+
+fn road_geometry_matches(a: &RoadSegment, b: &RoadSegment) -> bool {
+    a.a == b.a
+        && a.b == b.b
+        && a.via == b.via
+        && a.shape == b.shape
+        && a.roundabout_radius == b.roundabout_radius
+        && a.width == b.width
+        && a.elevation_a == b.elevation_a
+        && a.elevation_via == b.elevation_via
+        && a.elevation_b == b.elevation_b
+}
+
+struct RoadEditTransaction<'a> {
+    world: &'a mut VoxelWorld,
+    batch: WorldEditBatch,
+    changed: usize,
+}
+
+impl<'a> RoadEditTransaction<'a> {
+    fn new(world: &'a mut VoxelWorld) -> Self {
+        Self {
+            world,
+            batch: WorldEditBatch::default(),
+            changed: 0,
+        }
+    }
+
+    fn set_cell(&mut self, pos: IVec3, voxel: Voxel) -> bool {
+        let changed = self
+            .world
+            .edit_set_cell_batched(
+                pos.x,
+                pos.y,
+                pos.z,
+                voxel,
+                DEFAULT_MATERIAL,
+                &mut self.batch,
+            )
+            .is_some();
+        self.changed += usize::from(changed);
+        changed
+    }
+
+    fn replace_owned_cell(
+        &mut self,
+        pos: IVec3,
+        expected: Option<Voxel>,
+        replacement: Option<Voxel>,
+    ) -> bool {
+        if expected == replacement {
+            return false;
+        }
+        self.owns_cell(pos, expected) && self.set_cell(pos, replacement.unwrap_or(AIR))
+    }
+
+    fn owns_cell(&self, pos: IVec3, expected: Option<Voxel>) -> bool {
+        let current = self.world.voxel_at(pos.x, pos.y, pos.z);
+        match expected {
+            Some(expected) => {
+                current == expected
+                    && self.world.material_at(pos.x, pos.y, pos.z) == DEFAULT_MATERIAL
+            }
+            None => current == AIR,
+        }
+    }
+
+    fn finish(self) -> usize {
+        let Self {
+            world,
+            batch,
+            changed,
+        } = self;
+        world.finish_edit_batch(batch);
+        changed
+    }
+}
+
 fn restamp_road_component(
     world: &mut VoxelWorld,
     before: &RoadSegment,
     after: &RoadSegment,
 ) -> usize {
-    clear_road_component(world, before) + stamp_road(world, after)
+    match road_restamp_kind(before, after) {
+        RoadRestampKind::ReassignStyle => reassign_road_component_style(world, before, after),
+        RoadRestampKind::RebuildGeometry => {
+            let mut transaction = RoadEditTransaction::new(world);
+            clear_road_component_in(&mut transaction, before);
+            stamp_road_in(&mut transaction, after);
+            transaction.finish()
+        }
+    }
 }
 
 fn delete_road_component(
@@ -2056,44 +2159,44 @@ fn delete_road_component(
 }
 
 /// Remove a previously stamped road component footprint before applying
-/// an edited width, texture, or height. Surface cells are restored to a
-/// biome-appropriate top block; elevated decks/supports are cleared.
+/// edited geometry. Surface cells are restored to a biome-appropriate top
+/// block; elevated decks/supports are cleared.
 fn clear_road_component(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
-    let cells = road_path_xz(seg);
-    if cells.is_empty() {
-        return 0;
+    let mut transaction = RoadEditTransaction::new(world);
+    clear_road_component_in(&mut transaction, seg);
+    transaction.finish()
+}
+
+fn clear_road_component_in(transaction: &mut RoadEditTransaction<'_>, seg: &RoadSegment) {
+    let surface_plan = road_surface_plan(transaction.world, seg);
+    let furniture_plan = road_furniture_plan(transaction.world, seg);
+    let support_plan = road_support_plan(transaction.world, seg);
+
+    for (pos, expected) in furniture_plan {
+        transaction.replace_owned_cell(pos, Some(expected), None);
     }
-    let half = (seg.width as i32) / 2;
-    let last_index = cells.len().saturating_sub(1);
-    let mut changed = 0usize;
-    for (i, c) in cells.iter().enumerate() {
-        let (perp_x, perp_z) = road_width_axis_at(&cells, i);
-        for w in -half..=half {
-            let wx = c.x + perp_x * w;
-            let wz = c.y + perp_z * w;
-            let sy = world.surface_height_at(wx, wz);
-            let deck_y = road_deck_y_at_sample(world, seg, wx, wz, i, last_index).max(1);
-            changed += clear_road_furniture_column(world, wx, deck_y, wz);
-            if deck_y <= sy {
-                let restore = terrain_surface_restore_voxel(world, wx, wz);
-                for y in deck_y..=sy {
-                    if world.edit_set_voxel(wx, y, wz, restore) {
-                        changed += 1;
-                    }
-                }
-            } else {
-                if world.edit_set_voxel(wx, deck_y, wz, AIR) {
-                    changed += 1;
-                }
-                for support_y in (sy + 1)..deck_y {
-                    if world.edit_set_voxel(wx, support_y, wz, AIR) {
-                        changed += 1;
+
+    for (pos, expected) in surface_plan {
+        let surface_y = transaction.world.surface_height_at(pos.x, pos.z);
+        if pos.y <= surface_y {
+            let restore = terrain_surface_restore_voxel(transaction.world, pos.x, pos.z);
+            if transaction.owns_cell(pos, Some(expected)) {
+                transaction.set_cell(pos, restore);
+                for y in (pos.y + 1)..=surface_y {
+                    let fill = IVec3::new(pos.x, y, pos.z);
+                    if transaction.world.voxel_at(fill.x, fill.y, fill.z) == AIR {
+                        transaction.set_cell(fill, restore);
                     }
                 }
             }
+        } else {
+            transaction.replace_owned_cell(pos, Some(expected), None);
         }
     }
-    changed
+
+    for (pos, expected) in support_plan {
+        transaction.replace_owned_cell(pos, Some(expected), None);
+    }
 }
 
 fn terrain_surface_restore_voxel(world: &VoxelWorld, x: i32, z: i32) -> Voxel {
@@ -2121,65 +2224,143 @@ fn terrain_surface_restore_voxel(world: &VoxelWorld, x: i32, z: i32) -> Voxel {
 /// Stamp a road component onto the terrain surface. Returns the number
 /// of voxels actually changed, so the UI can show a count.
 fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
+    let mut transaction = RoadEditTransaction::new(world);
+    stamp_road_in(&mut transaction, seg);
+    transaction.finish()
+}
+
+fn stamp_road_in(transaction: &mut RoadEditTransaction<'_>, seg: &RoadSegment) {
+    let surface_plan = road_surface_plan(transaction.world, seg);
+    if surface_plan.is_empty() {
+        return;
+    }
+    let support_plan = road_support_plan(transaction.world, seg);
+    let furniture_plan = road_furniture_plan(transaction.world, seg);
+
+    for pos in surface_plan.keys().copied() {
+        let surface_y = transaction.world.surface_height_at(pos.x, pos.z);
+        for clear_y in (pos.y + 1)..=(pos.y + 3) {
+            if transaction.world.is_solid(pos.x, clear_y, pos.z) {
+                transaction.set_cell(IVec3::new(pos.x, clear_y, pos.z), AIR);
+            }
+        }
+        if pos.y < surface_y {
+            for cut_y in (pos.y + 1)..=surface_y {
+                if transaction.world.is_solid(pos.x, cut_y, pos.z) {
+                    transaction.set_cell(IVec3::new(pos.x, cut_y, pos.z), AIR);
+                }
+            }
+        }
+    }
+
+    for (pos, voxel) in support_plan {
+        transaction.set_cell(pos, voxel);
+    }
+    for (pos, voxel) in surface_plan {
+        transaction.set_cell(pos, voxel);
+    }
+    for (pos, voxel) in furniture_plan {
+        transaction.set_cell(pos, voxel);
+    }
+}
+
+fn road_surface_plan(world: &VoxelWorld, seg: &RoadSegment) -> HashMap<IVec3, Voxel> {
     let cells = road_path_xz(seg);
     if cells.is_empty() {
-        return 0;
+        return HashMap::new();
     }
     let half = (seg.width as i32) / 2;
-
-    let surface: Voxel = seg.style.surface_block().into();
-    let stripe: Option<Voxel> = seg.style.stripe_block().map(|b| b.into());
-    let support: Voxel = BlockType::Basalt.into();
     let last_index = cells.len().saturating_sub(1);
-
-    let mut changed = 0usize;
+    let mut plan = HashMap::with_capacity(cells.len() * seg.width as usize);
     for (i, c) in cells.iter().enumerate() {
         let (perp_x, perp_z) = road_width_axis_at(&cells, i);
         for w in -half..=half {
             let wx = c.x + perp_x * w;
             let wz = c.y + perp_z * w;
-            let sy = world.surface_height_at(wx, wz);
             let deck_y = road_deck_y_at_sample(world, seg, wx, wz, i, last_index).max(1);
-            // Carve up to 3 blocks of air above so we don't bury the
-            // road under trees / hills that just caught the edge.
-            for clear_y in (deck_y + 1)..=(deck_y + 3) {
-                if world.is_solid(wx, clear_y, wz) && world.edit_set_voxel(wx, clear_y, wz, AIR) {
-                    changed += 1;
-                }
-            }
-            if deck_y > sy + 1 {
-                let edge_or_pier = w.abs() == half || (w == 0 && i % 5 == 0);
-                if edge_or_pier {
-                    for support_y in (sy + 1)..deck_y {
-                        if world.edit_set_voxel(wx, support_y, wz, support) {
-                            changed += 1;
-                        }
-                    }
-                }
-            } else if deck_y < sy {
-                for cut_y in (deck_y + 1)..=sy {
-                    if world.is_solid(wx, cut_y, wz) && world.edit_set_voxel(wx, cut_y, wz, AIR) {
-                        changed += 1;
-                    }
-                }
-            }
-            let lane_surface = road_lane_surface_voxel(*seg, w, half, surface);
-            if world.edit_set_voxel(wx, deck_y, wz, lane_surface) {
-                changed += 1;
-            }
-            changed += stamp_road_furniture_column(world, *seg, i, w, half, wx, deck_y, wz);
+            plan.insert(
+                IVec3::new(wx, deck_y, wz),
+                road_surface_voxel(*seg, i, w, half),
+            );
         }
-        // Centre stripe every 3 cells along the length axis.
-        if let Some(s) = stripe {
-            if i % 3 == 0 {
-                let deck_y = road_deck_y_at_sample(world, seg, c.x, c.y, i, last_index).max(1);
-                if world.edit_set_voxel(c.x, deck_y, c.y, s) {
-                    changed += 1;
+    }
+    plan
+}
+
+fn road_support_plan(world: &VoxelWorld, seg: &RoadSegment) -> HashMap<IVec3, Voxel> {
+    let cells = road_path_xz(seg);
+    let half = (seg.width as i32) / 2;
+    let last_index = cells.len().saturating_sub(1);
+    let mut plan = HashMap::new();
+    for (i, c) in cells.iter().enumerate() {
+        let (perp_x, perp_z) = road_width_axis_at(&cells, i);
+        for w in -half..=half {
+            let wx = c.x + perp_x * w;
+            let wz = c.y + perp_z * w;
+            let surface_y = world.surface_height_at(wx, wz);
+            let deck_y = road_deck_y_at_sample(world, seg, wx, wz, i, last_index).max(1);
+            let edge_or_pier = w.abs() == half || (w == 0 && i % 5 == 0);
+            if deck_y > surface_y + 1 && edge_or_pier {
+                for y in (surface_y + 1)..deck_y {
+                    plan.insert(IVec3::new(wx, y, wz), Voxel::from(BlockType::Basalt));
                 }
             }
         }
     }
-    changed
+    plan
+}
+
+fn road_furniture_plan(world: &VoxelWorld, seg: &RoadSegment) -> HashMap<IVec3, Voxel> {
+    let cells = road_path_xz(seg);
+    let half = (seg.width as i32) / 2;
+    let last_index = cells.len().saturating_sub(1);
+    let mut plan = HashMap::new();
+    for (i, c) in cells.iter().enumerate() {
+        let (perp_x, perp_z) = road_width_axis_at(&cells, i);
+        for w in -half..=half {
+            let Some(_) = road_furniture_voxel(*seg, i, w, half, 1) else {
+                continue;
+            };
+            let wx = c.x + perp_x * w;
+            let wz = c.y + perp_z * w;
+            let deck_y = road_deck_y_at_sample(world, seg, wx, wz, i, last_index).max(1);
+            for y_offset in 1..=4 {
+                if let Some(voxel) = road_furniture_voxel(*seg, i, w, half, y_offset) {
+                    plan.insert(IVec3::new(wx, deck_y + y_offset, wz), voxel);
+                }
+            }
+        }
+    }
+    plan
+}
+
+fn road_style_plan(world: &VoxelWorld, seg: &RoadSegment) -> HashMap<IVec3, Voxel> {
+    let mut plan = road_surface_plan(world, seg);
+    plan.extend(road_furniture_plan(world, seg));
+    plan
+}
+
+// Retexturing is deliberately narrower than a geometry rebuild: only cells
+// still carrying this component's old default material are reassigned.
+fn reassign_road_component_style(
+    world: &mut VoxelWorld,
+    before: &RoadSegment,
+    after: &RoadSegment,
+) -> usize {
+    let before_plan = road_style_plan(world, before);
+    let after_plan = road_style_plan(world, after);
+    let mut transaction = RoadEditTransaction::new(world);
+
+    for (&pos, &expected) in &before_plan {
+        transaction.replace_owned_cell(pos, Some(expected), after_plan.get(&pos).copied());
+    }
+    for (&pos, &replacement) in &after_plan {
+        if !before_plan.contains_key(&pos) {
+            transaction.replace_owned_cell(pos, None, Some(replacement));
+        }
+    }
+
+    transaction.finish()
 }
 
 fn road_lane_surface_voxel(seg: RoadSegment, w: i32, half: i32, surface: Voxel) -> Voxel {
@@ -2196,51 +2377,30 @@ fn road_lane_surface_voxel(seg: RoadSegment, w: i32, half: i32, surface: Voxel) 
     }
 }
 
-fn stamp_road_furniture_column(
-    world: &mut VoxelWorld,
+fn road_surface_voxel(seg: RoadSegment, index: usize, w: i32, half: i32) -> Voxel {
+    if w == 0 && index % 3 == 0 {
+        if let Some(stripe) = seg.style.stripe_block() {
+            return Voxel::from(stripe);
+        }
+    }
+    road_lane_surface_voxel(seg, w, half, Voxel::from(seg.style.surface_block()))
+}
+
+fn road_furniture_voxel(
     seg: RoadSegment,
     index: usize,
     w: i32,
     half: i32,
-    wx: i32,
-    deck_y: i32,
-    wz: i32,
-) -> usize {
+    y_offset: i32,
+) -> Option<Voxel> {
     if half < 4 || seg.style == RoadStyle::Dirt || w.abs() != half || index % 36 != 0 {
-        return 0;
+        return None;
     }
-
-    let mut changed = 0usize;
-    for y_offset in 1..=4 {
-        let voxel = if y_offset == 4 {
-            Voxel::from(BlockType::GlowSand)
-        } else {
-            Voxel::from(BlockType::ShipHullDark)
-        };
-        if world.edit_set_voxel(wx, deck_y + y_offset, wz, voxel) {
-            changed += 1;
-        }
+    match y_offset {
+        1..=3 => Some(Voxel::from(BlockType::ShipHullDark)),
+        4 => Some(Voxel::from(BlockType::GlowSand)),
+        _ => None,
     }
-    changed
-}
-
-fn clear_road_furniture_column(world: &mut VoxelWorld, wx: i32, deck_y: i32, wz: i32) -> usize {
-    let mut changed = 0usize;
-    for y in (deck_y + 1)..=(deck_y + 5) {
-        if matches!(
-            BlockType::from_voxel(world.voxel_at(wx, y, wz)),
-            BlockType::ShipHullDark
-                | BlockType::GlowSand
-                | BlockType::NeonCyan
-                | BlockType::NeonMagenta
-                | BlockType::NeonAmber
-                | BlockType::EngineCore
-        ) && world.edit_set_voxel(wx, y, wz, AIR)
-        {
-            changed += 1;
-        }
-    }
-    changed
 }
 
 fn road_deck_y_at_sample(
@@ -3159,6 +3319,26 @@ fn on_off(b: bool) -> &'static str {
 // function is ~30 lines and lives here so the city module doesn't
 // have a cyclic dependency with selection.
 
+fn city_placement_ray(
+    window: Option<&bevy::window::Window>,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+) -> Option<(Vec3, Vec3)> {
+    if let Some(window) = window {
+        if window.cursor.visible {
+            return window
+                .cursor_position()
+                .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
+                .map(|ray| (ray.origin, *ray.direction));
+        }
+    }
+
+    Some((
+        camera_transform.translation(),
+        camera_transform.forward().as_vec3(),
+    ))
+}
+
 fn raycast_voxel(
     world: &VoxelWorld,
     origin: Vec3,
@@ -3250,6 +3430,164 @@ mod tests {
         assert_eq!(neon.width, road.width);
         assert_eq!(neon.style, RoadStyle::Neon);
         assert_eq!(neon.style.surface_block(), BlockType::Limestone);
+    }
+
+    #[test]
+    fn road_restamp_classifies_style_changes_without_rebuilding_geometry() {
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 16),
+            7,
+            RoadStyle::Asphalt,
+        )
+        .with_endpoint_heights(2, 8)
+        .with_turn_height(5);
+
+        assert_eq!(
+            road_restamp_kind(&road, &road.retextured(RoadStyle::Cobble)),
+            RoadRestampKind::ReassignStyle
+        );
+        assert_eq!(
+            road_restamp_kind(&road, &road.with_width(9)),
+            RoadRestampKind::RebuildGeometry
+        );
+        assert_eq!(
+            road_restamp_kind(&road, &road.with_turn_height(6)),
+            RoadRestampKind::RebuildGeometry
+        );
+    }
+
+    #[test]
+    fn road_surface_material_helper_distinguishes_lane_stripe_and_curb() {
+        let asphalt = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 0),
+            9,
+            RoadStyle::Asphalt,
+        );
+        let dirt = asphalt.retextured(RoadStyle::Dirt);
+
+        assert_eq!(
+            road_surface_voxel(asphalt, 1, 0, 4),
+            Voxel::from(BlockType::Stone)
+        );
+        assert_eq!(
+            road_surface_voxel(asphalt, 3, 0, 4),
+            Voxel::from(BlockType::Snow),
+            "asphalt center stripes should win over the lane surface"
+        );
+        assert_eq!(
+            road_surface_voxel(asphalt, 1, 4, 4),
+            Voxel::from(BlockType::ShipHullDark)
+        );
+        assert_eq!(
+            road_surface_voxel(asphalt, 1, 3, 4),
+            Voxel::from(BlockType::Limestone)
+        );
+        assert_eq!(
+            road_surface_voxel(dirt, 3, 4, 4),
+            Voxel::from(BlockType::Dirt),
+            "dirt roads should not inherit asphalt stripes or curb materials"
+        );
+    }
+
+    #[test]
+    fn road_edit_transaction_batches_and_counts_only_real_cell_changes() {
+        let mut world = VoxelWorld::new();
+        let pos = IVec3::new(3, 180, -4);
+        let changed = {
+            let mut transaction = RoadEditTransaction::new(&mut world);
+            assert!(transaction.set_cell(pos, Voxel::from(BlockType::Stone)));
+            assert!(!transaction.set_cell(pos, Voxel::from(BlockType::Stone)));
+            transaction.finish()
+        };
+
+        assert_eq!(changed, 1);
+        assert_eq!(
+            world.voxel_at(pos.x, pos.y, pos.z),
+            Voxel::from(BlockType::Stone)
+        );
+        assert_eq!(world.material_at(pos.x, pos.y, pos.z), DEFAULT_MATERIAL);
+    }
+
+    #[test]
+    fn road_style_reassignment_preserves_foreign_and_custom_material_cells() {
+        let mut world = VoxelWorld::new();
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(24, 72, 0),
+            5,
+            RoadStyle::Asphalt,
+        );
+        let cobble = road.retextured(RoadStyle::Cobble);
+        stamp_road(&mut world, &road);
+
+        let before_plan = road_surface_plan(&world, &road);
+        let after_plan = road_surface_plan(&world, &cobble);
+        let mut candidates: Vec<IVec3> = before_plan
+            .iter()
+            .filter_map(|(pos, voxel)| {
+                (*voxel == Voxel::from(BlockType::Stone)
+                    && after_plan.get(pos) == Some(&Voxel::from(BlockType::MossStone)))
+                .then_some(*pos)
+            })
+            .collect();
+        candidates.sort_by_key(|pos| (pos.x, pos.y, pos.z));
+        assert!(candidates.len() >= 3);
+        let foreign = candidates[0];
+        let custom = candidates[1];
+        let owned = candidates[2];
+        let foreign_above = owned + IVec3::Y * 2;
+
+        world.edit_set_voxel(
+            foreign.x,
+            foreign.y,
+            foreign.z,
+            Voxel::from(BlockType::Wood),
+        );
+        world.edit_set_voxel(
+            foreign_above.x,
+            foreign_above.y,
+            foreign_above.z,
+            Voxel::from(BlockType::Wood),
+        );
+        let mut batch = WorldEditBatch::default();
+        world.edit_set_cell_batched(
+            custom.x,
+            custom.y,
+            custom.z,
+            Voxel::from(BlockType::Stone),
+            crate::blocks::CUSTOM_MATERIAL_BASE,
+            &mut batch,
+        );
+        world.finish_edit_batch(batch);
+
+        let changed = restamp_road_component(&mut world, &road, &cobble);
+
+        assert!(changed > 0);
+        assert_eq!(
+            world.voxel_at(owned.x, owned.y, owned.z),
+            Voxel::from(BlockType::MossStone)
+        );
+        assert_eq!(
+            world.voxel_at(foreign.x, foreign.y, foreign.z),
+            Voxel::from(BlockType::Wood),
+            "a style-only edit must not clear or overwrite a foreign voxel"
+        );
+        assert_eq!(
+            world.voxel_at(foreign_above.x, foreign_above.y, foreign_above.z),
+            Voxel::from(BlockType::Wood),
+            "a style-only edit must not recarve the space above the road"
+        );
+        assert_eq!(
+            world.voxel_at(custom.x, custom.y, custom.z),
+            Voxel::from(BlockType::Stone)
+        );
+        assert_eq!(
+            world.material_at(custom.x, custom.y, custom.z),
+            crate::blocks::CUSTOM_MATERIAL_BASE,
+            "explicit custom material overrides should survive component retexturing"
+        );
     }
 
     #[test]

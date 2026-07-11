@@ -4,7 +4,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
 use crate::blocks::{Voxel, AIR};
-use crate::builder::BuilderHistory;
+use crate::builder::{BuilderHistory, BuilderHistorySketchMeta};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::sculpt::state::SculptState;
 use crate::toolbelt::{ToolbeltState, ToolbeltTool};
@@ -570,6 +570,14 @@ pub fn commit_selection_voxel_move(
         return 0;
     }
 
+    let Ok(summary) = sketch_doc.move_selection(selection, delta.as_vec3(), label.to_string())
+    else {
+        return 0;
+    };
+    if summary.entity_count == 0 {
+        return 0;
+    }
+
     let mut destinations = HashMap::<IVec3, Voxel>::new();
     for (cell, voxel) in &sources {
         destinations.insert(*cell + delta, *voxel);
@@ -597,8 +605,14 @@ pub fn commit_selection_voxel_move(
     }
     world.finish_edit_batch(batch);
     let moved = sources.len();
-    history.record_external(label.to_string(), changes);
-    let _ = sketch_doc.move_selection(selection, delta.as_vec3(), label.to_string());
+    history.record_external_with_sketch_meta(
+        label.to_string(),
+        changes,
+        Some(BuilderHistorySketchMeta::SketchMove {
+            entities: selection.ordered().to_vec(),
+            delta,
+        }),
+    );
     sketch_links.translate_entities(selection.ordered().iter().copied(), delta);
     moved
 }
@@ -646,8 +660,13 @@ pub fn commit_selection_voxel_copy_array(
         }
     }
     world.finish_edit_batch(batch);
-    history.record_external(label, changes);
     link_linear_array_copies(sketch_links, selection, &copied_entities, delta, copy_count);
+    let link_snapshots = sketch_links.snapshot_entities(copied_entities.iter().copied());
+    history.record_external_with_sketch_meta(
+        label,
+        changes,
+        Some(BuilderHistorySketchMeta::SketchCreated { link_snapshots }),
+    );
     sources.len() * copy_count
 }
 
@@ -982,6 +1001,125 @@ mod tests {
     }
 
     #[test]
+    fn undo_redo_selection_voxel_move_restores_cells_links_and_document() {
+        let mut world = VoxelWorld::new();
+        let mut seed = WorldEditBatch::default();
+        let stone = BlockType::Stone as u16;
+        world.edit_set_voxel_batched(1, 2, 3, stone, &mut seed);
+        world.edit_set_voxel_batched(2, 2, 3, stone, &mut seed);
+        world.finish_edit_batch(seed);
+
+        let mut doc = SketchDocument::default();
+        let entity = doc
+            .draw_pencil_line(
+                doc.active_context(),
+                Vec3::new(1.0, 2.0, 3.0),
+                Vec3::new(3.0, 2.0, 3.0),
+            )
+            .expect("edge entity");
+        let mut links = SketchVoxelLinkIndex::default();
+        let link = SketchVoxelLink::new(entity, doc.active_context(), SketchVoxelLinkRole::Stroke);
+        links.link_cells([IVec3::new(1, 2, 3), IVec3::new(2, 2, 3)], link);
+        let mut selection = SelectionSet::default();
+        selection.select(entity);
+        let mut history = BuilderHistory::default();
+
+        let delta = IVec3::new(0, 3, 0);
+        commit_selection_voxel_move(
+            &mut world,
+            &mut history,
+            &mut doc,
+            &mut links,
+            &selection,
+            delta,
+            "Move selection",
+        );
+
+        let undo = history
+            .pop_undo_detailed(&mut world)
+            .expect("voxel undo step");
+        assert_eq!(
+            undo.apply_sketch_undo(&mut doc, &mut links).unwrap().label,
+            "Move selection"
+        );
+
+        assert_eq!(world.voxel_at(1, 2, 3), stone);
+        assert_eq!(world.voxel_at(2, 2, 3), stone);
+        assert_eq!(world.voxel_at(1, 5, 3), AIR);
+        assert_eq!(world.voxel_at(2, 5, 3), AIR);
+        assert_eq!(links.primary_cell_link(IVec3::new(1, 2, 3)), Some(link));
+        assert!(links.primary_cell_link(IVec3::new(1, 5, 3)).is_none());
+        assert!(matches!(
+            &doc.entity(entity).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::new(1.0, 2.0, 3.0) && *b == Vec3::new(3.0, 2.0, 3.0)
+        ));
+
+        let redo = history
+            .pop_redo_detailed(&mut world)
+            .expect("voxel redo step");
+        assert_eq!(
+            redo.apply_sketch_redo(&mut doc, &mut links).unwrap().label,
+            "Move selection"
+        );
+
+        assert_eq!(world.voxel_at(1, 2, 3), AIR);
+        assert_eq!(world.voxel_at(2, 2, 3), AIR);
+        assert_eq!(world.voxel_at(1, 5, 3), stone);
+        assert_eq!(world.voxel_at(2, 5, 3), stone);
+        assert_eq!(links.primary_cell_link(IVec3::new(1, 5, 3)), Some(link));
+        assert!(links.primary_cell_link(IVec3::new(1, 2, 3)).is_none());
+        assert!(matches!(
+            &doc.entity(entity).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::new(1.0, 5.0, 3.0) && *b == Vec3::new(3.0, 5.0, 3.0)
+        ));
+    }
+
+    #[test]
+    fn stale_selection_move_aborts_without_voxel_or_link_history_changes() {
+        let mut world = VoxelWorld::new();
+        let mut seed = WorldEditBatch::default();
+        let stone = BlockType::Stone as u16;
+        world.edit_set_voxel_batched(1, 2, 3, stone, &mut seed);
+        world.finish_edit_batch(seed);
+
+        let mut doc = SketchDocument::default();
+        let stale_entity = crate::sketch_model::SketchId::new_for_test(99);
+        let mut links = SketchVoxelLinkIndex::default();
+        let stale_link = SketchVoxelLink::new(
+            stale_entity,
+            doc.active_context(),
+            SketchVoxelLinkRole::Stroke,
+        );
+        links.link_cell(IVec3::new(1, 2, 3), stale_link);
+        let mut selection = SelectionSet::default();
+        selection.select(stale_entity);
+        let mut history = BuilderHistory::default();
+
+        let moved = commit_selection_voxel_move(
+            &mut world,
+            &mut history,
+            &mut doc,
+            &mut links,
+            &selection,
+            IVec3::new(0, 3, 0),
+            "Move stale selection",
+        );
+
+        assert_eq!(moved, 0);
+        assert_eq!(world.voxel_at(1, 2, 3), stone);
+        assert_eq!(world.voxel_at(1, 5, 3), AIR);
+        assert_eq!(
+            links.primary_cell_link(IVec3::new(1, 2, 3)),
+            Some(stale_link)
+        );
+        assert!(links.primary_cell_link(IVec3::new(1, 5, 3)).is_none());
+        assert_eq!(history.undo_len(), 0);
+        assert_eq!(doc.undo_count(), 0);
+    }
+
+    #[test]
     fn commit_selection_voxel_copy_array_keeps_original_and_links_copies() {
         let mut world = VoxelWorld::new();
         let mut seed = WorldEditBatch::default();
@@ -1041,5 +1179,92 @@ mod tests {
         assert!(doc.entity(first_copy.entity).is_some());
         assert!(doc.entity(second_copy.entity).is_some());
         assert_eq!(links.primary_cell_link(IVec3::new(1, 2, 3)), Some(link));
+    }
+
+    #[test]
+    fn undo_redo_selection_copy_array_restores_cells_links_and_document() {
+        let mut world = VoxelWorld::new();
+        let mut seed = WorldEditBatch::default();
+        let stone = BlockType::Stone as u16;
+        world.edit_set_voxel_batched(1, 2, 3, stone, &mut seed);
+        world.edit_set_voxel_batched(2, 2, 3, stone, &mut seed);
+        world.finish_edit_batch(seed);
+
+        let mut doc = SketchDocument::default();
+        let entity = doc
+            .draw_pencil_line(
+                doc.active_context(),
+                Vec3::new(1.0, 2.0, 3.0),
+                Vec3::new(3.0, 2.0, 3.0),
+            )
+            .expect("edge entity");
+        let mut links = SketchVoxelLinkIndex::default();
+        let link = SketchVoxelLink::new(entity, doc.active_context(), SketchVoxelLinkRole::Stroke);
+        links.link_cells([IVec3::new(1, 2, 3), IVec3::new(2, 2, 3)], link);
+        let mut selection = SelectionSet::default();
+        selection.select(entity);
+        let mut history = BuilderHistory::default();
+
+        let copied = commit_selection_voxel_copy_array(
+            &mut world,
+            &mut history,
+            &mut doc,
+            &mut links,
+            &selection,
+            IVec3::new(0, 3, 0),
+            2,
+            "Copy selection x2",
+        );
+        assert_eq!(copied, 4);
+
+        let first_copy = links
+            .links_for_cell(IVec3::new(1, 5, 3))
+            .into_iter()
+            .find(|copy| copy.entity != entity)
+            .expect("first copied semantic link");
+        let second_copy = links
+            .links_for_cell(IVec3::new(1, 8, 3))
+            .into_iter()
+            .find(|copy| copy.entity != entity && copy.entity != first_copy.entity)
+            .expect("second copied semantic link");
+
+        let undo = history
+            .pop_undo_detailed(&mut world)
+            .expect("voxel undo step");
+        assert_eq!(
+            undo.apply_sketch_undo(&mut doc, &mut links).unwrap().label,
+            "Copy selection x2"
+        );
+        assert_eq!(world.voxel_at(1, 5, 3), AIR);
+        assert_eq!(world.voxel_at(2, 5, 3), AIR);
+        assert_eq!(world.voxel_at(1, 8, 3), AIR);
+        assert_eq!(world.voxel_at(2, 8, 3), AIR);
+        assert!(doc.entity(first_copy.entity).is_none());
+        assert!(doc.entity(second_copy.entity).is_none());
+        assert!(links.primary_cell_link(IVec3::new(1, 5, 3)).is_none());
+        assert!(links.primary_cell_link(IVec3::new(1, 8, 3)).is_none());
+        assert_eq!(links.primary_cell_link(IVec3::new(1, 2, 3)), Some(link));
+
+        let redo = history
+            .pop_redo_detailed(&mut world)
+            .expect("voxel redo step");
+        assert_eq!(
+            redo.apply_sketch_redo(&mut doc, &mut links).unwrap().label,
+            "Copy selection x2"
+        );
+        assert_eq!(world.voxel_at(1, 5, 3), stone);
+        assert_eq!(world.voxel_at(2, 5, 3), stone);
+        assert_eq!(world.voxel_at(1, 8, 3), stone);
+        assert_eq!(world.voxel_at(2, 8, 3), stone);
+        assert!(doc.entity(first_copy.entity).is_some());
+        assert!(doc.entity(second_copy.entity).is_some());
+        assert_eq!(
+            links.primary_cell_link(IVec3::new(1, 5, 3)),
+            Some(first_copy)
+        );
+        assert_eq!(
+            links.primary_cell_link(IVec3::new(1, 8, 3)),
+            Some(second_copy)
+        );
     }
 }

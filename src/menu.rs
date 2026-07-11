@@ -35,6 +35,57 @@ enum InventoryPage {
     Hotbar,
 }
 
+const ALL_INVENTORY_CATEGORIES: usize = usize::MAX;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InventoryBlockEntry {
+    block: crate::blocks::BlockType,
+    label: &'static str,
+    role: &'static str,
+    category: usize,
+}
+
+fn inventory_block_entries() -> Vec<InventoryBlockEntry> {
+    crate::blocks::block_palette_catalog()
+        .iter()
+        .enumerate()
+        .flat_map(|(category, group)| {
+            group.entries.iter().map(move |entry| InventoryBlockEntry {
+                block: entry.block,
+                label: entry.label,
+                role: entry.role,
+                category,
+            })
+        })
+        .collect()
+}
+
+fn inventory_entry_matches(
+    entry: InventoryBlockEntry,
+    category_label: &str,
+    query_lower: &str,
+) -> bool {
+    query_lower.is_empty()
+        || [entry.label, entry.role, category_label]
+            .iter()
+            .any(|value| value.to_ascii_lowercase().contains(query_lower))
+}
+
+fn apply_inventory_block_selection(
+    builder: &mut crate::builder::BuilderState,
+    block: crate::blocks::BlockType,
+) {
+    builder.block = block;
+    builder.status = format!(
+        "{} selected from inventory.",
+        crate::blocks::block_label(block)
+    );
+}
+
+fn menu_letter_shortcuts_enabled(wants_keyboard_input: bool) -> bool {
+    !wants_keyboard_input
+}
+
 #[derive(States, Clone, Eq, PartialEq, Debug, Hash, Default)]
 pub enum GameState {
     #[default]
@@ -72,7 +123,7 @@ impl Plugin for MenuPlugin {
             .insert_resource(PauseScreen::default())
             .insert_resource(NewWorldForm::default())
             .insert_resource(PendingWorldLoad::default())
-            .add_systems(Update, handle_keys.run_if(not_in_menu_text_edit))
+            .add_systems(Update, handle_keys)
             .add_systems(
                 Update,
                 (
@@ -94,14 +145,11 @@ fn clear_pending_load(mut pending: ResMut<PendingWorldLoad>) {
     }
 }
 
-fn not_in_menu_text_edit() -> bool {
-    true
-}
-
 /// ESC and E drive the state machine. The editor window close button also
 /// flips PauseScreen back to Menu, but key handling lives here for clarity.
 fn handle_keys(
     keys: Res<ButtonInput<KeyCode>>,
+    mut contexts: EguiContexts,
     state: Res<State<GameState>>,
     mut next: ResMut<NextState<GameState>>,
     mut pause_screen: ResMut<PauseScreen>,
@@ -109,6 +157,9 @@ fn handle_keys(
     command_palette: Option<ResMut<CommandPaletteState>>,
     mode: Option<Res<ModeContext>>,
 ) {
+    let allow_letter_shortcuts =
+        menu_letter_shortcuts_enabled(contexts.ctx_mut().wants_keyboard_input());
+
     if let Some(mut command_palette) = command_palette {
         if command_palette.open {
             if keys.just_pressed(KeyCode::Escape) {
@@ -131,7 +182,7 @@ fn handle_keys(
                 *pause_screen = PauseScreen::Menu;
                 editor.open = false;
                 next.set(GameState::Paused);
-            } else if keys.just_pressed(KeyCode::KeyE) {
+            } else if allow_letter_shortcuts && keys.just_pressed(KeyCode::KeyE) {
                 *pause_screen = PauseScreen::Inventory;
                 editor.open = false;
                 next.set(GameState::Paused);
@@ -147,7 +198,8 @@ fn handle_keys(
                     next.set(GameState::InGame);
                 }
             }
-            if keys.just_pressed(KeyCode::KeyE)
+            if allow_letter_shortcuts
+                && keys.just_pressed(KeyCode::KeyE)
                 && *pause_screen == PauseScreen::Inventory
                 && !editor.open
             {
@@ -902,6 +954,7 @@ fn draw_inventory_menu(
     mut pause_screen: ResMut<PauseScreen>,
     mut settings: ResMut<WorldSettings>,
     mut hotbar: ResMut<HotbarState>,
+    mut builder: ResMut<crate::builder::BuilderState>,
     mut ship_inventory: ResMut<crate::ships::ShipInventory>,
     mut ship_placement: ResMut<crate::ships::ShipPlacementState>,
     mut mode: ResMut<ModeContext>,
@@ -914,6 +967,7 @@ fn draw_inventory_menu(
     draw_inventory(
         ctx,
         &mut hotbar,
+        &mut builder,
         &mut pause_screen,
         &mut next,
         &mut settings,
@@ -981,6 +1035,62 @@ mod tests {
         apply_world_to_settings(&meta, &mut settings);
 
         assert_eq!(settings.scenery_quality, SceneryQuality::Lush);
+    }
+
+    #[test]
+    fn creative_inventory_covers_the_canonical_buildable_catalog() {
+        let entries = inventory_block_entries();
+        let catalog = crate::blocks::block_palette_catalog();
+        let mut actual: Vec<u16> = entries.iter().map(|entry| entry.block as u16).collect();
+        let mut expected: Vec<u16> = crate::blocks::BUILDABLE_BLOCKS
+            .iter()
+            .map(|block| *block as u16)
+            .collect();
+        actual.sort_unstable();
+        expected.sort_unstable();
+
+        assert_eq!(actual, expected);
+        assert!(entries.iter().all(|entry| entry.category < catalog.len()));
+    }
+
+    #[test]
+    fn creative_inventory_search_includes_catalog_roles_and_categories() {
+        let entry = inventory_block_entries()
+            .into_iter()
+            .find(|entry| entry.block == crate::blocks::BlockType::EngineCore)
+            .expect("engine core should be in the canonical catalog");
+        let category = crate::blocks::block_palette_catalog()[entry.category];
+
+        assert!(inventory_entry_matches(entry, category.label, "machinery"));
+        assert!(inventory_entry_matches(entry, category.label, "metal"));
+    }
+
+    #[test]
+    fn creative_inventory_selection_changes_the_real_builder_material() {
+        let mut builder = crate::builder::BuilderState::default();
+
+        apply_inventory_block_selection(&mut builder, crate::blocks::BlockType::ShojiLamp);
+
+        assert_eq!(builder.block, crate::blocks::BlockType::ShojiLamp);
+        assert!(builder.status.contains("Lantern"));
+    }
+
+    #[test]
+    fn keyboard_owned_by_search_disables_the_e_shortcut() {
+        let context = egui::Context::default();
+        let mut search = String::new();
+        context.begin_frame(egui::RawInput::default());
+        egui::CentralPanel::default().show(&context, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut search))
+                .request_focus();
+        });
+
+        assert!(context.wants_keyboard_input());
+        assert!(!menu_letter_shortcuts_enabled(
+            context.wants_keyboard_input()
+        ));
+        assert!(menu_letter_shortcuts_enabled(false));
+        let _ = context.end_frame();
     }
 }
 
@@ -1223,6 +1333,7 @@ fn draw_pause_main(
 fn draw_inventory(
     ctx: &egui::Context,
     hotbar: &mut HotbarState,
+    builder: &mut crate::builder::BuilderState,
     pause_screen: &mut PauseScreen,
     next: &mut ResMut<NextState<GameState>>,
     settings: &mut WorldSettings,
@@ -1264,56 +1375,8 @@ fn draw_inventory(
         screen.center().y - panel_h * 0.5,
     );
 
-    use crate::blocks::BlockType::*;
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Cat {
-        All,
-        Natural,
-        Stone,
-        Wood,
-        Liquid,
-        Tech,
-    }
-    let cats: [(Cat, &str); 6] = [
-        (Cat::All, "ALLE"),
-        (Cat::Natural, "NATUR"),
-        (Cat::Stone, "GESTEIN"),
-        (Cat::Wood, "HOLZ & LAUB"),
-        (Cat::Liquid, "FLUESSIG"),
-        (Cat::Tech, "HANGAR"),
-    ];
-    let palette: [(crate::blocks::BlockType, &str, Cat); 30] = [
-        (Grass, "Grass", Cat::Natural),
-        (Dirt, "Dirt", Cat::Natural),
-        (Sand, "Sand", Cat::Natural),
-        (Gravel, "Kies", Cat::Natural),
-        (Snow, "Schnee", Cat::Natural),
-        (TundraGrass, "Tundra", Cat::Natural),
-        (SavannaGrass, "Savanne", Cat::Natural),
-        (Stone, "Stone", Cat::Stone),
-        (Bedrock, "Bedrock", Cat::Stone),
-        (RedSand, "Rotsand", Cat::Natural),
-        (RedStone, "Rotstein", Cat::Stone),
-        (MesaClay, "Mesa-Ton", Cat::Stone),
-        (MossStone, "Moosstein", Cat::Stone),
-        (Limestone, "Kalkstein", Cat::Stone),
-        (Wood, "Holz", Cat::Wood),
-        (Leaves, "Laub", Cat::Wood),
-        (JungleLeaves, "Dschungel", Cat::Wood),
-        (Water, "Wasser", Cat::Liquid),
-        (Ice, "Eis", Cat::Liquid),
-        (ShipHullDark, "Hull Dark", Cat::Tech),
-        (ShipHullAlloy, "Alloy Hull", Cat::Tech),
-        (CockpitGlass, "Cockpit", Cat::Tech),
-        (NeonCyan, "Neon Cyan", Cat::Tech),
-        (NeonMagenta, "Neon Magenta", Cat::Tech),
-        (NeonAmber, "Neon Amber", Cat::Tech),
-        (EngineCore, "Engine Core", Cat::Tech),
-        (Crystal, "Crystal", Cat::Stone),
-        (LuminiteCrystal, "Luminite", Cat::Stone),
-        (MagnetiteOre, "Magnetite", Cat::Stone),
-        (IridiumVein, "Iridium", Cat::Stone),
-    ];
+    let catalog = crate::blocks::block_palette_catalog();
+    let palette = inventory_block_entries();
 
     let mut frame = command_frame(theme);
     frame.inner_margin = egui::Margin::symmetric(20.0, 18.0);
@@ -1366,12 +1429,26 @@ fn draw_inventory(
             let mut active_page: InventoryPage = ui
                 .data_mut(|d| d.get_temp(egui::Id::new("inv_page")))
                 .unwrap_or(InventoryPage::Blocks);
-            let mut selected: u8 = ui
+            let default_block = if palette.iter().any(|entry| entry.block == builder.block) {
+                builder.block
+            } else {
+                palette
+                    .first()
+                    .map(|entry| entry.block)
+                    .unwrap_or(crate::blocks::BlockType::Stone)
+            };
+            let mut selected: crate::blocks::BlockType = ui
                 .data_mut(|d| d.get_temp(egui::Id::new("inv_selected")))
-                .unwrap_or(0);
-            let mut active_cat: Cat = ui
-                .data_mut(|d| d.get_temp(egui::Id::new("inv_cat")))
-                .unwrap_or(Cat::All);
+                .unwrap_or(default_block);
+            if !palette.iter().any(|entry| entry.block == selected) {
+                selected = default_block;
+            }
+            let mut active_category: usize = ui
+                .data_mut(|d| d.get_temp(egui::Id::new("inv_catalog_category")))
+                .unwrap_or(ALL_INVENTORY_CATEGORIES);
+            if active_category != ALL_INVENTORY_CATEGORIES && active_category >= catalog.len() {
+                active_category = ALL_INVENTORY_CATEGORIES;
+            }
             let mut search: String = ui
                 .data_mut(|d| d.get_temp(egui::Id::new("inv_search")))
                 .unwrap_or_default();
@@ -1399,85 +1476,95 @@ fn draw_inventory(
 
             // -------- Search + category tabs --------
             if active_page == InventoryPage::Blocks {
-            ui.horizontal(|ui| {
-                let te = egui::TextEdit::singleline(&mut search)
-                    .hint_text("🔍  Block suchen…")
-                    .desired_width(220.0)
-                    .font(egui::FontId::proportional(13.0));
-                ui.add(te);
-                ui.add_space(14.0);
-                for (c, name) in cats.iter() {
-                    let sel = active_cat == *c;
-                    let btn = egui::Button::new(
-                        egui::RichText::new(*name)
-                            .size(11.5)
-                            .color(if sel {
-                                egui::Color32::from_rgb(8, 14, 22)
-                            } else {
-                                egui::Color32::from_gray(200)
-                            })
-                            .strong(),
-                    )
-                    .fill(if sel {
-                        egui::Color32::from_rgb(0, 220, 255)
-                    } else {
-                        egui::Color32::from_rgba_unmultiplied(40, 50, 66, 200)
-                    })
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        if sel {
-                            egui::Color32::from_rgb(0, 240, 255)
+                ui.horizontal_wrapped(|ui| {
+                    let te = egui::TextEdit::singleline(&mut search)
+                        .hint_text("🔍  Block suchen…")
+                        .desired_width(220.0)
+                        .font(egui::FontId::proportional(13.0));
+                    ui.add(te);
+                    ui.add_space(14.0);
+                    for (category, name) in
+                        std::iter::once((ALL_INVENTORY_CATEGORIES, "ALLE")).chain(
+                            catalog
+                                .iter()
+                                .enumerate()
+                                .map(|(category, group)| (category, group.label)),
+                        )
+                    {
+                        let selected_category = active_category == category;
+                        let btn = egui::Button::new(
+                            egui::RichText::new(name)
+                                .size(11.5)
+                                .color(if selected_category {
+                                    egui::Color32::from_rgb(8, 14, 22)
+                                } else {
+                                    egui::Color32::from_gray(200)
+                                })
+                                .strong(),
+                        )
+                        .fill(if selected_category {
+                            egui::Color32::from_rgb(0, 220, 255)
                         } else {
-                            egui::Color32::from_rgba_unmultiplied(70, 90, 110, 180)
-                        },
-                    ))
-                    .rounding(egui::Rounding::same(20.0))
-                    .min_size(egui::vec2(92.0, 28.0));
-                    if ui.add(btn).clicked() {
-                        active_cat = *c;
+                            egui::Color32::from_rgba_unmultiplied(40, 50, 66, 200)
+                        })
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            if selected_category {
+                                egui::Color32::from_rgb(0, 240, 255)
+                            } else {
+                                egui::Color32::from_rgba_unmultiplied(70, 90, 110, 180)
+                            },
+                        ))
+                        .rounding(egui::Rounding::same(20.0))
+                        .min_size(egui::vec2(92.0, 28.0));
+                        if ui.add(btn).clicked() {
+                            active_category = category;
+                        }
                     }
-                }
-            });
-            ui.add_space(16.0);
-
-            // -------- Filter block list --------
-            let search_lc = search.to_lowercase();
-            let visible: Vec<(usize, crate::blocks::BlockType, &str)> = palette
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, name, cat))| {
-                    (active_cat == Cat::All || *cat == active_cat)
-                        && (search_lc.is_empty() || name.to_lowercase().contains(&search_lc))
-                })
-                .map(|(i, (b, n, _))| (i, *b, *n))
-                .collect();
-
-            // -------- Block grid (5 columns of cinematic cards) --------
-            egui::ScrollArea::vertical()
-                .max_height((panel_h - 340.0).max(220.0))
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    egui::Grid::new("inv_grid")
-                        .num_columns(5)
-                        .spacing([12.0, 12.0])
-                        .show(ui, |ui| {
-                            for (col_idx, (i, b, name)) in visible.iter().enumerate() {
-                                draw_block_tile(
-                                    ui,
-                                    b,
-                                    name,
-                                    selected as usize == *i,
-                                    |sel_idx| {
-                                        selected = sel_idx as u8;
-                                    },
-                                    *i,
-                                );
-                                if (col_idx + 1) % 5 == 0 {
-                                    ui.end_row();
-                                }
-                            }
-                        });
                 });
+                ui.add_space(16.0);
+
+                // -------- Filter block list --------
+                let search_lc = search.trim().to_lowercase();
+                let visible: Vec<(usize, InventoryBlockEntry)> = palette
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(_, entry)| {
+                        (active_category == ALL_INVENTORY_CATEGORIES
+                            || entry.category == active_category)
+                            && inventory_entry_matches(
+                                *entry,
+                                catalog[entry.category].label,
+                                &search_lc,
+                            )
+                    })
+                    .collect();
+
+                // -------- Block grid (5 columns of cinematic cards) --------
+                egui::ScrollArea::vertical()
+                    .max_height((panel_h - 340.0).max(220.0))
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::Grid::new("inv_grid")
+                            .num_columns(5)
+                            .spacing([12.0, 12.0])
+                            .show(ui, |ui| {
+                                for (col_idx, (i, entry)) in visible.iter().enumerate() {
+                                    draw_block_tile(
+                                        ui,
+                                        &entry.block,
+                                        entry.label,
+                                        selected == entry.block,
+                                        |_| selected = entry.block,
+                                        *i,
+                                    );
+                                    if (col_idx + 1) % 5 == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    });
             }
 
             ui.add_space(14.0);
@@ -1500,7 +1587,13 @@ fn draw_inventory(
             ui.add_space(12.0);
 
             // -------- Selected-block info strip --------
-            let (sel_b, sel_name, _) = palette[selected.min((palette.len() - 1) as u8) as usize];
+            let selected_entry = palette
+                .iter()
+                .find(|entry| entry.block == selected)
+                .or_else(|| palette.first())
+                .expect("canonical block palette must not be empty");
+            let sel_b = selected_entry.block;
+            let sel_name = selected_entry.label;
             let sel_rgba = crate::blocks::voxel_color(sel_b.into());
             if matches!(active_page, InventoryPage::Blocks | InventoryPage::Hotbar) {
             ui.horizontal(|ui| {
@@ -1627,6 +1720,8 @@ fn draw_inventory(
                     let (rect, resp) =
                         ui.allocate_exact_size(egui::vec2(62.0, 62.0), egui::Sense::click());
                     let hovered = resp.hovered();
+                    let clicked = resp.clicked();
+                    resp.on_hover_text(slot.label());
                     // Slot background (deep panel).
                     ui.painter().rect_filled(
                         rect,
@@ -1658,12 +1753,9 @@ fn draw_inventory(
                         egui::Rounding::same(8.0),
                         egui::Stroke::new(if is_active { 2.5 } else { 1.0 }, ring_color),
                     );
-                    if resp.clicked() {
-                        let cc = crate::blocks::voxel_color(sel_b.into());
-                        hotbar.slots[i] = crate::hud::HotbarBlock {
-                            color: Color::srgb(cc[0], cc[1], cc[2]),
-                        };
-                        hotbar.active = i;
+                    if clicked {
+                        hotbar.assign_block(i, sel_b);
+                        apply_inventory_block_selection(builder, sel_b);
                     }
                     ui.add_space(4.0);
                 }
@@ -1684,10 +1776,20 @@ fn draw_inventory(
             // Persist UI state so reopening preserves selection/search.
             ui.data_mut(|d| {
                 d.insert_temp(egui::Id::new("inv_selected"), selected);
-                d.insert_temp(egui::Id::new("inv_cat"), active_cat);
+                d.insert_temp(
+                    egui::Id::new("inv_catalog_category"),
+                    active_category,
+                );
                 d.insert_temp(egui::Id::new("inv_search"), search);
                 d.insert_temp(egui::Id::new("inv_page"), active_page);
             });
+
+            // The catalog is a real builder material picker, not a cosmetic
+            // hotbar swatch. Selecting a tile updates the active voxel tool
+            // immediately; assigning a slot keeps the same typed identity.
+            if builder.block != selected {
+                apply_inventory_block_selection(builder, selected);
+            }
         });
 }
 

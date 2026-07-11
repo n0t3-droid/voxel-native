@@ -668,7 +668,8 @@ fn draw_toolbelt(
     mut history: ResMut<BuilderHistory>,
     mut world: ResMut<VoxelWorld>,
     mut ui_focus: ResMut<SketchEditorUiFocus>,
-    sketch_doc: Res<crate::sketch_model::SketchDocument>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
     mut tool_controller: ResMut<crate::sketch_model::ToolController>,
     mut semantic_hover: ResMut<crate::sketch_model::SemanticHoverHit>,
     mut wheel: EventReader<MouseWheel>,
@@ -813,11 +814,24 @@ fn draw_toolbelt(
     }
     if let Some(command) = dock.history_command {
         let result = match command {
-            HistoryCommand::Undo => history.pop_undo(&mut world),
-            HistoryCommand::Redo => history.pop_redo(&mut world),
+            HistoryCommand::Undo => history.pop_undo_detailed(&mut world),
+            HistoryCommand::Redo => history.pop_redo_detailed(&mut world),
         };
         let changed_history = result.is_some();
-        let status = format_history_command_status(command, result);
+        if let Some(step) = &result {
+            match command {
+                HistoryCommand::Undo => {
+                    step.apply_sketch_undo(&mut *sketch_doc, &mut *sketch_links);
+                }
+                HistoryCommand::Redo => {
+                    step.apply_sketch_redo(&mut *sketch_doc, &mut *sketch_links);
+                }
+            }
+        }
+        let status = format_history_command_status(
+            command,
+            result.as_ref().map(|step| step.label_and_voxels()),
+        );
         if changed_history {
             clear_editor_selection_after_toolbelt_history_step(
                 &mut tool_controller,

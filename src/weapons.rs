@@ -20,13 +20,12 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::blocks::{voxel_color, voxel_is_solid, voxel_is_weapon_target, AIR};
-use crate::chunk::{ChunkPos, CHUNK_SIZE_I};
 use crate::director::UnifiedTelemetry;
 use crate::menu::GameState;
 use crate::neurocore::RuntimeBudget;
 use crate::player::Player;
 use crate::settings::WorldSettings;
-use crate::world::{ChunkStreamer, VoxelWorld};
+use crate::world::{VoxelWorld, WorldEditBatch};
 
 // ---------------------------------------------------------------------
 // Shared FX asset cache
@@ -405,6 +404,7 @@ struct FireControlParams<'w> {
     time: Res<'w, Time>,
     mouse: Res<'w, ButtonInput<MouseButton>>,
     agent: Option<Res<'w, crate::agent_control::AgentControlState>>,
+    budget: Res<'w, RuntimeBudget>,
 }
 
 impl Plugin for WeaponsPlugin {
@@ -1195,6 +1195,9 @@ struct Explosion {
     max_scale: f32,
 }
 
+const MAX_PROJECTILE_LIFETIME_SECS: f32 = 6.0;
+const PROJECTILE_ARRIVAL_GRACE_SECS: f32 = 0.25;
+
 /// A travelling projectile carrying its delayed impact data. On
 /// arrival the stored payload is applied: break a sphere of blocks,
 /// spawn debris, and (for explosives) spawn a fireball.
@@ -1202,6 +1205,9 @@ struct Explosion {
 struct Projectile {
     dir: Vec3,
     speed: f32,
+    /// Safety horizon for shots into unloaded/empty space. Distant hits
+    /// still resolve when this expires, while misses simply disappear.
+    life: f32,
     /// Remaining distance along `dir` until it reaches the pre-computed
     /// impact point (or its max range, if the ray missed everything).
     remaining: f32,
@@ -1211,6 +1217,35 @@ struct Projectile {
     hit_block: Option<(i32, i32, i32)>,
     /// World-space impact position (block centre or end-of-range).
     impact_pos: Vec3,
+}
+
+fn projectile_lifetime_secs(remaining: f32, speed: f32) -> f32 {
+    if !remaining.is_finite() || !speed.is_finite() || speed <= 0.0 {
+        return MAX_PROJECTILE_LIFETIME_SECS;
+    }
+    (remaining.max(0.0) / speed + PROJECTILE_ARRIVAL_GRACE_SECS)
+        .clamp(PROJECTILE_ARRIVAL_GRACE_SECS, MAX_PROJECTILE_LIFETIME_SECS)
+}
+
+fn should_spawn_projectile_light(kind: WeaponKind, fx_scale: f32, shot_number: u64) -> bool {
+    let fx_scale = if fx_scale.is_finite() {
+        fx_scale.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let stride = match kind {
+        WeaponKind::RocketLauncher | WeaponKind::GrenadeLauncher if fx_scale >= 0.20 => 1,
+        WeaponKind::PlasmaRifle if fx_scale >= 0.75 => 1,
+        WeaponKind::PlasmaRifle if fx_scale >= 0.35 => 2,
+        WeaponKind::Sniper if fx_scale >= 0.55 => 1,
+        WeaponKind::Blaster if fx_scale >= 0.80 => 2,
+        WeaponKind::Blaster if fx_scale >= 0.55 => 3,
+        WeaponKind::Pistol | WeaponKind::Shotgun if fx_scale >= 0.85 => 2,
+        WeaponKind::AssaultRifle if fx_scale >= 0.85 => 3,
+        WeaponKind::Minigun if fx_scale >= 0.85 => 5,
+        _ => return false,
+    };
+    shot_number % stride == 0
 }
 
 fn despawn_recursive_if_exists(commands: &mut Commands, entity: Entity) {
@@ -2591,6 +2626,7 @@ fn fire_weapon(
     };
     let kind = weapon.kind;
     weapon.cooldown = kind.cooldown();
+    let fx_scale = controls.budget.weapon_fx_scale.clamp(0.0, 1.0);
 
     // --- FUN JUICE ------------------------------------------------------
     // Each gun shakes the camera in proportion to its punch. The exact
@@ -2598,6 +2634,7 @@ fn fire_weapon(
     // stay in one place.
     shake.add(kind.fire_shake());
     stats.shots_fired = stats.shots_fired.saturating_add(1);
+    let shot_number = stats.shots_fired;
     weapon.recoil_t = kind.recoil_time();
     player.fov_bonus += kind.fov_kick();
     player.pitch = (player.pitch + kind.pitch_kick()).clamp(-1.54, 1.54);
@@ -2610,30 +2647,32 @@ fn fire_weapon(
     // the camera turned into an ugly persistent yellow ball during
     // full-auto fire).
     let accent_lin = kind.color().to_linear();
-    let light_intensity = kind.muzzle_light_intensity();
-    commands.spawn((
-        PointLightBundle {
-            point_light: PointLight {
-                color: Color::srgb(
-                    1.0,
-                    0.85 + accent_lin.green * 0.1,
-                    0.45 + accent_lin.blue * 0.35,
-                ),
-                intensity: light_intensity,
-                range: 18.0,
-                shadows_enabled: false,
+    if fx_scale > 0.20 {
+        let light_intensity = kind.muzzle_light_intensity() * fx_scale;
+        commands.spawn((
+            PointLightBundle {
+                point_light: PointLight {
+                    color: Color::srgb(
+                        1.0,
+                        0.85 + accent_lin.green * 0.1,
+                        0.45 + accent_lin.blue * 0.35,
+                    ),
+                    intensity: light_intensity,
+                    range: 18.0 * fx_scale.clamp(0.55, 1.0),
+                    shadows_enabled: false,
+                    ..default()
+                },
+                transform: Transform::from_translation(muzzle),
                 ..default()
             },
-            transform: Transform::from_translation(muzzle),
-            ..default()
-        },
-        MuzzleFlashLight {
-            life: 0.10,
-            max_life: 0.10,
-            base_intensity: light_intensity,
-        },
-        Name::new("MuzzleFlashLight"),
-    ));
+            MuzzleFlashLight {
+                life: 0.10,
+                max_life: 0.10,
+                base_intensity: light_intensity,
+            },
+            Name::new("MuzzleFlashLight"),
+        ));
+    }
 
     let mut rng = ChaCha8Rng::seed_from_u64(
         (controls.time.elapsed_seconds_wrapped() * 100_000.0) as u64 ^ 0xFACE_FEED,
@@ -2647,7 +2686,7 @@ fn fire_weapon(
     let spread_scale = 1.0 - 0.9 * scope.progress.clamp(0.0, 1.0);
     let effective_spread = kind.spread() * spread_scale;
 
-    for _ in 0..kind.pellets() {
+    for pellet_index in 0..kind.pellets() {
         let dir = if effective_spread > 0.0 {
             random_cone_dir(base_dir, effective_spread, &mut rng)
         } else {
@@ -2696,6 +2735,7 @@ fn fire_weapon(
             impact_pos,
             hit_block,
             kind,
+            pellet_index == 0 && should_spawn_projectile_light(kind, fx_scale, shot_number),
         );
     }
     // One thermal tick per trigger pull (not per pellet) — matches "laser drill" HUD.
@@ -2729,7 +2769,6 @@ fn random_cone_dir(base: Vec3, half_angle: f32, rng: &mut ChaCha8Rng) -> Vec3 {
 
 fn break_blocks(
     world: &mut VoxelWorld,
-    streamer: &mut ChunkStreamer,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -2743,10 +2782,26 @@ fn break_blocks(
     fx_scale: f32,
     stats: &mut DestructionStats,
 ) -> u32 {
-    break_blocks_inner(
-        world, streamer, commands, meshes, materials, fx, cx, cy, cz, radius, kind, rng, 0,
-        fx_scale, stats,
-    )
+    let mut edit_batch = WorldEditBatch::default();
+    let broken = break_blocks_inner(
+        world,
+        &mut edit_batch,
+        commands,
+        meshes,
+        materials,
+        fx,
+        cx,
+        cy,
+        cz,
+        radius,
+        kind,
+        rng,
+        0,
+        fx_scale,
+        stats,
+    );
+    world.finish_edit_batch(edit_batch);
+    broken
 }
 
 /// Internal break_blocks with a chain-depth guard — emissive/crystal
@@ -2754,7 +2809,7 @@ fn break_blocks(
 #[allow(clippy::too_many_arguments)]
 fn break_blocks_inner(
     world: &mut VoxelWorld,
-    streamer: &mut ChunkStreamer,
+    edit_batch: &mut WorldEditBatch,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -2782,9 +2837,6 @@ fn break_blocks_inner(
     // get caught in this explosion detonate after the main sphere
     // finishes clearing, so their shockwave propagates outward.
     let mut chain_sites: Vec<(i32, i32, i32)> = Vec::new();
-    // Track which chunks we've already enqueued as dirty so we don't
-    // spam the queue with duplicates for a single blast.
-    let mut touched: std::collections::HashSet<ChunkPos> = std::collections::HashSet::new();
     for dy in -radius..=radius {
         for dz in -radius..=radius {
             for dx in -radius..=radius {
@@ -2809,67 +2861,31 @@ fn break_blocks_inner(
                 {
                     chain_sites.push((bx, by, bz));
                 }
-                let (cp, lx, ly, lz) = crate::chunk::world_to_chunk(bx, by, bz);
-                let edge_x = lx == 0 || lx == crate::chunk::CHUNK_SIZE - 1;
-                let edge_y = ly == 0 || ly == crate::chunk::CHUNK_SIZE - 1;
-                let edge_z = lz == 0 || lz == crate::chunk::CHUNK_SIZE - 1;
-                if let Some(chunk) = world.chunks.get_mut(&cp) {
-                    let units = ore_units_for_mined_voxel(v);
-                    if units > 0 {
-                        match v {
-                            VOXEL_LUMINITE => {
-                                stats.luminite_units =
-                                    stats.luminite_units.saturating_add(u64::from(units));
-                            }
-                            VOXEL_MAGNETITE => {
-                                stats.magnetite_units =
-                                    stats.magnetite_units.saturating_add(u64::from(units));
-                            }
-                            VOXEL_IRIDIUM => {
-                                stats.iridium_units =
-                                    stats.iridium_units.saturating_add(u64::from(units));
-                            }
-                            _ => {}
+                if world
+                    .edit_set_voxel_batched(bx, by, bz, AIR, edit_batch)
+                    .is_none()
+                {
+                    continue;
+                }
+                let units = ore_units_for_mined_voxel(v);
+                if units > 0 {
+                    match v {
+                        VOXEL_LUMINITE => {
+                            stats.luminite_units =
+                                stats.luminite_units.saturating_add(u64::from(units));
                         }
-                    }
-                    chunk.set(lx, ly, lz, AIR);
-                }
-                // Queue this chunk (and any neighbours whose face this
-                // block touched) for remeshing.
-                if touched.insert(cp) {
-                    streamer.dirty_queue.insert(cp);
-                }
-                if edge_x {
-                    let nx = if lx == 0 { cp.x - 1 } else { cp.x + 1 };
-                    let n = ChunkPos::new(nx, cp.y, cp.z);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
+                        VOXEL_MAGNETITE => {
+                            stats.magnetite_units =
+                                stats.magnetite_units.saturating_add(u64::from(units));
+                        }
+                        VOXEL_IRIDIUM => {
+                            stats.iridium_units =
+                                stats.iridium_units.saturating_add(u64::from(units));
+                        }
+                        _ => {}
                     }
                 }
-                if edge_y {
-                    let ny = if ly == 0 { cp.y - 1 } else { cp.y + 1 };
-                    let n = ChunkPos::new(cp.x, ny, cp.z);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
-                    }
-                }
-                if edge_z {
-                    let nz = if lz == 0 { cp.z - 1 } else { cp.z + 1 };
-                    let n = ChunkPos::new(cp.x, cp.y, nz);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
-                    }
-                }
-                broken += 1;
+                broken = broken.saturating_add(1);
                 if broken < debris_cap {
                     spawn_debris(
                         commands,
@@ -3014,62 +3030,28 @@ fn break_blocks_inner(
                 if !voxel_is_solid(v) {
                     continue;
                 }
-                let (cp, lx, ly, lz) = crate::chunk::world_to_chunk(bx, by, bz);
-                let edge_x = lx == 0 || lx == crate::chunk::CHUNK_SIZE - 1;
-                let edge_y = ly == 0 || ly == crate::chunk::CHUNK_SIZE - 1;
-                let edge_z = lz == 0 || lz == crate::chunk::CHUNK_SIZE - 1;
-                if let Some(chunk) = world.chunks.get_mut(&cp) {
-                    let units = ore_units_for_mined_voxel(v);
-                    if units > 0 {
-                        match v {
-                            VOXEL_LUMINITE => {
-                                stats.luminite_units =
-                                    stats.luminite_units.saturating_add(u64::from(units));
-                            }
-                            VOXEL_MAGNETITE => {
-                                stats.magnetite_units =
-                                    stats.magnetite_units.saturating_add(u64::from(units));
-                            }
-                            VOXEL_IRIDIUM => {
-                                stats.iridium_units =
-                                    stats.iridium_units.saturating_add(u64::from(units));
-                            }
-                            _ => {}
+                if world
+                    .edit_set_voxel_batched(bx, by, bz, AIR, edit_batch)
+                    .is_none()
+                {
+                    continue;
+                }
+                let units = ore_units_for_mined_voxel(v);
+                if units > 0 {
+                    match v {
+                        VOXEL_LUMINITE => {
+                            stats.luminite_units =
+                                stats.luminite_units.saturating_add(u64::from(units));
                         }
-                    }
-                    chunk.set(lx, ly, lz, AIR);
-                }
-                if touched.insert(cp) {
-                    streamer.dirty_queue.insert(cp);
-                }
-                if edge_x {
-                    let nx_c = if lx == 0 { cp.x - 1 } else { cp.x + 1 };
-                    let n = ChunkPos::new(nx_c, cp.y, cp.z);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
-                    }
-                }
-                if edge_y {
-                    let ny_c = if ly == 0 { cp.y - 1 } else { cp.y + 1 };
-                    let n = ChunkPos::new(cp.x, ny_c, cp.z);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
-                    }
-                }
-                if edge_z {
-                    let nz_c = if lz == 0 { cp.z - 1 } else { cp.z + 1 };
-                    let n = ChunkPos::new(cp.x, cp.y, nz_c);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
+                        VOXEL_MAGNETITE => {
+                            stats.magnetite_units =
+                                stats.magnetite_units.saturating_add(u64::from(units));
+                        }
+                        VOXEL_IRIDIUM => {
+                            stats.iridium_units =
+                                stats.iridium_units.saturating_add(u64::from(units));
+                        }
+                        _ => {}
                     }
                 }
                 spawn_falling_block(
@@ -3088,8 +3070,6 @@ fn break_blocks_inner(
             }
         }
     }
-    let _ = CHUNK_SIZE_I; // keep import alive if unused elsewhere
-
     // --- CHAIN REACTION -------------------------------------------------
     // Detonate every emissive voxel caught in this blast with a small
     // secondary explosion. Depth is capped so a crystal-rich cave
@@ -3120,7 +3100,7 @@ fn break_blocks_inner(
             );
             broken = broken.saturating_add(break_blocks_inner(
                 world,
-                streamer,
+                edit_batch,
                 commands,
                 meshes,
                 materials,
@@ -3339,6 +3319,7 @@ fn spawn_projectile(
     impact_pos: Vec3,
     hit_block: Option<(i32, i32, i32)>,
     kind: WeaponKind,
+    spawn_light: bool,
 ) {
     let speed = kind.projectile_speed();
     let color = kind.color();
@@ -3363,6 +3344,7 @@ fn spawn_projectile(
     } else {
         "LaserBolt"
     };
+    let remaining = (travel_dist - 0.6).max(0.0);
     let mut proj = commands.spawn((
         PbrBundle {
             mesh: halo_mesh.clone(),
@@ -3377,7 +3359,8 @@ fn spawn_projectile(
         Projectile {
             dir: ndir,
             speed,
-            remaining: (travel_dist - 0.6).max(0.0),
+            life: projectile_lifetime_secs(remaining, speed),
+            remaining,
             kind,
             hit_block,
             impact_pos,
@@ -3412,22 +3395,26 @@ fn spawn_projectile(
             transform: Transform::default(),
             ..default()
         });
-        // Travelling point light — paints walls as the bolt flies past.
-        p.spawn(PointLightBundle {
-            point_light: PointLight {
-                color: Color::srgb(
-                    (0.35 + lin.red * 0.65).min(1.0),
-                    (0.35 + lin.green * 0.65).min(1.0),
-                    (0.35 + lin.blue * 0.65).min(1.0),
-                ),
-                intensity: if is_explosive { 900_000.0 } else { 400_000.0 },
-                range: if is_explosive { 22.0 } else { 16.0 },
-                shadows_enabled: false,
+        // Keep the wall-lighting pass for signature shots, but cadence
+        // it by runtime tier so automatic fire does not create one live
+        // dynamic light per projectile.
+        if spawn_light {
+            p.spawn(PointLightBundle {
+                point_light: PointLight {
+                    color: Color::srgb(
+                        (0.35 + lin.red * 0.65).min(1.0),
+                        (0.35 + lin.green * 0.65).min(1.0),
+                        (0.35 + lin.blue * 0.65).min(1.0),
+                    ),
+                    intensity: if is_explosive { 900_000.0 } else { 400_000.0 },
+                    range: if is_explosive { 22.0 } else { 16.0 },
+                    shadows_enabled: false,
+                    ..default()
+                },
+                transform: Transform::default(),
                 ..default()
-            },
-            transform: Transform::default(),
-            ..default()
-        });
+            });
+        }
         // Explosive warhead: chunky glowing cube at the tip.
         if let (Some(orb_mesh), Some(orb_mat)) = (warhead_mesh, warhead_mat) {
             // Tip of the bolt in local space (+Z half-length).
@@ -3594,23 +3581,23 @@ fn spawn_explosion(
     // globally; the material has to stay per-instance because
     // `update_shockwaves` mutates emissive/alpha as the ring expands.
     let ring_mesh = fx.shockwave_mesh_shared(meshes);
-    let ring_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(
-            profile.ring_base_rgb.x,
-            profile.ring_base_rgb.y,
-            profile.ring_base_rgb.z,
-            1.0,
-        ),
-        emissive: LinearRgba::rgb(
-            profile.ring_emissive_rgb.x,
-            profile.ring_emissive_rgb.y,
-            profile.ring_emissive_rgb.z,
-        ),
-        unlit: true,
-        alpha_mode: AlphaMode::Add,
-        ..default()
-    });
     if fx_scale > 0.25 {
+        let ring_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(
+                profile.ring_base_rgb.x,
+                profile.ring_base_rgb.y,
+                profile.ring_base_rgb.z,
+                1.0,
+            ),
+            emissive: LinearRgba::rgb(
+                profile.ring_emissive_rgb.x,
+                profile.ring_emissive_rgb.y,
+                profile.ring_emissive_rgb.z,
+            ),
+            unlit: true,
+            alpha_mode: AlphaMode::Add,
+            ..default()
+        });
         commands.spawn((
             PbrBundle {
                 mesh: ring_mesh,
@@ -3982,7 +3969,6 @@ fn update_projectiles(
     budget: Res<RuntimeBudget>,
     mut commands: Commands,
     mut world: ResMut<VoxelWorld>,
-    mut streamer: ResMut<ChunkStreamer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut fx: ResMut<WeaponFxCache>,
@@ -3996,15 +3982,16 @@ fn update_projectiles(
     let mut rng =
         ChaCha8Rng::seed_from_u64((time.elapsed_seconds_wrapped() * 97_531.0) as u64 ^ 0xBABE_B00B);
     for (e, mut p, mut tf) in q.iter_mut() {
+        p.life -= dt;
         let step = p.speed * dt;
-        if step >= p.remaining {
-            // Arrived. Snap to impact, apply damage, despawn.
+        if step >= p.remaining || p.life <= 0.0 {
+            // Arrived or exceeded the visual safety horizon. A stored hit
+            // still resolves so lifetime culling never drops weapon damage.
             tf.translation = p.impact_pos;
             if let Some((bx, by, bz)) = p.hit_block {
                 let radius = p.kind.blast_radius();
                 let killed = break_blocks(
                     &mut world,
-                    &mut streamer,
                     &mut commands,
                     &mut meshes,
                     &mut materials,
@@ -4346,6 +4333,7 @@ fn update_shockwaves(
     for (e, mut sw, mut tf, mat_h) in q.iter_mut() {
         sw.life -= dt;
         if sw.life <= 0.0 {
+            mats.remove(mat_h.id());
             despawn_recursive_if_exists(&mut commands, e);
             continue;
         }
@@ -4466,4 +4454,70 @@ fn check_bounce_pad(world: Res<VoxelWorld>, mut player_q: Query<(&Transform, &mu
     // BOING! Scaled launch with a tiny bit of horizontal preserved.
     player.velocity.y = 22.0;
     player.on_ground = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projectile_lifetime_tracks_normal_travel_and_caps_long_shots() {
+        let normal = projectile_lifetime_secs(90.0, 90.0);
+        assert!((normal - 1.25).abs() < f32::EPSILON);
+        assert_eq!(
+            projectile_lifetime_secs(10_000.0, 45.0),
+            MAX_PROJECTILE_LIFETIME_SECS
+        );
+        assert_eq!(
+            projectile_lifetime_secs(-10.0, 90.0),
+            PROJECTILE_ARRIVAL_GRACE_SECS
+        );
+    }
+
+    #[test]
+    fn projectile_lifetime_fails_bounded_for_invalid_inputs() {
+        for (remaining, speed) in [
+            (f32::NAN, 90.0),
+            (90.0, f32::NAN),
+            (90.0, 0.0),
+            (90.0, -1.0),
+        ] {
+            assert_eq!(
+                projectile_lifetime_secs(remaining, speed),
+                MAX_PROJECTILE_LIFETIME_SECS
+            );
+        }
+    }
+
+    #[test]
+    fn projectile_lights_preserve_signature_shots_and_thin_automatic_fire() {
+        assert!(should_spawn_projectile_light(
+            WeaponKind::RocketLauncher,
+            0.20,
+            1
+        ));
+        assert!(!should_spawn_projectile_light(
+            WeaponKind::RocketLauncher,
+            0.19,
+            1
+        ));
+        assert!(should_spawn_projectile_light(
+            WeaponKind::PlasmaRifle,
+            0.35,
+            2
+        ));
+        assert!(!should_spawn_projectile_light(
+            WeaponKind::PlasmaRifle,
+            0.35,
+            1
+        ));
+        assert!(should_spawn_projectile_light(WeaponKind::Minigun, 1.0, 5));
+        assert!(!should_spawn_projectile_light(WeaponKind::Minigun, 1.0, 4));
+        assert!(!should_spawn_projectile_light(WeaponKind::Minigun, 0.5, 5));
+        assert!(!should_spawn_projectile_light(
+            WeaponKind::PlasmaRifle,
+            f32::NAN,
+            2
+        ));
+    }
 }
