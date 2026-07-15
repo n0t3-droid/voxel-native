@@ -510,6 +510,7 @@ fn cursor_policy_for(
     mode: ActiveMode,
     editor_open: bool,
     command_palette_open: bool,
+    pointer_editor_tool: bool,
     sketch_orbiting: bool,
     pointer_over_editor_ui: bool,
 ) -> CursorPolicy {
@@ -523,7 +524,7 @@ fn cursor_policy_for(
         | ActiveMode::Inventory
         | ActiveMode::Paused
         | ActiveMode::CommandPalette => CursorPolicy::ReleasedVisible,
-        ActiveMode::BuildLive { tool } if tool.uses_pointer_editor_cursor() => {
+        ActiveMode::BuildLive { .. } if pointer_editor_tool => {
             if sketch_orbiting_in_world {
                 CursorPolicy::LockedHidden
             } else {
@@ -565,17 +566,23 @@ fn mode_cursor_guard(
     editor: Res<EditorState>,
     command_palette: Option<Res<CommandPaletteState>>,
     ui_focus: Option<Res<SketchEditorUiFocus>>,
+    tool_controller: Option<Res<crate::sketch_model::ToolController>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else {
         return;
     };
 
+    let pointer_editor_tool = mode.is_build_live()
+        && tool_controller
+            .as_deref()
+            .is_some_and(|controller| controller.active_tool().uses_pointer_surface());
     match cursor_policy_for(
         game_state.get().clone(),
         mode.mode,
         editor.open,
         command_palette.as_deref().map(|p| p.open).unwrap_or(false),
+        pointer_editor_tool,
         mouse.pressed(MouseButton::Right),
         ui_focus
             .as_deref()
@@ -797,58 +804,41 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
             ),
             CursorPolicy::ReleasedVisible
         );
     }
 
     #[test]
-    fn cursor_policy_locks_live_brush_and_combat_immediately() {
-        assert_eq!(
-            cursor_policy_for(
-                GameState::InGame,
-                ActiveMode::BuildLive {
-                    tool: ToolbeltTool::BrushPlace,
-                },
-                false,
-                false,
-                false,
-                false,
-            ),
-            CursorPolicy::LockedHidden
-        );
-        assert_eq!(
-            cursor_policy_for(
-                GameState::InGame,
-                ActiveMode::Combat,
-                false,
-                false,
-                false,
-                false
-            ),
-            CursorPolicy::LockedHidden
-        );
+    fn cursor_policy_locks_direct_play_modes_immediately() {
+        for mode in [
+            ActiveMode::Combat,
+            ActiveMode::ShipPlacement {
+                kind: ShipKind::ScoutShuttle,
+            },
+            ActiveMode::ShipFlight {
+                entity: Entity::from_raw(1),
+            },
+        ] {
+            assert_eq!(
+                cursor_policy_for(GameState::InGame, mode, false, false, false, false, true),
+                CursorPolicy::LockedHidden,
+                "{mode:?} must keep direct-control capture despite stale editor UI focus"
+            );
+        }
     }
 
     #[test]
     fn cursor_policy_releases_for_pointer_editor_tools_until_right_orbit() {
-        for tool in [
-            ToolbeltTool::Navigate,
-            ToolbeltTool::DrawRect,
-            ToolbeltTool::Sculpt,
-            ToolbeltTool::SmartTower,
-            ToolbeltTool::CityRoad,
-            ToolbeltTool::CityDistrict,
-            ToolbeltTool::CityBuilding,
-            ToolbeltTool::CityFacade,
-            ToolbeltTool::AnimationPick,
-        ] {
+        for tool in ToolbeltTool::ALL {
             assert_eq!(
                 cursor_policy_for(
                     GameState::InGame,
                     ActiveMode::BuildLive { tool },
                     false,
                     false,
+                    true,
                     false,
                     false,
                 ),
@@ -862,45 +852,104 @@ mod tests {
                     false,
                     false,
                     true,
+                    true,
                     false,
                 ),
                 CursorPolicy::LockedHidden,
                 "Holding RMB in {tool:?} should immediately become camera orbit"
             );
         }
+    }
 
-        for tool in [ToolbeltTool::BrushPlace, ToolbeltTool::BrushCut] {
+    #[test]
+    fn cursor_policy_uses_canonical_editor_ownership_not_stale_mode_tool() {
+        let stale_mode = ActiveMode::BuildLive {
+            tool: ToolbeltTool::BrushPlace,
+        };
+
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                stale_mode,
+                false,
+                false,
+                true,
+                false,
+                false,
+            ),
+            CursorPolicy::ReleasedVisible
+        );
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                stale_mode,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            CursorPolicy::LockedHidden
+        );
+    }
+
+    #[test]
+    fn cursor_policy_keeps_toolbox_mouse_visible_during_right_click() {
+        for tool in ToolbeltTool::ALL {
             assert_eq!(
                 cursor_policy_for(
                     GameState::InGame,
                     ActiveMode::BuildLive { tool },
                     false,
                     false,
-                    false,
-                    false,
+                    true,
+                    true,
+                    true,
                 ),
-                CursorPolicy::LockedHidden,
-                "{tool:?} remains the old FPS brush path and keeps mouse-look capture"
+                CursorPolicy::ReleasedVisible,
+                "right mouse over the Sketch Editor UI must not make {tool:?} steal the cursor"
             );
         }
     }
 
     #[test]
-    fn cursor_policy_keeps_toolbox_mouse_visible_during_right_click() {
-        assert_eq!(
-            cursor_policy_for(
-                GameState::InGame,
-                ActiveMode::BuildLive {
-                    tool: ToolbeltTool::DrawRect,
-                },
-                false,
-                false,
+    fn cursor_policy_follows_editor_orbit_transition_sequence() {
+        let mode = ActiveMode::BuildLive {
+            tool: ToolbeltTool::BrushPlace,
+        };
+        let transitions = [
+            (false, false, CursorPolicy::ReleasedVisible, "editing"),
+            (true, false, CursorPolicy::LockedHidden, "orbit started"),
+            (
                 true,
                 true,
+                CursorPolicy::ReleasedVisible,
+                "pointer crossed onto UI",
             ),
-            CursorPolicy::ReleasedVisible,
-            "right mouse over the Sketch Editor UI must not steal the cursor into orbit"
-        );
+            (
+                true,
+                false,
+                CursorPolicy::LockedHidden,
+                "pointer returned to world",
+            ),
+            (false, false, CursorPolicy::ReleasedVisible, "orbit ended"),
+        ];
+
+        for (right_mouse_held, pointer_over_editor_ui, expected, phase) in transitions {
+            assert_eq!(
+                cursor_policy_for(
+                    GameState::InGame,
+                    mode,
+                    false,
+                    false,
+                    true,
+                    right_mouse_held,
+                    pointer_over_editor_ui,
+                ),
+                expected,
+                "unexpected cursor policy when {phase}"
+            );
+        }
     }
 
     #[test]
@@ -915,6 +964,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
             ),
             CursorPolicy::ReleasedVisible
         );
@@ -924,6 +974,7 @@ mod tests {
                 ActiveMode::Combat,
                 false,
                 true,
+                false,
                 false,
                 false
             ),

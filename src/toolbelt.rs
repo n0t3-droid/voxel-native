@@ -47,6 +47,25 @@ pub enum ToolbeltTool {
 }
 
 impl ToolbeltTool {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 15] = [
+        Self::Navigate,
+        Self::DrawRect,
+        Self::Sculpt,
+        Self::TransformMove,
+        Self::TransformScale,
+        Self::TransformRotate,
+        Self::MaterialPicker,
+        Self::SmartTower,
+        Self::BrushPlace,
+        Self::BrushCut,
+        Self::CityRoad,
+        Self::CityDistrict,
+        Self::CityBuilding,
+        Self::CityFacade,
+        Self::AnimationPick,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             ToolbeltTool::Navigate => "Navigate / Inspect",
@@ -64,26 +83,6 @@ impl ToolbeltTool {
             ToolbeltTool::CityBuilding => "Building Shell",
             ToolbeltTool::CityFacade => "Facade Stamp",
             ToolbeltTool::AnimationPick => "Animation Picker",
-        }
-    }
-
-    pub fn chip_label(self) -> &'static str {
-        match self {
-            ToolbeltTool::Navigate => "SELECT",
-            ToolbeltTool::DrawRect => "RECT",
-            ToolbeltTool::Sculpt => "PUSH/PULL",
-            ToolbeltTool::TransformMove => "MOVE",
-            ToolbeltTool::TransformScale => "SCALE",
-            ToolbeltTool::TransformRotate => "ROTATE",
-            ToolbeltTool::MaterialPicker => "PAINT",
-            ToolbeltTool::SmartTower => "TOWER",
-            ToolbeltTool::BrushPlace => "BUILD",
-            ToolbeltTool::BrushCut => "CUT",
-            ToolbeltTool::CityRoad => "ROAD",
-            ToolbeltTool::CityDistrict => "AREA",
-            ToolbeltTool::CityBuilding => "SHELL",
-            ToolbeltTool::CityFacade => "STAMP",
-            ToolbeltTool::AnimationPick => "ANIM",
         }
     }
 
@@ -647,7 +646,7 @@ pub struct SketchEditorUiFocus {
     pub pointer_over_editor_ui: bool,
     pub hover_drawer_open: bool,
     pub hover_drawer_grace_remaining: f32,
-    hover_drawer_selection: Option<ToolboxSelection>,
+    hover_drawer_group: Option<ToolboxGroupId>,
 }
 
 impl Plugin for ToolbeltPlugin {
@@ -678,7 +677,7 @@ fn draw_toolbelt(
         ui_focus.pointer_over_editor_ui = false;
         ui_focus.hover_drawer_open = false;
         ui_focus.hover_drawer_grace_remaining = 0.0;
-        ui_focus.hover_drawer_selection = None;
+        ui_focus.hover_drawer_group = None;
         wheel.clear();
         return;
     }
@@ -686,7 +685,6 @@ fn draw_toolbelt(
     let ctx = contexts.ctx_mut();
     let theme = settings.theme;
     let primary = theme.color.primary();
-    let dim = theme.color.dim();
     let expanded = mode.is_build_picker();
     let live = mode.is_build();
     let active_tool = mode.build_tool().unwrap_or(toolbelt.tool);
@@ -709,10 +707,10 @@ fn draw_toolbelt(
         history.undo_len(),
         history.redo_len(),
         toolbelt.active_workflow,
-        ui_focus.hover_drawer_selection,
+        tool_controller.tool_phase(),
+        ui_focus.hover_drawer_group,
         theme,
         primary,
-        dim,
         ctx,
     );
     ui_focus.pointer_over_editor_ui = dock.wheel_navigation_hovered || dock.hover_bridge_hovered;
@@ -727,10 +725,10 @@ fn draw_toolbelt(
     );
     ui_focus.hover_drawer_open = hover_state.open;
     ui_focus.hover_drawer_grace_remaining = hover_state.grace_remaining;
-    if let Some(selection) = dock.hovered_selection {
-        ui_focus.hover_drawer_selection = Some(selection);
+    if let Some(group) = dock.hovered_group {
+        ui_focus.hover_drawer_group = Some(group);
     } else if !hover_state.open {
-        ui_focus.hover_drawer_selection = None;
+        ui_focus.hover_drawer_group = None;
     }
 
     let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
@@ -814,24 +812,25 @@ fn draw_toolbelt(
     }
     if let Some(command) = dock.history_command {
         let result = match command {
-            HistoryCommand::Undo => history.pop_undo_detailed(&mut world),
-            HistoryCommand::Redo => history.pop_redo_detailed(&mut world),
-        };
-        let changed_history = result.is_some();
-        if let Some(step) = &result {
-            match command {
-                HistoryCommand::Undo => {
-                    step.apply_sketch_undo(&mut *sketch_doc, &mut *sketch_links);
-                }
-                HistoryCommand::Redo => {
-                    step.apply_sketch_redo(&mut *sketch_doc, &mut *sketch_links);
-                }
+            HistoryCommand::Undo => {
+                history.undo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links)
             }
-        }
-        let status = format_history_command_status(
-            command,
-            result.as_ref().map(|step| step.label_and_voxels()),
-        );
+            HistoryCommand::Redo => {
+                history.redo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links)
+            }
+        };
+        let changed_history = result.as_ref().is_ok_and(|step| step.is_some());
+        let status = match &result {
+            Err(step) => format!(
+                "{} '{}' blocked: history mismatch; world left unchanged.",
+                command.label(),
+                step.label
+            ),
+            Ok(step) => format_history_command_status(
+                command,
+                step.as_ref().map(|step| step.label_and_voxels()),
+            ),
+        };
         if changed_history {
             clear_editor_selection_after_toolbelt_history_step(
                 &mut tool_controller,
@@ -855,10 +854,6 @@ impl ToolbeltTool {
     pub(crate) fn uses_live_brush(self) -> bool {
         matches!(self, Self::BrushPlace | Self::BrushCut)
     }
-
-    pub(crate) fn uses_pointer_editor_cursor(self) -> bool {
-        !self.uses_live_brush()
-    }
 }
 
 fn compact_status(
@@ -867,7 +862,7 @@ fn compact_status(
     active_workflow: Option<BuildWorkflowPreset>,
 ) -> String {
     if active_workflow == Some(BuildWorkflowPreset::ModernHouse) && tool == ToolbeltTool::DrawRect {
-        return "HOUSE: Footprint first. Draw Rectangle/Pencil, then Push/Pull walls, Opening cuts, Room hollow.".to_owned();
+        return "House ready. Draw the footprint, pull the walls, cut openings, then hollow the room.".to_owned();
     }
     if status.len() <= 96 {
         status.to_owned()
@@ -900,16 +895,22 @@ fn compact_status_for_controller(
     tool_controller: &crate::sketch_model::ToolController,
 ) -> String {
     match tool_controller.tool_phase() {
-        crate::sketch_model::EditorToolPhase::Previewing
-        | crate::sketch_model::EditorToolPhase::Committed
-        | crate::sketch_model::EditorToolPhase::Cancelled => {
+        crate::sketch_model::EditorToolPhase::Previewing => {
             let lifecycle_status = format!(
-                "{}: {}",
-                tool_controller.active_tool_label(),
+                "{} in progress. {}",
+                active_editor_label(tool, active_workflow),
                 tool_controller.active_tool_hint()
             );
             compact_single_line_status(&lifecycle_status)
         }
+        crate::sketch_model::EditorToolPhase::Committed => format!(
+            "{} applied. Continue in the world or choose another tool.",
+            active_editor_label(tool, active_workflow)
+        ),
+        crate::sketch_model::EditorToolPhase::Cancelled => format!(
+            "{} cancelled. Click in the world to start again.",
+            active_editor_label(tool, active_workflow)
+        ),
         crate::sketch_model::EditorToolPhase::Idle => compact_status(status, tool, active_workflow),
     }
 }
@@ -948,7 +949,9 @@ struct BuildDockResult {
     toolbox_hovered: bool,
     drawer_hovered: bool,
     hover_bridge_hovered: bool,
-    hovered_selection: Option<ToolboxSelection>,
+    hovered_group: Option<ToolboxGroupId>,
+    toolbox_rect: Option<egui::Rect>,
+    drawer_rect: Option<egui::Rect>,
     toggle_picker: bool,
     exit_editor: bool,
     brush_preset: Option<IVec3>,
@@ -1009,19 +1012,37 @@ fn next_hover_drawer_state(
     }
 }
 
-fn hover_drawer_bridge_rect(screen: egui::Rect) -> egui::Rect {
-    let center_y = screen.center().y;
+fn hover_drawer_bridge_rect(toolbox: egui::Rect, drawer: egui::Rect) -> egui::Rect {
+    let rail_edge = toolbox.right();
+    let drawer_edge = drawer.left();
     egui::Rect::from_min_max(
-        egui::pos2(64.0, center_y - 420.0),
-        egui::pos2(238.0, center_y + 420.0),
+        egui::pos2(
+            rail_edge.min(drawer_edge) - 4.0,
+            toolbox.top().min(drawer.top()) - 4.0,
+        ),
+        egui::pos2(
+            rail_edge.max(drawer_edge) + 4.0,
+            toolbox.bottom().max(drawer.bottom()) + 4.0,
+        ),
     )
 }
 
-fn hover_drawer_bridge_hovered(ctx: &egui::Context) -> bool {
+fn hover_drawer_bridge_hovered(
+    ctx: &egui::Context,
+    enabled: bool,
+    toolbox: Option<egui::Rect>,
+    drawer: Option<egui::Rect>,
+) -> bool {
+    if !enabled {
+        return false;
+    }
+    let (Some(toolbox), Some(drawer)) = (toolbox, drawer) else {
+        return false;
+    };
     let Some(pointer) = ctx.pointer_hover_pos() else {
         return false;
     };
-    hover_drawer_bridge_rect(ctx.screen_rect()).contains(pointer)
+    hover_drawer_bridge_rect(toolbox, drawer).contains(pointer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1056,17 +1077,171 @@ impl ToolboxSelection {
     ];
 }
 
-const PRIMARY_TOOLBOX_ITEMS: [ToolboxSelection; 9] = [
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolboxGroupId {
+    Core,
+    Draw,
+    Shape,
+    Transform,
+    World,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ToolboxGroup {
+    id: ToolboxGroupId,
+    label: &'static str,
+    hint: &'static str,
+    icon: Icon,
+    primary: ToolboxSelection,
+    items: &'static [ToolboxSelection],
+}
+
+const CORE_TOOLBOX_ITEMS: [ToolboxSelection; 2] = [
     ToolboxSelection::Tool(ToolbeltTool::Navigate),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
+    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
+];
+
+const DRAW_TOOLBOX_ITEMS: [ToolboxSelection; 6] = [
     ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
     ToolboxSelection::Workflow(BuildWorkflowPreset::Circle),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Polygon),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Arc),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Freehand),
+];
+
+const SHAPE_TOOLBOX_ITEMS: [ToolboxSelection; 4] = [
     ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
+];
+
+const TRANSFORM_TOOLBOX_ITEMS: [ToolboxSelection; 3] = [
     ToolboxSelection::Tool(ToolbeltTool::TransformMove),
     ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
     ToolboxSelection::Tool(ToolbeltTool::TransformScale),
-    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
 ];
+
+const WORLD_TOOLBOX_ITEMS: [ToolboxSelection; 6] = [
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::CityShell),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Landscape),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Skyline),
+    ToolboxSelection::Workflow(BuildWorkflowPreset::Spacecraft),
+];
+
+const TOOLBOX_GROUP_IDS: [ToolboxGroupId; 5] = [
+    ToolboxGroupId::Core,
+    ToolboxGroupId::Draw,
+    ToolboxGroupId::Shape,
+    ToolboxGroupId::Transform,
+    ToolboxGroupId::World,
+];
+
+fn toolbox_group(id: ToolboxGroupId) -> ToolboxGroup {
+    match id {
+        ToolboxGroupId::Core => ToolboxGroup {
+            id,
+            label: "Core",
+            hint: "Select geometry or apply material styling.",
+            icon: Icon::ModeNavigate,
+            primary: ToolboxSelection::Tool(ToolbeltTool::Navigate),
+            items: &CORE_TOOLBOX_ITEMS,
+        },
+        ToolboxGroupId::Draw => ToolboxGroup {
+            id,
+            label: "Draw",
+            hint: "Create lines and planar shapes from snapped points.",
+            icon: Icon::Grid,
+            primary: ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
+            items: &DRAW_TOOLBOX_ITEMS,
+        },
+        ToolboxGroupId::Shape => ToolboxGroup {
+            id,
+            label: "Shape",
+            hint: "Pull faces, cut openings, make rooms, or guide a house.",
+            icon: Icon::Builder,
+            primary: ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
+            items: &SHAPE_TOOLBOX_ITEMS,
+        },
+        ToolboxGroupId::Transform => ToolboxGroup {
+            id,
+            label: "Transform",
+            hint: "Move, rotate, or scale selected geometry.",
+            icon: Icon::Move,
+            primary: ToolboxSelection::Tool(ToolbeltTool::TransformMove),
+            items: &TRANSFORM_TOOLBOX_ITEMS,
+        },
+        ToolboxGroupId::World => ToolboxGroup {
+            id,
+            label: "World",
+            hint: "Lay out roads, areas, buildings, landscape, and landmarks.",
+            icon: Icon::City,
+            primary: ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
+            items: &WORLD_TOOLBOX_ITEMS,
+        },
+    }
+}
+
+fn toolbox_group_for_selection(selection: ToolboxSelection) -> ToolboxGroupId {
+    match selection {
+        ToolboxSelection::Tool(ToolbeltTool::Navigate | ToolbeltTool::MaterialPicker) => {
+            ToolboxGroupId::Core
+        }
+        ToolboxSelection::Tool(ToolbeltTool::DrawRect)
+        | ToolboxSelection::Workflow(
+            BuildWorkflowPreset::Pencil
+            | BuildWorkflowPreset::Sketch
+            | BuildWorkflowPreset::Circle
+            | BuildWorkflowPreset::Polygon
+            | BuildWorkflowPreset::Arc
+            | BuildWorkflowPreset::Freehand,
+        ) => ToolboxGroupId::Draw,
+        ToolboxSelection::Tool(ToolbeltTool::Sculpt)
+        | ToolboxSelection::Workflow(
+            BuildWorkflowPreset::PushPull
+            | BuildWorkflowPreset::Opening
+            | BuildWorkflowPreset::Room
+            | BuildWorkflowPreset::ModernHouse,
+        ) => ToolboxGroupId::Shape,
+        ToolboxSelection::Tool(
+            ToolbeltTool::TransformMove
+            | ToolbeltTool::TransformRotate
+            | ToolbeltTool::TransformScale,
+        ) => ToolboxGroupId::Transform,
+        ToolboxSelection::Tool(
+            ToolbeltTool::SmartTower
+            | ToolbeltTool::BrushPlace
+            | ToolbeltTool::BrushCut
+            | ToolbeltTool::CityRoad
+            | ToolbeltTool::CityDistrict
+            | ToolbeltTool::CityBuilding
+            | ToolbeltTool::CityFacade
+            | ToolbeltTool::AnimationPick,
+        )
+        | ToolboxSelection::Workflow(
+            BuildWorkflowPreset::Roads
+            | BuildWorkflowPreset::BotArea
+            | BuildWorkflowPreset::CityShell
+            | BuildWorkflowPreset::Landscape
+            | BuildWorkflowPreset::Skyline
+            | BuildWorkflowPreset::Spacecraft,
+        ) => ToolboxGroupId::World,
+    }
+}
+
+fn toolbox_group_color(id: ToolboxGroupId, theme: crate::theme::ThemeSettings) -> egui::Color32 {
+    let colors = theme.semantic();
+    match id {
+        ToolboxGroupId::Core => colors.text_muted,
+        ToolboxGroupId::Draw => colors.info,
+        ToolboxGroupId::Shape => colors.warning,
+        ToolboxGroupId::Transform => colors.accent,
+        ToolboxGroupId::World => colors.success,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryCommand {
@@ -1074,6 +1249,16 @@ enum HistoryCommand {
     Redo,
 }
 
+impl HistoryCommand {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Undo => "Undo",
+            Self::Redo => "Redo",
+        }
+    }
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InferenceCue {
     Point,
@@ -1087,6 +1272,7 @@ enum InferenceCue {
     Volume,
 }
 
+#[cfg(test)]
 impl InferenceCue {
     fn label(self) -> &'static str {
         match self {
@@ -1113,20 +1299,6 @@ impl InferenceCue {
             Self::Path => "continues from road/path endpoints and branches",
             Self::Area => "uses two corners to mark a build zone",
             Self::Volume => "works with shell depth, rooms, and hollow space",
-        }
-    }
-
-    fn icon(self) -> Icon {
-        match self {
-            Self::Point => Icon::Snap,
-            Self::Corner => Icon::Grid,
-            Self::Center => Icon::Magnet,
-            Self::Face => Icon::Cube,
-            Self::Plane => Icon::Layout,
-            Self::Axis => Icon::Move,
-            Self::Path => Icon::Road,
-            Self::Area => Icon::District,
-            Self::Volume => Icon::Open,
         }
     }
 }
@@ -1214,17 +1386,6 @@ impl BuildWorkflowPreset {
         Self::Spacecraft,
     ];
     #[cfg(test)]
-    const TOOLBOX: [Self; 9] = [
-        Self::Pencil,
-        Self::Sketch,
-        Self::Circle,
-        Self::PushPull,
-        Self::Opening,
-        Self::Room,
-        Self::Roads,
-        Self::BotArea,
-        Self::ModernHouse,
-    ];
     fn label(self) -> &'static str {
         match self {
             Self::Pencil => "PENCIL",
@@ -1381,6 +1542,7 @@ impl BuildWorkflowPreset {
         }
     }
 
+    #[cfg(test)]
     fn inference_cue(self) -> InferenceCue {
         match self {
             Self::Pencil => InferenceCue::Point,
@@ -1402,6 +1564,7 @@ impl BuildWorkflowPreset {
         }
     }
 
+    #[cfg(test)]
     fn inference_hover_text(self) -> String {
         let cue = self.inference_cue();
         format!(
@@ -1435,203 +1598,6 @@ impl BuildWorkflowPreset {
     }
 }
 
-#[derive(Clone, Copy)]
-struct WorkflowDrawerGroup {
-    label: &'static str,
-    hint: &'static str,
-    icon: Icon,
-    presets: &'static [BuildWorkflowPreset],
-}
-
-#[derive(Clone, Copy)]
-struct ToolboxContextGroup {
-    label: &'static str,
-    hint: &'static str,
-    icon: Icon,
-    items: &'static [ToolboxSelection],
-}
-
-const DRAW_WORKFLOWS: [BuildWorkflowPreset; 6] = [
-    BuildWorkflowPreset::Pencil,
-    BuildWorkflowPreset::Sketch,
-    BuildWorkflowPreset::Circle,
-    BuildWorkflowPreset::Polygon,
-    BuildWorkflowPreset::Arc,
-    BuildWorkflowPreset::Freehand,
-];
-
-const SHAPE_WORKFLOWS: [BuildWorkflowPreset; 4] = [
-    BuildWorkflowPreset::PushPull,
-    BuildWorkflowPreset::Opening,
-    BuildWorkflowPreset::Room,
-    BuildWorkflowPreset::ModernHouse,
-];
-
-const WORLD_WORKFLOWS: [BuildWorkflowPreset; 6] = [
-    BuildWorkflowPreset::Roads,
-    BuildWorkflowPreset::BotArea,
-    BuildWorkflowPreset::CityShell,
-    BuildWorkflowPreset::Landscape,
-    BuildWorkflowPreset::Skyline,
-    BuildWorkflowPreset::Spacecraft,
-];
-
-const DRAW_CONTEXT_ITEMS: [ToolboxSelection; 6] = [
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Circle),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Polygon),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Arc),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Freehand),
-];
-
-const EDIT_CONTEXT_ITEMS: [ToolboxSelection; 6] = [
-    ToolboxSelection::Tool(ToolbeltTool::Navigate),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
-    ToolboxSelection::Tool(ToolbeltTool::TransformMove),
-    ToolboxSelection::Tool(ToolbeltTool::TransformScale),
-    ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
-    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
-];
-
-const OPEN_CONTEXT_ITEMS: [ToolboxSelection; 5] = [
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
-    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
-];
-
-const HOUSE_CONTEXT_ITEMS: [ToolboxSelection; 6] = [
-    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
-    ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
-];
-
-const CITY_CONTEXT_ITEMS: [ToolboxSelection; 5] = [
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::CityShell),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Landscape),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
-];
-
-const SCENE_CONTEXT_ITEMS: [ToolboxSelection; 5] = [
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Landscape),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Skyline),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Spacecraft),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
-    ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
-];
-
-fn context_group_for_selection(selection: ToolboxSelection) -> ToolboxContextGroup {
-    match selection {
-        ToolboxSelection::Tool(ToolbeltTool::DrawRect)
-        | ToolboxSelection::Workflow(
-            BuildWorkflowPreset::Pencil
-            | BuildWorkflowPreset::Sketch
-            | BuildWorkflowPreset::Circle
-            | BuildWorkflowPreset::Polygon
-            | BuildWorkflowPreset::Arc
-            | BuildWorkflowPreset::Freehand,
-        ) => ToolboxContextGroup {
-            label: "Draw",
-            hint: "Start with points, corners, and clean planar faces.",
-            icon: Icon::Pipette,
-            items: &DRAW_CONTEXT_ITEMS,
-        },
-        ToolboxSelection::Tool(ToolbeltTool::Sculpt)
-        | ToolboxSelection::Tool(
-            ToolbeltTool::Navigate
-            | ToolbeltTool::TransformMove
-            | ToolbeltTool::TransformScale
-            | ToolbeltTool::TransformRotate
-            | ToolbeltTool::MaterialPicker,
-        )
-        | ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull) => ToolboxContextGroup {
-            label: "Edit Selected",
-            hint: "Select a face/component, then pull, move, scale, rotate, or style it.",
-            icon: Icon::Move,
-            items: &EDIT_CONTEXT_ITEMS,
-        },
-        ToolboxSelection::Workflow(BuildWorkflowPreset::Opening | BuildWorkflowPreset::Room) => {
-            ToolboxContextGroup {
-                label: "Openings",
-                hint: "Cut doors/windows, hollow rooms, then finish walls and materials.",
-                icon: Icon::Open,
-                items: &OPEN_CONTEXT_ITEMS,
-            }
-        }
-        ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse) => ToolboxContextGroup {
-            label: "House Builder",
-            hint: "Footprint, pull walls, cut openings, hollow the room, then style it.",
-            icon: Icon::Builder,
-            items: &HOUSE_CONTEXT_ITEMS,
-        },
-        ToolboxSelection::Workflow(
-            BuildWorkflowPreset::Roads
-            | BuildWorkflowPreset::BotArea
-            | BuildWorkflowPreset::CityShell,
-        ) => ToolboxContextGroup {
-            label: "City Layout",
-            hint: "Draw roads and mark bot/city areas after the building shell is clear.",
-            icon: Icon::Road,
-            items: &CITY_CONTEXT_ITEMS,
-        },
-        ToolboxSelection::Workflow(
-            BuildWorkflowPreset::Landscape
-            | BuildWorkflowPreset::Skyline
-            | BuildWorkflowPreset::Spacecraft,
-        ) => ToolboxContextGroup {
-            label: "Scene",
-            hint: "Add gardens, skyline massing, and spacecraft once the main build reads cleanly.",
-            icon: Icon::City,
-            items: &SCENE_CONTEXT_ITEMS,
-        },
-        ToolboxSelection::Tool(
-            ToolbeltTool::SmartTower
-            | ToolbeltTool::BrushPlace
-            | ToolbeltTool::BrushCut
-            | ToolbeltTool::CityRoad
-            | ToolbeltTool::CityDistrict
-            | ToolbeltTool::CityBuilding
-            | ToolbeltTool::CityFacade
-            | ToolbeltTool::AnimationPick,
-        ) => ToolboxContextGroup {
-            label: "City Layout",
-            hint: "Advanced world tools stay grouped away from the first building flow.",
-            icon: Icon::City,
-            items: &CITY_CONTEXT_ITEMS,
-        },
-    }
-}
-
-fn workflow_drawer_groups() -> [WorkflowDrawerGroup; 3] {
-    [
-        WorkflowDrawerGroup {
-            label: "Draw",
-            hint: "Lines, boxes, circles, polygons, arcs, and freehand strokes.",
-            icon: Icon::Pipette,
-            presets: &DRAW_WORKFLOWS,
-        },
-        WorkflowDrawerGroup {
-            label: "Shape",
-            hint: "Push faces, cut windows, hollow rooms, and guide house massing.",
-            icon: Icon::Builder,
-            presets: &SHAPE_WORKFLOWS,
-        },
-        WorkflowDrawerGroup {
-            label: "World",
-            hint: "Roads, bot areas, city shells, gardens, towers, and spacecraft.",
-            icon: Icon::City,
-            presets: &WORLD_WORKFLOWS,
-        },
-    ]
-}
-
 fn active_toolbox_selection(
     active_tool: ToolbeltTool,
     active_workflow: Option<BuildWorkflowPreset>,
@@ -1652,6 +1618,16 @@ fn active_toolbox_selection(
         .find(|preset| preset.tool() == active_tool)
         .map(ToolboxSelection::Workflow)
         .unwrap_or(ToolboxSelection::Tool(ToolbeltTool::Navigate))
+}
+
+fn active_toolbox_group(
+    active_tool: ToolbeltTool,
+    active_workflow: Option<BuildWorkflowPreset>,
+) -> ToolboxGroupId {
+    let selection = active_workflow
+        .map(ToolboxSelection::Workflow)
+        .unwrap_or(ToolboxSelection::Tool(active_tool));
+    toolbox_group_for_selection(selection)
 }
 
 fn toolbox_wheel_selection(
@@ -1695,8 +1671,12 @@ fn apply_toolbox_selection(
     if selection == ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse) {
         tool_controller.start_house_workflow(default_material);
     } else {
-        tool_controller.activate(toolbox_selection_editor_tool(selection));
-        tool_controller.cancel_transaction();
+        let editor_tool = toolbox_selection_editor_tool(selection);
+        if tool_controller.active_tool() == editor_tool {
+            tool_controller.restart_active_tool();
+        } else {
+            tool_controller.activate(editor_tool);
+        }
     }
     match selection {
         ToolboxSelection::Tool(tool) => {
@@ -1788,10 +1768,10 @@ fn draw_build_dock(
     undo_count: usize,
     redo_count: usize,
     active_workflow: Option<BuildWorkflowPreset>,
-    retained_hover_selection: Option<ToolboxSelection>,
+    tool_phase: crate::sketch_model::EditorToolPhase,
+    retained_hover_group: Option<ToolboxGroupId>,
     theme: crate::theme::ThemeSettings,
     primary: egui::Color32,
-    dim: egui::Color32,
     ctx: &egui::Context,
 ) -> BuildDockResult {
     let mut result = BuildDockResult::default();
@@ -1805,13 +1785,9 @@ fn draw_build_dock(
         undo_count,
         redo_count,
         theme,
-        primary,
-        dim,
         &mut result,
     );
-    result.hover_bridge_hovered = hover_drawer_bridge_hovered(ctx);
-    let hover_visible =
-        picker_open || hover_drawer_open || result.toolbox_hovered || result.hover_bridge_hovered;
+    let hover_visible = picker_open || hover_drawer_open || result.toolbox_hovered;
     let surface = editor_drawer_surface(picker_open, hover_visible);
     draw_editor_status_bar(
         ctx,
@@ -1821,37 +1797,26 @@ fn draw_build_dock(
         status,
         active_block,
         brush,
-        undo_count,
-        redo_count,
+        tool_phase,
         theme,
         primary,
-        dim,
         &mut result,
     );
     match surface {
         EditorDrawerSurface::Hidden => {}
         EditorDrawerSurface::HoverFlyout => {
-            let hovered = hover_drawer_selection(
-                result.hovered_selection,
-                retained_hover_selection,
+            let group = hover_drawer_group(
+                result.hovered_group,
+                retained_hover_group,
                 active_tool,
                 active_workflow,
             );
-            draw_editor_hover_flyout(
-                ctx,
-                hovered,
-                active_tool,
-                active_workflow,
-                theme,
-                primary,
-                &mut result,
-            );
+            draw_editor_hover_flyout(ctx, group, active_tool, active_workflow, theme, &mut result);
         }
         EditorDrawerSurface::FullDrawer => {
             draw_editor_drawer(
                 ctx,
                 active_tool,
-                active_workflow,
                 active_block,
                 brush,
                 theme,
@@ -1861,21 +1826,23 @@ fn draw_build_dock(
         }
     }
 
+    result.hover_bridge_hovered =
+        hover_drawer_bridge_hovered(ctx, hover_visible, result.toolbox_rect, result.drawer_rect);
+
     result
 }
 
-fn hover_drawer_selection(
-    current_hover: Option<ToolboxSelection>,
-    retained_hover: Option<ToolboxSelection>,
+fn hover_drawer_group(
+    current_hover: Option<ToolboxGroupId>,
+    retained_hover: Option<ToolboxGroupId>,
     active_tool: ToolbeltTool,
     active_workflow: Option<BuildWorkflowPreset>,
-) -> ToolboxSelection {
+) -> ToolboxGroupId {
     current_hover
         .or(retained_hover)
-        .unwrap_or_else(|| active_toolbox_selection(active_tool, active_workflow))
+        .unwrap_or_else(|| active_toolbox_group(active_tool, active_workflow))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_editor_toolbox(
     ctx: &egui::Context,
     active_tool: ToolbeltTool,
@@ -1884,121 +1851,68 @@ fn draw_editor_toolbox(
     undo_count: usize,
     redo_count: usize,
     theme: crate::theme::ThemeSettings,
-    primary: egui::Color32,
-    dim: egui::Color32,
     result: &mut BuildDockResult,
 ) {
-    let colors = theme.semantic();
-    let frame = egui::Frame::none()
-        .fill(egui::Color32::from_rgba_unmultiplied(
-            colors.surface_strong.r(),
-            colors.surface_strong.g(),
-            colors.surface_strong.b(),
-            204,
-        ))
-        .stroke(egui::Stroke::new(
-            1.15,
-            if picker_open {
-                colors.info
-            } else {
-                active_editor_color(active_tool, active_workflow)
-            },
-        ))
-        .inner_margin(egui::Margin::symmetric(7.0, 8.0))
-        .rounding(egui::Rounding::same(8.0))
-        .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 8.0),
-            blur: 20.0,
-            spread: 0.0,
-            color: egui::Color32::from_black_alpha(118),
-        });
+    let frame =
+        crate::ui_kit::toolbench_frame(theme).inner_margin(egui::Margin::symmetric(7.0, 8.0));
+    let active_group = active_toolbox_group(active_tool, active_workflow);
 
     let area = egui::Area::new(egui::Id::new("voxel_native_sketch_editor_toolbox"))
         .anchor(egui::Align2::LEFT_CENTER, egui::vec2(14.0, 0.0))
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
-                ui.set_width(66.0);
+                ui.set_width(crate::theme::KANSO_LAYOUT.icon_square_size);
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 5.0);
                 ui.vertical_centered(|ui| {
-                    for (index, item) in PRIMARY_TOOLBOX_ITEMS.into_iter().enumerate() {
-                        if index == 1 || index == 4 || index == 8 {
-                            editor_toolbox_separator(ui, colors.stroke);
+                    for id in TOOLBOX_GROUP_IDS {
+                        let group = toolbox_group(id);
+                        let response = toolbox_group_button(ui, group, active_group == id, theme);
+                        if response.hovered() {
+                            result.hovered_group = Some(id);
+                            result.toolbox_hovered = true;
                         }
-                        match item {
-                            ToolboxSelection::Tool(tool) => {
-                                let (clicked, hovered) = toolbox_tool_button(
-                                    ui,
-                                    tool,
-                                    toolbox_tool_label(tool),
-                                    active_tool == tool && active_workflow.is_none(),
-                                    primary,
-                                    dim,
-                                );
-                                if hovered {
-                                    result.hovered_selection = Some(ToolboxSelection::Tool(tool));
-                                }
-                                if clicked {
-                                    result.clicked_tool = Some(tool);
-                                }
-                            }
-                            ToolboxSelection::Workflow(preset) => {
-                                let (clicked, hovered) = toolbox_workflow_button(
-                                    ui,
-                                    preset,
-                                    workflow_preset_selected(preset, active_tool, active_workflow),
-                                );
-                                if hovered {
-                                    result.hovered_selection =
-                                        Some(ToolboxSelection::Workflow(preset));
-                                }
-                                if clicked {
-                                    result.workflow_preset = Some(preset);
-                                }
-                            }
+                        if response.clicked() {
+                            set_toolbox_result_selection(result, group.primary);
                         }
                     }
-                    editor_toolbox_separator(ui, colors.stroke);
-                    if toolbox_command_button(
+                    crate::ui_kit::compact_separator(ui, theme);
+                    if toolbox_icon_command(
                         ui,
                         Icon::Textures,
-                        "STYLE",
                         picker_open,
-                        primary,
                         true,
-                        "Open the material and workflow drawer.",
+                        theme,
+                        "Open style and materials.",
                     ) {
                         result.toggle_picker = true;
                     }
-                    if toolbox_command_button(
+                    if toolbox_icon_command(
                         ui,
                         Icon::Undo,
-                        "UNDO",
                         false,
-                        primary,
                         undo_count > 0,
+                        theme,
                         "Undo the last build edit.",
                     ) {
                         result.history_command = Some(HistoryCommand::Undo);
                     }
-                    if toolbox_command_button(
+                    if toolbox_icon_command(
                         ui,
                         Icon::Redo,
-                        "REDO",
                         false,
-                        dim,
                         redo_count > 0,
+                        theme,
                         "Redo the last undone build edit.",
                     ) {
                         result.history_command = Some(HistoryCommand::Redo);
                     }
-                    if toolbox_command_button(
+                    if toolbox_icon_command(
                         ui,
                         Icon::Play,
-                        "PLAY",
                         false,
-                        AMBER,
                         true,
+                        theme,
                         "Exit Sketch Editor and return to play mode.",
                     ) {
                         result.exit_editor = true;
@@ -2007,7 +1921,60 @@ fn draw_editor_toolbox(
             });
         });
     result.wheel_navigation_hovered |= area.response.hovered();
-    result.toolbox_hovered |= area.response.hovered();
+    result.toolbox_rect = Some(area.response.rect);
+}
+
+fn toolbox_group_button(
+    ui: &mut egui::Ui,
+    group: ToolboxGroup,
+    selected: bool,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Response {
+    let tooltip = format!(
+        "{} tools. {} Click to activate {}.",
+        group.label,
+        group.hint,
+        toolbox_selection_label(group.primary)
+    );
+    let response = crate::ui_kit::icon_square(ui, group.icon, selected, theme, &tooltip);
+    let color = toolbox_group_color(group.id, theme);
+    let marker = egui::Rect::from_min_max(
+        response.rect.left_top() + egui::vec2(2.0, 7.0),
+        response.rect.left_bottom() + egui::vec2(5.0, -7.0),
+    );
+    ui.painter()
+        .rect_filled(marker, egui::Rounding::same(2.0), color);
+    if selected {
+        ui.painter().circle_filled(
+            response.rect.right_bottom() - egui::vec2(7.0, 7.0),
+            2.5,
+            color,
+        );
+    }
+    response
+}
+
+fn toolbox_icon_command(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    selected: bool,
+    enabled: bool,
+    theme: crate::theme::ThemeSettings,
+    tooltip: &str,
+) -> bool {
+    let response = ui
+        .add_enabled_ui(enabled, |ui| {
+            crate::ui_kit::icon_square(ui, icon, selected, theme, tooltip)
+        })
+        .inner;
+    enabled && response.clicked()
+}
+
+fn set_toolbox_result_selection(result: &mut BuildDockResult, selection: ToolboxSelection) {
+    match selection {
+        ToolboxSelection::Tool(tool) => result.clicked_tool = Some(tool),
+        ToolboxSelection::Workflow(preset) => result.workflow_preset = Some(preset),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2019,11 +1986,9 @@ fn draw_editor_status_bar(
     status: &str,
     active_block: BlockType,
     brush: IVec3,
-    undo_count: usize,
-    redo_count: usize,
+    tool_phase: crate::sketch_model::EditorToolPhase,
     theme: crate::theme::ThemeSettings,
     primary: egui::Color32,
-    dim: egui::Color32,
     result: &mut BuildDockResult,
 ) {
     let colors = theme.semantic();
@@ -2056,10 +2021,11 @@ fn draw_editor_status_bar(
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
-                ui.set_max_width(930.0);
+                let width = (ctx.screen_rect().width() - 32.0).clamp(560.0, 930.0);
+                ui.set_width(width);
                 ui.spacing_mut().item_spacing = egui::vec2(7.0, 0.0);
                 ui.horizontal(|ui| {
-                    selected_tool_badge(ui, active_tool, picker_open, active_workflow, primary);
+                    selected_tool_badge(ui, active_tool, active_workflow, tool_phase, theme);
                     metric_chip(
                         ui,
                         Icon::Cube,
@@ -2078,46 +2044,40 @@ fn draw_editor_status_bar(
                     } else {
                         metric_chip(ui, Icon::Snap, "SNAP", primary, "Endpoint snap is active");
                     }
-                    if history_chip(
-                        ui,
-                        Icon::Undo,
-                        &undo_count.to_string(),
-                        primary,
-                        undo_count > 0,
-                        "Undo last build edit",
-                    ) {
-                        result.history_command = Some(HistoryCommand::Undo);
-                    }
-                    if history_chip(
-                        ui,
-                        Icon::Redo,
-                        &redo_count.to_string(),
-                        dim,
-                        redo_count > 0,
-                        "Redo last undone build edit",
-                    ) {
-                        result.history_command = Some(HistoryCommand::Redo);
-                    }
                     ui.separator();
                     if drawer_chip(ui, picker_open, primary) {
                         result.toggle_picker = true;
                     }
-                    ui.label(
-                        egui::RichText::new(status)
-                            .monospace()
-                            .size(10.5)
-                            .color(colors.text_muted),
-                    );
+                    editor_status_message(ui, status, colors.text_muted);
                 });
             });
         });
     result.wheel_navigation_hovered |= area.response.hovered();
 }
 
+fn editor_status_message(ui: &mut egui::Ui, status: &str, color: egui::Color32) {
+    let width = ui.available_width().max(96.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::hover());
+    ui.painter()
+        .with_clip_rect(rect.shrink2(egui::vec2(4.0, 0.0)))
+        .text(
+            rect.left_center() + egui::vec2(4.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            status,
+            egui::FontId::monospace(10.5),
+            color,
+        );
+    response.on_hover_text(status);
+}
+
+const TOOLBOX_DRAWER_LEFT: f32 = 76.0;
+const TOOLBOX_FLYOUT_CONTENT_WIDTH: f32 = 300.0;
+const TOOLBOX_FLYOUT_CONTENT_HEIGHT: f32 = 190.0;
+const TOOLBOX_FLYOUT_SLOTS: usize = 6;
+
 fn draw_editor_drawer(
     ctx: &egui::Context,
     active_tool: ToolbeltTool,
-    active_workflow: Option<BuildWorkflowPreset>,
     active_block: BlockType,
     brush: IVec3,
     theme: crate::theme::ThemeSettings,
@@ -2125,34 +2085,13 @@ fn draw_editor_drawer(
     result: &mut BuildDockResult,
 ) {
     let colors = theme.semantic();
-    let open_t = ctx
-        .animate_bool(
-            egui::Id::new("voxel_native_sketch_editor_full_drawer_anim"),
-            true,
-        )
-        .clamp(0.0, 1.0);
-    let fill_alpha = (168.0 + 58.0 * open_t).round() as u8;
-    let frame = egui::Frame::none()
-        .fill(egui::Color32::from_rgba_unmultiplied(
-            colors.surface_strong.r(),
-            colors.surface_strong.g(),
-            colors.surface_strong.b(),
-            fill_alpha,
-        ))
-        .stroke(egui::Stroke::new(1.1, accent))
-        .inner_margin(egui::Margin::symmetric(10.0, 10.0))
-        .rounding(egui::Rounding::same(8.0))
-        .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 9.0),
-            blur: 22.0,
-            spread: 0.0,
-            color: egui::Color32::from_black_alpha(128),
-        });
+    let frame =
+        crate::ui_kit::toolbench_frame(theme).inner_margin(egui::Margin::symmetric(10.0, 10.0));
 
     let area = egui::Area::new(egui::Id::new("voxel_native_sketch_editor_drawer"))
         .anchor(
             egui::Align2::LEFT_CENTER,
-            egui::vec2(76.0 + 16.0 * open_t, 0.0),
+            egui::vec2(TOOLBOX_DRAWER_LEFT, 0.0),
         )
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -2164,51 +2103,34 @@ fn draw_editor_drawer(
                         ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
                     paint_icon(ui.painter(), rect, Icon::Drawer, accent);
                     ui.label(
-                        egui::RichText::new("SKETCH EDITOR")
+                        egui::RichText::new("STYLE & MATERIALS")
                             .monospace()
                             .size(11.0)
                             .strong()
                             .color(accent),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if toolbox_command_button(
+                        if toolbox_icon_command(
                             ui,
                             Icon::Close,
-                            "CLOSE",
                             false,
-                            accent,
                             true,
+                            theme,
                             "Close the drawer.",
                         ) {
                             result.toggle_picker = true;
                         }
                     });
                 });
-                crate::ui_kit::compact_separator(ui, theme);
-                ui.label(
-                    egui::RichText::new("ADVANCED WORKFLOWS")
-                        .monospace()
-                        .size(9.5)
-                        .strong()
-                        .color(colors.text_muted),
-                );
-                for group in workflow_drawer_groups() {
-                    workflow_group_header(ui, group, colors.text_muted, accent);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
-                        for preset in group.presets {
-                            if workflow_preset_chip(
-                                ui,
-                                *preset,
-                                workflow_preset_selected(*preset, active_tool, active_workflow),
-                            ) {
-                                result.workflow_preset = Some(*preset);
-                            }
-                        }
-                    });
-                }
                 if active_tool.uses_live_brush() {
                     crate::ui_kit::compact_separator(ui, theme);
+                    ui.label(
+                        egui::RichText::new("BRUSH SIZE")
+                            .monospace()
+                            .size(9.5)
+                            .strong()
+                            .color(colors.text_muted),
+                    );
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
                         for (label, size) in brush_presets() {
@@ -2224,104 +2146,167 @@ fn draw_editor_drawer(
         });
     result.wheel_navigation_hovered |= area.response.hovered();
     result.drawer_hovered |= area.response.hovered();
+    result.drawer_rect = Some(area.response.rect);
 }
 
 fn draw_editor_hover_flyout(
     ctx: &egui::Context,
-    hovered: ToolboxSelection,
+    group_id: ToolboxGroupId,
     active_tool: ToolbeltTool,
     active_workflow: Option<BuildWorkflowPreset>,
     theme: crate::theme::ThemeSettings,
-    accent: egui::Color32,
     result: &mut BuildDockResult,
 ) {
     let colors = theme.semantic();
-    let group = context_group_for_selection(hovered);
-    let open_t = ctx
-        .animate_bool(
-            egui::Id::new("voxel_native_sketch_editor_context_flyout"),
-            true,
-        )
-        .clamp(0.0, 1.0);
-    let frame = egui::Frame::none()
-        .fill(egui::Color32::from_rgba_unmultiplied(
-            colors.surface_strong.r(),
-            colors.surface_strong.g(),
-            colors.surface_strong.b(),
-            210,
-        ))
-        .stroke(egui::Stroke::new(1.0, accent))
-        .inner_margin(egui::Margin::symmetric(9.0, 8.0))
-        .rounding(egui::Rounding::same(8.0))
-        .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 7.0),
-            blur: 18.0,
-            spread: 0.0,
-            color: egui::Color32::from_black_alpha(112),
-        });
+    let group = toolbox_group(group_id);
+    let accent = toolbox_group_color(group_id, theme);
+    let frame =
+        crate::ui_kit::toolbench_frame(theme).inner_margin(egui::Margin::symmetric(9.0, 8.0));
 
     let area = egui::Area::new(egui::Id::new(
         "voxel_native_sketch_editor_context_flyout_area",
     ))
     .anchor(
         egui::Align2::LEFT_CENTER,
-        egui::vec2(92.0 + 12.0 * open_t, -34.0),
+        egui::vec2(TOOLBOX_DRAWER_LEFT, 0.0),
     )
     .order(egui::Order::Foreground)
     .show(ctx, |ui| {
         frame.show(ui, |ui| {
-            ui.set_width(286.0);
+            ui.set_min_size(egui::vec2(
+                TOOLBOX_FLYOUT_CONTENT_WIDTH,
+                TOOLBOX_FLYOUT_CONTENT_HEIGHT,
+            ));
+            ui.set_max_width(TOOLBOX_FLYOUT_CONTENT_WIDTH);
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-            ui.horizontal(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
-                paint_icon(ui.painter(), rect, group.icon, accent);
-                ui.label(
-                    egui::RichText::new(group.label)
-                        .monospace()
-                        .size(11.0)
-                        .strong()
-                        .color(accent),
-                );
-            });
-            ui.label(
-                egui::RichText::new(group.hint)
-                    .monospace()
-                    .size(9.0)
-                    .color(colors.text_muted),
-            );
+            toolbox_group_header(ui, group, accent, colors.text_muted);
             crate::ui_kit::compact_separator(ui, theme);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
-                for item in group.items {
-                    let selected = match *item {
-                        ToolboxSelection::Tool(tool) => {
-                            active_tool == tool && active_workflow.is_none()
-                        }
-                        ToolboxSelection::Workflow(preset) => {
-                            workflow_preset_selected(preset, active_tool, active_workflow)
-                        }
-                    };
-                    if toolbox_selection_chip(ui, *item, selected, accent) {
-                        match *item {
-                            ToolboxSelection::Tool(tool) => result.clicked_tool = Some(tool),
-                            ToolboxSelection::Workflow(preset) => {
-                                result.workflow_preset = Some(preset);
+            egui::Grid::new(("stable_toolbox_group", group.label))
+                .num_columns(2)
+                .spacing(egui::vec2(6.0, 6.0))
+                .show(ui, |ui| {
+                    for slot in 0..TOOLBOX_FLYOUT_SLOTS {
+                        if let Some(selection) = group.items.get(slot).copied() {
+                            let selected = toolbox_selection_is_active(
+                                selection,
+                                active_tool,
+                                active_workflow,
+                            );
+                            if toolbox_selection_action(ui, selection, selected, accent, theme) {
+                                set_toolbox_result_selection(result, selection);
                             }
+                        } else {
+                            ui.allocate_exact_size(
+                                egui::vec2(
+                                    (TOOLBOX_FLYOUT_CONTENT_WIDTH - 6.0) * 0.5,
+                                    theme.density.row_height(),
+                                ),
+                                egui::Sense::hover(),
+                            );
+                        }
+                        if slot % 2 == 1 {
+                            ui.end_row();
                         }
                     }
-                }
-            });
+                });
         });
     });
     result.wheel_navigation_hovered |= area.response.hovered();
     result.drawer_hovered |= area.response.hovered();
+    result.drawer_rect = Some(area.response.rect);
 }
 
-fn editor_toolbox_separator(ui: &mut egui::Ui, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(52.0, 1.0), egui::Sense::hover());
+fn toolbox_group_header(
+    ui: &mut egui::Ui,
+    group: ToolboxGroup,
+    accent: egui::Color32,
+    text: egui::Color32,
+) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(TOOLBOX_FLYOUT_CONTENT_WIDTH, 26.0),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    paint_icon(
+        &painter,
+        egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 11.0, rect.center().y),
+            egui::vec2(18.0, 18.0),
+        ),
+        group.icon,
+        accent,
+    );
+    painter.text(
+        egui::pos2(rect.left() + 28.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        group.label,
+        egui::FontId::monospace(11.5),
+        text,
+    );
+    response.on_hover_text(group.hint);
+}
+
+fn toolbox_selection_is_active(
+    selection: ToolboxSelection,
+    active_tool: ToolbeltTool,
+    active_workflow: Option<BuildWorkflowPreset>,
+) -> bool {
+    match selection {
+        ToolboxSelection::Tool(tool) => active_tool == tool && active_workflow.is_none(),
+        ToolboxSelection::Workflow(preset) => {
+            workflow_preset_selected(preset, active_tool, active_workflow)
+        }
+    }
+}
+
+fn toolbox_selection_action(
+    ui: &mut egui::Ui,
+    selection: ToolboxSelection,
+    selected: bool,
+    accent: egui::Color32,
+    theme: crate::theme::ThemeSettings,
+) -> bool {
+    let width = (TOOLBOX_FLYOUT_CONTENT_WIDTH - 6.0) * 0.5;
+    let response = crate::ui_kit::icon_action_sized(
+        ui,
+        toolbox_selection_icon(selection),
+        toolbox_selection_label(selection),
+        selected,
+        width,
+        theme,
+    );
+    let marker = egui::Rect::from_min_max(
+        response.rect.left_top() + egui::vec2(2.0, 6.0),
+        response.rect.left_bottom() + egui::vec2(5.0, -6.0),
+    );
     ui.painter()
-        .rect_filled(rect, egui::Rounding::same(1.0), color.linear_multiply(0.75));
+        .rect_filled(marker, egui::Rounding::same(2.0), accent);
+    let clicked = response.clicked();
+    response.on_hover_text(toolbox_selection_hint(selection));
+    clicked
+}
+
+fn toolbox_selection_icon(selection: ToolboxSelection) -> Icon {
+    match selection {
+        ToolboxSelection::Tool(tool) => tool.icon(),
+        ToolboxSelection::Workflow(preset) => preset.icon(),
+    }
+}
+
+fn toolbox_selection_label(selection: ToolboxSelection) -> &'static str {
+    match selection {
+        ToolboxSelection::Tool(tool) => toolbox_tool_label(tool),
+        ToolboxSelection::Workflow(preset) => workflow_toolbox_label(preset),
+    }
+}
+
+fn toolbox_selection_hint(selection: ToolboxSelection) -> String {
+    match selection {
+        ToolboxSelection::Tool(tool) => format!("{}: {}", toolbox_tool_label(tool), tool.hint()),
+        ToolboxSelection::Workflow(preset) => {
+            format!("{}: {}", workflow_toolbox_label(preset), preset.hint())
+        }
+    }
 }
 
 fn active_editor_workflow(
@@ -2336,8 +2321,8 @@ fn active_editor_label(
     active_workflow: Option<BuildWorkflowPreset>,
 ) -> &'static str {
     active_editor_workflow(tool, active_workflow)
-        .map(BuildWorkflowPreset::label)
-        .unwrap_or_else(|| tool.chip_label())
+        .map(workflow_toolbox_label)
+        .unwrap_or_else(|| toolbox_tool_label(tool))
 }
 
 fn active_editor_icon(tool: ToolbeltTool, active_workflow: Option<BuildWorkflowPreset>) -> Icon {
@@ -2361,68 +2346,23 @@ fn active_editor_hint(tool: ToolbeltTool, active_workflow: Option<BuildWorkflowP
         .unwrap_or_else(|| tool.hint().to_owned())
 }
 
-fn toolbox_selection_chip(
-    ui: &mut egui::Ui,
-    selection: ToolboxSelection,
-    selected: bool,
-    fallback: egui::Color32,
-) -> bool {
-    let (icon, label, base_color) = match selection {
-        ToolboxSelection::Tool(tool) => {
-            (tool.icon(), toolbox_tool_label(tool), tool.category_color())
-        }
-        ToolboxSelection::Workflow(preset) => (
-            preset.icon(),
-            workflow_toolbox_label(preset),
-            preset.color(),
-        ),
-    };
-    let color = if selected { AMBER } else { base_color };
-    let stroke = if selected {
-        AMBER
-    } else {
-        fallback.linear_multiply(0.75)
-    };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(86.0, 34.0), egui::Sense::click());
-    let hovered = response.hovered();
-    let fill = if selected {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 72)
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(base_color.r(), base_color.g(), base_color.b(), 40)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(5, 20, 28, 168)
-    };
-    let painter = ui.painter_at(rect);
-    painter.rect(
-        rect,
-        egui::Rounding::same(6.0),
-        fill,
-        egui::Stroke::new(1.0, stroke),
-    );
-    paint_icon(
-        &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 8.0), egui::vec2(16.0, 16.0)),
-        icon,
-        color,
-    );
-    painter.text(
-        rect.right_center() - egui::vec2(7.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        label,
-        egui::FontId::monospace(8.0),
-        TEXT,
-    );
-    response.clicked()
-}
-
 fn toolbox_tool_label(tool: ToolbeltTool) -> &'static str {
     match tool {
         ToolbeltTool::Navigate => "Select",
+        ToolbeltTool::DrawRect => "Rectangle",
+        ToolbeltTool::Sculpt => "Push/Pull",
         ToolbeltTool::TransformMove => "Move",
         ToolbeltTool::TransformScale => "Scale",
         ToolbeltTool::TransformRotate => "Rotate",
         ToolbeltTool::MaterialPicker => "Paint",
-        _ => tool.chip_label(),
+        ToolbeltTool::SmartTower => "Tower",
+        ToolbeltTool::BrushPlace => "Build",
+        ToolbeltTool::BrushCut => "Cut",
+        ToolbeltTool::CityRoad => "Road",
+        ToolbeltTool::CityDistrict => "Bot Area",
+        ToolbeltTool::CityBuilding => "City Shell",
+        ToolbeltTool::CityFacade => "Facade",
+        ToolbeltTool::AnimationPick => "Animation",
     }
 }
 
@@ -2445,187 +2385,6 @@ fn workflow_toolbox_label(preset: BuildWorkflowPreset) -> &'static str {
         BuildWorkflowPreset::Skyline => "Tower",
         BuildWorkflowPreset::Spacecraft => "Ship",
     }
-}
-
-fn toolbox_workflow_button(
-    ui: &mut egui::Ui,
-    preset: BuildWorkflowPreset,
-    selected: bool,
-) -> (bool, bool) {
-    let color = preset.color();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 41.0), egui::Sense::click());
-    let hovered = response.hovered();
-    let fill = if selected {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 74)
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 42)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(8, 22, 30, 174)
-    };
-    let painter = ui.painter_at(rect);
-    painter.rect(
-        rect,
-        egui::Rounding::same(7.0),
-        fill,
-        egui::Stroke::new(1.0, if selected { AMBER } else { color }),
-    );
-    paint_icon(
-        &painter,
-        egui::Rect::from_center_size(
-            rect.center_top() + egui::vec2(-2.0, 12.0),
-            egui::vec2(16.0, 16.0),
-        ),
-        preset.icon(),
-        if selected { AMBER } else { color },
-    );
-    let cue = preset.inference_cue();
-    let cue_rect = egui::Rect::from_min_size(
-        rect.right_top() + egui::vec2(-19.0, 4.0),
-        egui::vec2(14.0, 14.0),
-    );
-    painter.circle_filled(
-        cue_rect.center(),
-        7.5,
-        egui::Color32::from_rgba_unmultiplied(0, 12, 18, 178),
-    );
-    paint_icon(
-        &painter,
-        cue_rect.shrink(2.0),
-        cue.icon(),
-        if selected { AMBER } else { color },
-    );
-    painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 14.5),
-        egui::Align2::CENTER_BOTTOM,
-        workflow_toolbox_label(preset),
-        egui::FontId::monospace(8.0),
-        TEXT,
-    );
-    painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 4.0),
-        egui::Align2::CENTER_BOTTOM,
-        cue.label(),
-        egui::FontId::monospace(6.8),
-        egui::Color32::from_white_alpha(150),
-    );
-    let clicked = response.clicked();
-    let hovered = response.hovered();
-    (clicked, hovered)
-}
-
-fn toolbox_tool_button(
-    ui: &mut egui::Ui,
-    tool: ToolbeltTool,
-    label: &'static str,
-    selected: bool,
-    primary: egui::Color32,
-    dim: egui::Color32,
-) -> (bool, bool) {
-    let color = if selected { AMBER } else { primary };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 41.0), egui::Sense::click());
-    let hovered = response.hovered();
-    let fill = if selected {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 70)
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(6, 18, 24, 170)
-    };
-    let painter = ui.painter_at(rect);
-    painter.rect(
-        rect,
-        egui::Rounding::same(7.0),
-        fill,
-        egui::Stroke::new(1.0, if selected { AMBER } else { dim }),
-    );
-    paint_icon(
-        &painter,
-        egui::Rect::from_center_size(
-            rect.center_top() + egui::vec2(0.0, 12.0),
-            egui::vec2(16.0, 16.0),
-        ),
-        tool.icon(),
-        if selected { AMBER } else { color },
-    );
-    painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 5.0),
-        egui::Align2::CENTER_BOTTOM,
-        label,
-        egui::FontId::monospace(8.1),
-        TEXT,
-    );
-    let clicked = response.clicked();
-    let hovered = response.hovered();
-    (clicked, hovered)
-}
-
-fn toolbox_command_button(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    label: &'static str,
-    selected: bool,
-    color: egui::Color32,
-    enabled: bool,
-    hint: &'static str,
-) -> bool {
-    let sense = if enabled {
-        egui::Sense::click()
-    } else {
-        egui::Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(58.0, 32.0), sense);
-    let hovered = response.hovered() && enabled;
-    let visible = if enabled {
-        color
-    } else {
-        color.linear_multiply(0.36)
-    };
-    let fill = if selected {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 72)
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 42)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(6, 18, 24, 168)
-    };
-    let painter = ui.painter_at(rect);
-    painter.rect(
-        rect,
-        egui::Rounding::same(7.0),
-        fill,
-        egui::Stroke::new(
-            1.0,
-            if selected {
-                AMBER
-            } else {
-                visible.linear_multiply(0.8)
-            },
-        ),
-    );
-    paint_icon(
-        &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 9.0), egui::vec2(16.0, 16.0)),
-        icon,
-        visible,
-    );
-    painter.text(
-        rect.right_center() - egui::vec2(5.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        label,
-        egui::FontId::monospace(7.8),
-        if enabled {
-            TEXT
-        } else {
-            egui::Color32::from_white_alpha(86)
-        },
-    );
-    response
-        .on_hover_text(if enabled {
-            hint
-        } else {
-            "No build history for this command yet."
-        })
-        .clicked()
-        && enabled
 }
 
 fn drawer_chip(ui: &mut egui::Ui, open: bool, primary: egui::Color32) -> bool {
@@ -2659,26 +2418,15 @@ fn drawer_chip(ui: &mut egui::Ui, open: bool, primary: egui::Color32) -> bool {
 fn selected_tool_badge(
     ui: &mut egui::Ui,
     tool: ToolbeltTool,
-    picker_open: bool,
     active_workflow: Option<BuildWorkflowPreset>,
-    primary: egui::Color32,
+    phase: crate::sketch_model::EditorToolPhase,
+    theme: crate::theme::ThemeSettings,
 ) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(154.0, 34.0), egui::Sense::hover());
+    let colors = theme.semantic();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(178.0, 34.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    let glass = egui::Color32::from_rgba_unmultiplied(12, 34, 45, 188);
-    let sheen = egui::Color32::from_rgba_unmultiplied(220, 250, 255, 34);
     let color = active_editor_color(tool, active_workflow);
-    painter.rect(
-        rect,
-        egui::Rounding::same(8.0),
-        glass,
-        egui::Stroke::new(1.0, color),
-    );
-    painter.rect_filled(
-        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.center().y)),
-        egui::Rounding::same(8.0),
-        sheen,
-    );
+    crate::ui_kit::hud_panel(&painter, rect, theme, 0.84, color);
     let icon_rect =
         egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 7.0), egui::vec2(20.0, 20.0));
     paint_icon(
@@ -2690,18 +2438,45 @@ fn selected_tool_badge(
     painter.text(
         rect.min + egui::vec2(34.0, 9.0),
         egui::Align2::LEFT_CENTER,
-        if picker_open { "DRAWER" } else { "EDITOR" },
+        format!("ACTIVE / {}", editor_phase_label(phase)),
         egui::FontId::monospace(9.5),
-        AMBER,
+        editor_phase_color(phase, theme),
     );
     painter.text(
         rect.min + egui::vec2(34.0, 23.0),
         egui::Align2::LEFT_CENTER,
         active_editor_label(tool, active_workflow),
         egui::FontId::monospace(11.5),
-        primary,
+        colors.text,
     );
-    response.on_hover_text(active_editor_hint(tool, active_workflow));
+    response.on_hover_text(format!(
+        "{} - {}. {}",
+        active_editor_label(tool, active_workflow),
+        editor_phase_label(phase).to_ascii_lowercase(),
+        active_editor_hint(tool, active_workflow)
+    ));
+}
+
+fn editor_phase_label(phase: crate::sketch_model::EditorToolPhase) -> &'static str {
+    match phase {
+        crate::sketch_model::EditorToolPhase::Idle => "READY",
+        crate::sketch_model::EditorToolPhase::Previewing => "IN PROGRESS",
+        crate::sketch_model::EditorToolPhase::Committed => "APPLIED",
+        crate::sketch_model::EditorToolPhase::Cancelled => "CANCELLED",
+    }
+}
+
+fn editor_phase_color(
+    phase: crate::sketch_model::EditorToolPhase,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Color32 {
+    let colors = theme.semantic();
+    match phase {
+        crate::sketch_model::EditorToolPhase::Idle => colors.text_muted,
+        crate::sketch_model::EditorToolPhase::Previewing => colors.info,
+        crate::sketch_model::EditorToolPhase::Committed => colors.success,
+        crate::sketch_model::EditorToolPhase::Cancelled => colors.warning,
+    }
 }
 
 #[cfg(test)]
@@ -2979,177 +2754,20 @@ fn metric_chip(
     response.on_hover_text(hint);
 }
 
-fn history_chip(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    value: &str,
-    color: egui::Color32,
-    enabled: bool,
-    hint: &'static str,
-) -> bool {
-    let sense = if enabled {
-        egui::Sense::click()
-    } else {
-        egui::Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(70.0, 34.0), sense);
-    let hovered = response.hovered() && enabled;
-    let painter = ui.painter_at(rect);
-    let visible_color = if enabled {
-        color
-    } else {
-        color.linear_multiply(0.35)
-    };
-    let fill = if hovered {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 54)
-    } else {
-        egui::Color32::from_rgba_premultiplied(0, 8, 6, 180)
-    };
-    painter.rect(
-        rect,
-        egui::Rounding::same(4.0),
-        fill,
-        egui::Stroke::new(
-            if enabled { 1.15 } else { 1.0 },
-            visible_color.linear_multiply(if hovered { 0.95 } else { 0.55 }),
-        ),
-    );
-    paint_icon(
-        &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 8.0), egui::vec2(17.0, 17.0)),
-        icon,
-        visible_color,
-    );
-    painter.text(
-        rect.right_center() - egui::vec2(7.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        value,
-        egui::FontId::monospace(10.5),
-        if enabled {
-            TEXT
-        } else {
-            egui::Color32::from_white_alpha(92)
-        },
-    );
-    response
-        .on_hover_text(if enabled {
-            hint
-        } else {
-            "No build history for this command yet."
-        })
-        .clicked()
-        && enabled
-}
-
 fn format_history_command_status(
     command: HistoryCommand,
     result: Option<(String, usize)>,
 ) -> String {
     match (command, result) {
-        (HistoryCommand::Undo, Some((label, n))) => {
-            format!("Undo '{label}': {n} voxels restored. Click Redo or press Ctrl+Y.")
+        (HistoryCommand::Undo, Some((label, _))) => {
+            format!("Undid '{label}'. Redo is available.")
         }
-        (HistoryCommand::Redo, Some((label, n))) => {
-            format!("Redo '{label}': {n} voxels applied. Click Undo or press Ctrl+Z.")
+        (HistoryCommand::Redo, Some((label, _))) => {
+            format!("Redid '{label}'. Undo is available.")
         }
         (HistoryCommand::Undo, None) => "Undo: no build edits to rewind yet.".into(),
         (HistoryCommand::Redo, None) => "Redo: no undone build edits to replay yet.".into(),
     }
-}
-
-fn workflow_group_header(
-    ui: &mut egui::Ui,
-    group: WorkflowDrawerGroup,
-    muted: egui::Color32,
-    accent: egui::Color32,
-) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(366.0, 22.0), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        egui::Rounding::same(5.0),
-        egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 18),
-    );
-    paint_icon(
-        &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 4.0), egui::vec2(14.0, 14.0)),
-        group.icon,
-        accent,
-    );
-    painter.text(
-        rect.min + egui::vec2(27.0, 11.0),
-        egui::Align2::LEFT_CENTER,
-        group.label,
-        egui::FontId::monospace(9.5),
-        TEXT,
-    );
-    painter.text(
-        rect.right_center() - egui::vec2(7.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        group.hint,
-        egui::FontId::monospace(7.5),
-        muted,
-    );
-    response.on_hover_text(group.hint);
-}
-
-fn workflow_preset_chip(ui: &mut egui::Ui, preset: BuildWorkflowPreset, selected: bool) -> bool {
-    let color = preset.color();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(108.0, 42.0), egui::Sense::click());
-    let hovered = response.hovered();
-    let fill = if selected {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 88)
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 52)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(10, 26, 34, 188)
-    };
-    let painter = ui.painter_at(rect);
-    painter.rect(
-        rect,
-        egui::Rounding::same(7.0),
-        fill,
-        egui::Stroke::new(1.0, if selected { AMBER } else { color }),
-    );
-    paint_icon(
-        &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 9.0), egui::vec2(19.0, 19.0)),
-        preset.icon(),
-        if selected { AMBER } else { color },
-    );
-    let cue = preset.inference_cue();
-    let cue_rect = egui::Rect::from_min_size(
-        rect.right_top() + egui::vec2(-22.0, 5.0),
-        egui::vec2(15.0, 15.0),
-    );
-    painter.circle_filled(
-        cue_rect.center(),
-        8.0,
-        egui::Color32::from_rgba_unmultiplied(0, 12, 18, 170),
-    );
-    paint_icon(
-        &painter,
-        cue_rect.shrink(2.0),
-        cue.icon(),
-        if selected { AMBER } else { color },
-    );
-    painter.text(
-        rect.min + egui::vec2(32.0, 14.0),
-        egui::Align2::LEFT_CENTER,
-        workflow_toolbox_label(preset),
-        egui::FontId::monospace(10.0),
-        TEXT,
-    );
-    painter.text(
-        rect.min + egui::vec2(32.0, 29.0),
-        egui::Align2::LEFT_CENTER,
-        cue.label(),
-        egui::FontId::monospace(8.0),
-        egui::Color32::from_white_alpha(152),
-    );
-    let clicked = response.clicked();
-    response.on_hover_text(preset.inference_hover_text());
-    clicked
 }
 
 #[cfg(test)]
@@ -3503,8 +3121,9 @@ mod tests {
         );
         let redo = format_history_command_status(HistoryCommand::Redo, None);
 
-        assert!(undo.contains("Undo 'Sketch Fill 12 cells'"));
-        assert!(undo.contains("Click Redo"));
+        assert!(undo.contains("Undid 'Sketch Fill 12 cells'"));
+        assert!(undo.contains("Redo is available"));
+        assert!(!undo.contains("Ctrl+"));
         assert!(redo.contains("no undone build edits"));
     }
 
@@ -3656,20 +3275,18 @@ mod tests {
     }
 
     #[test]
-    fn editor_toolbox_exposes_mouse_first_core_actions() {
+    fn editor_toolbox_groups_are_stable_and_prioritized() {
         assert_eq!(
-            BuildWorkflowPreset::TOOLBOX,
-            [
-                BuildWorkflowPreset::Pencil,
-                BuildWorkflowPreset::Sketch,
-                BuildWorkflowPreset::Circle,
-                BuildWorkflowPreset::PushPull,
-                BuildWorkflowPreset::Opening,
-                BuildWorkflowPreset::Room,
-                BuildWorkflowPreset::Roads,
-                BuildWorkflowPreset::BotArea,
-                BuildWorkflowPreset::ModernHouse,
-            ]
+            TOOLBOX_GROUP_IDS.map(|id| toolbox_group(id).label),
+            ["Core", "Draw", "Shape", "Transform", "World",]
+        );
+        assert_eq!(
+            toolbox_group(ToolboxGroupId::Draw).primary,
+            ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch)
+        );
+        assert_eq!(
+            toolbox_group(ToolboxGroupId::Shape).primary,
+            ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull)
         );
     }
 
@@ -3687,6 +3304,19 @@ mod tests {
         );
         assert_eq!(toolbox_tool_label(ToolbeltTool::MaterialPicker), "Paint");
         assert_eq!(workflow_toolbox_label(BuildWorkflowPreset::BotArea), "Bots");
+    }
+
+    #[test]
+    fn visible_toolbox_labels_do_not_expose_number_shortcuts() {
+        for id in TOOLBOX_GROUP_IDS {
+            let group = toolbox_group(id);
+            assert!(!group.label.chars().any(|ch| ch.is_ascii_digit()));
+            for selection in group.items {
+                assert!(!toolbox_selection_label(*selection)
+                    .chars()
+                    .any(|ch| ch.is_ascii_digit()));
+            }
+        }
     }
 
     #[test]
@@ -3713,16 +3343,23 @@ mod tests {
     }
 
     #[test]
-    fn workflow_drawer_groups_keep_subtools_sorted_under_hover_sections() {
-        let groups = workflow_drawer_groups();
+    fn toolbox_groups_partition_every_selection_without_duplicates() {
+        let item_count: usize = TOOLBOX_GROUP_IDS
+            .into_iter()
+            .map(|id| toolbox_group(id).items.len())
+            .sum();
+        assert_eq!(item_count, ToolboxSelection::ORDER.len());
 
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].label, "Draw");
-        assert!(groups[0].presets.contains(&BuildWorkflowPreset::Circle));
-        assert_eq!(groups[1].label, "Shape");
-        assert!(groups[1].presets.contains(&BuildWorkflowPreset::PushPull));
-        assert_eq!(groups[2].label, "World");
-        assert!(groups[2].presets.contains(&BuildWorkflowPreset::Spacecraft));
+        for selection in ToolboxSelection::ORDER {
+            let occurrences = TOOLBOX_GROUP_IDS
+                .into_iter()
+                .filter(|id| toolbox_group(*id).items.contains(&selection))
+                .count();
+            assert_eq!(
+                occurrences, 1,
+                "{selection:?} must appear in exactly one group"
+            );
+        }
     }
 
     #[test]
@@ -3750,65 +3387,56 @@ mod tests {
     }
 
     #[test]
+    fn hover_drawer_bridge_is_a_narrow_gap_not_an_invisible_world_panel() {
+        let toolbox = egui::Rect::from_min_size(egui::pos2(14.0, 160.0), egui::vec2(50.0, 380.0));
+        let drawer = egui::Rect::from_min_size(egui::pos2(76.0, 245.0), egui::vec2(318.0, 206.0));
+        let bridge = hover_drawer_bridge_rect(toolbox, drawer);
+
+        assert!(bridge.width() <= 20.0);
+        assert!(bridge.contains(egui::pos2(70.0, drawer.center().y)));
+        assert!(bridge.top() <= toolbox.top());
+        assert!(bridge.bottom() >= toolbox.bottom());
+    }
+
+    #[test]
+    fn every_visible_editor_tool_keeps_pointer_control_available() {
+        for selection in ToolboxSelection::ORDER {
+            assert!(
+                toolbox_selection_editor_tool(selection).uses_pointer_surface(),
+                "{selection:?} must map to a canonical mouse-first editor tool"
+            );
+        }
+    }
+
+    #[test]
     fn hover_drawer_reuses_retained_group_while_pointer_crosses_gap() {
-        let retained = ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse);
-        let selected = hover_drawer_selection(None, Some(retained), ToolbeltTool::Navigate, None);
+        let retained = ToolboxGroupId::Shape;
+        let selected = hover_drawer_group(None, Some(retained), ToolbeltTool::Navigate, None);
 
         assert_eq!(selected, retained);
     }
 
     #[test]
-    fn primary_editor_order_keeps_only_high_value_mouse_first_tools() {
-        assert_eq!(
-            PRIMARY_TOOLBOX_ITEMS,
-            [
-                ToolboxSelection::Tool(ToolbeltTool::Navigate),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::Sketch),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::Circle),
-                ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull),
-                ToolboxSelection::Tool(ToolbeltTool::TransformMove),
-                ToolboxSelection::Tool(ToolbeltTool::TransformRotate),
-                ToolboxSelection::Tool(ToolbeltTool::TransformScale),
-                ToolboxSelection::Tool(ToolbeltTool::MaterialPicker),
-            ]
-        );
-    }
+    fn every_group_primary_is_a_directly_selectable_item() {
+        for id in TOOLBOX_GROUP_IDS {
+            let group = toolbox_group(id);
+            assert!(group.items.contains(&group.primary));
 
-    #[test]
-    fn expanded_editor_order_starts_with_the_primary_toolbar() {
-        assert_eq!(
-            &ToolboxSelection::ORDER[..PRIMARY_TOOLBOX_ITEMS.len()],
-            PRIMARY_TOOLBOX_ITEMS
-        );
-    }
-
-    #[test]
-    fn voxel_specific_workflows_stay_in_contextual_flyouts_not_primary_rail() {
-        for advanced in [
-            ToolboxSelection::Workflow(BuildWorkflowPreset::Opening),
-            ToolboxSelection::Workflow(BuildWorkflowPreset::Room),
-            ToolboxSelection::Workflow(BuildWorkflowPreset::ModernHouse),
-            ToolboxSelection::Workflow(BuildWorkflowPreset::Roads),
-            ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea),
-        ] {
-            assert!(
-                !PRIMARY_TOOLBOX_ITEMS.contains(&advanced),
-                "{advanced:?} should be available through hover drawers, not the primary rail"
-            );
+            let mut result = BuildDockResult::default();
+            set_toolbox_result_selection(&mut result, group.primary);
+            assert!(result.clicked_tool.is_some() || result.workflow_preset.is_some());
         }
+    }
 
-        let house = context_group_for_selection(ToolboxSelection::Workflow(
-            BuildWorkflowPreset::ModernHouse,
-        ));
-        assert!(house
-            .items
-            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::Opening)));
-        let city =
-            context_group_for_selection(ToolboxSelection::Workflow(BuildWorkflowPreset::Roads));
-        assert!(city
-            .items
-            .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea)));
+    #[test]
+    fn fixed_flyout_capacity_covers_every_group_without_resizing() {
+        assert!(TOOLBOX_FLYOUT_CONTENT_WIDTH.is_finite());
+        assert!(TOOLBOX_FLYOUT_CONTENT_HEIGHT.is_finite());
+        assert!(TOOLBOX_FLYOUT_CONTENT_WIDTH <= 320.0);
+        assert!(TOOLBOX_FLYOUT_CONTENT_HEIGHT <= 200.0);
+        for id in TOOLBOX_GROUP_IDS {
+            assert!(toolbox_group(id).items.len() <= TOOLBOX_FLYOUT_SLOTS);
+        }
     }
 
     #[test]
@@ -3844,57 +3472,68 @@ mod tests {
     }
 
     #[test]
-    fn contextual_hover_groups_do_not_mix_unrelated_tools() {
-        let edit = context_group_for_selection(ToolboxSelection::Tool(ToolbeltTool::TransformMove));
-        assert_eq!(edit.label, "Edit Selected");
-        assert!(edit
+    fn stable_groups_do_not_mix_unrelated_tools() {
+        let transform = toolbox_group(ToolboxGroupId::Transform);
+        assert!(transform
             .items
             .contains(&ToolboxSelection::Tool(ToolbeltTool::TransformScale)));
-        assert!(edit
+        assert!(transform
             .items
             .contains(&ToolboxSelection::Tool(ToolbeltTool::TransformRotate)));
-        assert!(!edit
+        assert!(!transform
             .items
             .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::Roads)));
 
-        let draw =
-            context_group_for_selection(ToolboxSelection::Workflow(BuildWorkflowPreset::Pencil));
+        let draw = toolbox_group(ToolboxGroupId::Draw);
         assert_eq!(draw.label, "Draw");
-        assert!(draw.items.len() <= 6);
+        assert_eq!(draw.items.len(), TOOLBOX_FLYOUT_SLOTS);
         assert!(!draw
             .items
             .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea)));
 
-        let house = context_group_for_selection(ToolboxSelection::Workflow(
-            BuildWorkflowPreset::ModernHouse,
-        ));
-        assert_eq!(house.label, "House Builder");
-        assert!(house
+        let shape = toolbox_group(ToolboxGroupId::Shape);
+        assert!(shape
             .items
             .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::PushPull)));
-        assert!(house
+        assert!(shape
             .items
             .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::Opening)));
-        assert!(!house
+        assert!(!shape
             .items
             .contains(&ToolboxSelection::Workflow(BuildWorkflowPreset::BotArea)));
+    }
+
+    #[test]
+    fn active_group_tracks_direct_tools_without_a_workflow() {
+        assert_eq!(
+            active_toolbox_group(ToolbeltTool::DrawRect, None),
+            ToolboxGroupId::Draw
+        );
+        assert_eq!(
+            active_toolbox_group(ToolbeltTool::Sculpt, None),
+            ToolboxGroupId::Shape
+        );
+        assert_eq!(
+            active_toolbox_group(ToolbeltTool::BrushPlace, None),
+            ToolboxGroupId::World
+        );
     }
 
     #[test]
     fn active_editor_badge_names_workflow_not_internal_tool() {
         assert_eq!(
             active_editor_label(ToolbeltTool::DrawRect, Some(BuildWorkflowPreset::Pencil)),
-            "PENCIL"
+            "Line"
         );
         assert_eq!(
             active_editor_label(ToolbeltTool::DrawRect, Some(BuildWorkflowPreset::Sketch)),
-            "RECTANGLE"
+            "Rect"
         );
         assert_eq!(
             active_editor_label(ToolbeltTool::Sculpt, Some(BuildWorkflowPreset::PushPull)),
-            "PUSH/PULL"
+            "Push/Pull"
         );
-        assert_eq!(active_editor_label(ToolbeltTool::CityRoad, None), "ROAD");
+        assert_eq!(active_editor_label(ToolbeltTool::CityRoad, None), "Road");
     }
 
     #[test]
@@ -3905,8 +3544,8 @@ mod tests {
             Some(BuildWorkflowPreset::ModernHouse),
         );
 
-        assert!(status.starts_with("HOUSE: Footprint"));
-        assert!(status.contains("Push/Pull"));
+        assert!(status.starts_with("House ready"));
+        assert!(status.contains("pull the walls"));
         assert!(!status.contains("Sketch Draw ready"));
     }
 
@@ -3923,9 +3562,51 @@ mod tests {
             &controller,
         );
 
-        assert!(status.starts_with("PENCIL:"));
+        assert!(status.starts_with("Line in progress."));
         assert!(status.contains("snapped endpoint"));
+        assert!(!status.contains("PENCIL:"));
         assert!(!status.contains("Sketch Draw ready"));
+    }
+
+    #[test]
+    fn committed_status_hides_internal_transaction_text() {
+        let mut controller = crate::sketch_model::ToolController::default();
+        controller.activate(crate::sketch_model::EditorToolId::Pencil);
+        controller.begin_transaction("internal pencil transaction");
+        assert!(controller.commit_transaction().is_some());
+
+        let status = compact_status_for_controller(
+            "unused internal status",
+            ToolbeltTool::DrawRect,
+            Some(BuildWorkflowPreset::Pencil),
+            &controller,
+        );
+
+        assert_eq!(
+            status,
+            "Line applied. Continue in the world or choose another tool."
+        );
+        assert!(!status.contains("internal pencil transaction"));
+    }
+
+    #[test]
+    fn active_state_phases_use_plain_user_facing_words() {
+        assert_eq!(
+            editor_phase_label(crate::sketch_model::EditorToolPhase::Idle),
+            "READY"
+        );
+        assert_eq!(
+            editor_phase_label(crate::sketch_model::EditorToolPhase::Previewing),
+            "IN PROGRESS"
+        );
+        assert_eq!(
+            editor_phase_label(crate::sketch_model::EditorToolPhase::Committed),
+            "APPLIED"
+        );
+        assert_eq!(
+            editor_phase_label(crate::sketch_model::EditorToolPhase::Cancelled),
+            "CANCELLED"
+        );
     }
 
     #[test]

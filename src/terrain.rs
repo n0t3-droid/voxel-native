@@ -99,6 +99,13 @@ pub enum Region {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeSilhouette {
+    Layered,
+    Windswept,
+    Crowned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TreeProfile {
     trunk_height: i32,
     canopy_radius: i32,
@@ -106,6 +113,7 @@ struct TreeProfile {
     tiers: usize,
     max_extent: i32,
     crown_lift: i32,
+    silhouette: TreeSilhouette,
 }
 
 impl TreeProfile {
@@ -239,6 +247,11 @@ impl TerrainGenerator {
             return None;
         }
         let (trunk_height, leaves) = self.tree_height_for_biome(biome, style_roll);
+        let silhouette = match (style_roll * 3.0).floor() as i32 {
+            0 => TreeSilhouette::Layered,
+            1 => TreeSilhouette::Windswept,
+            _ => TreeSilhouette::Crowned,
+        };
         let profile = match self.scenery_quality {
             SceneryQuality::Off => return None,
             SceneryQuality::Lean => TreeProfile {
@@ -248,22 +261,67 @@ impl TerrainGenerator {
                 tiers: 2,
                 max_extent: 3,
                 crown_lift: 2,
+                // Lean deliberately preserves the previous tree shape and
+                // cost. Shape variety is a Balanced/Lush visual feature.
+                silhouette: TreeSilhouette::Layered,
             },
-            SceneryQuality::Balanced => TreeProfile {
-                trunk_height,
-                canopy_radius: 2,
-                branch_reach: 2,
-                tiers: 4,
-                max_extent: 5,
-                crown_lift: 3,
+            SceneryQuality::Balanced => match silhouette {
+                TreeSilhouette::Layered => TreeProfile {
+                    trunk_height,
+                    canopy_radius: 2,
+                    branch_reach: 2,
+                    tiers: 4,
+                    max_extent: 5,
+                    crown_lift: 3,
+                    silhouette,
+                },
+                TreeSilhouette::Windswept => TreeProfile {
+                    trunk_height,
+                    canopy_radius: 2,
+                    branch_reach: 3,
+                    tiers: 4,
+                    max_extent: 5,
+                    crown_lift: 3,
+                    silhouette,
+                },
+                TreeSilhouette::Crowned => TreeProfile {
+                    trunk_height,
+                    canopy_radius: 2,
+                    branch_reach: 2,
+                    tiers: 5,
+                    max_extent: 5,
+                    crown_lift: 4,
+                    silhouette,
+                },
             },
-            SceneryQuality::Lush => TreeProfile {
-                trunk_height,
-                canopy_radius: 3,
-                branch_reach: 3,
-                tiers: 6,
-                max_extent: 7,
-                crown_lift: 4,
+            SceneryQuality::Lush => match silhouette {
+                TreeSilhouette::Layered => TreeProfile {
+                    trunk_height,
+                    canopy_radius: 3,
+                    branch_reach: 3,
+                    tiers: 6,
+                    max_extent: 7,
+                    crown_lift: 4,
+                    silhouette,
+                },
+                TreeSilhouette::Windswept => TreeProfile {
+                    trunk_height,
+                    canopy_radius: 3,
+                    branch_reach: 4,
+                    tiers: 5,
+                    max_extent: 7,
+                    crown_lift: 4,
+                    silhouette,
+                },
+                TreeSilhouette::Crowned => TreeProfile {
+                    trunk_height,
+                    canopy_radius: 3,
+                    branch_reach: 2,
+                    tiers: 6,
+                    max_extent: 6,
+                    crown_lift: 5,
+                    silhouette,
+                },
             },
         };
         Some((profile, leaves))
@@ -788,10 +846,109 @@ impl TerrainGenerator {
         }
     }
 
-    /// Y-banded sub-surface block for Mesa biome â€” produces the
-    /// horizontal red/buff/dark stripes that define real-world
-    /// canyon cliff faces. Pure function of world Y so adjacent
-    /// columns line up perfectly into continuous bands.
+    /// Whether a surface palette may take part in natural biome feathering.
+    #[inline]
+    fn supports_natural_ecotone(biome: Biome) -> bool {
+        !matches!(biome, Biome::Ocean) && !biome.is_showcase_terrain()
+    }
+
+    /// Select the neighbouring surface material in broad, deterministic
+    /// clusters rather than per-voxel speckle. World-space cells keep the
+    /// result seamless across chunk borders, while one low-frequency sample
+    /// softens the otherwise square cell silhouette.
+    fn clustered_ecotone_choice(
+        &self,
+        current: BlockType,
+        neighbour: BlockType,
+        wx: i32,
+        wz: i32,
+    ) -> BlockType {
+        use crate::settings::SceneryQuality;
+
+        let (cell_size, cell_coverage, noise_floor) = match self.scenery_quality {
+            SceneryQuality::Off | SceneryQuality::Lean => return current,
+            SceneryQuality::Balanced => (8, 0.52, 0.06),
+            SceneryQuality::Lush => (10, 0.72, -0.14),
+        };
+        if current == neighbour {
+            return current;
+        }
+
+        let cell_x = wx.div_euclid(cell_size);
+        let cell_z = wz.div_euclid(cell_size);
+        let cell_roll = column_rand(self.seed ^ 0xEC07_0AE1, cell_x, cell_z);
+        if cell_roll > cell_coverage {
+            return current;
+        }
+
+        let organic = self.hills_a.get([
+            wx as f64 * 0.034 + cell_roll * 7.0,
+            wz as f64 * 0.034 - cell_roll * 5.0,
+        ]);
+        if organic + (cell_roll - 0.5) * 0.32 >= noise_floor {
+            neighbour
+        } else {
+            current
+        }
+    }
+
+    /// Feather only the visible surface skin near biome borders. This never
+    /// changes the canonical height, cave field, sub-surface material, or
+    /// decoration count. Off/Lean return before any additional noise work.
+    fn ecotone_surface_block(
+        &self,
+        biome: Biome,
+        current: BlockType,
+        surface: i32,
+        cont: f64,
+        wx: i32,
+        wz: i32,
+    ) -> BlockType {
+        use crate::settings::SceneryQuality;
+
+        let sample_distance = match self.scenery_quality {
+            SceneryQuality::Off | SceneryQuality::Lean => return current,
+            SceneryQuality::Balanced => 9,
+            SceneryQuality::Lush => 13,
+        };
+        if !Self::supports_natural_ecotone(biome) || current != Self::blocks_for(biome).0 {
+            return current;
+        }
+
+        let cell_size = if self.scenery_quality == SceneryQuality::Lush {
+            10
+        } else {
+            8
+        };
+        let cell_x = wx.div_euclid(cell_size);
+        let cell_z = wz.div_euclid(cell_size);
+        let direction_roll = column_rand(self.seed ^ 0xEC07_0D12, cell_x, cell_z);
+        let directions = [
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (-1, 1),
+            (-1, 0),
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+        ];
+        let direction = directions
+            [((direction_roll * directions.len() as f64) as usize).min(directions.len() - 1)];
+        let neighbour_biome = self.biome(
+            (wx + direction.0 * sample_distance) as f64,
+            (wz + direction.1 * sample_distance) as f64,
+            surface,
+            cont,
+        );
+        if neighbour_biome == biome || !Self::supports_natural_ecotone(neighbour_biome) {
+            return current;
+        }
+
+        self.clustered_ecotone_choice(current, Self::blocks_for(neighbour_biome).0, wx, wz)
+    }
+
+    /// World-Y banding keeps mesa sediment continuous across columns.
     fn mesa_band(wy: i32) -> BlockType {
         // 6-block bands cycling through 4 colors. The repetition pattern
         // (red, red, clay, red, clay, red, ...) avoids feeling stripey
@@ -982,6 +1139,7 @@ impl TerrainGenerator {
                     (top, sub)
                 };
                 let top = self.surface_detail_block(biome, top, slope, wx, wz);
+                let top = self.ecotone_surface_block(biome, top, surface, cont, wx, wz);
 
                 for ly in 0..CHUNK_SIZE {
                     let wy = cy * CHUNK_SIZE_I + ly as i32;
@@ -1219,7 +1377,12 @@ impl TerrainGenerator {
 
         let rotation = (column_rand(self.seed ^ 0xB05A_3003, wx, wz) * 4.0) as usize;
         let directions = [(1, 0), (0, 1), (-1, 0), (0, -1)];
-        let lower_dy = (profile.trunk_height / 2).max(3);
+        let lower_dy = match profile.silhouette {
+            TreeSilhouette::Crowned => (profile.trunk_height * 2 / 3).max(3),
+            TreeSilhouette::Layered | TreeSilhouette::Windswept => {
+                (profile.trunk_height / 2).max(3)
+            }
+        };
         let branch_span = (profile.trunk_height - lower_dy - 2).max(1);
         let mut crowns = [(0i32, 0i32, 0i32, 0i32); 6];
 
@@ -1227,8 +1390,24 @@ impl TerrainGenerator {
             let tier_divisor = (profile.tiers - 1).max(1) as i32;
             let branch_dy = lower_dy + tier as i32 * branch_span / tier_divisor;
             let (trunk_ox, trunk_oz) = trunk_offset(branch_dy);
-            let (dir_x, dir_z) = directions[(tier + rotation) % directions.len()];
-            let reach = (profile.branch_reach - tier as i32 / 3).max(1);
+            let direction_index = match profile.silhouette {
+                TreeSilhouette::Layered => tier + rotation,
+                TreeSilhouette::Windswept => {
+                    let side_step = match tier % 4 {
+                        1 => 1,
+                        3 => directions.len() - 1,
+                        _ => 0,
+                    };
+                    rotation + side_step
+                }
+                TreeSilhouette::Crowned => tier * 3 + rotation,
+            } % directions.len();
+            let (dir_x, dir_z) = directions[direction_index];
+            let reach = match profile.silhouette {
+                TreeSilhouette::Layered => (profile.branch_reach - tier as i32 / 3).max(1),
+                TreeSilhouette::Windswept => (profile.branch_reach - tier as i32 / 4).max(1),
+                TreeSilhouette::Crowned => (profile.branch_reach - tier as i32 / 3).max(1),
+            };
             let branch_y = base_y + branch_dy;
 
             for step in 0..=reach {
@@ -1240,7 +1419,10 @@ impl TerrainGenerator {
                     origin_y,
                 );
             }
-            let upturn = (tier % 2 == 0) as i32;
+            let upturn = match profile.silhouette {
+                TreeSilhouette::Crowned => 1,
+                TreeSilhouette::Layered | TreeSilhouette::Windswept => (tier % 2 == 0) as i32,
+            };
             let crown_x = lx as i32 + trunk_ox + dir_x * reach;
             let crown_z = lz as i32 + trunk_oz + dir_z * reach;
             if upturn == 1 {
@@ -1263,12 +1445,17 @@ impl TerrainGenerator {
                 chunk, crown_x, crown_y, crown_z, radius, pad_layers, leaf_kind, origin_y,
             );
         }
+        let top_radius = if profile.silhouette == TreeSilhouette::Crowned {
+            profile.canopy_radius
+        } else {
+            (profile.canopy_radius - 1).max(1)
+        };
         place_leaf_pad(
             chunk,
             top_x,
             trunk_top_y + profile.crown_lift,
             top_z,
-            (profile.canopy_radius - 1).max(1),
+            top_radius,
             2,
             leaf_kind,
             origin_y,
@@ -2873,6 +3060,127 @@ mod tests {
             lush.tree_height_for_biome(Biome::Forest, 0.4).1,
             BlockType::BlossomLeaves
         );
+    }
+
+    #[test]
+    fn off_and_lean_ecotones_are_strict_no_ops() {
+        use crate::settings::SceneryQuality;
+
+        for quality in [SceneryQuality::Off, SceneryQuality::Lean] {
+            let generator = TerrainGenerator::new(0xEC07_0AE1).with_scenery_quality(quality);
+            for z in (-96..=96).step_by(3) {
+                for x in (-96..=96).step_by(3) {
+                    assert_eq!(
+                        generator.clustered_ecotone_choice(
+                            BlockType::Grass,
+                            BlockType::SavannaGrass,
+                            x,
+                            z,
+                        ),
+                        BlockType::Grass,
+                    );
+                    assert_eq!(
+                        generator.ecotone_surface_block(
+                            Biome::Plains,
+                            BlockType::Grass,
+                            WATER_LEVEL + 20,
+                            0.0,
+                            x,
+                            z,
+                        ),
+                        BlockType::Grass,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn balanced_and_lush_ecotones_are_deterministic_bounded_clusters() {
+        use crate::settings::SceneryQuality;
+
+        for quality in [SceneryQuality::Balanced, SceneryQuality::Lush] {
+            let generator = TerrainGenerator::new(0xEC07_0AE1).with_scenery_quality(quality);
+            let replay = TerrainGenerator::new(0xEC07_0AE1).with_scenery_quality(quality);
+            let mut changed = HashSet::new();
+
+            for z in -64..64 {
+                for x in -64..64 {
+                    let first = generator.clustered_ecotone_choice(
+                        BlockType::Grass,
+                        BlockType::SavannaGrass,
+                        x,
+                        z,
+                    );
+                    let second = replay.clustered_ecotone_choice(
+                        BlockType::Grass,
+                        BlockType::SavannaGrass,
+                        x,
+                        z,
+                    );
+                    assert_eq!(first, second, "same seed must replay at {x},{z}");
+                    if first == BlockType::SavannaGrass {
+                        changed.insert((x, z));
+                    }
+                }
+            }
+
+            let total = 128usize * 128;
+            assert!(
+                changed.len() > total / 40,
+                "{quality:?} ecotone should visibly feather a boundary"
+            );
+            assert!(
+                changed.len() < total * 3 / 4,
+                "{quality:?} ecotone must preserve the dominant biome"
+            );
+
+            let connected = changed
+                .iter()
+                .filter(|&&(x, z)| {
+                    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .any(|&(dx, dz)| changed.contains(&(x + dx, z + dz)))
+                })
+                .count();
+            assert!(
+                connected * 10 >= changed.len() * 9,
+                "{quality:?} ecotone should form clusters, not isolated speckle"
+            );
+        }
+    }
+
+    #[test]
+    fn balanced_and_lush_bonsai_offer_three_bounded_silhouettes() {
+        use crate::settings::SceneryQuality;
+
+        for (quality, budget) in [
+            (SceneryQuality::Balanced, 220usize),
+            (SceneryQuality::Lush, 480usize),
+        ] {
+            let generator = TerrainGenerator::new(12345).with_scenery_quality(quality);
+            let mut silhouettes = Vec::new();
+            for style_roll in [0.12, 0.50, 0.88] {
+                let (profile, blocks) =
+                    paint_tree_for_test(&generator, Biome::Forest, style_roll, 14);
+                assert!(
+                    blocks.len() <= budget,
+                    "{quality:?} {:?} tree used {} blocks, budget is {budget}",
+                    profile.silhouette,
+                    blocks.len(),
+                );
+                silhouettes.push(profile.silhouette);
+            }
+
+            assert_eq!(
+                silhouettes,
+                vec![
+                    TreeSilhouette::Layered,
+                    TreeSilhouette::Windswept,
+                    TreeSilhouette::Crowned,
+                ],
+            );
+        }
     }
 
     #[test]

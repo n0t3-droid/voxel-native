@@ -137,6 +137,8 @@ pub struct VisualTokens {
     pub outline_width: f32,
     pub focus_width: f32,
     pub focus_gap: f32,
+    pub neon_glow_width: f32,
+    pub neon_glow_gap: f32,
     pub hover_lift: f32,
 }
 
@@ -145,13 +147,43 @@ pub const KANSO_VISUALS: VisualTokens = VisualTokens {
     outline_width: 1.0,
     focus_width: 1.5,
     focus_gap: 2.0,
+    neon_glow_width: 3.0,
+    neon_glow_gap: 1.0,
     hover_lift: 1.0,
+};
+
+/// Fixed control geometry. Interaction paint may move inside these bounds,
+/// but it never changes allocation and therefore cannot shift neighbouring UI.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayoutTokens {
+    pub icon_action_min_width: f32,
+    pub icon_action_max_width: f32,
+    pub tab_min_width: f32,
+    pub tab_max_width: f32,
+    pub tab_height: f32,
+    pub icon_square_size: f32,
+    pub loading_indicator_size: f32,
+    pub orbit_pulse_size: f32,
+    pub press_depth: f32,
+}
+
+pub const KANSO_LAYOUT: LayoutTokens = LayoutTokens {
+    icon_action_min_width: 82.0,
+    icon_action_max_width: 170.0,
+    tab_min_width: 96.0,
+    tab_max_width: 150.0,
+    tab_height: 34.0,
+    icon_square_size: 36.0,
+    loading_indicator_size: 24.0,
+    orbit_pulse_size: 32.0,
+    press_depth: 0.75,
 };
 
 /// Named finite transition durations. None of these imply a repaint loop once
 /// the target value has been reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MotionRole {
+    Press,
     Feedback,
     State,
     Panel,
@@ -160,20 +192,23 @@ pub enum MotionRole {
 /// Timing tokens are public so non-widget UI can use the same cadence.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MotionTokens {
+    pub press_seconds: f32,
     pub feedback_seconds: f32,
     pub state_seconds: f32,
     pub panel_seconds: f32,
 }
 
 pub const KANSO_MOTION: MotionTokens = MotionTokens {
-    feedback_seconds: 0.10,
-    state_seconds: 0.16,
-    panel_seconds: 0.22,
+    press_seconds: 0.07,
+    feedback_seconds: 0.11,
+    state_seconds: 0.17,
+    panel_seconds: 0.21,
 };
 
 impl MotionRole {
     pub const fn seconds(self) -> f32 {
         match self {
+            Self::Press => KANSO_MOTION.press_seconds,
             Self::Feedback => KANSO_MOTION.feedback_seconds,
             Self::State => KANSO_MOTION.state_seconds,
             Self::Panel => KANSO_MOTION.panel_seconds,
@@ -182,6 +217,30 @@ impl MotionRole {
 }
 
 const REDUCED_MOTION_ID: &str = "r93g_kanso_reduced_motion";
+const LOW_SPEC_MOTION_ID: &str = "r93g_kanso_low_spec_motion";
+
+/// Effective UI motion budget. Full motion uses finite transitions and may run
+/// explicitly scheduled ambient indicators. Low-spec and reduced motion both
+/// snap every transition; reduced motion still takes preference semantically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionProfile {
+    Full,
+    LowSpec,
+    Reduced,
+}
+
+impl MotionProfile {
+    pub const fn seconds(self, role: MotionRole) -> f32 {
+        match self {
+            Self::Full => role.seconds(),
+            Self::LowSpec | Self::Reduced => 0.0,
+        }
+    }
+
+    pub const fn allows_continuous(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
 
 /// A clamped cubic-out curve for responsive controls with a quiet finish.
 pub fn kanso_ease_out(value: f32) -> f32 {
@@ -193,20 +252,38 @@ pub fn kanso_ease_out(value: f32) -> f32 {
     1.0 - (1.0 - value).powi(3)
 }
 
-/// Set the context-wide accessibility preference once. Shared widgets read
-/// this state automatically, so their call sites do not need a motion flag.
-pub fn set_reduced_motion(ctx: &egui::Context, reduced: bool) {
-    ctx.data_mut(|data| data.insert_temp(egui::Id::new(REDUCED_MOTION_ID), reduced));
-    ctx.style_mut(|style| {
-        style.animation_time = if reduced {
-            0.0
-        } else {
-            MotionRole::Feedback.seconds()
-        };
+/// Set both context-wide performance preferences. Shared widgets read this
+/// state automatically, so individual call sites do not need motion flags.
+pub fn set_motion_preferences(ctx: &egui::Context, reduced: bool, low_spec: bool) {
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new(REDUCED_MOTION_ID), reduced);
+        data.insert_temp(egui::Id::new(LOW_SPEC_MOTION_ID), low_spec);
     });
-    if reduced {
+    let profile = if reduced {
+        MotionProfile::Reduced
+    } else if low_spec {
+        MotionProfile::LowSpec
+    } else {
+        MotionProfile::Full
+    };
+    ctx.style_mut(|style| {
+        style.animation_time = profile.seconds(MotionRole::Feedback);
+    });
+    if !matches!(profile, MotionProfile::Full) {
         ctx.clear_animations();
     }
+}
+
+/// Set the context-wide accessibility preference while retaining the current
+/// low-spec preference.
+pub fn set_reduced_motion(ctx: &egui::Context, reduced: bool) {
+    set_motion_preferences(ctx, reduced, prefers_low_spec(ctx));
+}
+
+/// Freeze all UI motion for low-spec rendering. Runtime-profile owners can
+/// call this alongside [`set_reduced_motion`].
+pub fn set_low_spec_motion(ctx: &egui::Context, low_spec: bool) {
+    set_motion_preferences(ctx, prefers_reduced_motion(ctx), low_spec);
 }
 
 /// Returns the explicit Kanso preference, falling back to egui's animation
@@ -216,17 +293,34 @@ pub fn prefers_reduced_motion(ctx: &egui::Context) -> bool {
         .unwrap_or_else(|| ctx.style().animation_time <= f32::EPSILON)
 }
 
-/// Resolve a token duration against the current accessibility preference.
-pub fn motion_seconds(ctx: &egui::Context, role: MotionRole) -> f32 {
+/// Returns whether the explicit low-spec UI budget is enabled.
+pub fn prefers_low_spec(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(egui::Id::new(LOW_SPEC_MOTION_ID)))
+        .unwrap_or(false)
+}
+
+pub fn motion_profile(ctx: &egui::Context) -> MotionProfile {
     if prefers_reduced_motion(ctx) {
-        0.0
+        MotionProfile::Reduced
+    } else if prefers_low_spec(ctx) {
+        MotionProfile::LowSpec
     } else {
-        role.seconds()
+        MotionProfile::Full
     }
 }
 
-/// Animate a boolean only until it reaches its target. Reduced motion snaps
-/// immediately and does not enqueue repaint requests.
+/// Ambient indicators are opt-in and only loop under the full motion budget.
+pub fn allows_continuous_motion(ctx: &egui::Context) -> bool {
+    motion_profile(ctx).allows_continuous()
+}
+
+/// Resolve a token duration against the current accessibility preference.
+pub fn motion_seconds(ctx: &egui::Context, role: MotionRole) -> f32 {
+    motion_profile(ctx).seconds(role)
+}
+
+/// Animate a boolean only until it reaches its target. Static profiles snap
+/// immediately and do not enqueue repaint requests.
 pub fn animate_bool_finite(
     ctx: &egui::Context,
     id: egui::Id,
@@ -250,9 +344,13 @@ pub fn animate_bool_finite(
 pub struct SemanticColors {
     pub background: egui::Color32,
     pub surface: egui::Color32,
+    pub surface_hover: egui::Color32,
+    pub surface_active: egui::Color32,
+    pub surface_disabled: egui::Color32,
     pub surface_strong: egui::Color32,
     pub text: egui::Color32,
     pub text_muted: egui::Color32,
+    pub text_disabled: egui::Color32,
     pub success: egui::Color32,
     pub warning: egui::Color32,
     pub danger: egui::Color32,
@@ -260,6 +358,12 @@ pub struct SemanticColors {
     pub accent: egui::Color32,
     /// Neutral separator and resting control outline.
     pub outline: egui::Color32,
+    /// Pointer-hover outline. Brighter than rest, quieter than active.
+    pub outline_hover: egui::Color32,
+    /// Pressed or selected outline.
+    pub outline_active: egui::Color32,
+    /// Explicit low-contrast outline for unavailable controls.
+    pub outline_disabled: egui::Color32,
     /// Higher-contrast structural outline for raised surfaces.
     pub outline_strong: egui::Color32,
     /// Keyboard focus ring; intentionally brighter than hover.
@@ -270,6 +374,88 @@ pub struct SemanticColors {
     pub stroke: egui::Color32,
     pub selected: egui::Color32,
     pub disabled: egui::Color32,
+}
+
+/// Paint-only stroke pair for a restrained neon outline. The halo is wider
+/// and lower-alpha than the crisp core; neither stroke affects allocation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NeonOutlineStrokes {
+    pub halo: egui::Stroke,
+    pub core: egui::Stroke,
+}
+
+fn scaled_alpha(color: egui::Color32, amount: f32) -> egui::Color32 {
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let [red, green, blue, alpha] = color.to_srgba_unmultiplied();
+    egui::Color32::from_rgba_unmultiplied(red, green, blue, (alpha as f32 * amount).round() as u8)
+}
+
+/// Resolve deterministic neon strokes for custom shapes. Zero and non-finite
+/// amounts produce no paint, which keeps hidden outlines fully inert.
+pub fn neon_outline_strokes(
+    glow: egui::Color32,
+    core: egui::Color32,
+    amount: f32,
+) -> Option<NeonOutlineStrokes> {
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if amount <= 0.001 {
+        return None;
+    }
+
+    Some(NeonOutlineStrokes {
+        halo: egui::Stroke::new(KANSO_VISUALS.neon_glow_width, scaled_alpha(glow, amount)),
+        core: egui::Stroke::new(
+            KANSO_VISUALS.outline_width
+                + (KANSO_VISUALS.focus_width - KANSO_VISUALS.outline_width) * amount,
+            scaled_alpha(core, amount),
+        ),
+    })
+}
+
+/// Draw a two-layer neon rectangle entirely as paint. Callers reserve layout
+/// once; changing `amount` cannot move or resize neighboring widgets.
+pub fn paint_neon_outline(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    rounding: f32,
+    glow: egui::Color32,
+    core: egui::Color32,
+    amount: f32,
+) {
+    let Some(strokes) = neon_outline_strokes(glow, core, amount) else {
+        return;
+    };
+    painter.rect_stroke(
+        rect.expand(KANSO_VISUALS.neon_glow_gap),
+        egui::Rounding::same(rounding + KANSO_VISUALS.neon_glow_gap),
+        strokes.halo,
+    );
+    painter.rect_stroke(rect, egui::Rounding::same(rounding), strokes.core);
+}
+
+/// Shared keyboard-focus treatment for custom controls and previews.
+pub fn paint_focus_outline(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    colors: SemanticColors,
+    amount: f32,
+) {
+    paint_neon_outline(
+        painter,
+        rect.expand(KANSO_VISUALS.focus_gap),
+        KANSO_VISUALS.corner_radius + 1.0,
+        colors.focus_glow,
+        colors.focus,
+        amount,
+    );
 }
 
 fn default_scanlines() -> bool {
@@ -343,13 +529,13 @@ impl ThemeSettings {
         let (background, surface, surface_strong, text, text_muted, outline, outline_strong) =
             match self.style {
                 ThemeStyle::LiquidGlass => (
-                    egui::Color32::from_rgb(0x08, 0x0B, 0x0D),
-                    egui::Color32::from_rgb(0x11, 0x17, 0x19),
-                    egui::Color32::from_rgb(0x19, 0x22, 0x26),
-                    egui::Color32::from_rgb(0xEA, 0xF2, 0xEE),
-                    egui::Color32::from_rgb(0x98, 0xAA, 0xA2),
-                    egui::Color32::from_rgb(0x34, 0x45, 0x3E),
-                    egui::Color32::from_rgb(0x5B, 0x70, 0x67),
+                    egui::Color32::from_rgb(0x09, 0x0B, 0x0F),
+                    egui::Color32::from_rgb(0x12, 0x16, 0x1B),
+                    egui::Color32::from_rgb(0x1C, 0x22, 0x28),
+                    egui::Color32::from_rgb(0xF1, 0xED, 0xF0),
+                    egui::Color32::from_rgb(0xAA, 0xA2, 0xA8),
+                    egui::Color32::from_rgb(0x41, 0x4A, 0x52),
+                    egui::Color32::from_rgb(0x66, 0x72, 0x7B),
                 ),
                 ThemeStyle::NeonToolbench => (
                     egui::Color32::from_rgb(0x05, 0x09, 0x0C),
@@ -371,35 +557,54 @@ impl ThemeSettings {
                 ),
             };
         let focus = mix_rgb(accent, egui::Color32::WHITE, 0.18);
-        let focus_glow = egui::Color32::from_rgba_unmultiplied(focus.r(), focus.g(), focus.b(), 72);
-        let selected = mix_rgb(
+        let focus_glow = egui::Color32::from_rgba_unmultiplied(focus.r(), focus.g(), focus.b(), 52);
+        let surface_hover = mix_rgb(
             surface_strong,
             accent,
             if matches!(self.style, ThemeStyle::NeonToolbench) {
-                0.24
+                0.06
             } else {
-                0.18
+                0.035
             },
         );
+        let selected_amount = if matches!(self.style, ThemeStyle::NeonToolbench) {
+            0.22
+        } else {
+            0.16
+        };
+        let selected = mix_rgb(surface_strong, accent, selected_amount);
+        let surface_active = mix_rgb(surface_strong, accent, selected_amount + 0.10);
+        let surface_disabled = mix_rgb(background, surface, 0.58);
+        let text_disabled = mix_rgb(text_muted, background, 0.30);
+        let outline_hover = mix_rgb(outline_strong, accent, 0.44);
+        let outline_active = accent;
+        let outline_disabled = mix_rgb(outline, background, 0.45);
 
         SemanticColors {
             background,
             surface,
+            surface_hover,
+            surface_active,
+            surface_disabled,
             surface_strong,
             text,
             text_muted,
+            text_disabled,
             success: egui::Color32::from_rgb(0x63, 0xD6, 0x9A),
             warning: egui::Color32::from_rgb(0xE8, 0xB8, 0x5C),
             danger: egui::Color32::from_rgb(0xF2, 0x6D, 0x78),
             info: egui::Color32::from_rgb(0x6C, 0xD5, 0xE8),
             accent,
             outline,
+            outline_hover,
+            outline_active,
+            outline_disabled,
             outline_strong,
             focus,
             focus_glow,
             stroke: outline,
             selected,
-            disabled: egui::Color32::from_rgb(0x62, 0x70, 0x6A),
+            disabled: text_disabled,
         }
     }
 
@@ -479,7 +684,6 @@ pub fn draw_theme_preview_card(
 ) -> egui::Response {
     let desired = egui::vec2(188.0, 108.0);
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
-    let hovered = response.hovered();
     let theme = ThemeSettings {
         color: preset.color,
         style: preset.style,
@@ -487,14 +691,38 @@ pub fn draw_theme_preview_card(
     };
     let colors = theme.semantic();
     let painter = ui.painter_at(rect.expand(5.0));
-    let focused = response.has_focus();
-    let glow = animate_bool_finite(
+    let hover = animate_bool_finite(
         ui.ctx(),
         response.id.with("theme_preview_hover"),
-        hovered || focused,
+        response.hovered(),
         MotionRole::Feedback,
     );
-    let card = rect.translate(egui::vec2(0.0, -glow * KANSO_VISUALS.hover_lift));
+    let focus = animate_bool_finite(
+        ui.ctx(),
+        response.id.with("theme_preview_focus"),
+        response.has_focus(),
+        MotionRole::Feedback,
+    );
+    let press = animate_bool_finite(
+        ui.ctx(),
+        response.id.with("theme_preview_press"),
+        response.is_pointer_button_down_on() || response.clicked(),
+        MotionRole::Press,
+    );
+    let selection = animate_bool_finite(
+        ui.ctx(),
+        response.id.with("theme_preview_selection"),
+        selected,
+        MotionRole::State,
+    );
+    let spatial_motion = if allows_continuous_motion(ui.ctx()) {
+        1.0
+    } else {
+        0.0
+    };
+    let offset = spatial_motion
+        * (-hover * (1.0 - press) * KANSO_VISUALS.hover_lift + press * KANSO_LAYOUT.press_depth);
+    let card = rect.translate(egui::vec2(0.0, offset));
 
     painter.rect_filled(
         card,
@@ -517,36 +745,22 @@ pub fn draw_theme_preview_card(
 
     let accent = colors.accent;
     let dim = colors.outline;
-    if glow > 0.01 {
-        painter.rect_stroke(
-            card.expand(KANSO_VISUALS.focus_gap + glow * 1.5),
-            egui::Rounding::same(KANSO_VISUALS.corner_radius + 2.0),
-            egui::Stroke::new(
-                KANSO_VISUALS.focus_width,
-                if focused {
-                    colors.focus
-                } else {
-                    colors.focus_glow.linear_multiply(glow)
-                },
-            ),
-        );
-    }
+    paint_focus_outline(&painter, card, colors, focus);
+    let hover_or_focus = hover.max(focus);
+    let active = selection.max(press);
+    let outline = mix_rgb(
+        mix_rgb(dim, colors.outline_hover, hover_or_focus),
+        colors.outline_active,
+        active,
+    );
     painter.rect_stroke(
         card,
         egui::Rounding::same(KANSO_VISUALS.corner_radius),
         egui::Stroke::new(
-            if selected {
-                KANSO_VISUALS.focus_width
-            } else {
-                KANSO_VISUALS.outline_width
-            },
-            if focused {
-                colors.focus
-            } else if selected || hovered {
-                accent
-            } else {
-                dim
-            },
+            KANSO_VISUALS.outline_width
+                + (KANSO_VISUALS.focus_width - KANSO_VISUALS.outline_width)
+                    * hover_or_focus.max(active),
+            outline,
         ),
     );
 
@@ -595,12 +809,12 @@ pub fn draw_theme_preview_card(
     let orb_center = egui::pos2(card.right() - 38.0, card.top() + 34.0);
     painter.circle_filled(
         orb_center,
-        20.0 + glow * 2.0,
+        20.0 + hover,
         colors.selected.linear_multiply(0.75),
     );
     painter.circle_stroke(
         orb_center,
-        24.0 + glow * 4.0,
+        24.0 + hover * 2.0,
         egui::Stroke::new(1.0, accent),
     );
 
@@ -655,7 +869,7 @@ pub const CYAN: egui::Color32 = egui::Color32::from_rgb(0x6C, 0xD5, 0xE8);
 pub fn apply_hacker_theme(ctx: &egui::Context, settings: ThemeSettings) {
     let primary = settings.color.primary();
     let colors = settings.semantic();
-    let reduced_motion = prefers_reduced_motion(ctx);
+    let motion = motion_profile(ctx);
 
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = colors.background;
@@ -664,10 +878,10 @@ pub fn apply_hacker_theme(ctx: &egui::Context, settings: ThemeSettings) {
     visuals.window_rounding = egui::Rounding::same(KANSO_VISUALS.corner_radius);
     visuals.menu_rounding = egui::Rounding::same(KANSO_VISUALS.corner_radius);
     visuals.window_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 8.0),
-        blur: 20.0,
+        offset: egui::vec2(0.0, 6.0),
+        blur: 12.0,
         spread: 0.0,
-        color: egui::Color32::from_black_alpha(168),
+        color: egui::Color32::from_black_alpha(144),
     };
     visuals.popup_shadow = visuals.window_shadow;
 
@@ -676,6 +890,7 @@ pub fn apply_hacker_theme(ctx: &egui::Context, settings: ThemeSettings) {
     visuals.widgets.noninteractive.bg_stroke =
         egui::Stroke::new(KANSO_VISUALS.outline_width, colors.outline);
     visuals.widgets.noninteractive.rounding = egui::Rounding::same(KANSO_VISUALS.corner_radius);
+    visuals.widgets.noninteractive.weak_bg_fill = colors.surface_disabled;
 
     visuals.widgets.inactive.bg_fill = colors.surface;
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, colors.text);
@@ -684,21 +899,25 @@ pub fn apply_hacker_theme(ctx: &egui::Context, settings: ThemeSettings) {
     visuals.widgets.inactive.rounding = egui::Rounding::same(KANSO_VISUALS.corner_radius);
     visuals.widgets.inactive.weak_bg_fill = colors.surface;
 
-    visuals.widgets.hovered.bg_fill = colors.surface_strong;
+    visuals.widgets.hovered.bg_fill = colors.surface_hover;
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, colors.text);
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(KANSO_VISUALS.focus_width, colors.accent);
+    visuals.widgets.hovered.bg_stroke =
+        egui::Stroke::new(KANSO_VISUALS.focus_width, colors.outline_hover);
     visuals.widgets.hovered.rounding = egui::Rounding::same(KANSO_VISUALS.corner_radius);
-    visuals.widgets.hovered.weak_bg_fill = colors.surface_strong;
+    visuals.widgets.hovered.weak_bg_fill = colors.surface_hover;
 
-    visuals.widgets.active.bg_fill = colors.selected;
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, settings.text_on(colors.selected));
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(KANSO_VISUALS.focus_width, colors.focus);
+    visuals.widgets.active.bg_fill = colors.surface_active;
+    visuals.widgets.active.fg_stroke =
+        egui::Stroke::new(1.0, settings.text_on(colors.surface_active));
+    visuals.widgets.active.bg_stroke =
+        egui::Stroke::new(KANSO_VISUALS.focus_width, colors.outline_active);
     visuals.widgets.active.rounding = egui::Rounding::same(KANSO_VISUALS.corner_radius);
-    visuals.widgets.active.weak_bg_fill = colors.selected;
+    visuals.widgets.active.weak_bg_fill = colors.surface_active;
 
-    visuals.widgets.open.bg_fill = colors.surface_strong;
+    visuals.widgets.open.bg_fill = colors.surface_hover;
     visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, colors.text);
-    visuals.widgets.open.bg_stroke = egui::Stroke::new(KANSO_VISUALS.focus_width, colors.focus);
+    visuals.widgets.open.bg_stroke =
+        egui::Stroke::new(KANSO_VISUALS.focus_width, colors.outline_active);
     visuals.widgets.open.rounding = egui::Rounding::same(KANSO_VISUALS.corner_radius);
 
     visuals.selection.bg_fill = colors.selected;
@@ -736,11 +955,7 @@ pub fn apply_hacker_theme(ctx: &egui::Context, settings: ThemeSettings) {
     style.spacing.slider_width = 220.0;
     style.spacing.window_margin = egui::Margin::symmetric(10.0, 8.0);
     style.spacing.interact_size = egui::vec2(32.0, settings.density.row_height());
-    style.animation_time = if reduced_motion {
-        0.0
-    } else {
-        MotionRole::Panel.seconds()
-    };
+    style.animation_time = motion.seconds(MotionRole::Feedback);
     ctx.set_style(style);
 }
 
@@ -756,10 +971,10 @@ pub fn command_frame(theme: ThemeSettings) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(18.0, 16.0))
         .rounding(egui::Rounding::same(KANSO_VISUALS.corner_radius))
         .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 8.0),
-            blur: 20.0,
+            offset: egui::vec2(0.0, 6.0),
+            blur: 12.0,
             spread: 0.0,
-            color: egui::Color32::from_black_alpha(168),
+            color: egui::Color32::from_black_alpha(144),
         })
 }
 
@@ -1057,7 +1272,7 @@ pub fn term_button(text: &str, selected: bool, theme: ThemeSettings) -> egui::Bu
                 KANSO_VISUALS.outline_width
             },
             if selected {
-                colors.accent
+                colors.outline_active
             } else {
                 colors.outline
             },
@@ -1115,8 +1330,14 @@ mod tests {
                 assert!(contrast_ratio(colors.text, colors.background) >= 7.0);
                 assert!(contrast_ratio(colors.text_muted, colors.background) >= 4.5);
                 assert!(contrast_ratio(colors.focus, colors.background) >= 3.0);
+                assert!(contrast_ratio(colors.text_disabled, colors.surface_disabled) >= 3.0);
                 assert_ne!(colors.outline, colors.accent);
+                assert_ne!(colors.outline, colors.outline_hover);
+                assert_ne!(colors.outline_hover, colors.outline_active);
+                assert_ne!(colors.outline_active, colors.outline_disabled);
                 assert_ne!(colors.outline_strong, colors.focus);
+                assert_ne!(colors.surface, colors.surface_hover);
+                assert_ne!(colors.surface_hover, colors.surface_active);
                 assert!(colors.focus_glow.a() < colors.focus.a());
                 assert!(contrast_ratio(theme.text_on(colors.selected), colors.selected) >= 4.5);
             }
@@ -1125,6 +1346,7 @@ mod tests {
 
     #[test]
     fn motion_tokens_are_finite_ordered_and_clamped() {
+        assert!(MotionRole::Press.seconds() < MotionRole::Feedback.seconds());
         assert!(MotionRole::Feedback.seconds() < MotionRole::State.seconds());
         assert!(MotionRole::State.seconds() < MotionRole::Panel.seconds());
         assert_eq!(kanso_ease_out(f32::NAN), 0.0);
@@ -1164,5 +1386,98 @@ mod tests {
             KANSO_MOTION.feedback_seconds
         );
         assert_eq!(ctx.style().animation_time, KANSO_MOTION.feedback_seconds);
+    }
+
+    #[test]
+    fn low_spec_and_reduced_motion_are_deterministically_static() {
+        let ctx = egui::Context::default();
+        set_motion_preferences(&ctx, false, false);
+        set_low_spec_motion(&ctx, true);
+
+        assert_eq!(motion_profile(&ctx), MotionProfile::LowSpec);
+        assert!(prefers_low_spec(&ctx));
+        assert!(!prefers_reduced_motion(&ctx));
+        for role in [
+            MotionRole::Press,
+            MotionRole::Feedback,
+            MotionRole::State,
+            MotionRole::Panel,
+        ] {
+            assert_eq!(motion_seconds(&ctx, role), 0.0);
+        }
+        assert_eq!(ctx.style().animation_time, 0.0);
+        assert_eq!(
+            animate_bool_finite(&ctx, egui::Id::new("low_spec_on"), true, MotionRole::State),
+            1.0
+        );
+        assert_eq!(
+            animate_bool_finite(
+                &ctx,
+                egui::Id::new("low_spec_off"),
+                false,
+                MotionRole::State,
+            ),
+            0.0
+        );
+        assert!(!allows_continuous_motion(&ctx));
+
+        set_reduced_motion(&ctx, true);
+        assert_eq!(motion_profile(&ctx), MotionProfile::Reduced);
+        for role in [
+            MotionRole::Press,
+            MotionRole::Feedback,
+            MotionRole::State,
+            MotionRole::Panel,
+        ] {
+            assert_eq!(motion_seconds(&ctx, role), 0.0);
+        }
+        assert!(!allows_continuous_motion(&ctx));
+
+        set_motion_preferences(&ctx, false, false);
+        assert_eq!(motion_profile(&ctx), MotionProfile::Full);
+        assert_eq!(
+            motion_seconds(&ctx, MotionRole::Feedback),
+            KANSO_MOTION.feedback_seconds
+        );
+        assert!(allows_continuous_motion(&ctx));
+    }
+
+    #[test]
+    fn neon_outline_strokes_are_clamped_layered_and_quiet_at_zero() {
+        let colors = ThemeSettings::default().semantic();
+        assert_eq!(
+            neon_outline_strokes(colors.focus_glow, colors.focus, 0.0),
+            None
+        );
+        assert_eq!(
+            neon_outline_strokes(colors.focus_glow, colors.focus, f32::NAN),
+            None
+        );
+
+        let half = neon_outline_strokes(colors.focus_glow, colors.focus, 0.5)
+            .expect("half-strength neon outline");
+        let full = neon_outline_strokes(colors.focus_glow, colors.focus, 2.0)
+            .expect("clamped full-strength neon outline");
+        assert_eq!(half.halo.width, KANSO_VISUALS.neon_glow_width);
+        assert!(half.halo.width > half.core.width);
+        assert!(half.halo.color.a() < half.core.color.a());
+        assert!(half.core.width > KANSO_VISUALS.outline_width);
+        assert!(half.core.width < KANSO_VISUALS.focus_width);
+        assert_eq!(full.core.width, KANSO_VISUALS.focus_width);
+        assert_eq!(full.core.color, colors.focus);
+        assert_eq!(full.halo.color, colors.focus_glow);
+    }
+
+    #[test]
+    fn fixed_layout_tokens_are_positive_and_ordered() {
+        assert!(KANSO_LAYOUT.icon_action_min_width > 0.0);
+        assert!(KANSO_LAYOUT.icon_action_min_width < KANSO_LAYOUT.icon_action_max_width);
+        assert!(KANSO_LAYOUT.tab_min_width < KANSO_LAYOUT.tab_max_width);
+        assert!(KANSO_LAYOUT.tab_height > 0.0);
+        assert!(KANSO_LAYOUT.loading_indicator_size > 0.0);
+        assert!(KANSO_LAYOUT.orbit_pulse_size >= KANSO_LAYOUT.loading_indicator_size);
+        assert!(KANSO_LAYOUT.press_depth < KANSO_VISUALS.hover_lift);
+        assert!(KANSO_VISUALS.neon_glow_width > KANSO_VISUALS.focus_width);
+        assert!(KANSO_VISUALS.neon_glow_gap > 0.0);
     }
 }

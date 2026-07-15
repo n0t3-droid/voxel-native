@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,6 +38,7 @@ const MEGA_CITY_RADIUS: i32 = 1024;
 const DEFAULT_MAX_ACTIVE_PROJECTS: usize = 3;
 const AUTONOMY_BURST_ACTIVE_PROJECTS: usize = 5;
 const MAX_ACTIVE_PROJECTS_LIMIT: usize = 48;
+const BOT_ACTIVE_AREA_HARD_LIMIT: usize = 6;
 const MAX_CREW_BOTS_PER_PROJECT: usize = 32;
 const MAX_COMPANION_TEAM: usize = 4;
 const COMPANION_WORKERS_PER_LEADER: u8 = 0;
@@ -58,18 +59,21 @@ const COMPANION_FOLLOW_MIN: f32 = 5.0;
 const COMPANION_FOLLOW_MAX: f32 = 28.0;
 const COMPANION_FOLLOW_STEP: f32 = 2.25;
 const BOT_LOD_REFRESH_SECONDS: f32 = 0.25;
-const BOT_LOD_DISTANCE_BUCKET: f32 = 4.0;
+const BOT_LOD_DISTANCE_BUCKET_SQUARED: f32 = 16.0;
 const BOT_FULL_DETAIL_DISTANCE: f32 = 48.0;
 const BOT_REDUCED_DETAIL_DISTANCE: f32 = 112.0;
 const BOT_PROXY_DISTANCE: f32 = 256.0;
-const BOT_FULL_DETAIL_LIMIT: usize = 4;
-const BOT_REDUCED_DETAIL_LIMIT: usize = 6;
+const BOT_FULL_DETAIL_LIMIT: usize = 3;
+const BOT_REDUCED_DETAIL_LIMIT: usize = 8;
 const BOT_PROXY_LIMIT: usize = 32;
 const BOT_UPDATE_GROUP_COUNT: u64 = 8;
 const BOT_MAX_FRAME_PERCEPTION_BOTS: usize = 4;
 const BOT_MAX_FRAME_ROOT_SYNCS: usize = 10;
 const BOT_MAX_FRAME_ANIMATED_RIGS: usize = 6;
 const BOT_MAX_FRAME_FX_BOTS: usize = 2;
+const BOT_MAX_FRAME_VISUAL_BUILDS: usize = 2;
+const BOT_MAX_FRAME_VISUAL_REMOVALS: usize = 4;
+const MAX_FINISHED_PROJECT_HISTORY: usize = 64;
 
 fn companion_workers_per_leader() -> u8 {
     COMPANION_WORKERS_PER_LEADER
@@ -175,6 +179,7 @@ pub struct FriendlyWorldBrain {
     pub hud_message: String,
     pub autosave_timer: f32,
     pub force_city_idea: bool,
+    pub one_shot_plan_request: bool,
     message_cooldown: f32,
     conversation_timer: f32,
     greeter_timer: f32,
@@ -198,6 +203,7 @@ impl Default for FriendlyWorldBrain {
             hud_message: "BOT CITY // waiting for world".into(),
             autosave_timer: 30.0,
             force_city_idea: false,
+            one_shot_plan_request: false,
             message_cooldown: 0.0,
             conversation_timer: 5.0,
             greeter_timer: 1.0,
@@ -565,8 +571,16 @@ impl BotWorldSave {
         self.next_idea_id = self.next_idea_id.max(1);
         self.next_conversation_id = self.next_conversation_id.max(1);
         self.next_crew_id = self.next_crew_id.max(1);
+        self.autonomy.intensity = self.autonomy.intensity.clamp(1, 10);
+        if self
+            .autonomy
+            .active_work_area
+            .is_some_and(|area| area.dimensions().x <= 0 || area.dimensions().z <= 0)
+        {
+            self.autonomy.active_work_area = None;
+        }
         if legacy_version < 2 {
-            self.autonomy.enabled = false;
+            self.autonomy.set_fleet_mode(BotFleetMode::Parked);
         }
 
         for settlement in &mut self.settlements {
@@ -585,7 +599,7 @@ impl BotWorldSave {
             settlement.bounds.max_active_projects = settlement
                 .bounds
                 .max_active_projects
-                .clamp(1, MAX_ACTIVE_PROJECTS_LIMIT);
+                .clamp(1, BOT_ACTIVE_AREA_HARD_LIMIT);
         }
         ensure_city_districts(self);
         if legacy_version < 2 {
@@ -622,6 +636,7 @@ impl BotWorldSave {
             .next_crew_id
             .max(self.crews.iter().map(|c| c.id).max().unwrap_or(0) + 1);
 
+        compact_project_history(self);
         self.ideas.truncate(96);
         self.conversations.truncate(96);
         self.journal.truncate(128);
@@ -691,7 +706,7 @@ impl BotWorldSave {
                 },
             });
         }
-        save.autonomy.enabled = false;
+        save.autonomy.set_fleet_mode(BotFleetMode::Parked);
         ensure_city_districts(&mut save);
         normalize_relationships(&mut save);
         save.journal.push(BotJournalEntry::new(format!(
@@ -700,6 +715,38 @@ impl BotWorldSave {
         )));
         save
     }
+}
+
+fn compact_project_history(save: &mut BotWorldSave) {
+    let finished_count = save
+        .projects
+        .iter()
+        .filter(|project| project.status.is_done())
+        .count();
+    if finished_count <= MAX_FINISHED_PROJECT_HISTORY {
+        return;
+    }
+
+    let mut newest_finished_ids = save
+        .projects
+        .iter()
+        .filter(|project| project.status.is_done())
+        .map(|project| project.id)
+        .collect::<Vec<_>>();
+    newest_finished_ids.sort_unstable_by(|a, b| b.cmp(a));
+    newest_finished_ids.truncate(MAX_FINISHED_PROJECT_HISTORY);
+    let newest_finished_ids = newest_finished_ids.into_iter().collect::<HashSet<_>>();
+
+    save.projects
+        .retain(|project| !project.status.is_done() || newest_finished_ids.contains(&project.id));
+
+    let retained_project_ids = save
+        .projects
+        .iter()
+        .map(|project| project.id)
+        .collect::<HashSet<_>>();
+    save.crews
+        .retain(|crew| crew.active || retained_project_ids.contains(&crew.project_id));
 }
 
 fn normalize_legacy_companions(save: &mut BotWorldSave) {
@@ -1724,6 +1771,60 @@ pub struct BotCrew {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotWorkArea {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+}
+
+impl BotWorkArea {
+    fn from_corners(a: IVec3, b: IVec3) -> Self {
+        Self {
+            min: [a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)],
+            max: [a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)],
+        }
+    }
+
+    fn contains_box(self, origin: [i32; 3], size: [i32; 3]) -> bool {
+        if size.iter().any(|value| *value <= 0) {
+            return false;
+        }
+        let max_x = origin[0].saturating_add(size[0] - 1);
+        let max_z = origin[2].saturating_add(size[2] - 1);
+        origin[0] >= self.min[0]
+            && origin[2] >= self.min[2]
+            && max_x <= self.max[0]
+            && max_z <= self.max[2]
+    }
+
+    fn dimensions(self) -> IVec3 {
+        IVec3::new(
+            self.max[0] - self.min[0] + 1,
+            self.max[1] - self.min[1] + 1,
+            self.max[2] - self.min[2] + 1,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotFleetMode {
+    Parked,
+    ManualQueue,
+    MarkedArea,
+    ContinuousAutonomy,
+}
+
+impl BotFleetMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Parked => "PARKED",
+            Self::ManualQueue => "MANUAL QUEUE",
+            Self::MarkedArea => "MARKED AREA",
+            Self::ContinuousAutonomy => "AUTONOMY",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotAutonomySettings {
     #[serde(default = "default_autonomy_enabled")]
@@ -1732,6 +1833,8 @@ pub struct BotAutonomySettings {
     pub bots_active: bool,
     #[serde(default = "default_autonomy_intensity")]
     pub intensity: u8,
+    #[serde(default)]
+    pub active_work_area: Option<BotWorkArea>,
 }
 
 impl Default for BotAutonomySettings {
@@ -1740,6 +1843,38 @@ impl Default for BotAutonomySettings {
             enabled: default_autonomy_enabled(),
             bots_active: default_bots_active(),
             intensity: default_autonomy_intensity(),
+            active_work_area: None,
+        }
+    }
+}
+
+impl BotAutonomySettings {
+    fn fleet_mode(&self) -> BotFleetMode {
+        if !self.bots_active {
+            BotFleetMode::Parked
+        } else if self.enabled {
+            BotFleetMode::ContinuousAutonomy
+        } else if self.active_work_area.is_some() {
+            BotFleetMode::MarkedArea
+        } else {
+            BotFleetMode::ManualQueue
+        }
+    }
+
+    fn set_fleet_mode(&mut self, mode: BotFleetMode) {
+        match mode {
+            BotFleetMode::Parked => {
+                self.bots_active = false;
+                self.enabled = false;
+            }
+            BotFleetMode::ManualQueue | BotFleetMode::MarkedArea => {
+                self.bots_active = true;
+                self.enabled = false;
+            }
+            BotFleetMode::ContinuousAutonomy => {
+                self.bots_active = true;
+                self.enabled = true;
+            }
         }
     }
 }
@@ -2042,9 +2177,9 @@ enum BotRuntimeTier {
 impl BotRuntimeTier {
     fn cadence(self, work: BotRuntimeWork) -> Option<u64> {
         match (self, work) {
-            (Self::Full, BotRuntimeWork::Perception) => Some(2),
-            (Self::Full, BotRuntimeWork::RootSync | BotRuntimeWork::Animation) => Some(1),
-            (Self::Full, BotRuntimeWork::Fx) => Some(2),
+            (Self::Full, BotRuntimeWork::Perception) => Some(4),
+            (Self::Full, BotRuntimeWork::RootSync) => Some(1),
+            (Self::Full, BotRuntimeWork::Animation | BotRuntimeWork::Fx) => Some(2),
             (Self::Reduced, BotRuntimeWork::Perception) => Some(6),
             (Self::Reduced, BotRuntimeWork::RootSync) => Some(3),
             (Self::Reduced, BotRuntimeWork::Animation) => Some(4),
@@ -2069,15 +2204,64 @@ enum BotRuntimeWork {
 #[derive(Debug, Clone, Copy)]
 struct BotLodSample {
     id: u64,
-    distance: f32,
+    distance_squared: f32,
     companion: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BotIdBudget<const N: usize> {
+    ids: [u64; N],
+    len: usize,
+}
+
+impl<const N: usize> Default for BotIdBudget<N> {
+    fn default() -> Self {
+        Self {
+            ids: [0; N],
+            len: 0,
+        }
+    }
+}
+
+impl<const N: usize> BotIdBudget<N> {
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn contains(&self, id: &u64) -> bool {
+        self.ids[..self.len].contains(id)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.ids[..self.len].iter().copied()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+#[derive(Debug, Default)]
+struct BotFrameSchedule {
+    perception: BotIdBudget<BOT_MAX_FRAME_PERCEPTION_BOTS>,
+    root_sync: BotIdBudget<BOT_MAX_FRAME_ROOT_SYNCS>,
+    animation: BotIdBudget<BOT_MAX_FRAME_ANIMATED_RIGS>,
+    fx: BotIdBudget<BOT_MAX_FRAME_FX_BOTS>,
 }
 
 #[derive(Resource)]
 struct BotRuntimeControl {
     frame: u64,
     lod_refresh_timer: f32,
+    lod_revision: u64,
     tiers: AHashMap<u64, BotRuntimeTier>,
+    lod_samples: Vec<BotLodSample>,
+    schedule: BotFrameSchedule,
 }
 
 impl Default for BotRuntimeControl {
@@ -2085,7 +2269,10 @@ impl Default for BotRuntimeControl {
         Self {
             frame: 0,
             lod_refresh_timer: 0.0,
+            lod_revision: 0,
             tiers: AHashMap::new(),
+            lod_samples: Vec::new(),
+            schedule: BotFrameSchedule::default(),
         }
     }
 }
@@ -2097,10 +2284,6 @@ impl BotRuntimeControl {
             .copied()
             .unwrap_or(BotRuntimeTier::Culled)
     }
-
-    fn due_ids(&self, work: BotRuntimeWork, budget: usize) -> HashSet<u64> {
-        budgeted_bot_update_ids(&self.tiers, self.frame, work, budget)
-    }
 }
 
 #[derive(Component)]
@@ -2111,6 +2294,13 @@ struct BotDetailedRig {
 #[derive(Component)]
 struct BotLodProxy {
     bot_id: u64,
+    full_tier_fallback: bool,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum BotVisualMode {
+    Detailed,
+    Proxy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2156,10 +2346,13 @@ fn bot_update_group(bot_id: u64) -> u64 {
     stable_bot_mix(bot_id) % BOT_UPDATE_GROUP_COUNT
 }
 
-fn assign_bot_runtime_tiers(samples: &[BotLodSample]) -> AHashMap<u64, BotRuntimeTier> {
-    let mut ordered = samples.to_vec();
-    ordered.sort_by_key(|sample| {
-        let distance_bucket = (sample.distance.max(0.0) / BOT_LOD_DISTANCE_BUCKET).floor() as u32;
+fn assign_bot_runtime_tiers_in_place(
+    samples: &mut [BotLodSample],
+    tiers: &mut AHashMap<u64, BotRuntimeTier>,
+) {
+    samples.sort_by_key(|sample| {
+        let distance_bucket =
+            (sample.distance_squared.max(0.0) / BOT_LOD_DISTANCE_BUCKET_SQUARED).floor() as u32;
         (
             distance_bucket,
             !sample.companion,
@@ -2172,8 +2365,11 @@ fn assign_bot_runtime_tiers(samples: &[BotLodSample]) -> AHashMap<u64, BotRuntim
     let mut full = 0usize;
     let mut reduced = 0usize;
     let mut proxy = 0usize;
-    let mut tiers = AHashMap::with_capacity(ordered.len());
-    for sample in ordered {
+    tiers.clear();
+    if tiers.capacity() < samples.len() {
+        tiers.reserve(samples.len());
+    }
+    for sample in samples {
         let full_distance = if sample.companion {
             BOT_REDUCED_DETAIL_DISTANCE
         } else {
@@ -2184,13 +2380,19 @@ fn assign_bot_runtime_tiers(samples: &[BotLodSample]) -> AHashMap<u64, BotRuntim
         } else {
             BOT_REDUCED_DETAIL_DISTANCE
         };
-        let tier = if full < BOT_FULL_DETAIL_LIMIT && sample.distance <= full_distance {
+        let tier = if full < BOT_FULL_DETAIL_LIMIT
+            && sample.distance_squared <= full_distance * full_distance
+        {
             full += 1;
             BotRuntimeTier::Full
-        } else if reduced < BOT_REDUCED_DETAIL_LIMIT && sample.distance <= reduced_distance {
+        } else if reduced < BOT_REDUCED_DETAIL_LIMIT
+            && sample.distance_squared <= reduced_distance * reduced_distance
+        {
             reduced += 1;
             BotRuntimeTier::Reduced
-        } else if proxy < BOT_PROXY_LIMIT && sample.distance <= BOT_PROXY_DISTANCE {
+        } else if proxy < BOT_PROXY_LIMIT
+            && sample.distance_squared <= BOT_PROXY_DISTANCE * BOT_PROXY_DISTANCE
+        {
             proxy += 1;
             BotRuntimeTier::Proxy
         } else {
@@ -2198,35 +2400,118 @@ fn assign_bot_runtime_tiers(samples: &[BotLodSample]) -> AHashMap<u64, BotRuntim
         };
         tiers.insert(sample.id, tier);
     }
+}
+
+#[cfg(test)]
+fn assign_bot_runtime_tiers(samples: &[BotLodSample]) -> AHashMap<u64, BotRuntimeTier> {
+    let mut ordered = samples.to_vec();
+    let mut tiers = AHashMap::with_capacity(ordered.len());
+    assign_bot_runtime_tiers_in_place(&mut ordered, &mut tiers);
     tiers
 }
 
+fn bot_update_rank(
+    id: u64,
+    tier: BotRuntimeTier,
+    schedule_epoch: u64,
+) -> (BotRuntimeTier, u64, u64) {
+    (
+        tier,
+        stable_bot_mix(id ^ schedule_epoch.wrapping_mul(0xd134_2543_de82_ef95)),
+        id,
+    )
+}
+
+fn schedule_bot_update_ids<const N: usize>(
+    tiers: &AHashMap<u64, BotRuntimeTier>,
+    frame: u64,
+    work: BotRuntimeWork,
+    budget: usize,
+    scheduled: &mut BotIdBudget<N>,
+) {
+    scheduled.clear();
+    let budget = budget.min(N);
+    let schedule_epoch = frame / BOT_UPDATE_GROUP_COUNT;
+    for (&id, &tier) in tiers {
+        let Some(cadence) = tier.cadence(work) else {
+            continue;
+        };
+        if (frame + bot_update_group(id)) % cadence != 0 {
+            continue;
+        }
+
+        let rank = bot_update_rank(id, tier, schedule_epoch);
+        let insert_at = scheduled.ids[..scheduled.len]
+            .iter()
+            .position(|existing| {
+                let existing_tier = tiers
+                    .get(existing)
+                    .copied()
+                    .unwrap_or(BotRuntimeTier::Culled);
+                rank < bot_update_rank(*existing, existing_tier, schedule_epoch)
+            })
+            .unwrap_or(scheduled.len);
+        if insert_at >= budget {
+            continue;
+        }
+        let new_len = (scheduled.len + 1).min(budget);
+        if new_len > insert_at + 1 {
+            scheduled
+                .ids
+                .copy_within(insert_at..new_len - 1, insert_at + 1);
+        }
+        scheduled.ids[insert_at] = id;
+        scheduled.len = new_len;
+    }
+}
+
+fn refresh_bot_frame_schedule(runtime: &mut BotRuntimeControl) {
+    let BotRuntimeControl {
+        frame,
+        tiers,
+        schedule,
+        ..
+    } = runtime;
+    schedule_bot_update_ids(
+        tiers,
+        *frame,
+        BotRuntimeWork::Perception,
+        BOT_MAX_FRAME_PERCEPTION_BOTS,
+        &mut schedule.perception,
+    );
+    schedule_bot_update_ids(
+        tiers,
+        *frame,
+        BotRuntimeWork::RootSync,
+        BOT_MAX_FRAME_ROOT_SYNCS,
+        &mut schedule.root_sync,
+    );
+    schedule_bot_update_ids(
+        tiers,
+        *frame,
+        BotRuntimeWork::Animation,
+        BOT_MAX_FRAME_ANIMATED_RIGS,
+        &mut schedule.animation,
+    );
+    schedule_bot_update_ids(
+        tiers,
+        *frame,
+        BotRuntimeWork::Fx,
+        BOT_MAX_FRAME_FX_BOTS,
+        &mut schedule.fx,
+    );
+}
+
+#[cfg(test)]
 fn budgeted_bot_update_ids(
     tiers: &AHashMap<u64, BotRuntimeTier>,
     frame: u64,
     work: BotRuntimeWork,
     budget: usize,
-) -> HashSet<u64> {
-    if budget == 0 {
-        return HashSet::new();
-    }
-    let schedule_epoch = frame / BOT_UPDATE_GROUP_COUNT;
-    let mut due: Vec<(u64, BotRuntimeTier)> = tiers
-        .iter()
-        .filter_map(|(&id, &tier)| {
-            let cadence = tier.cadence(work)?;
-            ((frame + bot_update_group(id)) % cadence == 0).then_some((id, tier))
-        })
-        .collect();
-    due.sort_by_key(|(id, tier)| {
-        (
-            *tier,
-            stable_bot_mix(*id ^ schedule_epoch.wrapping_mul(0xd134_2543_de82_ef95)),
-            *id,
-        )
-    });
-    due.truncate(budget);
-    due.into_iter().map(|(id, _)| id).collect()
+) -> BotIdBudget<BOT_MAX_FRAME_ROOT_SYNCS> {
+    let mut scheduled = BotIdBudget::default();
+    schedule_bot_update_ids(tiers, frame, work, budget, &mut scheduled);
+    scheduled
 }
 
 /// Marks a child of a companion bot so we can keep the saucer ring spinning
@@ -2460,12 +2745,12 @@ fn load_or_seed_bot_world(
     brain.greeter_timer = 0.5;
     brain.busy_timer = 0.5;
     brain.force_city_idea = false;
+    brain.one_shot_plan_request = false;
     brain.dirty = true;
 }
 
 fn prime_autonomous_city_defaults(save: &mut BotWorldSave) {
-    save.autonomy.enabled = false;
-    save.autonomy.bots_active = false;
+    save.autonomy.set_fleet_mode(BotFleetMode::Parked);
     save.autonomy.intensity = save.autonomy.intensity.clamp(1, 6);
     if let Some(settlement) = save.settlements.first_mut() {
         settlement.bounds.max_active_projects = settlement
@@ -2473,7 +2758,7 @@ fn prime_autonomous_city_defaults(save: &mut BotWorldSave) {
             .max_active_projects
             .min(DEFAULT_MAX_ACTIVE_PROJECTS)
             .max(1)
-            .min(MAX_ACTIVE_PROJECTS_LIMIT);
+            .min(BOT_ACTIVE_AREA_HARD_LIMIT);
     }
     for bot in save.agents.iter_mut().filter(|bot| bot.companion) {
         bot.memory.work_focus = bot.memory.work_focus.min(0.75);
@@ -2504,36 +2789,56 @@ fn update_bot_runtime_control(
 ) {
     runtime.frame = runtime.frame.wrapping_add(1);
     runtime.lod_refresh_timer -= time.delta_seconds().min(0.1);
-    if runtime.lod_refresh_timer > 0.0 {
-        return;
-    }
-
-    let player_pos = player_q
-        .get_single()
-        .ok()
-        .map(|transform| transform.translation);
-    let samples: Vec<BotLodSample> = brain
-        .save
-        .agents
-        .iter()
-        .filter(|bot| bot_should_spawn_visual(bot))
-        .map(|bot| {
-            let distance = player_pos
-                .map(|player| vec3_from_arr(bot.position).distance(player))
+    if runtime.lod_refresh_timer <= 0.0 {
+        let player_pos = player_q
+            .get_single()
+            .ok()
+            .map(|transform| transform.translation);
+        runtime.lod_samples.clear();
+        if runtime.lod_samples.capacity() < brain.save.agents.len() {
+            let additional = brain.save.agents.len() - runtime.lod_samples.capacity();
+            runtime.lod_samples.reserve(additional);
+        }
+        for bot in brain
+            .save
+            .agents
+            .iter()
+            .filter(|bot| bot_should_spawn_visual(bot))
+        {
+            let distance_squared = player_pos
+                .map(|player| vec3_from_arr(bot.position).distance_squared(player))
                 .unwrap_or(0.0);
-            BotLodSample {
+            runtime.lod_samples.push(BotLodSample {
                 id: bot.id,
-                distance,
+                distance_squared,
                 companion: bot.companion,
-            }
-        })
-        .collect();
-    runtime.tiers = assign_bot_runtime_tiers(&samples);
-    runtime.lod_refresh_timer = BOT_LOD_REFRESH_SECONDS;
+            });
+        }
+        let BotRuntimeControl {
+            lod_samples,
+            tiers,
+            lod_revision,
+            lod_refresh_timer,
+            ..
+        } = &mut *runtime;
+        assign_bot_runtime_tiers_in_place(lod_samples, tiers);
+        *lod_revision = lod_revision.wrapping_add(1).max(1);
+        *lod_refresh_timer = BOT_LOD_REFRESH_SECONDS;
+    }
+    refresh_bot_frame_schedule(&mut runtime);
+}
+
+fn bot_uses_detailed_rig(tier: BotRuntimeTier) -> bool {
+    tier == BotRuntimeTier::Full
+}
+
+fn bot_uses_proxy(tier: BotRuntimeTier) -> bool {
+    matches!(tier, BotRuntimeTier::Reduced | BotRuntimeTier::Proxy)
 }
 
 fn apply_bot_visual_lod(
     runtime: Res<BotRuntimeControl>,
+    mut applied_revision: Local<u64>,
     mut roots: Query<
         (&FriendlyBotEntity, &mut Visibility),
         (Without<BotDetailedRig>, Without<BotLodProxy>),
@@ -2547,6 +2852,11 @@ fn apply_bot_visual_lod(
         (Without<FriendlyBotEntity>, Without<BotDetailedRig>),
     >,
 ) {
+    if *applied_revision == runtime.lod_revision {
+        return;
+    }
+    *applied_revision = runtime.lod_revision;
+
     for (bot, mut visibility) in &mut roots {
         let desired = if runtime.tier(bot.id) == BotRuntimeTier::Culled {
             Visibility::Hidden
@@ -2558,7 +2868,7 @@ fn apply_bot_visual_lod(
         }
     }
     for (rig, mut visibility) in &mut detailed {
-        let desired = if runtime.tier(rig.bot_id) <= BotRuntimeTier::Reduced {
+        let desired = if bot_uses_detailed_rig(runtime.tier(rig.bot_id)) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -2568,11 +2878,13 @@ fn apply_bot_visual_lod(
         }
     }
     for (proxy, mut visibility) in &mut proxies {
-        let desired = if runtime.tier(proxy.bot_id) == BotRuntimeTier::Proxy {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+        let tier = runtime.tier(proxy.bot_id);
+        let desired =
+            if bot_uses_proxy(tier) || (proxy.full_tier_fallback && tier == BotRuntimeTier::Full) {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
         if *visibility != desired {
             *visibility = desired;
         }
@@ -2586,29 +2898,94 @@ fn spawn_missing_bot_entities(
     mut cache: ResMut<BotVisualCache>,
     runtime: Res<BotRuntimeControl>,
     brain: Res<FriendlyWorldBrain>,
-    query: Query<&FriendlyBotEntity>,
+    query: Query<(Entity, &FriendlyBotEntity, &BotVisualMode)>,
 ) {
-    let existing: HashSet<u64> = query.iter().map(|b| b.id).collect();
-    for bot in &brain.save.agents {
-        if existing.contains(&bot.id) {
-            continue;
+    let mut removals = 0usize;
+    for (entity, visual, _) in &query {
+        let keep = brain
+            .save
+            .agents
+            .iter()
+            .find(|bot| bot.id == visual.id)
+            .is_some_and(|bot| bot_should_materialize_visual(bot, runtime.tier(bot.id)));
+        if !keep && removals < BOT_MAX_FRAME_VISUAL_REMOVALS {
+            despawn(&mut commands, entity);
+            removals += 1;
         }
-        if !bot_should_spawn_visual(bot) {
-            continue;
+    }
+
+    let mut selected = [None; BOT_MAX_FRAME_VISUAL_BUILDS];
+    for slot_index in 0..selected.len() {
+        let mut best: Option<((BotRuntimeTier, bool, u64, u64), u64)> = None;
+        for bot in &brain.save.agents {
+            if selected.contains(&Some(bot.id)) {
+                continue;
+            }
+            let tier = runtime.tier(bot.id);
+            let Some(desired_mode) = desired_bot_visual_mode(bot, tier) else {
+                continue;
+            };
+            let current_mode = query
+                .iter()
+                .find(|(_, visual, _)| visual.id == bot.id)
+                .map(|(_, _, mode)| *mode);
+            if current_mode == Some(desired_mode) {
+                continue;
+            }
+            let rank = (tier, !bot.companion, stable_bot_mix(bot.id), bot.id);
+            if best.is_none_or(|(best_rank, _)| rank < best_rank) {
+                best = Some((rank, bot.id));
+            }
         }
-        spawn_bot_entity(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut cache,
-            bot,
-            runtime.tier(bot.id),
-        );
+        selected[slot_index] = best.map(|(_, id)| id);
+    }
+
+    for id in selected.into_iter().flatten() {
+        if let Some((entity, _, _)) = query.iter().find(|(_, visual, _)| visual.id == id) {
+            despawn(&mut commands, entity);
+        }
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == id) else {
+            continue;
+        };
+        let tier = runtime.tier(bot.id);
+        match desired_bot_visual_mode(bot, tier) {
+            Some(BotVisualMode::Detailed) => spawn_bot_entity(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                bot,
+                tier,
+            ),
+            Some(BotVisualMode::Proxy) => spawn_bot_proxy_entity(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                bot,
+                tier,
+            ),
+            None => {}
+        }
     }
 }
 
 fn bot_should_spawn_visual(bot: &BotAgent) -> bool {
     bot.companion || bot.current_task.is_some()
+}
+
+fn bot_should_materialize_visual(bot: &BotAgent, tier: BotRuntimeTier) -> bool {
+    bot_should_spawn_visual(bot) && (bot.companion || tier != BotRuntimeTier::Culled)
+}
+
+fn desired_bot_visual_mode(bot: &BotAgent, tier: BotRuntimeTier) -> Option<BotVisualMode> {
+    if !bot_should_materialize_visual(bot, tier) {
+        None
+    } else if bot_uses_detailed_rig(tier) {
+        Some(BotVisualMode::Detailed)
+    } else {
+        Some(BotVisualMode::Proxy)
+    }
 }
 
 fn bot_agent_index(save: &BotWorldSave) -> AHashMap<u64, usize> {
@@ -2703,6 +3080,63 @@ fn worker_material_set(
     set
 }
 
+fn spawn_bot_proxy_entity(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut BotVisualCache,
+    bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
+) {
+    let mesh = cache
+        .worker_chassis
+        .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
+        .clone();
+    let material = worker_material_set(cache, materials, bot.role).body;
+    let scale = if bot.companion {
+        Vec3::new(0.90, 1.05, 0.78)
+    } else {
+        Vec3::new(0.92, 1.55, 0.72)
+    };
+    let bot_id = bot.id;
+    commands
+        .spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(vec3_from_arr(bot.position)),
+                visibility: if runtime_tier == BotRuntimeTier::Culled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
+                ..default()
+            },
+            FriendlyBotEntity { id: bot_id },
+            BotVisualMode::Proxy,
+            Name::new("Bot LOD proxy"),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                PbrBundle {
+                    mesh,
+                    material,
+                    transform: Transform::from_translation(Vec3::Y * 0.42).with_scale(scale),
+                    visibility: if bot_uses_proxy(runtime_tier)
+                        || runtime_tier == BotRuntimeTier::Full
+                    {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotLodProxy {
+                    bot_id,
+                    full_tier_fallback: true,
+                },
+            ));
+        });
+}
+
 fn spawn_bot_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -2786,6 +3220,7 @@ fn spawn_bot_entity(
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
+            BotVisualMode::Detailed,
             Name::new(format!("FriendlyBot_{}_{}", bot.id, bot.name)),
         ))
         .with_children(|root| {
@@ -2795,18 +3230,21 @@ fn spawn_bot_entity(
                     material: mat.clone(),
                     transform: Transform::from_translation(Vec3::new(0.0, 0.42, 0.0))
                         .with_scale(Vec3::new(0.92 * chassis_width, 1.55, 0.72 * armor_depth)),
-                    visibility: if runtime_tier == BotRuntimeTier::Proxy {
+                    visibility: if bot_uses_proxy(runtime_tier) {
                         Visibility::Inherited
                     } else {
                         Visibility::Hidden
                     },
                     ..default()
                 },
-                BotLodProxy { bot_id },
+                BotLodProxy {
+                    bot_id,
+                    full_tier_fallback: false,
+                },
             ));
             root.spawn((
                 SpatialBundle {
-                    visibility: if runtime_tier <= BotRuntimeTier::Reduced {
+                    visibility: if bot_uses_detailed_rig(runtime_tier) {
                         Visibility::Inherited
                     } else {
                         Visibility::Hidden
@@ -3348,6 +3786,7 @@ fn spawn_aura_companion(
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
+            BotVisualMode::Detailed,
             Name::new(format!("AURA_{}_{}", bot_id, bot.name)),
         ))
         .with_children(|root| {
@@ -3360,14 +3799,17 @@ fn spawn_aura_companion(
                         1.12,
                         0.92 * rig_scale,
                     )),
-                    visibility: if runtime_tier == BotRuntimeTier::Proxy {
+                    visibility: if bot_uses_proxy(runtime_tier) {
                         Visibility::Inherited
                     } else {
                         Visibility::Hidden
                     },
                     ..default()
                 },
-                BotLodProxy { bot_id },
+                BotLodProxy {
+                    bot_id,
+                    full_tier_fallback: false,
+                },
             ));
             root.spawn((
                 SpatialBundle {
@@ -3376,7 +3818,7 @@ fn spawn_aura_companion(
                         0.97 + variant.armor as f32 * 0.02,
                         rig_scale,
                     )),
-                    visibility: if runtime_tier <= BotRuntimeTier::Reduced {
+                    visibility: if bot_uses_detailed_rig(runtime_tier) {
                         Visibility::Inherited
                     } else {
                         Visibility::Hidden
@@ -3738,6 +4180,7 @@ fn spawn_bolt_companion(
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
+            BotVisualMode::Detailed,
             Name::new(format!("BOLT_{}_{}", bot_id, bot.name)),
         ))
         .with_children(|root| {
@@ -3750,14 +4193,17 @@ fn spawn_bolt_companion(
                         1.05,
                         0.96 * rig_scale,
                     )),
-                    visibility: if runtime_tier == BotRuntimeTier::Proxy {
+                    visibility: if bot_uses_proxy(runtime_tier) {
                         Visibility::Inherited
                     } else {
                         Visibility::Hidden
                     },
                     ..default()
                 },
-                BotLodProxy { bot_id },
+                BotLodProxy {
+                    bot_id,
+                    full_tier_fallback: false,
+                },
             ));
             root.spawn((
                 SpatialBundle {
@@ -3766,7 +4212,7 @@ fn spawn_bolt_companion(
                         0.97 + variant.armor as f32 * 0.02,
                         rig_scale,
                     )),
-                    visibility: if runtime_tier <= BotRuntimeTier::Reduced {
+                    visibility: if bot_uses_detailed_rig(runtime_tier) {
                         Visibility::Inherited
                     } else {
                         Visibility::Hidden
@@ -4472,11 +4918,15 @@ fn tick_friendly_world(
         }
     }
 
-    let perception_ids = runtime.due_ids(BotRuntimeWork::Perception, BOT_MAX_FRAME_PERCEPTION_BOTS);
-    keep_bots_visible_and_busy(&mut brain, &world, player_pos, &perception_ids);
+    let perception_ids = &runtime.schedule.perception;
+    keep_bots_visible_and_busy(&mut brain, &world, player_pos, perception_ids);
     if !brain.queued_commands.is_empty() {
-        brain.save.autonomy.bots_active = true;
-        brain.save.autonomy.enabled = false;
+        let mode = if brain.save.autonomy.active_work_area.is_some() {
+            BotFleetMode::MarkedArea
+        } else {
+            BotFleetMode::ManualQueue
+        };
+        brain.save.autonomy.set_fleet_mode(mode);
         process_queued_commands(&mut brain, &world, player_pos, &ship_positions);
         brain.dirty = true;
     }
@@ -4495,10 +4945,11 @@ fn tick_friendly_world(
         || allow_road_front_infill
         || open_projects_before_planning == 0
         || brain.force_city_idea;
-    if brain.force_city_idea || (brain.save.autonomy.enabled && brain.plan_timer <= 0.0) {
+    if should_run_city_planner(&brain) {
         brain.plan_timer = planner_interval(&brain.save);
-        let urgent = brain.force_city_idea;
+        let urgent = brain.force_city_idea || brain.one_shot_plan_request;
         brain.force_city_idea = false;
+        brain.one_shot_plan_request = false;
         if allow_planner_tick
             && run_city_planner(
                 &mut brain,
@@ -4516,32 +4967,22 @@ fn tick_friendly_world(
         }
     }
 
-    move_bot_memories(&mut brain.save, &world, dt, &perception_ids);
+    move_bot_memories(&mut brain.save, &world, dt, perception_ids);
 
     let mut completed = Vec::new();
     let mut blocked = Vec::new();
-    let open_projects = planner_project_count(&brain.save);
-    let frame_edit_budget = bot_frame_edit_budget(&budget, open_projects);
-    let per_project_budget = bot_project_slice_budget(frame_edit_budget, open_projects);
-    let project_scan_budget = bot_project_scan_budget(open_projects);
+    let active_limit = active_project_limit_for_budget(&brain.save, &budget);
+    let scheduled = scheduled_project_indices(&brain.save, brain.project_scan_cursor, active_limit);
+    park_unscheduled_active_projects(&mut brain.save, &scheduled);
+    let running_projects = scheduled.len();
+    let frame_edit_budget = bot_frame_edit_budget(&budget, running_projects);
+    let per_project_budget = bot_project_slice_budget(frame_edit_budget, running_projects);
     let mut changed_total = 0usize;
     let bounds = brain.save.primary_bounds();
 
     if frame_edit_budget > 0 {
         let project_len = brain.save.projects.len();
-        let scan_limit = project_len.min(project_scan_budget);
-        let start = if project_len == 0 {
-            0
-        } else {
-            brain.project_scan_cursor % project_len
-        };
-        let mut scanned = 0usize;
-        while scanned < scan_limit {
-            let idx = (start + scanned) % project_len;
-            scanned += 1;
-            if brain.save.projects[idx].status.is_done() {
-                continue;
-            }
+        for &idx in &scheduled {
             let remaining = frame_edit_budget.saturating_sub(changed_total);
             if remaining == 0 {
                 break;
@@ -4568,7 +5009,7 @@ fn tick_friendly_world(
         brain.project_scan_cursor = if project_len == 0 {
             0
         } else {
-            (start + scanned).min(start + project_len) % project_len
+            (brain.project_scan_cursor + 1) % project_len
         };
     } else if brain.message_cooldown <= 0.0 {
         brain.hud_message = "Bot builders are yielding to max-distance world streaming.".into();
@@ -4583,7 +5024,7 @@ fn tick_friendly_world(
             format!("{label} complete. Bot city is growing."),
             8,
         );
-        if allow_new_city_work {
+        if allow_new_city_work && brain.save.autonomy.enabled {
             brain.force_city_idea = true;
             brain.plan_timer = 0.0;
         } else {
@@ -4599,11 +5040,17 @@ fn tick_friendly_world(
         brain.dirty = true;
     }
 
+    compact_project_history(&mut brain.save);
     sync_bot_task_progress(&mut brain.save);
     brain.save.journal.truncate(128);
     if changed_total > 0 {
         brain.dirty = true;
     }
+}
+
+fn should_run_city_planner(brain: &FriendlyWorldBrain) -> bool {
+    brain.one_shot_plan_request
+        || (brain.save.autonomy.enabled && (brain.force_city_idea || brain.plan_timer <= 0.0))
 }
 
 fn process_queued_commands(
@@ -4786,7 +5233,13 @@ fn command_site_candidates(
             let center = anchor + Vec3::new(angle.cos() * ring, 0.0, angle.sin() * ring);
             let target_origin = clamp_to_bounds(bounds, center - half);
             let origin = project_origin(world, target_origin);
-            if !bounds.contains_box(origin, size) || !project_anchor_loaded(world, origin, size) {
+            if !bounds.contains_box(origin, size)
+                || save
+                    .autonomy
+                    .active_work_area
+                    .is_some_and(|area| !area.contains_box(origin, size))
+                || !project_anchor_loaded(world, origin, size)
+            {
                 continue;
             }
             if !out.contains(&origin) {
@@ -4889,7 +5342,7 @@ fn keep_bots_visible_and_busy(
     brain: &mut FriendlyWorldBrain,
     world: &VoxelWorld,
     player_pos: Option<Vec3>,
-    perception_ids: &HashSet<u64>,
+    perception_ids: &BotIdBudget<BOT_MAX_FRAME_PERCEPTION_BOTS>,
 ) {
     if brain.save.agents.is_empty() {
         return;
@@ -4954,7 +5407,7 @@ fn update_companion_targets(
     save: &mut BotWorldSave,
     world: &VoxelWorld,
     player_pos: Option<Vec3>,
-    perception_ids: &HashSet<u64>,
+    perception_ids: &BotIdBudget<BOT_MAX_FRAME_PERCEPTION_BOTS>,
 ) {
     let Some(player_pos) = player_pos else {
         return;
@@ -5085,7 +5538,7 @@ fn draw_companion_preview_gizmos(
 ) {
     let elapsed = time.elapsed_seconds();
     let pulse = (elapsed * 3.4).sin() * 0.5 + 0.5;
-    let fx_ids = runtime.due_ids(BotRuntimeWork::Fx, BOT_MAX_FRAME_FX_BOTS);
+    let fx_ids = &runtime.schedule.fx;
     for bot in brain
         .save
         .agents
@@ -5278,6 +5731,7 @@ fn active_project_limit(save: &BotWorldSave) -> usize {
         .max_active_projects
         .clamp(1, MAX_ACTIVE_PROJECTS_LIMIT)
         .min(intensity_limit)
+        .min(BOT_ACTIVE_AREA_HARD_LIMIT)
 }
 
 fn active_project_limit_for_budget(save: &BotWorldSave, budget: &RuntimeBudget) -> usize {
@@ -5303,6 +5757,63 @@ fn planner_project_count(save: &BotWorldSave) -> usize {
         .iter()
         .filter(|project| !project.status.is_done())
         .count()
+}
+
+fn project_schedule_status_rank(status: BotProjectStatus) -> u8 {
+    match status {
+        BotProjectStatus::Active => 0,
+        BotProjectStatus::WaitingForPlayer => 1,
+        BotProjectStatus::WaitingForChunks => 2,
+        BotProjectStatus::Queued => 3,
+        BotProjectStatus::Complete | BotProjectStatus::Blocked => 4,
+    }
+}
+
+fn scheduled_project_indices(save: &BotWorldSave, cursor: usize, limit: usize) -> Vec<usize> {
+    if limit == 0 || save.projects.is_empty() {
+        return Vec::new();
+    }
+    let len = save.projects.len();
+    let mut candidates = save
+        .projects
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| !project.status.is_done())
+        .map(|(index, project)| {
+            let rotated_order = (index + len - cursor % len) % len;
+            (
+                index,
+                project.priority,
+                project_schedule_status_rank(project.status),
+                rotated_order,
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    candidates
+        .into_iter()
+        .take(limit.min(BOT_ACTIVE_AREA_HARD_LIMIT))
+        .map(|(index, _, _, _)| index)
+        .collect()
+}
+
+fn park_unscheduled_active_projects(save: &mut BotWorldSave, scheduled: &[usize]) {
+    let scheduled = scheduled.iter().copied().collect::<HashSet<_>>();
+    for (index, project) in save.projects.iter_mut().enumerate() {
+        if project.status == BotProjectStatus::Active && !scheduled.contains(&index) {
+            project.status = BotProjectStatus::Queued;
+            project.blocked_reason = "waiting for a higher-priority fleet slot".into();
+        }
+    }
+}
+
+fn scheduled_project_count(save: &BotWorldSave) -> usize {
+    planner_project_count(save).min(active_project_limit(save))
 }
 
 fn open_access_road_project_count(save: &BotWorldSave) -> usize {
@@ -7916,6 +8427,11 @@ fn add_project_unchecked(
     priority: u8,
     manual: bool,
 ) -> Result<u64, String> {
+    if let Some(area) = save.autonomy.active_work_area {
+        if !area.contains_box(origin, size) {
+            return Err("outside the player-marked bot work area".into());
+        }
+    }
     let id = save.next_project_id;
     save.next_project_id += 1;
     let total_steps = (size[0].max(1) * size[1].max(1) * size[2].max(1)) as u32;
@@ -8695,6 +9211,11 @@ fn validate_project_shape_and_bounds(
     let bounds = save.primary_bounds();
     if !bounds.contains_box(origin, size) {
         return Err("outside the 1024 block bot city boundary".into());
+    }
+    if let Some(area) = save.autonomy.active_work_area {
+        if !area.contains_box(origin, size) {
+            return Err("outside the player-marked bot work area".into());
+        }
     }
     Ok(())
 }
@@ -10249,7 +10770,7 @@ fn move_bot_memories(
     save: &mut BotWorldSave,
     world: &VoxelWorld,
     dt: f32,
-    terrain_probe_ids: &HashSet<u64>,
+    terrain_probe_ids: &BotIdBudget<BOT_MAX_FRAME_PERCEPTION_BOTS>,
 ) {
     for bot in &mut save.agents {
         let pos = vec3_from_arr(bot.position);
@@ -10353,11 +10874,14 @@ fn process_companion_command(
 
     match command {
         CompanionCommand::BuildCityAutonomy => {
-            brain.save.autonomy.enabled = true;
-            brain.save.autonomy.bots_active = true;
+            brain
+                .save
+                .autonomy
+                .set_fleet_mode(BotFleetMode::ContinuousAutonomy);
             brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(6);
             if let Some(settlement) = brain.save.settlements.first_mut() {
-                settlement.bounds.max_active_projects = AUTONOMY_BURST_ACTIVE_PROJECTS;
+                settlement.bounds.max_active_projects =
+                    AUTONOMY_BURST_ACTIVE_PROJECTS.min(BOT_ACTIVE_AREA_HARD_LIMIT);
             }
             let queued_now = queue_mega_city_starter_projects(
                 &mut brain.save,
@@ -10829,13 +11353,13 @@ fn animate_worker_bots(
 ) {
     let elapsed = time.elapsed_seconds();
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
-    let animation_ids = runtime.due_ids(BotRuntimeWork::Animation, BOT_MAX_FRAME_ANIMATED_RIGS);
+    let animation_ids = &runtime.schedule.animation;
     if animation_ids.is_empty() {
         return;
     }
 
-    let mut poses = AHashMap::with_capacity(animation_ids.len());
-    for bot_id in animation_ids {
+    let mut poses = [None; BOT_MAX_FRAME_ANIMATED_RIGS];
+    for (pose_slot, bot_id) in poses.iter_mut().zip(animation_ids.iter()) {
         let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == bot_id) else {
             continue;
         };
@@ -10885,7 +11409,7 @@ fn animate_worker_bots(
         };
         let head_yaw_local = head_yaw_local.clamp(-0.9, 0.9);
 
-        poses.insert(
+        *pose_slot = Some((
             bot_id,
             WorkerAnimationPose {
                 phase,
@@ -10896,11 +11420,16 @@ fn animate_worker_bots(
                 walking,
                 state: bot.state,
             },
-        );
+        ));
     }
 
     for (rig, children) in &rigs {
-        let Some(pose) = poses.get(&rig.bot_id).copied() else {
+        let Some((_, pose)) = poses
+            .iter()
+            .flatten()
+            .find(|(bot_id, _)| *bot_id == rig.bot_id)
+            .copied()
+        else {
             continue;
         };
         for &child in children.iter() {
@@ -11167,23 +11696,21 @@ fn sync_bot_visuals(
     let elapsed = time.elapsed_seconds();
     let dt = time.delta_seconds().clamp(0.0, 0.1);
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
-    let bot_index = bot_agent_index(&brain.save);
-    let root_sync_ids = runtime.due_ids(BotRuntimeWork::RootSync, BOT_MAX_FRAME_ROOT_SYNCS);
-    let animation_ids = runtime.due_ids(BotRuntimeWork::Animation, BOT_MAX_FRAME_ANIMATED_RIGS);
+    let root_sync_ids = &runtime.schedule.root_sync;
+    let animation_ids = &runtime.schedule.animation;
 
-    // Per-bot world rotation cache so head/iris systems can transform world
-    // vectors into local space (used for eye tracking + head tilt direction).
-    let mut bot_world_rot: HashMap<u64, Quat> = HashMap::new();
-    let mut bot_pos: HashMap<u64, Vec3> = HashMap::new();
+    let mut companion_poses = [None; MAX_COMPANION_TEAM];
+    let mut companion_pose_len = 0usize;
 
     for (entity, mut transform) in &mut bot_q {
-        let Some(bot) = bot_by_id(&brain.save, &bot_index, entity.id) else {
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == entity.id) else {
             continue;
         };
         if !root_sync_ids.contains(&entity.id) {
-            if bot.companion {
-                bot_world_rot.insert(entity.id, transform.rotation);
-                bot_pos.insert(entity.id, transform.translation);
+            if bot.companion && companion_pose_len < companion_poses.len() {
+                companion_poses[companion_pose_len] =
+                    Some((entity.id, transform.rotation, transform.translation));
+                companion_pose_len += 1;
             }
             continue;
         }
@@ -11236,8 +11763,11 @@ fn sync_bot_visuals(
                 .rotation
                 .slerp(desired_rot, (8.0 * dt).clamp(0.0, 1.0));
 
-            bot_world_rot.insert(entity.id, transform.rotation);
-            bot_pos.insert(entity.id, transform.translation);
+            if companion_pose_len < companion_poses.len() {
+                companion_poses[companion_pose_len] =
+                    Some((entity.id, transform.rotation, transform.translation));
+                companion_pose_len += 1;
+            }
         } else {
             // Worker droid body — smooth follow toward sim position, slerp
             // rotation toward movement direction (or the player when idle so
@@ -11300,13 +11830,15 @@ fn sync_bot_visuals(
         if !animation_ids.contains(&head.bot_id) {
             continue;
         }
-        let Some(bot) = bot_by_id(&brain.save, &bot_index, head.bot_id) else {
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == head.bot_id) else {
             continue;
         };
-        let Some(world_rot) = bot_world_rot.get(&head.bot_id).copied() else {
-            continue;
-        };
-        let Some(world_pos) = bot_pos.get(&head.bot_id).copied() else {
+        let Some((_, world_rot, world_pos)) = companion_poses
+            .iter()
+            .flatten()
+            .find(|(bot_id, _, _)| *bot_id == head.bot_id)
+            .copied()
+        else {
             continue;
         };
         let to = look_target(bot) - world_pos;
@@ -11339,13 +11871,15 @@ fn sync_bot_visuals(
         if !animation_ids.contains(&iris.bot_id) {
             continue;
         }
-        let Some(bot) = bot_by_id(&brain.save, &bot_index, iris.bot_id) else {
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == iris.bot_id) else {
             continue;
         };
-        let Some(world_rot) = bot_world_rot.get(&iris.bot_id).copied() else {
-            continue;
-        };
-        let Some(world_pos) = bot_pos.get(&iris.bot_id).copied() else {
+        let Some((_, world_rot, world_pos)) = companion_poses
+            .iter()
+            .flatten()
+            .find(|(bot_id, _, _)| *bot_id == iris.bot_id)
+            .copied()
+        else {
             continue;
         };
         let to = look_target(bot) - world_pos;
@@ -11389,7 +11923,7 @@ fn sync_bot_visuals(
         if !animation_ids.contains(&mood.bot_id) {
             continue;
         }
-        let Some(bot) = bot_by_id(&brain.save, &bot_index, mood.bot_id) else {
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == mood.bot_id) else {
             continue;
         };
         let Some(mat) = materials.get_mut(&mood.mat) else {
@@ -11524,39 +12058,13 @@ pub fn save_bot_world_files(world_name: &str, save: &BotWorldSave) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let root = bot_root(world_name);
-        let agents = root.join("agents");
-        let projects = root.join("projects");
-        if let Err(e) = fs::create_dir_all(&agents) {
-            warn!("bots: failed creating {}: {e}", agents.display());
-            return;
-        }
-        if let Err(e) = fs::create_dir_all(&projects) {
-            warn!("bots: failed creating {}: {e}", projects.display());
+        if let Err(e) = fs::create_dir_all(&root) {
+            warn!("bots: failed creating {}: {e}", root.display());
             return;
         }
         if let Ok(text) = ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default()) {
             let _ = crate::settings::atomic_write_text(&root.join("journal.ron"), &text);
         }
-        let mut expected_agents = HashSet::new();
-        for bot in &save.agents {
-            let path = agents.join(format!("bot_{}.ron", bot.id));
-            expected_agents.insert(path.clone());
-            if let Ok(text) = ron::ser::to_string_pretty(bot, ron::ser::PrettyConfig::default()) {
-                let _ = crate::settings::atomic_write_text(&path, &text);
-            }
-        }
-        cleanup_stale_ron(&agents, &expected_agents);
-
-        let mut expected_projects = HashSet::new();
-        for project in &save.projects {
-            let path = projects.join(format!("project_{}.ron", project.id));
-            expected_projects.insert(path.clone());
-            if let Ok(text) = ron::ser::to_string_pretty(project, ron::ser::PrettyConfig::default())
-            {
-                let _ = crate::settings::atomic_write_text(&path, &text);
-            }
-        }
-        cleanup_stale_ron(&projects, &expected_projects);
     }
 }
 
@@ -11626,19 +12134,6 @@ fn browser_bot_world_key(world_name: &str) -> String {
         "voxel_native.bot_world.{}",
         crate::settings::world_storage_stem(world_name)
     )
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn cleanup_stale_ron(dir: &Path, expected: &HashSet<PathBuf>) {
-    let Ok(read) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in read.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("ron") && !expected.contains(&path) {
-            let _ = fs::remove_file(path);
-        }
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -12247,8 +12742,12 @@ fn queue_smart_editor_task(
     };
     brain.command_draft = cmd;
     brain.queued_commands.push(cmd);
-    brain.save.autonomy.bots_active = true;
-    brain.save.autonomy.enabled = false;
+    let mode = if brain.save.autonomy.active_work_area.is_some() {
+        BotFleetMode::MarkedArea
+    } else {
+        BotFleetMode::ManualQueue
+    };
+    brain.save.autonomy.set_fleet_mode(mode);
     brain.hud_message = format!(
         "{} queued for {}. Manual mode: bots build only this command queue.",
         kind.label(),
@@ -12371,8 +12870,8 @@ fn queue_area_masterplan(
 
     let cancelled = cancel_open_projects_for_area_command(&mut brain.save);
     brain.queued_commands.clear();
-    brain.save.autonomy.bots_active = true;
-    brain.save.autonomy.enabled = false;
+    brain.save.autonomy.active_work_area = Some(BotWorkArea::from_corners(min, max));
+    brain.save.autonomy.set_fleet_mode(BotFleetMode::MarkedArea);
     brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(5);
     set_companions_to_area_command(&mut brain.save);
     let district_id = install_player_city_area(&mut brain.save, min, max, world);
@@ -12897,7 +13396,7 @@ fn draw_city_control_center(
                 ui,
                 Icon::Builder,
                 "ACTIVE",
-                &brain.active_project_count().to_string(),
+                &scheduled_project_count(&brain.save).to_string(),
                 theme,
             );
             crate::ui_kit::status_chip(
@@ -12910,14 +13409,20 @@ fn draw_city_control_center(
             crate::ui_kit::status_chip(
                 ui,
                 Icon::Approve,
-                "WORKERS",
-                if brain.save.autonomy.bots_active {
-                    "ON"
-                } else {
-                    "OFF"
-                },
+                "FLEET",
+                brain.save.autonomy.fleet_mode().label(),
                 theme,
             );
+            if let Some(area) = brain.save.autonomy.active_work_area {
+                let size = area.dimensions();
+                crate::ui_kit::status_chip(
+                    ui,
+                    Icon::Grid,
+                    "WORK AREA",
+                    &format!("{} x {}", size.x, size.z),
+                    theme,
+                );
+            }
         });
 
         ui.horizontal_wrapped(|ui| {
@@ -12932,35 +13437,41 @@ fn draw_city_control_center(
         });
 
         ui.horizontal_wrapped(|ui| {
+            let fleet_mode = brain.save.autonomy.fleet_mode();
             if crate::ui_kit::icon_action(
                 ui,
-                Icon::Approve,
-                if brain.save.autonomy.bots_active {
-                    "Bots On"
+                if fleet_mode == BotFleetMode::Parked {
+                    Icon::Approve
                 } else {
-                    "Bots Off"
+                    Icon::Hold
                 },
-                brain.save.autonomy.bots_active,
+                if fleet_mode == BotFleetMode::Parked {
+                    "Run Queue"
+                } else {
+                    "Park Fleet"
+                },
+                fleet_mode != BotFleetMode::Parked,
                 theme,
             )
             .clicked()
             {
-                brain.save.autonomy.bots_active = !brain.save.autonomy.bots_active;
-                if brain.save.autonomy.bots_active {
-                    brain.save.autonomy.enabled = false;
-                }
-                brain.dirty = true;
-                brain.hud_message = if brain.save.autonomy.bots_active {
-                    "Bot workers resumed in manual mode. They continue queued/saved projects only."
-                        .into()
+                let next = if fleet_mode == BotFleetMode::Parked {
+                    if brain.save.autonomy.active_work_area.is_some() {
+                        BotFleetMode::MarkedArea
+                    } else {
+                        BotFleetMode::ManualQueue
+                    }
                 } else {
-                    "Bot workers paused. Project sheets and progress are saved.".into()
+                    BotFleetMode::Parked
                 };
-            }
-            if crate::ui_kit::icon_action(ui, Icon::City, "Start Mega City", false, theme).clicked()
-            {
-                brain.save.autonomy.bots_active = true;
-                brain.companion_command = Some(CompanionCommand::BuildCityAutonomy);
+                brain.save.autonomy.set_fleet_mode(next);
+                brain.dirty = true;
+                brain.hud_message = if next == BotFleetMode::Parked {
+                    "Fleet parked. Queued projects and progress are preserved.".into()
+                } else {
+                    "Fleet running only the saved priority queue; no new projects are invented."
+                        .into()
+                };
             }
             if crate::ui_kit::icon_action(ui, Icon::Grid, "Selected Area", false, theme).clicked() {
                 queue_selected_area_masterplan(brain, selection);
@@ -13032,17 +13543,32 @@ fn draw_city_control_center(
             if crate::ui_kit::icon_action(
                 ui,
                 Icon::Optimize,
-                "Continuous Autonomy",
-                brain.save.autonomy.enabled,
+                "Autonomy (Opt-in)",
+                brain.save.autonomy.fleet_mode() == BotFleetMode::ContinuousAutonomy,
                 theme,
             )
             .clicked()
             {
-                brain.save.autonomy.enabled = !brain.save.autonomy.enabled;
-                if brain.save.autonomy.enabled {
-                    brain.save.autonomy.bots_active = true;
+                let enabling = brain.save.autonomy.fleet_mode() != BotFleetMode::ContinuousAutonomy;
+                if enabling {
+                    brain
+                        .save
+                        .autonomy
+                        .set_fleet_mode(BotFleetMode::ContinuousAutonomy);
                     brain.force_city_idea = true;
                     brain.plan_timer = 0.0;
+                    brain.hud_message =
+                        "Continuous autonomy enabled explicitly. Fleet may propose new work."
+                            .into();
+                } else {
+                    let next = if brain.save.autonomy.active_work_area.is_some() {
+                        BotFleetMode::MarkedArea
+                    } else {
+                        BotFleetMode::ManualQueue
+                    };
+                    brain.save.autonomy.set_fleet_mode(next);
+                    brain.hud_message =
+                        "Autonomy disabled. Fleet will finish only the existing queue.".into();
                 }
                 brain.dirty = true;
             }
@@ -13054,7 +13580,7 @@ fn draw_city_control_center(
                 ui.add(
                     egui::Slider::new(
                         &mut settlement.bounds.max_active_projects,
-                        1..=MAX_ACTIVE_PROJECTS_LIMIT,
+                        1..=BOT_ACTIVE_AREA_HARD_LIMIT,
                     )
                     .text("simultaneous builds"),
                 );
@@ -13114,13 +13640,7 @@ fn draw_build_spreadsheet(
                 ui,
                 Icon::Approve,
                 "MODE",
-                if !brain.save.autonomy.bots_active {
-                    "paused"
-                } else if brain.save.autonomy.enabled {
-                    "continuous"
-                } else {
-                    "manual"
-                },
+                brain.save.autonomy.fleet_mode().label(),
                 theme,
             );
         });
@@ -13130,11 +13650,12 @@ fn draw_build_spreadsheet(
             .show(ui, |ui| {
                 egui::Grid::new("bot_build_spreadsheet_grid")
                     .striped(true)
-                    .num_columns(7)
+                    .num_columns(8)
                     .spacing(egui::vec2(12.0, 6.0))
                     .show(ui, |ui| {
                         ui.strong("PROJECT");
                         ui.strong("STATUS");
+                        ui.strong("PRIORITY");
                         ui.strong("PHASE");
                         ui.strong("OWNER");
                         ui.strong("MATERIAL");
@@ -13175,6 +13696,11 @@ fn draw_build_spreadsheet(
                                     format!("{:?}", project.status)
                                 } else {
                                     row.status.clone()
+                                });
+                                ui.label(if idx == 0 {
+                                    project.priority.to_string()
+                                } else {
+                                    String::new()
                                 });
                                 ui.label(&row.phase);
                                 ui.label(&row.owner);
@@ -13218,7 +13744,7 @@ pub fn draw_bots_editor(
                 ui,
                 Icon::Builder,
                 "ACTIVE",
-                &brain.active_project_count().to_string(),
+                &scheduled_project_count(&brain.save).to_string(),
                 theme,
             );
             crate::ui_kit::status_chip(
@@ -13424,31 +13950,47 @@ pub fn draw_bots_editor(
                 if crate::ui_kit::icon_action(
                     ui,
                     Icon::Optimize,
-                    "Autonomy",
-                    brain.save.autonomy.enabled,
+                    "Autonomy (Opt-in)",
+                    brain.save.autonomy.fleet_mode() == BotFleetMode::ContinuousAutonomy,
                     theme,
                 )
                 .clicked()
                 {
-                    brain.save.autonomy.enabled = !brain.save.autonomy.enabled;
-                    if brain.save.autonomy.enabled {
-                        brain.save.autonomy.bots_active = true;
+                    let enabling =
+                        brain.save.autonomy.fleet_mode() != BotFleetMode::ContinuousAutonomy;
+                    if enabling {
+                        brain
+                            .save
+                            .autonomy
+                            .set_fleet_mode(BotFleetMode::ContinuousAutonomy);
                         brain.force_city_idea = true;
                         brain.plan_timer = 0.0;
+                    } else {
+                        let next = if brain.save.autonomy.active_work_area.is_some() {
+                            BotFleetMode::MarkedArea
+                        } else {
+                            BotFleetMode::ManualQueue
+                        };
+                        brain.save.autonomy.set_fleet_mode(next);
                     }
-                    brain.hud_message = if brain.save.autonomy.enabled {
+                    brain.hud_message = if enabling {
                         "Bot city autonomy resumed.".into()
                     } else {
-                        "Bot city autonomy paused.".into()
+                        "Autonomy disabled; existing queue only.".into()
                     };
                     brain.dirty = true;
                 }
                 if crate::ui_kit::icon_action(ui, Icon::Wand, "Queue Idea", false, theme).clicked()
                 {
-                    brain.save.autonomy.bots_active = true;
-                    brain.save.autonomy.enabled = false;
-                    brain.force_city_idea = true;
-                    brain.hud_message = "Companions queued an optional city idea.".into();
+                    let next = if brain.save.autonomy.active_work_area.is_some() {
+                        BotFleetMode::MarkedArea
+                    } else {
+                        BotFleetMode::ManualQueue
+                    };
+                    brain.save.autonomy.set_fleet_mode(next);
+                    brain.one_shot_plan_request = true;
+                    brain.hud_message =
+                        "One planner proposal requested; continuous autonomy remains off.".into();
                 }
             });
             ui.add(
@@ -13458,7 +14000,7 @@ pub fn draw_bots_editor(
             ui.add(
                 egui::Slider::new(
                     &mut brain.save.settlements[0].bounds.max_active_projects,
-                    1..=MAX_ACTIVE_PROJECTS_LIMIT,
+                    1..=BOT_ACTIVE_AREA_HARD_LIMIT,
                 )
                 .text("max active projects"),
             );
@@ -13612,7 +14154,14 @@ pub fn draw_bots_editor(
             let mut cmd = brain.command_draft;
             cmd.bot_id = brain.selected_bot;
             brain.queued_commands.push(cmd);
-            brain.hud_message = "Manual bot task queued.".into();
+            let mode = if brain.save.autonomy.active_work_area.is_some() {
+                BotFleetMode::MarkedArea
+            } else {
+                BotFleetMode::ManualQueue
+            };
+            brain.save.autonomy.set_fleet_mode(mode);
+            brain.hud_message = "Manual bot task queued; continuous autonomy is off.".into();
+            brain.dirty = true;
         }
     });
 
@@ -13623,6 +14172,7 @@ pub fn draw_bots_editor(
             .show(ui, |ui| {
                 ui.label("Project");
                 ui.label("Status");
+                ui.label("Priority");
                 ui.label("Progress");
                 ui.end_row();
                 for project in brain.save.projects.iter().rev().take(12) {
@@ -13633,6 +14183,7 @@ pub fn draw_bots_editor(
                     };
                     ui.label(&project.label);
                     ui.label(format!("{:?}", project.status));
+                    ui.label(project.priority.to_string());
                     ui.label(format!("{:>3.0}%", progress.clamp(0.0, 1.0) * 100.0));
                     ui.end_row();
                 }
@@ -13675,12 +14226,86 @@ fn despawn(commands: &mut Commands, entity: Entity) {
 mod tests {
     use super::*;
 
+    fn history_test_project(id: u64, status: BotProjectStatus) -> BotProject {
+        BotProject {
+            id,
+            kind: BotTaskKind::BuildRoad,
+            label: format!("History project {id}"),
+            origin: [id as i32, 90, 0],
+            size: [8, 2, 8],
+            theme: BotTheme::AmberStreet,
+            assigned_bot: None,
+            status,
+            cursor: 0,
+            total_steps: 1,
+            blocked_reason: String::new(),
+            priority: 1,
+            district_id: None,
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        }
+    }
+
     fn mark_test_city_columns_loaded(world: &mut VoxelWorld, min: i32, max: i32) {
         for cx in min..=max {
             for cz in min..=max {
                 world.loaded_column_counts.insert((cx, cz), 1);
             }
         }
+    }
+
+    #[test]
+    fn project_history_compaction_keeps_live_work_and_newest_finished_records() {
+        let mut save = BotWorldSave::default();
+        save.projects
+            .extend((1..=100).map(|id| history_test_project(id, BotProjectStatus::Complete)));
+        save.projects
+            .push(history_test_project(200, BotProjectStatus::Active));
+        save.projects.push(history_test_project(
+            201,
+            BotProjectStatus::WaitingForChunks,
+        ));
+        save.crews.extend([
+            BotCrew {
+                id: 1,
+                role_focus: BotRole::Builder,
+                project_id: 1,
+                bot_ids: Vec::new(),
+                active: false,
+            },
+            BotCrew {
+                id: 2,
+                role_focus: BotRole::Builder,
+                project_id: 100,
+                bot_ids: Vec::new(),
+                active: false,
+            },
+            BotCrew {
+                id: 3,
+                role_focus: BotRole::Builder,
+                project_id: 999,
+                bot_ids: Vec::new(),
+                active: true,
+            },
+        ]);
+
+        compact_project_history(&mut save);
+
+        let finished_ids = save
+            .projects
+            .iter()
+            .filter(|project| project.status.is_done())
+            .map(|project| project.id)
+            .collect::<Vec<_>>();
+        assert_eq!(finished_ids.len(), MAX_FINISHED_PROJECT_HISTORY);
+        assert_eq!(finished_ids.first(), Some(&37));
+        assert_eq!(finished_ids.last(), Some(&100));
+        assert!(save.projects.iter().any(|project| project.id == 200));
+        assert!(save.projects.iter().any(|project| project.id == 201));
+        assert!(!save.crews.iter().any(|crew| crew.id == 1));
+        assert!(save.crews.iter().any(|crew| crew.id == 2));
+        assert!(save.crews.iter().any(|crew| crew.id == 3));
     }
 
     #[test]
@@ -13817,6 +14442,92 @@ mod tests {
     }
 
     #[test]
+    fn fleet_modes_require_explicit_user_control() {
+        let mut settings = BotAutonomySettings::default();
+        assert_eq!(settings.fleet_mode(), BotFleetMode::Parked);
+
+        settings.set_fleet_mode(BotFleetMode::ManualQueue);
+        assert_eq!(settings.fleet_mode(), BotFleetMode::ManualQueue);
+        assert!(!settings.enabled);
+
+        settings.active_work_area = Some(BotWorkArea::from_corners(
+            IVec3::new(-20, 80, -10),
+            IVec3::new(20, 100, 10),
+        ));
+        settings.set_fleet_mode(BotFleetMode::MarkedArea);
+        assert_eq!(settings.fleet_mode(), BotFleetMode::MarkedArea);
+        assert!(!settings.enabled);
+
+        settings.set_fleet_mode(BotFleetMode::ContinuousAutonomy);
+        assert_eq!(settings.fleet_mode(), BotFleetMode::ContinuousAutonomy);
+        settings.set_fleet_mode(BotFleetMode::Parked);
+        assert_eq!(settings.fleet_mode(), BotFleetMode::Parked);
+    }
+
+    #[test]
+    fn manual_fleet_does_not_run_planner_without_one_shot_request() {
+        let mut brain = FriendlyWorldBrain::default();
+        brain
+            .save
+            .autonomy
+            .set_fleet_mode(BotFleetMode::ManualQueue);
+        brain.force_city_idea = true;
+        brain.plan_timer = -1.0;
+        assert!(!should_run_city_planner(&brain));
+
+        brain.one_shot_plan_request = true;
+        assert!(should_run_city_planner(&brain));
+
+        brain.one_shot_plan_request = false;
+        brain
+            .save
+            .autonomy
+            .set_fleet_mode(BotFleetMode::ContinuousAutonomy);
+        assert!(should_run_city_planner(&brain));
+    }
+
+    #[test]
+    fn marked_work_area_rejects_projects_crossing_its_exact_rectangle() {
+        let mut save = BotWorldSave::default();
+        save.autonomy.active_work_area = Some(BotWorkArea::from_corners(
+            IVec3::new(-16, 70, -8),
+            IVec3::new(16, 110, 8),
+        ));
+
+        assert!(validate_project_shape_and_bounds(&save, [-16, 80, -8], [33, 4, 17]).is_ok());
+        assert_eq!(
+            validate_project_shape_and_bounds(&save, [10, 80, -4], [8, 4, 8]),
+            Err("outside the player-marked bot work area".into())
+        );
+    }
+
+    #[test]
+    fn project_scheduler_honors_priority_and_hard_parallel_limit() {
+        let mut save = BotWorldSave::default();
+        save.projects = (0..12)
+            .map(|index| {
+                let mut project = history_test_project(index as u64 + 1, BotProjectStatus::Queued);
+                project.priority = (index % 10 + 1) as u8;
+                project
+            })
+            .collect();
+        save.projects[1].status = BotProjectStatus::Active;
+        save.projects[1].priority = 2;
+        save.projects[5].priority = 10;
+        save.projects[9].priority = 10;
+
+        let scheduled = scheduled_project_indices(&save, 0, 3);
+        assert_eq!(scheduled.len(), 3);
+        assert_eq!(scheduled[0], 5);
+        assert_eq!(scheduled[1], 9);
+        assert!(save.projects[scheduled[2]].priority >= 9);
+        assert!(!scheduled.contains(&1));
+        assert!(
+            scheduled_project_indices(&save, 0, usize::MAX).len() <= BOT_ACTIVE_AREA_HARD_LIMIT
+        );
+    }
+
+    #[test]
     fn v2_normalization_keeps_companion_team_small_and_removes_idle_helper_swarm() {
         let world = VoxelWorld::new();
         let mut save = BotWorldSave::seed("Manual", Vec3::new(0.0, 90.0, 0.0), &world);
@@ -13888,6 +14599,18 @@ mod tests {
             progress: 0.0,
         });
         assert!(bot_should_spawn_visual(&active));
+        assert!(!bot_should_materialize_visual(
+            &active,
+            BotRuntimeTier::Culled
+        ));
+        assert!(bot_should_materialize_visual(
+            &active,
+            BotRuntimeTier::Proxy
+        ));
+        assert!(bot_should_materialize_visual(
+            &companion,
+            BotRuntimeTier::Culled
+        ));
     }
 
     #[test]
@@ -13914,7 +14637,7 @@ mod tests {
         let samples: Vec<BotLodSample> = (1..=64)
             .map(|id| BotLodSample {
                 id,
-                distance: 6.0,
+                distance_squared: 6.0 * 6.0,
                 companion: id <= 4,
             })
             .collect();
@@ -13934,26 +14657,38 @@ mod tests {
     }
 
     #[test]
+    fn only_full_tier_uses_the_expensive_detailed_rig() {
+        assert!(bot_uses_detailed_rig(BotRuntimeTier::Full));
+        assert!(!bot_uses_proxy(BotRuntimeTier::Full));
+        for tier in [BotRuntimeTier::Reduced, BotRuntimeTier::Proxy] {
+            assert!(!bot_uses_detailed_rig(tier));
+            assert!(bot_uses_proxy(tier));
+        }
+        assert!(!bot_uses_detailed_rig(BotRuntimeTier::Culled));
+        assert!(!bot_uses_proxy(BotRuntimeTier::Culled));
+    }
+
+    #[test]
     fn bot_lod_assignment_is_distance_aware_and_order_independent() {
         let samples = vec![
             BotLodSample {
                 id: 11,
-                distance: 12.0,
+                distance_squared: 12.0 * 12.0,
                 companion: false,
             },
             BotLodSample {
                 id: 22,
-                distance: 80.0,
+                distance_squared: 80.0 * 80.0,
                 companion: false,
             },
             BotLodSample {
                 id: 33,
-                distance: 180.0,
+                distance_squared: 180.0 * 180.0,
                 companion: false,
             },
             BotLodSample {
                 id: 44,
-                distance: 320.0,
+                distance_squared: 320.0 * 320.0,
                 companion: false,
             },
         ];

@@ -2876,6 +2876,48 @@ impl SketchDocument {
         })
     }
 
+    pub fn rotate_selection_about_pivot(
+        &mut self,
+        selection: &SelectionSet,
+        pivot: Vec3,
+        rotation: Quat,
+        label: impl Into<String>,
+    ) -> Result<SketchEditSummary, SketchModelError> {
+        self.rotate_selection_about_pivot_with_offset(selection, pivot, rotation, Vec3::ZERO, label)
+    }
+
+    /// Rotates a selection and applies one uniform lattice correction in the
+    /// same history batch. Voxel-backed geometry needs this when a quarter turn
+    /// swaps even and odd extents: the exact selection center can land voxel
+    /// centers on half cells, so the complete result is shifted by half a cell
+    /// rather than rounding individual cells and distorting the shape.
+    pub fn rotate_selection_about_pivot_with_offset(
+        &mut self,
+        selection: &SelectionSet,
+        pivot: Vec3,
+        rotation: Quat,
+        offset: Vec3,
+        label: impl Into<String>,
+    ) -> Result<SketchEditSummary, SketchModelError> {
+        let rotation_components = rotation.to_array();
+        if !pivot.is_finite()
+            || !offset.is_finite()
+            || !rotation_components
+                .iter()
+                .all(|component| component.is_finite())
+            || rotation.length_squared() <= f32::EPSILON
+        {
+            return Err(SketchModelError::InvalidGeometry(
+                "Rotation, pivot, and offset must be finite and rotation must be non-zero",
+            ));
+        }
+        let rotation = rotation.normalize();
+        self.modify_selection(selection, label, |kind| {
+            rotate_entity_kind(kind, pivot, rotation);
+            translate_entity_kind(kind, offset);
+        })
+    }
+
     pub fn flip_selection_across_plane(
         &mut self,
         selection: &SelectionSet,
@@ -3890,6 +3932,120 @@ fn scale_entity_kind(kind: &mut SketchEntityKind, pivot: Vec3, scale: Vec3) {
     }
 }
 
+fn rotate_entity_kind(kind: &mut SketchEntityKind, pivot: Vec3, rotation: Quat) {
+    match kind {
+        SketchEntityKind::Vertex { point } => {
+            *point = rotate_point_about_pivot(*point, pivot, rotation);
+        }
+        SketchEntityKind::Edge { a, b } => {
+            *a = rotate_point_about_pivot(*a, pivot, rotation);
+            *b = rotate_point_about_pivot(*b, pivot, rotation);
+        }
+        SketchEntityKind::Face { vertices, normal } => {
+            rotate_points(vertices, pivot, rotation);
+            *normal = rotate_direction(*normal, rotation);
+            recompute_face_normal(vertices, normal);
+        }
+        SketchEntityKind::CircleFace {
+            center,
+            normal,
+            vertices,
+            ..
+        }
+        | SketchEntityKind::PolygonFace {
+            center,
+            normal,
+            vertices,
+            ..
+        } => {
+            *center = rotate_point_about_pivot(*center, pivot, rotation);
+            rotate_points(vertices, pivot, rotation);
+            *normal = rotate_direction(*normal, rotation);
+            recompute_face_normal(vertices, normal);
+        }
+        SketchEntityKind::ArcCurve {
+            center,
+            normal,
+            start_direction,
+            points,
+            ..
+        } => {
+            *center = rotate_point_about_pivot(*center, pivot, rotation);
+            *normal = rotate_direction(*normal, rotation);
+            *start_direction = rotate_direction(*start_direction, rotation);
+            rotate_points(points, pivot, rotation);
+        }
+        SketchEntityKind::FreehandCurve { points } => {
+            rotate_points(points, pivot, rotation);
+        }
+        SketchEntityKind::PushPullExtrusion {
+            base_vertices,
+            top_vertices,
+            normal,
+            bounds,
+            ..
+        } => {
+            rotate_points(base_vertices, pivot, rotation);
+            rotate_points(top_vertices, pivot, rotation);
+            *normal = rotate_direction(*normal, rotation);
+            *bounds = bounds.transformed(|point| rotate_point_about_pivot(point, pivot, rotation));
+        }
+        SketchEntityKind::Opening {
+            center,
+            size,
+            normal,
+            bounds,
+            ..
+        } => {
+            *center = rotate_point_about_pivot(*center, pivot, rotation);
+            *normal = rotate_direction(*normal, rotation);
+            *bounds = bounds.transformed(|point| rotate_point_about_pivot(point, pivot, rotation));
+            *size = (*bounds).size();
+        }
+        SketchEntityKind::Room {
+            shell_bounds,
+            interior_bounds,
+            ..
+        } => {
+            *shell_bounds =
+                shell_bounds.transformed(|point| rotate_point_about_pivot(point, pivot, rotation));
+            *interior_bounds = interior_bounds
+                .transformed(|point| rotate_point_about_pivot(point, pivot, rotation));
+        }
+        SketchEntityKind::Group { .. } => {}
+        SketchEntityKind::ComponentInstance { transform, .. } => {
+            transform.translation =
+                rotate_point_about_pivot(transform.translation, pivot, rotation);
+            transform.rotation = (rotation * transform.rotation).normalize();
+        }
+        SketchEntityKind::GuidePoint { point } => {
+            *point = rotate_point_about_pivot(*point, pivot, rotation);
+        }
+        SketchEntityKind::GuideLine { origin, direction } => {
+            *origin = rotate_point_about_pivot(*origin, pivot, rotation);
+            *direction = rotate_direction(*direction, rotation);
+        }
+        SketchEntityKind::SectionPlane { origin, normal } => {
+            *origin = rotate_point_about_pivot(*origin, pivot, rotation);
+            *normal = rotate_direction(*normal, rotation);
+        }
+    }
+}
+
+fn rotate_point_about_pivot(point: Vec3, pivot: Vec3, rotation: Quat) -> Vec3 {
+    pivot + rotation * (point - pivot)
+}
+
+fn rotate_points(points: &mut [Vec3], pivot: Vec3, rotation: Quat) {
+    for point in points {
+        *point = rotate_point_about_pivot(*point, pivot, rotation);
+    }
+}
+
+fn rotate_direction(direction: Vec3, rotation: Quat) -> Vec3 {
+    (rotation * direction).try_normalize().unwrap_or(direction)
+}
+
 fn flip_entity_kind(kind: &mut SketchEntityKind, plane_origin: Vec3, plane_normal: Vec3) {
     match kind {
         SketchEntityKind::Vertex { point } => {
@@ -4468,7 +4624,10 @@ fn rank_screen_space_candidates(
         let b_score = screen_space_snap_score(b, radius_pixels, sticky_bonus);
         a_score
             .total_cmp(&b_score)
-            .then_with(|| a.depth.total_cmp(&b.depth))
+            // Bevy uses reverse-Z: 1.0 is near and 0.0 is far. Prefer the
+            // visible foreground point when two inference candidates overlap
+            // in screen space.
+            .then_with(|| b.depth.total_cmp(&a.depth))
             .then_with(|| {
                 stable_kind_order(a.inference.kind).cmp(&stable_kind_order(b.inference.kind))
             })
@@ -5195,6 +5354,40 @@ pub enum EditorToolId {
     Material,
 }
 
+impl EditorToolId {
+    /// Tools whose primary world interaction is handled by the shared
+    /// click-move-click sketch surface. Keeping this classification on the
+    /// canonical editor id prevents ModeContext and the presentation
+    /// toolbelt from independently deciding which operation owns the mouse.
+    pub const fn uses_draw_surface(self) -> bool {
+        matches!(
+            self,
+            Self::Pencil
+                | Self::Rectangle
+                | Self::Circle
+                | Self::Polygon
+                | Self::Arc
+                | Self::Freehand
+                | Self::House
+                | Self::Room
+                | Self::CutOpening
+        )
+    }
+
+    pub const fn uses_transform_surface(self) -> bool {
+        matches!(self, Self::Move | Self::Scale | Self::Rotate)
+    }
+
+    pub const fn uses_pointer_surface(self) -> bool {
+        self.uses_draw_surface()
+            || self.uses_transform_surface()
+            || matches!(
+                self,
+                Self::Select | Self::PushPull | Self::Road | Self::BotArea | Self::Material
+            )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorToolPhase {
     Idle,
@@ -5527,6 +5720,7 @@ pub struct ToolController {
     tool_phase: EditorToolPhase,
     selection: SelectionSet,
     inference_lock: Option<InferenceLock>,
+    tool_generation: u64,
     preview_generation: u64,
     open_transaction: Option<ToolTransaction>,
     last_transaction_label: Option<String>,
@@ -5538,12 +5732,13 @@ pub struct ToolController {
 
 impl Default for ToolController {
     fn default() -> Self {
-        let definition = editor_tool_definition(EditorToolId::Select);
+        let definition = editor_tool_definition(EditorToolId::Rectangle);
         Self {
-            active_tool: EditorToolId::Select,
+            active_tool: EditorToolId::Rectangle,
             tool_phase: EditorToolPhase::Idle,
             selection: SelectionSet::default(),
             inference_lock: None,
+            tool_generation: 0,
             preview_generation: 0,
             open_transaction: None,
             last_transaction_label: None,
@@ -5583,12 +5778,30 @@ impl ToolController {
                 self.house_guide = None;
             }
             self.sync_lifecycle_from_definition();
+            self.tool_generation = self.tool_generation.wrapping_add(1);
             self.preview_generation += 1;
         }
     }
 
+    /// Restarts the currently selected editor tool without changing its
+    /// identity. Toolbox clicks use this to invalidate local previews that are
+    /// not represented by a document transaction yet.
+    pub fn restart_active_tool(&mut self) {
+        self.cancel_open_transaction_for_lifecycle();
+        self.inference_lock = None;
+        self.open_transaction = None;
+        self.tool_phase = EditorToolPhase::Idle;
+        self.sync_lifecycle_from_definition();
+        self.tool_generation = self.tool_generation.wrapping_add(1);
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+    }
+
     pub fn start_house_workflow(&mut self, material: SketchId) {
-        self.activate(EditorToolId::House);
+        if self.active_tool == EditorToolId::House {
+            self.restart_active_tool();
+        } else {
+            self.activate(EditorToolId::House);
+        }
         self.house_guide = Some(HouseWorkflowGuide {
             stage: HouseBuildStage::Footprint,
             material,
@@ -5641,6 +5854,13 @@ impl ToolController {
 
     pub fn preview_generation(&self) -> u64 {
         self.preview_generation
+    }
+
+    /// Changes only when the active editor tool changes or is explicitly
+    /// restarted. Selection and inference updates deliberately do not affect
+    /// this counter.
+    pub fn tool_generation(&self) -> u64 {
+        self.tool_generation
     }
 
     pub fn inference_lock(&self) -> Option<InferenceLock> {
@@ -6434,6 +6654,111 @@ mod tests {
     }
 
     #[test]
+    fn rotate_selection_about_pivot_rotates_geometry_and_instances_with_undo_redo() {
+        let mut doc = SketchDocument::new();
+        let line = doc
+            .draw_pencil_line(doc.active_context(), Vec3::X, Vec3::new(3.0, 0.0, 0.0))
+            .unwrap();
+        let definition = doc.create_component_definition("Rotating Panel").unwrap();
+        let instance = doc
+            .add_component_instance(
+                definition,
+                SketchTransform::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+            )
+            .unwrap();
+        let mut selection = SelectionSet::default();
+        selection.select(line);
+        selection.select(instance);
+        let quarter_turn = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+
+        let rotated = doc
+            .rotate_selection_about_pivot(
+                &selection,
+                Vec3::X,
+                quarter_turn,
+                "Rotate selection 90 degrees",
+            )
+            .unwrap();
+
+        assert_eq!(rotated.label, "Rotate selection 90 degrees");
+        assert_eq!(rotated.entity_count, 2);
+        assert!(matches!(
+            &doc.entity(line).unwrap().kind,
+            SketchEntityKind::Edge { a, b }
+                if a.distance(Vec3::X) < 1.0e-5
+                    && b.distance(Vec3::new(1.0, 0.0, -2.0)) < 1.0e-5
+        ));
+        assert!(matches!(
+            &doc.entity(instance).unwrap().kind,
+            SketchEntityKind::ComponentInstance { transform, .. }
+                if transform.translation.distance(Vec3::new(1.0, 0.0, -1.0)) < 1.0e-5
+                    && transform.rotation.dot(quarter_turn).abs() > 1.0 - 1.0e-5
+        ));
+
+        let undone = doc.undo_last().expect("undo rotation");
+        assert_eq!(undone.label, "Rotate selection 90 degrees");
+        assert!(matches!(
+            &doc.entity(line).unwrap().kind,
+            SketchEntityKind::Edge { a, b }
+                if *a == Vec3::X && *b == Vec3::new(3.0, 0.0, 0.0)
+        ));
+
+        let redone = doc.redo_last().expect("redo rotation");
+        assert_eq!(redone.entity_count, 2);
+        assert!(matches!(
+            &doc.entity(instance).unwrap().kind,
+            SketchEntityKind::ComponentInstance { transform, .. }
+                if transform.translation.distance(Vec3::new(1.0, 0.0, -1.0)) < 1.0e-5
+        ));
+    }
+
+    #[test]
+    fn rotate_selection_rejects_non_finite_and_zero_rotations() {
+        let mut doc = SketchDocument::new();
+        let line = doc
+            .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::X)
+            .unwrap();
+        let mut selection = SelectionSet::default();
+        selection.select(line);
+
+        for rotation in [
+            Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
+            Quat::from_xyzw(f32::NAN, 0.0, 0.0, 1.0),
+        ] {
+            assert!(matches!(
+                doc.rotate_selection_about_pivot(&selection, Vec3::ZERO, rotation, "Bad rotation",),
+                Err(SketchModelError::InvalidGeometry(
+                    "Rotation, pivot, and offset must be finite and rotation must be non-zero"
+                ))
+            ));
+        }
+        assert!(matches!(
+            doc.rotate_selection_about_pivot(
+                &selection,
+                Vec3::splat(f32::INFINITY),
+                Quat::IDENTITY,
+                "Bad pivot",
+            ),
+            Err(SketchModelError::InvalidGeometry(
+                "Rotation, pivot, and offset must be finite and rotation must be non-zero"
+            ))
+        ));
+
+        assert!(matches!(
+            doc.rotate_selection_about_pivot_with_offset(
+                &selection,
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Vec3::splat(f32::NAN),
+                "Bad offset",
+            ),
+            Err(SketchModelError::InvalidGeometry(
+                "Rotation, pivot, and offset must be finite and rotation must be non-zero"
+            ))
+        ));
+    }
+
+    #[test]
     fn flip_selection_across_plane_mirrors_geometry_and_component_instances() {
         let mut doc = SketchDocument::new();
         let line = doc
@@ -6767,6 +7092,32 @@ mod tests {
 
         assert_eq!(best.inference.kind, InferenceKind::Midpoint);
         assert!(best.sticky);
+    }
+
+    #[test]
+    fn screen_space_inference_prefers_near_reverse_z_candidate_on_overlap() {
+        let inference =
+            InferenceCandidate::new(InferenceKind::Endpoint, Vec3::ZERO, 1.0, "Endpoint");
+        let mut candidates = vec![
+            ScreenSpaceInferenceCandidate {
+                inference: inference.clone(),
+                screen_point: Vec2::ZERO,
+                screen_distance: 2.0,
+                depth: 0.1,
+                sticky: false,
+            },
+            ScreenSpaceInferenceCandidate {
+                inference,
+                screen_point: Vec2::ZERO,
+                screen_distance: 2.0,
+                depth: 0.9,
+                sticky: false,
+            },
+        ];
+
+        rank_screen_space_candidates(&mut candidates, 15.0, 0.22);
+
+        assert_eq!(candidates[0].depth, 0.9);
     }
 
     #[test]
@@ -7308,6 +7659,52 @@ mod tests {
         assert_eq!(guide.material, wall_material);
         assert!(guide.status().contains("Footprint"));
         assert!(guide.status().contains("Opening"));
+    }
+
+    #[test]
+    fn tool_generation_tracks_tool_lifecycle_without_treating_hover_state_as_a_switch() {
+        let entity = SketchId::new_for_test(77);
+        let hit = HitRecord::new(entity, [], HitKind::Face, Vec3::ZERO, 1.0);
+        let mut controller = ToolController::default();
+        let initial = controller.tool_generation();
+
+        controller.activate(EditorToolId::Pencil);
+        let pencil_generation = controller.tool_generation();
+        assert!(pencil_generation > initial);
+
+        controller.select_hit(&hit, false);
+        controller.lock_inference(
+            InferenceLock::axis(InferenceKind::AxisX, Vec3::ZERO).expect("axis lock"),
+        );
+        controller.begin_transaction("Pencil preview");
+        assert_eq!(controller.tool_generation(), pencil_generation);
+
+        controller.restart_active_tool();
+        assert!(controller.tool_generation() > pencil_generation);
+        assert_eq!(controller.active_tool(), EditorToolId::Pencil);
+        assert_eq!(controller.open_transaction_label(), None);
+        assert_eq!(controller.inference_lock(), None);
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Idle);
+    }
+
+    #[test]
+    fn canonical_editor_tools_expose_every_mouse_first_pointer_surface() {
+        assert!(EditorToolId::Pencil.uses_draw_surface());
+        assert!(EditorToolId::Rectangle.uses_draw_surface());
+        assert!(EditorToolId::Move.uses_transform_surface());
+        assert!(EditorToolId::Rotate.uses_transform_surface());
+        assert!(EditorToolId::PushPull.uses_pointer_surface());
+        assert!(EditorToolId::Road.uses_pointer_surface());
+        assert!(EditorToolId::BotArea.uses_pointer_surface());
+    }
+
+    #[test]
+    fn default_controller_matches_the_default_rectangle_editor_workflow() {
+        let controller = ToolController::default();
+
+        assert_eq!(controller.active_tool(), EditorToolId::Rectangle);
+        assert_eq!(controller.active_tool_label(), "RECTANGLE");
+        assert!(controller.active_tool().uses_pointer_surface());
     }
 
     #[test]

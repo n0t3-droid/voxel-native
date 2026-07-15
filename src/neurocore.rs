@@ -175,12 +175,49 @@ pub struct RuntimeBudget {
     pub status: String,
 }
 
-const SMOOTH_MAX_CHUNKS_PER_FRAME: u32 = 6;
-const SMOOTH_MAX_MESHES_PER_FRAME: u32 = 6;
-const SMOOTH_MAX_MESH_APPLIES_PER_FRAME: u32 = 4;
-const SMOOTH_MAX_IN_FLIGHT_TERRAIN: u32 = 48;
-const SMOOTH_MAX_IN_FLIGHT_MESHES: u32 = 36;
 const LAUNCH_WARMUP_SECONDS: f32 = 12.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeCaps {
+    chunks_per_frame: u32,
+    meshes_per_frame: u32,
+    mesh_applies_per_frame: u32,
+    in_flight_terrain: u32,
+    in_flight_meshes: u32,
+}
+
+fn runtime_caps(profile: RuntimeProfile) -> RuntimeCaps {
+    match profile {
+        RuntimeProfile::LowSpec => RuntimeCaps {
+            chunks_per_frame: 3,
+            meshes_per_frame: 3,
+            mesh_applies_per_frame: 2,
+            in_flight_terrain: 24,
+            in_flight_meshes: 18,
+        },
+        RuntimeProfile::Auto | RuntimeProfile::Balanced => RuntimeCaps {
+            chunks_per_frame: 6,
+            meshes_per_frame: 6,
+            mesh_applies_per_frame: 4,
+            in_flight_terrain: 48,
+            in_flight_meshes: 36,
+        },
+        RuntimeProfile::Cinematic => RuntimeCaps {
+            chunks_per_frame: 12,
+            meshes_per_frame: 12,
+            mesh_applies_per_frame: 8,
+            in_flight_terrain: 96,
+            in_flight_meshes: 72,
+        },
+        RuntimeProfile::Benchmark => RuntimeCaps {
+            chunks_per_frame: u32::MAX,
+            meshes_per_frame: u32::MAX,
+            mesh_applies_per_frame: u32::MAX,
+            in_flight_terrain: u32::MAX,
+            in_flight_meshes: u32::MAX,
+        },
+    }
+}
 
 impl Default for RuntimeBudget {
     fn default() -> Self {
@@ -236,42 +273,37 @@ impl RuntimeBudget {
 
     fn clamp_to_settings(&mut self, settings: &WorldSettings) {
         let target = (settings.render_distance as i32).max(2);
+        let caps = runtime_caps(self.profile);
         self.target_render_distance = target;
         self.render_distance = self.render_distance.clamp(2, target);
         self.chunks_per_frame = self.chunks_per_frame.clamp(
             1,
-            settings
-                .chunks_per_frame
-                .max(1)
-                .min(SMOOTH_MAX_CHUNKS_PER_FRAME),
+            settings.chunks_per_frame.max(1).min(caps.chunks_per_frame),
         );
         self.meshes_per_frame = self.meshes_per_frame.clamp(
             1,
-            settings
-                .meshes_per_frame
-                .max(1)
-                .min(SMOOTH_MAX_MESHES_PER_FRAME),
+            settings.meshes_per_frame.max(1).min(caps.meshes_per_frame),
         );
         self.mesh_applies_per_frame = self.mesh_applies_per_frame.clamp(
             1,
             settings
                 .mesh_applies_per_frame
                 .max(1)
-                .min(SMOOTH_MAX_MESH_APPLIES_PER_FRAME),
+                .min(caps.mesh_applies_per_frame),
         );
         self.max_in_flight_terrain = self.max_in_flight_terrain.clamp(
             1,
             settings
                 .max_in_flight_terrain
                 .max(1)
-                .min(SMOOTH_MAX_IN_FLIGHT_TERRAIN),
+                .min(caps.in_flight_terrain),
         );
         self.max_in_flight_meshes = self.max_in_flight_meshes.clamp(
             1,
             settings
                 .max_in_flight_meshes
                 .max(1)
-                .min(SMOOTH_MAX_IN_FLIGHT_MESHES),
+                .min(caps.in_flight_meshes),
         );
         self.shadow_radius = self.shadow_radius.clamp(2, self.render_distance.max(2));
         self.weather_fx_scale = self.weather_fx_scale.clamp(0.0, 1.0);
@@ -798,14 +830,15 @@ fn queue_pressure(
     pending_meshes: usize,
     dirty_chunks: usize,
 ) -> f32 {
+    let caps = runtime_caps(settings.runtime_profile);
     let terrain_cap = settings
         .max_in_flight_terrain
         .max(1)
-        .min(SMOOTH_MAX_IN_FLIGHT_TERRAIN);
+        .min(caps.in_flight_terrain);
     let mesh_cap = settings
         .max_in_flight_meshes
         .max(1)
-        .min(SMOOTH_MAX_IN_FLIGHT_MESHES);
+        .min(caps.in_flight_meshes);
     let terrain = pending_terrain as f32 / terrain_cap as f32;
     let meshes = pending_meshes as f32 / mesh_cap as f32;
     let dirty = dirty_chunks as f32 / 2_000.0;
@@ -1038,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn smooth_runtime_caps_keep_background_streaming_low_end_safe() {
+    fn cinematic_caps_use_high_end_hardware_without_becoming_unbounded() {
         let mut settings = WorldSettings::default();
         settings.runtime_profile = RuntimeProfile::Cinematic;
         settings.render_distance = 64;
@@ -1062,11 +1095,35 @@ mod tests {
             0.6,
         );
 
-        assert!(budget.chunks_per_frame <= 6);
-        assert!(budget.meshes_per_frame <= 6);
-        assert!(budget.mesh_applies_per_frame <= 4);
-        assert!(budget.max_in_flight_terrain <= 48);
-        assert!(budget.max_in_flight_meshes <= 36);
+        assert_eq!(budget.chunks_per_frame, 12);
+        assert_eq!(budget.meshes_per_frame, 12);
+        assert_eq!(budget.mesh_applies_per_frame, 8);
+        assert_eq!(budget.max_in_flight_terrain, 96);
+        assert_eq!(budget.max_in_flight_meshes, 72);
+    }
+
+    #[test]
+    fn low_spec_caps_remain_strict_even_with_extreme_user_ceilings() {
+        let mut settings = WorldSettings::default();
+        settings.runtime_profile = RuntimeProfile::LowSpec;
+        settings.chunks_per_frame = 64;
+        settings.meshes_per_frame = 64;
+        settings.mesh_applies_per_frame = 64;
+        settings.max_in_flight_terrain = 512;
+        settings.max_in_flight_meshes = 512;
+
+        let mut core = NeuroCore::default();
+        for _ in 0..25 {
+            core.update_budget(&settings, telemetry(60.0, 0.0, RuntimeIntent::Explore), 0.6);
+        }
+        let budget =
+            core.update_budget(&settings, telemetry(60.0, 0.0, RuntimeIntent::Explore), 0.6);
+
+        assert!(budget.chunks_per_frame <= 3);
+        assert!(budget.meshes_per_frame <= 3);
+        assert!(budget.mesh_applies_per_frame <= 2);
+        assert!(budget.max_in_flight_terrain <= 24);
+        assert!(budget.max_in_flight_meshes <= 18);
     }
 
     #[test]

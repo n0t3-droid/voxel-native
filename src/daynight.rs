@@ -1,4 +1,4 @@
-//! Day/night cycle — moves a directional "sun" light around the player,
+//! Day/night cycle — rotates world-space sun and moon light directions,
 //! swings sky colour + fog between day and night, and drops intensity at
 //! dawn/dusk. Port target: the `DayNightCycle` component from
 //! `components/VoxelEngine.tsx`.
@@ -6,6 +6,7 @@
 use bevy::pbr::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::prelude::*;
 
+use crate::neurocore::RuntimeProfile;
 use crate::player::Player;
 use crate::settings::{GraphicsMode, TimeMode, WorldSettings};
 use crate::terrain::Biome;
@@ -95,6 +96,11 @@ impl Default for WorldIntelRuntime {
 
 pub struct DayNightPlugin;
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DayNightSet {
+    Lighting,
+}
+
 impl Plugin for DayNightPlugin {
     fn build(&self, app: &mut App) {
         // Shadow-map size is picked once at startup from the loaded
@@ -111,13 +117,16 @@ impl Plugin for DayNightPlugin {
         // `update_shadow_quality` on mode changes.
         app.insert_resource(DirectionalLightShadowMap { size: 1024 })
             .insert_resource(WorldIntelRuntime::default())
-            .add_systems(Startup, (apply_startup_shadow_size, spawn_sun).chain())
+            .add_systems(
+                Startup,
+                (apply_startup_shadow_size, spawn_celestial_lights).chain(),
+            )
             .add_systems(
                 Update,
                 (
                     advance_time,
                     update_world_intel_runtime,
-                    update_sun,
+                    update_sun.in_set(DayNightSet::Lighting),
                     update_shadow_quality,
                 )
                     .chain(),
@@ -182,7 +191,10 @@ fn cascade_config_for(mode: GraphicsMode) -> bevy::pbr::CascadeShadowConfig {
 #[derive(Component)]
 pub struct Sun;
 
-fn spawn_sun(mut commands: Commands, settings: Res<WorldSettings>) {
+#[derive(Component)]
+struct MoonKey;
+
+fn spawn_celestial_lights(mut commands: Commands, settings: Res<WorldSettings>) {
     let cascades = cascade_config_for(settings.graphics);
 
     commands.spawn((
@@ -192,12 +204,31 @@ fn spawn_sun(mut commands: Commands, settings: Res<WorldSettings>) {
                 shadows_enabled: terrain_directional_shadows_enabled(settings.graphics),
                 ..default()
             },
-            transform: Transform::from_xyz(50.0, 200.0, 50.0).looking_at(Vec3::ZERO, Vec3::Y),
+            // Directional lights are translation-invariant. Keeping them at
+            // the world origin prevents camera/player motion from leaking
+            // into celestial transforms or shadow stabilization.
+            transform: directional_light_transform(sun_direction_for_time(settings.time_of_day)),
             cascade_shadow_config: cascades,
             ..default()
         },
         bevy::pbr::VolumetricLight,
         Sun,
+        Name::new("Sun.KeyLight"),
+    ));
+
+    commands.spawn((
+        DirectionalLightBundle {
+            directional_light: DirectionalLight {
+                illuminance: 0.0,
+                color: Color::srgb(0.58, 0.68, 0.92),
+                shadows_enabled: false,
+                ..default()
+            },
+            transform: directional_light_transform(moon_direction_for_time(settings.time_of_day)),
+            ..default()
+        },
+        MoonKey,
+        Name::new("Moon.KeyLight"),
     ));
 
     commands.insert_resource(AmbientLight {
@@ -237,9 +268,25 @@ fn advance_time(
         return;
     }
     if settings.time_mode == TimeMode::Cycle {
-        settings.time_of_day =
-            (settings.time_of_day + settings.cycle_speed * time.delta_seconds() * 60.0) % 24.0;
+        settings.time_of_day = time_of_day_after_delta(
+            settings.time_of_day,
+            settings.cycle_speed,
+            time.delta_seconds(),
+        );
     }
+}
+
+fn time_of_day_after_delta(
+    current_hour: f32,
+    speed_minutes_per_second: f32,
+    delta_seconds: f32,
+) -> f32 {
+    let elapsed_hours = speed_minutes_per_second.max(0.0) * delta_seconds.max(0.0) / 60.0;
+    (current_hour + elapsed_hours).rem_euclid(24.0)
+}
+
+fn celestial_phase(time_of_day: f32) -> f32 {
+    (time_of_day.rem_euclid(24.0) / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2
 }
 
 /// Unit direction from the world origin toward the visible sun.
@@ -249,9 +296,115 @@ fn advance_time(
 /// A single source of truth prevents the old failure where the bright sky
 /// object and the shadows moved on different trajectories.
 pub(crate) fn sun_direction_for_time(time_of_day: f32) -> Vec3 {
-    let t =
-        (time_of_day.rem_euclid(24.0) / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-    Vec3::new(t.cos(), t.sin(), 0.3).normalize()
+    const SUN_PATH_TILT_RAD: f32 = 17.0 * std::f32::consts::PI / 180.0;
+    let phase = celestial_phase(time_of_day);
+    let equatorial_direction = Vec3::new(phase.cos(), phase.sin(), 0.0);
+    (Quat::from_rotation_x(SUN_PATH_TILT_RAD) * equatorial_direction).normalize()
+}
+
+/// Unit direction from the world origin toward the visible moon.
+///
+/// The fixed phase offset makes this a stable fictional orbit rather than an
+/// Earth ephemeris. Its inclined great-circle path is shared by the visible
+/// body and the moon key light, so neither depends on the camera position.
+pub(crate) fn moon_direction_for_time(time_of_day: f32) -> Vec3 {
+    const MOON_PHASE_OFFSET_RAD: f32 = 18.0 * std::f32::consts::PI / 180.0;
+    const MOON_PATH_TILT_RAD: f32 = -6.0 * std::f32::consts::PI / 180.0;
+    let phase = celestial_phase(time_of_day) + std::f32::consts::PI + MOON_PHASE_OFFSET_RAD;
+    let orbital_direction = Vec3::new(phase.cos(), phase.sin(), 0.0);
+    (Quat::from_rotation_x(MOON_PATH_TILT_RAD) * orbital_direction).normalize()
+}
+
+fn directional_light_transform(direction_to_source: Vec3) -> Transform {
+    let direction_to_source = if direction_to_source.length_squared() > 1.0e-8 {
+        direction_to_source.normalize()
+    } else {
+        Vec3::Y
+    };
+    // Bevy directional lights emit along local -Z. `from_rotation_arc`
+    // avoids the unstable up-vector branch of `looking_to` near zenith.
+    Transform::from_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, -direction_to_source))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SolarBlend {
+    daylight: f32,
+    twilight: f32,
+    night: f32,
+}
+
+impl SolarBlend {
+    fn for_elevation_sine(elevation_sine: f32) -> Self {
+        // Civil twilight ends when the solar centre is 6 degrees below the
+        // geometric horizon. NOAA Solar Calculator dawn/dusk definition.
+        const CIVIL_TWILIGHT_SINE: f32 = -0.104_528_464; // sin(-6 degrees)
+
+        let civil_light = smoothstep(CIVIL_TWILIGHT_SINE, 0.035, elevation_sine);
+        let daylight = smoothstep(-0.01, 0.22, elevation_sine);
+        Self {
+            daylight,
+            twilight: (civil_light - daylight).max(0.0),
+            night: 1.0 - civil_light,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LightingQuality {
+    moon_illuminance: f32,
+    twilight_illuminance: f32,
+    noon_illuminance: f32,
+    night_ambient: f32,
+    twilight_ambient: f32,
+    noon_ambient: f32,
+    fog_scatter_exponent: f32,
+}
+
+fn lighting_quality(profile: RuntimeProfile, graphics: GraphicsMode) -> LightingQuality {
+    let tier = match profile {
+        RuntimeProfile::LowSpec => GraphicsMode::Fast,
+        RuntimeProfile::Balanced => GraphicsMode::Balanced,
+        RuntimeProfile::Cinematic => GraphicsMode::High,
+        RuntimeProfile::Auto | RuntimeProfile::Benchmark => graphics,
+    };
+
+    match tier {
+        GraphicsMode::Fast => LightingQuality {
+            // These are exposure-compensated gameplay lux, not physical
+            // moonlight. The roughly 12:1 day/night key ratio preserves
+            // terrain readability while restoring visible day/night contrast.
+            moon_illuminance: 1_800.0,
+            twilight_illuminance: 9_200.0,
+            noon_illuminance: 22_000.0,
+            night_ambient: 1_020.0,
+            twilight_ambient: 1_380.0,
+            noon_ambient: 1_680.0,
+            fog_scatter_exponent: 56.0,
+        },
+        GraphicsMode::Balanced => LightingQuality {
+            moon_illuminance: 2_200.0,
+            twilight_illuminance: 10_600.0,
+            noon_illuminance: 25_500.0,
+            night_ambient: 1_160.0,
+            twilight_ambient: 1_540.0,
+            noon_ambient: 1_900.0,
+            fog_scatter_exponent: 40.0,
+        },
+        GraphicsMode::High => LightingQuality {
+            moon_illuminance: 2_600.0,
+            twilight_illuminance: 12_000.0,
+            noon_illuminance: 29_000.0,
+            night_ambient: 1_260.0,
+            twilight_ambient: 1_680.0,
+            noon_ambient: 2_080.0,
+            fog_scatter_exponent: 30.0,
+        },
+    }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn update_sun(
@@ -259,43 +412,48 @@ fn update_sun(
     intel: Res<WorldIntelRuntime>,
     mut clear_color: ResMut<ClearColor>,
     mut ambient: ResMut<AmbientLight>,
-    mut sun: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
+    mut sun: Query<(&mut Transform, &mut DirectionalLight), (With<Sun>, Without<MoonKey>)>,
+    mut moon: Query<(&mut Transform, &mut DirectionalLight), (With<MoonKey>, Without<Sun>)>,
     mut fog: Query<&mut FogSettings>,
 ) {
-    let Ok((mut transform, mut light)) = sun.get_single_mut() else {
+    let Ok((mut sun_transform, mut sun_light)) = sun.get_single_mut() else {
+        return;
+    };
+    let Ok((mut moon_transform, mut moon_light)) = moon.get_single_mut() else {
         return;
     };
 
     let sun_dir = sun_direction_for_time(settings.time_of_day);
-
-    // Directional lights in Bevy shine along their -Z. Orient so -Z == -sun_dir.
-    let forward = -sun_dir;
-    *transform = Transform::from_xyz(sun_dir.x * 400.0, sun_dir.y * 400.0, sun_dir.z * 400.0)
-        .looking_to(forward, Vec3::Y);
+    let moon_dir = moon_direction_for_time(settings.time_of_day);
+    *sun_transform = directional_light_transform(sun_dir);
+    *moon_transform = directional_light_transform(moon_dir);
 
     // Day factor 0..1 where 1 = high noon, 0 = deep night.
-    let day = sun_dir.y.max(0.0);
-    light.illuminance = sun_illuminance_for_day(day);
+    let solar = SolarBlend::for_elevation_sine(sun_dir.y);
+    let quality = lighting_quality(settings.runtime_profile, settings.graphics);
+    sun_light.illuminance = sun_illuminance_for_conditions(sun_dir.y, solar, quality);
+    moon_light.illuminance = moon_illuminance_for_conditions(solar, quality);
     // Warm sun, cool moon — the cinematic directional tint that
     // gives grass its golden rim at dusk and a silvery wash at night.
-    let warmth = ((sun_dir.y - 0.05).clamp(-0.3, 0.4) / 0.4).clamp(-1.0, 1.0);
-    let sun_tint = Color::srgb(1.0, 0.82 + warmth * 0.12, 0.62 + warmth * 0.32);
-    light.color = sun_tint;
+    let moon_key = Color::srgb(0.58, 0.68, 0.92).to_linear();
+    let twilight_key = Color::srgb(1.0, 0.58, 0.34).to_linear();
+    let daylight_key = Color::srgb(1.0, 0.93, 0.82).to_linear();
+    let sun_color = twilight_key.mix(&daylight_key, smoothstep(0.0, 0.45, sun_dir.y.max(0.0)));
+    sun_light.color = Color::LinearRgba(sun_color);
+    moon_light.color = Color::LinearRgba(moon_key);
 
     // Ambient gets a cool tint at night, warm at sunrise/sunset.
-    let sunset = (1.0 - (sun_dir.y.abs()).clamp(0.0, 1.0)).powf(3.0);
     let day_color = Color::srgb(0.72, 0.85, 1.0).to_linear();
-    let night_color = Color::srgb(0.14, 0.18, 0.38).to_linear();
-    let sunset_color = Color::srgb(1.0, 0.48, 0.25).to_linear();
-
-    let base = if day > 0.0 { day_color } else { night_color };
-    let amb_lin = base.mix(&sunset_color, sunset * 0.40);
+    let night_color = Color::srgb(0.31, 0.36, 0.52).to_linear();
+    let twilight_color = Color::srgb(0.70, 0.47, 0.42).to_linear();
+    let amb_lin = weighted_linear_color(night_color, twilight_color, day_color, solar);
     ambient.color = Color::LinearRgba(amb_lin);
-    ambient.brightness = ambient_brightness_for_day(day, intel.profile.ambient_mul);
+    ambient.brightness =
+        ambient_brightness_for_conditions(sun_dir.y, solar, quality, intel.profile.ambient_mul);
 
     // Sky (clear colour) interpolates similarly — grounded blue day,
     // readable twilight, and deep indigo night without a milky clear fog.
-    let sky_srgb = sky_srgb_for_conditions(day, sunset, intel.profile.sky_saturation, intel.biome);
+    let sky_srgb = sky_srgb_for_conditions(solar, intel.profile.sky_saturation, intel.biome);
     let sky = Color::srgb(sky_srgb.x, sky_srgb.y, sky_srgb.z).to_linear();
     clear_color.0 = Color::LinearRgba(sky);
 
@@ -305,50 +463,67 @@ fn update_sun(
     // near the horizon for atmospheric scattering feel.
     if let Ok(mut fog_settings) = fog.get_single_mut() {
         let horizon = sky
-            .mix(&Color::srgb(1.0, 1.0, 1.0).to_linear(), 0.07)
-            .mix(&sunset_color, sunset * 0.25);
+            .mix(&Color::srgb(0.78, 0.82, 0.86).to_linear(), 0.02)
+            .mix(&twilight_key, solar.twilight * 0.12);
         fog_settings.color = Color::LinearRgba(sky);
-        if let FogFalloff::ExponentialSquared { density } = &mut fog_settings.falloff {
-            // Fog thins at clear noon for epic long-distance vistas of
-            // alien spires and mountain ranges, thickens dramatically
-            // at sunset/sunrise for fiery god-ray haze.
-            let base_density = 0.00034;
-            *density = base_density
-                * (1.0 + sunset * 0.82 + (1.0 - day) * 0.12)
-                * intel.profile.fog_density_mul;
-        }
         // Directional light scattering — makes god-ray / atmospheric
         // tints at sunset and during the night. Much stronger sunset
         // inscatter so the horizon glows fiery orange.
         fog_settings.directional_light_color = Color::LinearRgba(horizon);
-        fog_settings.directional_light_exponent = 18.0;
+        fog_settings.directional_light_exponent = quality.fog_scatter_exponent;
     }
 }
 
-fn sun_illuminance_for_day(day: f32) -> f32 {
-    let day = day.clamp(0.0, 1.0);
-    6_200.0 + day.powf(0.78) * 18_500.0
+fn weighted_linear_color(
+    night: LinearRgba,
+    twilight: LinearRgba,
+    daylight: LinearRgba,
+    solar: SolarBlend,
+) -> LinearRgba {
+    night * solar.night + twilight * solar.twilight + daylight * solar.daylight
 }
 
-fn ambient_brightness_for_day(day: f32, profile_ambient_mul: f32) -> f32 {
-    let day = day.clamp(0.0, 1.0);
-    (920.0 + day.powf(0.58) * 860.0) * profile_ambient_mul.max(0.92)
+fn sun_illuminance_for_conditions(
+    elevation_sine: f32,
+    solar: SolarBlend,
+    quality: LightingQuality,
+) -> f32 {
+    let height = elevation_sine.max(0.0).sqrt();
+    let daylight = quality.twilight_illuminance
+        + (quality.noon_illuminance - quality.twilight_illuminance) * height;
+    quality.twilight_illuminance * solar.twilight + daylight * solar.daylight
+}
+
+fn moon_illuminance_for_conditions(solar: SolarBlend, quality: LightingQuality) -> f32 {
+    quality.moon_illuminance * smoothstep(0.0, 0.92, solar.night)
+}
+
+fn ambient_brightness_for_conditions(
+    elevation_sine: f32,
+    solar: SolarBlend,
+    quality: LightingQuality,
+    biome_ambient_mul: f32,
+) -> f32 {
+    let height = elevation_sine.max(0.0).sqrt();
+    let daylight =
+        quality.twilight_ambient + (quality.noon_ambient - quality.twilight_ambient) * height;
+    let base = quality.night_ambient * solar.night
+        + quality.twilight_ambient * solar.twilight
+        + daylight * solar.daylight;
+    base * biome_ambient_mul.clamp(0.90, 1.12)
 }
 
 fn lerp_vec3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
     a + (b - a) * t.clamp(0.0, 1.0)
 }
 
-fn sky_srgb_for_conditions(day: f32, sunset: f32, sky_saturation: f32, biome: Biome) -> Vec3 {
-    let day = day.clamp(0.0, 1.0);
-    let sunset = sunset.clamp(0.0, 1.0);
-    let sky_day = Vec3::new(0.40, 0.66, 0.96);
-    let sky_night = Vec3::new(0.045, 0.065, 0.14);
-    let sunset_color = Vec3::new(1.0, 0.48, 0.25);
+fn sky_srgb_for_conditions(solar: SolarBlend, sky_saturation: f32, biome: Biome) -> Vec3 {
+    let sky_day = Vec3::new(0.38, 0.64, 0.94);
+    let sky_twilight = Vec3::new(0.38, 0.28, 0.40);
+    let sky_night = Vec3::new(0.095, 0.125, 0.22);
 
-    let twilight_floor = (sunset * 0.34).min(0.30);
-    let mut sky = lerp_vec3(sky_night, sky_day, day.max(twilight_floor));
-    sky = lerp_vec3(sky, sunset_color, sunset * 0.22);
+    let mut sky =
+        sky_night * solar.night + sky_twilight * solar.twilight + sky_day * solar.daylight;
 
     let sat = sky_saturation;
     sky = lerp_vec3(sky, Vec3::splat(0.5), (1.0_f32 - sat).max(0.0));
@@ -358,14 +533,14 @@ fn sky_srgb_for_conditions(day: f32, sunset: f32, sky_saturation: f32, biome: Bi
             let void_v = Vec3::new(0.06, 0.02, 0.20);
             let acc_c = Vec3::new(0.04, 0.26, 0.40);
             lerp_vec3(
-                lerp_vec3(sky, void_v, (1.0 - day) * 0.62 + 0.07),
+                lerp_vec3(sky, void_v, solar.night * 0.62 + 0.07),
                 acc_c,
-                day * 0.24 + 0.05,
+                solar.daylight * 0.24 + 0.05,
             )
         }
         Biome::AlienReef => {
             let reef = Vec3::new(0.16, 0.04, 0.22);
-            lerp_vec3(sky, reef, (1.0 - day) * 0.48 + 0.11)
+            lerp_vec3(sky, reef, solar.night * 0.48 + 0.11)
         }
         _ => sky,
     }
@@ -402,23 +577,37 @@ mod tests {
 
     #[test]
     fn night_ambient_floor_keeps_world_readable() {
+        let solar = SolarBlend::for_elevation_sine(-1.0);
+        let quality = lighting_quality(RuntimeProfile::Balanced, GraphicsMode::Balanced);
         assert!(
-            ambient_brightness_for_day(0.0, 1.0) >= 620.0,
+            ambient_brightness_for_conditions(-1.0, solar, quality, 1.0) >= 1_100.0,
             "night ambient must keep terrain/trees readable instead of black silhouettes"
         );
+        let sky = sky_srgb_for_conditions(solar, 1.0, Biome::Plains);
+        assert!(sky.min_element() >= 0.09);
     }
 
     #[test]
-    fn dusk_keeps_directional_light_visible() {
+    fn civil_twilight_is_smooth_and_keeps_directional_form() {
+        let before = SolarBlend::for_elevation_sine(-0.001);
+        let horizon = SolarBlend::for_elevation_sine(0.0);
+        let after = SolarBlend::for_elevation_sine(0.001);
+        let quality = lighting_quality(RuntimeProfile::Balanced, GraphicsMode::Balanced);
+
+        assert!(horizon.twilight > 0.75);
+        assert!((before.twilight - after.twilight).abs() < 0.04);
         assert!(
-            sun_illuminance_for_day(0.08) >= 5_500.0,
+            sun_illuminance_for_conditions(0.0, horizon, quality)
+                + moon_illuminance_for_conditions(horizon, quality)
+                >= 7_500.0,
             "low sun should still give visible form and not collapse to black"
         );
     }
 
     #[test]
     fn normal_day_sky_is_blue_not_whitewashed() {
-        let sky = sky_srgb_for_conditions(1.0, 0.0, 1.0, Biome::Plains);
+        let solar = SolarBlend::for_elevation_sine(1.0);
+        let sky = sky_srgb_for_conditions(solar, 1.0, Biome::Plains);
 
         assert!(
             sky.z > sky.y && sky.y > sky.x,
@@ -432,13 +621,45 @@ mod tests {
 
     #[test]
     fn evening_sky_keeps_readable_brightness_floor() {
-        let sky = sky_srgb_for_conditions(0.08, 0.68, 1.0, Biome::Plains);
+        let sky = sky_srgb_for_conditions(SolarBlend::for_elevation_sine(0.0), 1.0, Biome::Plains);
         let luminance = sky.dot(Vec3::new(0.2126, 0.7152, 0.0722));
 
         assert!(
             luminance >= 0.24,
             "evening sky should not collapse to an overly dark horizon"
         );
+    }
+
+    #[test]
+    fn solar_weights_are_normalized_across_day_twilight_and_night() {
+        for elevation in [-1.0, -0.104_528_464, -0.03, 0.0, 0.1, 0.4, 1.0] {
+            let solar = SolarBlend::for_elevation_sine(elevation);
+            let sum = solar.daylight + solar.twilight + solar.night;
+            assert!((sum - 1.0).abs() < 1.0e-5);
+            assert!(solar.daylight >= 0.0 && solar.twilight >= 0.0 && solar.night >= 0.0);
+        }
+    }
+
+    #[test]
+    fn quality_profiles_scale_light_without_sacrificing_low_spec_readability() {
+        let solar = SolarBlend::for_elevation_sine(-1.0);
+        let low = lighting_quality(RuntimeProfile::LowSpec, GraphicsMode::High);
+        let balanced = lighting_quality(RuntimeProfile::Balanced, GraphicsMode::Balanced);
+        let cinematic = lighting_quality(RuntimeProfile::Cinematic, GraphicsMode::Fast);
+
+        assert!(low.night_ambient >= 1_000.0);
+        assert!(low.night_ambient < balanced.night_ambient);
+        assert!(balanced.night_ambient < cinematic.night_ambient);
+        assert!(
+            moon_illuminance_for_conditions(solar, low)
+                < moon_illuminance_for_conditions(solar, cinematic)
+        );
+        let noon = SolarBlend::for_elevation_sine(1.0);
+        assert!(
+            sun_illuminance_for_conditions(1.0, noon, low)
+                < sun_illuminance_for_conditions(1.0, noon, cinematic)
+        );
+        assert!(low.fog_scatter_exponent > cinematic.fog_scatter_exponent);
     }
 
     #[test]
@@ -454,5 +675,42 @@ mod tests {
     fn shared_sun_direction_places_noon_above_the_horizon() {
         assert!(sun_direction_for_time(12.0).y > 0.9);
         assert!(sun_direction_for_time(0.0).y < -0.9);
+    }
+
+    #[test]
+    fn shared_moon_direction_is_world_fixed_and_opposes_the_sun_at_night() {
+        let moon = moon_direction_for_time(0.0);
+        let wrapped = moon_direction_for_time(24.0);
+        let midnight_sun = sun_direction_for_time(0.0);
+
+        assert!((moon.length() - 1.0).abs() < 1.0e-5);
+        assert!(moon.distance(wrapped) < 1.0e-5);
+        assert!(moon.y > 0.9);
+        assert!(moon.dot(midnight_sun) < -0.8);
+    }
+
+    #[test]
+    fn cycle_speed_uses_minutes_per_second() {
+        let after_one_second = time_of_day_after_delta(12.0, 1.0, 1.0);
+        assert!((after_one_second - (12.0 + 1.0 / 60.0)).abs() < 1.0e-6);
+
+        let wrapped = time_of_day_after_delta(23.99, 1.0, 1.0);
+        assert!((wrapped - 0.006_666_2).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn directional_light_rotation_is_stable_and_translation_independent() {
+        for direction in [
+            sun_direction_for_time(0.0),
+            sun_direction_for_time(6.0),
+            sun_direction_for_time(12.0),
+            moon_direction_for_time(0.0),
+        ] {
+            let transform = directional_light_transform(direction);
+            let emitted_forward = transform.rotation * Vec3::NEG_Z;
+            assert_eq!(transform.translation, Vec3::ZERO);
+            assert!(emitted_forward.dot(-direction) > 0.9999);
+            assert!(transform.rotation.is_finite());
+        }
     }
 }

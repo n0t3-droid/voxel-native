@@ -18,7 +18,8 @@ use crate::builder::{BuilderHistory, BuilderHistorySketchMeta, BuilderState};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::player::Player;
 use crate::sculpt::raycast::dda_voxel;
-use crate::toolbelt::{BuildWorkflowPreset, ToolbeltState, ToolbeltTool};
+use crate::sketch_model::{EditorToolId, ToolController};
+use crate::toolbelt::{ToolbeltState, ToolbeltTool};
 use crate::world::{VoxelWorld, WorldEditBatch};
 
 const DRAW_REACH: f32 = 128.0;
@@ -33,6 +34,9 @@ const RECT_EQUAL_LENGTH_TOLERANCE: i32 = 2;
 const RECT_FACE_SNAP_RADIUS: f32 = 0.30;
 const SEMANTIC_DRAW_POINT_RADIUS: f32 = 1.25;
 const SEMANTIC_DRAW_SCREEN_RADIUS: f32 = 22.0;
+const SEMANTIC_DRAW_DEPTH_EPSILON: f32 = 0.002;
+const NATURAL_AXIS_SCREEN_RADIUS: f32 = 10.0;
+const NATURAL_AXIS_MIN_TRAVEL: f32 = 6.0;
 const RECT_ACQUISITION_FEEDBACK_SECONDS: f32 = 0.24;
 const RECT_COMMIT_FEEDBACK_SECONDS: f32 = 0.34;
 
@@ -56,6 +60,7 @@ pub struct RectDrawState {
     snap_kind: Option<RectFaceSnapKind>,
     start_snap_kind: Option<RectFaceSnapKind>,
     axis_lock: Option<RectAxisLock>,
+    inferred_axis: Option<RectAxisLock>,
     start_point: Vec3,
     current_point: Vec3,
     tool_generation: u64,
@@ -463,14 +468,12 @@ impl SketchShapeWorkflow {
 enum RectDragButton {
     #[default]
     Left,
-    Right,
 }
 
 impl RectDragButton {
     fn just_released(self, mouse: &ButtonInput<MouseButton>) -> bool {
         match self {
             Self::Left => mouse.just_released(MouseButton::Left),
-            Self::Right => mouse.just_released(MouseButton::Right),
         }
     }
 }
@@ -486,35 +489,23 @@ struct RectStartIntent {
 fn rect_start_intent(
     active_tool: ToolbeltTool,
     left_just: bool,
-    right_just: bool,
-    ctrl: bool,
-    shift: bool,
+    _right_just: bool,
+    _ctrl: bool,
+    _shift: bool,
     opening_workflow: bool,
     room_workflow: bool,
 ) -> RectStartIntent {
-    let smart_tool = matches!(
-        active_tool,
-        ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
-    );
     let sketch_tool = active_tool == ToolbeltTool::DrawRect;
-    let room_cut =
-        sketch_tool && left_just && !ctrl && !opening_workflow && (shift || room_workflow);
+    let room_cut = sketch_tool && left_just && room_workflow && !opening_workflow;
     let opening_cut = sketch_tool && left_just && opening_workflow;
-    let modifier_cut = sketch_tool && left_just && (ctrl || shift || room_workflow || opening_cut);
     let brush_cut = active_tool == ToolbeltTool::BrushCut && left_just;
-    let smart_right_cut = smart_tool && right_just;
-    let cut = modifier_cut || brush_cut || smart_right_cut;
+    let cut = room_cut || opening_cut || brush_cut;
     let fill = left_just && !cut && active_tool != ToolbeltTool::BrushCut;
-    let button = if smart_right_cut {
-        RectDragButton::Right
-    } else {
-        RectDragButton::Left
-    };
     RectStartIntent {
         fill,
         cut,
         room_cut,
-        button,
+        button: RectDragButton::Left,
     }
 }
 
@@ -527,18 +518,6 @@ fn rect_action_for_start_intent(
         return RectDrawAction::Cut;
     }
     RectDrawAction::Fill
-}
-
-fn shape_alt_pressed(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
-}
-
-fn shift_pressed(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
-}
-
-fn ctrl_pressed(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
 }
 
 fn update_rect_axis_lock(
@@ -560,6 +539,45 @@ fn update_rect_axis_lock(
     current
 }
 
+fn inferred_axis_lock_from_screen(
+    start_point: Vec3,
+    cursor_screen: Vec2,
+    view_projection: Mat4,
+    viewport_size: Vec2,
+    aperture_pixels: f32,
+) -> Option<RectAxisLock> {
+    let start =
+        crate::sketch_model::project_world_to_screen(start_point, view_projection, viewport_size)?
+            .screen;
+    let cursor_delta = cursor_screen - start;
+    if !cursor_delta.is_finite() || cursor_delta.length() < NATURAL_AXIS_MIN_TRAVEL {
+        return None;
+    }
+
+    [RectAxisLock::X, RectAxisLock::Y, RectAxisLock::Z]
+        .into_iter()
+        .filter_map(|axis_lock| {
+            let axis_screen = crate::sketch_model::project_world_to_screen(
+                start_point + axis_lock.axis_vec3(),
+                view_projection,
+                viewport_size,
+            )?
+            .screen;
+            let projected_axis = axis_screen - start;
+            let projected_length = projected_axis.length();
+            if !projected_length.is_finite() || projected_length < 1.0 {
+                return None;
+            }
+            let direction = projected_axis / projected_length;
+            let perpendicular_distance =
+                (cursor_delta.x * direction.y - cursor_delta.y * direction.x).abs();
+            (perpendicular_distance <= aperture_pixels.max(1.0))
+                .then_some((axis_lock, perpendicular_distance))
+        })
+        .min_by(|(_, distance_a), (_, distance_b)| distance_a.total_cmp(distance_b))
+        .map(|(axis_lock, _)| axis_lock)
+}
+
 fn toggle_rect_axis_lock(
     current: Option<RectAxisLock>,
     requested: RectAxisLock,
@@ -575,12 +593,12 @@ fn sketch_tool_uses_click_finish(active_tool: ToolbeltTool, smart_tool: bool) ->
     !smart_tool && matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
 }
 
-fn active_shape_workflow(toolbelt: &ToolbeltState) -> SketchShapeWorkflow {
-    match toolbelt.drafting_shape_workflow() {
-        Some(BuildWorkflowPreset::Circle) => SketchShapeWorkflow::Circle,
-        Some(BuildWorkflowPreset::Polygon) => SketchShapeWorkflow::Polygon,
-        Some(BuildWorkflowPreset::Arc) => SketchShapeWorkflow::Arc,
-        Some(BuildWorkflowPreset::Freehand) => SketchShapeWorkflow::Freehand,
+fn active_shape_workflow(active_tool: EditorToolId) -> SketchShapeWorkflow {
+    match active_tool {
+        EditorToolId::Circle => SketchShapeWorkflow::Circle,
+        EditorToolId::Polygon => SketchShapeWorkflow::Polygon,
+        EditorToolId::Arc => SketchShapeWorkflow::Arc,
+        EditorToolId::Freehand => SketchShapeWorkflow::Freehand,
         _ => SketchShapeWorkflow::Rectangle,
     }
 }
@@ -611,14 +629,18 @@ enum RectPointerLossDisposition {
 fn rect_pointer_loss_disposition(
     draw: &RectDrawState,
     active_tool: ToolbeltTool,
+    editor_tool: EditorToolId,
     pointer_ray_available: bool,
     cursor_locked: bool,
-    right_held: bool,
+    _right_held: bool,
 ) -> RectPointerLossDisposition {
-    if !draw.active || !editor_pointer_tool_requires_cursor(active_tool) || pointer_ray_available {
+    if !draw.active
+        || !editor_pointer_tool_requires_cursor(active_tool, editor_tool)
+        || pointer_ray_available
+    {
         return RectPointerLossDisposition::None;
     }
-    if cursor_locked && right_held {
+    if cursor_locked {
         RectPointerLossDisposition::SuspendForOrbit
     } else {
         RectPointerLossDisposition::Cancel
@@ -641,6 +663,7 @@ fn clear_rect_preview(draw: &mut RectDrawState) {
     draw.snap_kind = None;
     draw.start_snap_kind = None;
     draw.axis_lock = None;
+    draw.inferred_axis = None;
     draw.inference = RectEndpointInference::None;
     draw.pointer_valid = false;
     draw.visual_acquisition = None;
@@ -742,16 +765,21 @@ fn sync_pointer_marker(
     marker.clear();
 }
 
-fn draw_rect_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, draw: &RectDrawState) -> bool {
-    if !mode.is_build_live() {
-        return false;
-    }
-    match mode.build_tool() {
-        Some(ToolbeltTool::DrawRect) => draw.active || !shape_alt_pressed(keys),
-        Some(ToolbeltTool::Sculpt) => draw.active || shape_alt_pressed(keys),
-        Some(ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut) => true,
-        _ => false,
-    }
+fn legacy_draw_tool(mode: &ModeContext) -> Option<ToolbeltTool> {
+    mode.build_tool()
+        .filter(|tool| matches!(tool, ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut))
+}
+
+fn active_draw_tool(mode: &ModeContext, editor_tool: EditorToolId) -> Option<ToolbeltTool> {
+    legacy_draw_tool(mode).or_else(|| {
+        editor_tool
+            .uses_draw_surface()
+            .then_some(ToolbeltTool::DrawRect)
+    })
+}
+
+fn draw_rect_active(mode: &ModeContext, editor_tool: EditorToolId) -> bool {
+    mode.is_build_live() && active_draw_tool(mode, editor_tool).is_some()
 }
 
 pub fn rect_draw_input(
@@ -766,7 +794,7 @@ pub fn rect_draw_input(
     mut gesture_lock: ResMut<BuildGestureLock>,
     mut world: ResMut<VoxelWorld>,
     mut history: ResMut<BuilderHistory>,
-    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut tool_controller: ResMut<ToolController>,
     mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
     mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
     builder: Res<BuilderState>,
@@ -775,7 +803,8 @@ pub fn rect_draw_input(
         Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
     )>,
 ) {
-    if !draw_rect_active(&mode, &keys, &draw) {
+    let active_editor_tool = tool_controller.active_tool();
+    if !draw_rect_active(&mode, active_editor_tool) {
         if draw.active {
             clear_rect_preview(&mut draw);
             tool_controller
@@ -786,7 +815,7 @@ pub fn rect_draw_input(
         return;
     }
 
-    if rect_should_cancel_for_tool_selection(&draw, toolbelt.selection_generation()) {
+    if rect_should_cancel_for_tool_selection(&draw, tool_controller.tool_generation()) {
         clear_rect_preview(&mut draw);
         tool_controller
             .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolboxClick);
@@ -798,7 +827,10 @@ pub fn rect_draw_input(
         return;
     }
 
-    let active_tool = mode.build_tool().unwrap_or(toolbelt.tool);
+    let Some(active_tool) = active_draw_tool(&mode, active_editor_tool) else {
+        motion_evr.clear();
+        return;
+    };
     let smart_tool = matches!(
         active_tool,
         ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
@@ -833,15 +865,6 @@ pub fn rect_draw_input(
             window.and_then(|window| window.cursor_position()),
         )
     };
-    if smart_tool && !cursor_locked {
-        if mouse.just_pressed(MouseButton::Left) || mouse.just_pressed(MouseButton::Right) {
-            toolbelt.status =
-                "Smart Builder needs mouse capture. Click the game view once, then build.".into();
-        }
-        motion_evr.clear();
-        return;
-    }
-
     let cam_q = view_q.p1();
     let Ok((camera, cam_tf)) = cam_q.get_single() else {
         if draw.active {
@@ -860,6 +883,7 @@ pub fn rect_draw_input(
     let screen_snap = if cursor_locked
         && !editor_pointer_ray_available(
             active_tool,
+            active_editor_tool,
             cursor_locked,
             cursor_visible,
             cursor_position,
@@ -875,6 +899,7 @@ pub fn rect_draw_input(
     };
     let input_ray = draw_input_ray(
         active_tool,
+        active_editor_tool,
         cursor_locked,
         cursor_visible,
         cursor_position,
@@ -884,6 +909,7 @@ pub fn rect_draw_input(
     match rect_pointer_loss_disposition(
         &draw,
         active_tool,
+        active_editor_tool,
         input_ray.is_some(),
         cursor_locked,
         mouse.pressed(MouseButton::Right),
@@ -917,15 +943,17 @@ pub fn rect_draw_input(
         return;
     };
 
-    let pencil_workflow = toolbelt.pencil_workflow_active();
+    let pencil_workflow = active_editor_tool == EditorToolId::Pencil;
+    let opening_workflow = active_editor_tool == EditorToolId::CutOpening;
+    let room_workflow = active_editor_tool == EditorToolId::Room;
     let start_intent = rect_start_intent(
         active_tool,
         mouse.just_pressed(MouseButton::Left),
         mouse.just_pressed(MouseButton::Right),
-        ctrl_pressed(&keys),
-        shift_pressed(&keys),
-        toolbelt.opening_workflow_active(),
-        toolbelt.room_workflow_active(),
+        false,
+        false,
+        opening_workflow,
+        room_workflow,
     );
 
     if rect_should_commit_on_start_intent(start_intent, &draw) {
@@ -963,7 +991,7 @@ pub fn rect_draw_input(
         let shape_workflow = if pencil_line || start_intent.cut {
             SketchShapeWorkflow::Rectangle
         } else {
-            active_shape_workflow(&toolbelt)
+            active_shape_workflow(active_editor_tool)
         };
         let action = if pencil_line {
             RectDrawAction::Fill
@@ -1045,7 +1073,8 @@ pub fn rect_draw_input(
             .or_else(|| start_input.and_then(|input| input.kind));
         draw.start_snap_kind = draw.snap_kind;
         draw.axis_lock = None;
-        draw.tool_generation = toolbelt.selection_generation();
+        draw.inferred_axis = None;
+        draw.tool_generation = tool_controller.tool_generation();
         draw.voxel = if action == RectDrawAction::Cut {
             AIR
         } else {
@@ -1067,7 +1096,7 @@ pub fn rect_draw_input(
             )
         } else if draw.pencil_line {
             format!(
-                "Pencil start set.{} Move to Endpoint/Midpoint/Face Center. Right locks X, Left locks Y, Up locks Z, Down returns to relative inference. RMB orbits.",
+                "Pencil start set.{} Move naturally along red, blue, or green inference, or snap to Endpoint/Midpoint/Face Center. Arrow keys hard-lock an axis; RMB orbits.",
                 start_status_suffix
             )
         } else if draw.shape_workflow != SketchShapeWorkflow::Rectangle {
@@ -1081,14 +1110,9 @@ pub fn rect_draw_input(
                 "Room start set.{} Move to size the wall/floor face, click again to hollow a livable volume.",
                 start_status_suffix
             )
-        } else if mode.build_tool() == Some(ToolbeltTool::Sculpt) {
-            format!(
-                "Push/Pull start set.{} Move on the locked face plane, click again to commit.",
-                start_status_suffix
-            )
         } else {
             format!(
-                "Rectangle start set.{} Move to Endpoint/Midpoint/Face Center. Right locks X, Left locks Y, Up locks Z, Down returns to relative inference. RMB orbits.",
+                "Rectangle start set.{} Move to Endpoint/Midpoint/Face Center. Arrow keys hard-lock an axis; RMB orbits.",
                 start_status_suffix
             )
         };
@@ -1102,11 +1126,66 @@ pub fn rect_draw_input(
             for ev in motion_evr.read() {
                 draw.motion_len += ev.delta.length();
             }
-            if draw.pencil_line && draw.axis_lock.is_some() {
-                let semantic_reference =
-                    dda_voxel(&world, origin, dir, DRAW_REACH).and_then(|(hit, prev)| {
-                        rect_face_input_point(origin, dir, hit, prev).map(|input| input.point)
-                    });
+            let semantic_reference =
+                dda_voxel(&world, origin, dir, DRAW_REACH).and_then(|(hit, prev)| {
+                    rect_face_input_point(origin, dir, hit, prev).map(|input| input.point)
+                });
+            let free_semantic_input = (draw.pencil_line && draw.axis_lock.is_none())
+                .then(|| {
+                    screen_snap
+                        .and_then(|(cursor, view_projection, viewport)| {
+                            semantic_draw_screen_space_input_point(
+                                &sketch_doc,
+                                semantic_hover.0.as_ref(),
+                                semantic_reference,
+                                draw.start,
+                                draw.normal,
+                                draw.axis_u,
+                                draw.axis_v,
+                                true,
+                                None,
+                                cursor,
+                                view_projection,
+                                viewport,
+                            )
+                        })
+                        .or_else(|| {
+                            semantic_draw_input_point(
+                                &sketch_doc,
+                                semantic_hover.0.as_ref(),
+                                semantic_reference,
+                                draw.start,
+                                draw.normal,
+                                draw.axis_u,
+                                draw.axis_v,
+                                true,
+                                None,
+                            )
+                        })
+                })
+                .flatten();
+            draw.inferred_axis =
+                if draw.pencil_line && draw.axis_lock.is_none() && free_semantic_input.is_none() {
+                    screen_snap.and_then(|(cursor, view_projection, viewport)| {
+                        inferred_axis_lock_from_screen(
+                            draw.start_point,
+                            cursor,
+                            view_projection,
+                            viewport,
+                            NATURAL_AXIS_SCREEN_RADIUS,
+                        )
+                    })
+                } else {
+                    None
+                };
+            let effective_axis_lock = draw.axis_lock.or(draw.inferred_axis);
+
+            if let Some(input) = free_semantic_input {
+                draw.current = input.cell;
+                draw.current_point = input.point;
+                draw.inference = RectEndpointInference::None;
+                draw.snap_kind = Some(input.kind);
+            } else if draw.pencil_line && effective_axis_lock.is_some() {
                 let semantic_input = screen_snap
                     .and_then(|(cursor, view_projection, viewport)| {
                         semantic_draw_screen_space_input_point(
@@ -1118,7 +1197,7 @@ pub fn rect_draw_input(
                             draw.axis_u,
                             draw.axis_v,
                             true,
-                            draw.axis_lock,
+                            effective_axis_lock,
                             cursor,
                             view_projection,
                             viewport,
@@ -1134,10 +1213,10 @@ pub fn rect_draw_input(
                             draw.axis_u,
                             draw.axis_v,
                             true,
-                            draw.axis_lock,
+                            effective_axis_lock,
                         )
                     });
-                if let (Some(axis_lock), Some(input)) = (draw.axis_lock, semantic_input) {
+                if let (Some(axis_lock), Some(input)) = (effective_axis_lock, semantic_input) {
                     let (endpoint, point) = semantic_axis_locked_endpoint(
                         draw.start,
                         draw.start_point,
@@ -1152,7 +1231,7 @@ pub fn rect_draw_input(
                     snap_pencil_axis_endpoint_and_marker_from_ray(
                         draw.start,
                         draw.start_point,
-                        draw.axis_lock,
+                        effective_axis_lock,
                         origin,
                         dir,
                     )
@@ -1333,13 +1412,14 @@ pub fn rect_draw_input(
             }
             let raw_cells = draw_preview_cell_count(&draw);
             draw.status_cells = raw_cells.min(DRAW_CELL_CAP);
-            let status_suffix = rect_status_suffix(draw.snap_kind, draw.inference, draw.axis_lock);
+            let active_axis = draw.axis_lock.or(draw.inferred_axis);
+            let status_suffix = rect_status_suffix(draw.snap_kind, draw.inference, active_axis);
             let readout = rect_alignment_readout(
                 draw.start,
                 draw.current,
                 draw.snap_kind,
                 draw.inference,
-                draw.axis_lock,
+                active_axis,
             );
             let readout_suffix = if readout.is_empty() {
                 String::new()
@@ -1430,40 +1510,56 @@ fn rect_preview_transaction_label(draw: &RectDrawState) -> &'static str {
 
 fn draw_input_ray(
     active_tool: ToolbeltTool,
+    editor_tool: EditorToolId,
     cursor_locked: bool,
     cursor_visible: bool,
     cursor_position: Option<Vec2>,
     camera: &Camera,
     camera_tf: &GlobalTransform,
 ) -> Option<(Vec3, Vec3)> {
-    if editor_pointer_ray_available(active_tool, cursor_locked, cursor_visible, cursor_position) {
+    if editor_pointer_ray_available(
+        active_tool,
+        editor_tool,
+        cursor_locked,
+        cursor_visible,
+        cursor_position,
+    ) {
         if let Some(ray) =
             cursor_position.and_then(|cursor| camera.viewport_to_world(camera_tf, cursor))
         {
             return Some((ray.origin, *ray.direction));
         }
     }
-    if editor_pointer_tool_requires_cursor(active_tool) {
+    if editor_pointer_tool_requires_cursor(active_tool, editor_tool) {
         return None;
     }
     Some((camera_tf.translation(), camera_tf.forward().as_vec3()))
 }
 
-fn editor_pointer_tool_requires_cursor(active_tool: ToolbeltTool) -> bool {
-    matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
+fn editor_pointer_tool_requires_cursor(
+    active_tool: ToolbeltTool,
+    editor_tool: EditorToolId,
+) -> bool {
+    matches!(
+        active_tool,
+        ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut
+    ) || editor_tool.uses_pointer_surface()
 }
 
 fn editor_pointer_ray_available(
     active_tool: ToolbeltTool,
+    editor_tool: EditorToolId,
     _cursor_locked: bool,
     cursor_visible: bool,
     cursor_position: Option<Vec2>,
 ) -> bool {
-    editor_pointer_tool_requires_cursor(active_tool) && cursor_visible && cursor_position.is_some()
+    editor_pointer_tool_requires_cursor(active_tool, editor_tool)
+        && cursor_visible
+        && cursor_position.is_some()
 }
 
-fn rect_draw_endpoint_updates(smart_gesture: bool, right_held: bool) -> bool {
-    smart_gesture || !right_held
+fn rect_draw_endpoint_updates(_smart_gesture: bool, right_held: bool) -> bool {
+    !right_held
 }
 
 fn commit_rect_fill(
@@ -1648,6 +1744,7 @@ fn record_rect_semantics_for_history(
     sketch_doc: &mut crate::sketch_model::SketchDocument,
     sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
 ) -> Option<BuilderHistorySketchMeta> {
+    let undo_count_before = sketch_doc.undo_count();
     let records = match record_rect_semantics(draw, sketch_doc) {
         Ok(records) => records,
         Err(error) => {
@@ -1656,6 +1753,10 @@ fn record_rect_semantics_for_history(
         }
     };
     if records.is_empty() {
+        return None;
+    }
+    let document_steps = sketch_doc.undo_count().saturating_sub(undo_count_before);
+    if document_steps == 0 {
         return None;
     }
     register_rect_semantic_links(
@@ -1667,6 +1768,7 @@ fn record_rect_semantics_for_history(
     );
     Some(BuilderHistorySketchMeta::SketchCreated {
         link_snapshots: sketch_links.snapshot_entities(records.iter().map(|(entity, _)| *entity)),
+        document_steps,
     })
 }
 
@@ -2497,8 +2599,22 @@ fn semantic_draw_point_to_cell(
     normal: IVec3,
     axis_u: IVec3,
     axis_v: IVec3,
+    pencil_line: bool,
 ) -> IVec3 {
     let mut cell = start;
+    if pencil_line {
+        for axis in 0..3 {
+            set_component_by_index(
+                &mut cell,
+                axis,
+                center_axis_component_to_cell(
+                    vec_component_by_index(point, axis),
+                    component_by_index(start, axis),
+                ),
+            );
+        }
+        return cell;
+    }
     if !is_cardinal_axis(axis_u) || !is_cardinal_axis(axis_v) {
         return cell;
     }
@@ -2545,7 +2661,7 @@ fn semantic_draw_input_point(
         pencil_line,
         axis_lock,
     );
-    let cell = semantic_draw_point_to_cell(start, point, normal, axis_u, axis_v);
+    let cell = semantic_draw_point_to_cell(start, point, normal, axis_u, axis_v, pencil_line);
     Some(SemanticDrawInputPoint { cell, point, kind })
 }
 
@@ -2575,6 +2691,19 @@ fn semantic_draw_screen_space_input_point(
             .ok()?,
         );
     }
+    if let Some(front_depth) = reference_point.and_then(|point| {
+        crate::sketch_model::project_world_to_screen(point, view_projection, viewport_size)
+            .map(|projection| projection.ndc.z)
+    }) {
+        candidates.retain(|candidate| {
+            crate::sketch_model::project_world_to_screen(
+                candidate.point,
+                view_projection,
+                viewport_size,
+            )
+            .is_some_and(|projection| projection.ndc.z + SEMANTIC_DRAW_DEPTH_EPSILON >= front_depth)
+        });
+    }
     let chosen = crate::sketch_model::best_screen_space_inference(
         candidates,
         cursor_screen,
@@ -2594,7 +2723,7 @@ fn semantic_draw_screen_space_input_point(
         pencil_line,
         axis_lock,
     );
-    let cell = semantic_draw_point_to_cell(start, point, normal, axis_u, axis_v);
+    let cell = semantic_draw_point_to_cell(start, point, normal, axis_u, axis_v, pencil_line);
     Some(SemanticDrawInputPoint { cell, point, kind })
 }
 
@@ -2605,6 +2734,9 @@ fn project_semantic_draw_candidate_point(
     pencil_line: bool,
     axis_lock: Option<RectAxisLock>,
 ) -> Vec3 {
+    if pencil_line && axis_lock.is_none() {
+        return candidate_point;
+    }
     let mut point =
         project_draw_input_point_to_locked_plane(candidate_point, start, normal, pencil_line);
     if pencil_line {
@@ -3228,7 +3360,7 @@ fn draw_rect_input_point_gizmos(draw: &RectDrawState, gizmos: &mut Gizmos) {
         draw.current_point + draw.normal.as_vec3() * 0.12,
         rect_snap_marker_color(draw.snap_kind).with_alpha(0.78),
     );
-    if let Some(axis_lock) = draw.axis_lock {
+    if let Some(axis_lock) = draw.axis_lock.or(draw.inferred_axis) {
         let axis = axis_lock.axis_vec3();
         let start = draw.start_point + draw.normal.as_vec3() * 0.10;
         let reach = 120.0;
@@ -3247,7 +3379,7 @@ fn rect_visual_acquisition(draw: &RectDrawState) -> Option<RectVisualAcquisition
     if let Some(kind) = draw.snap_kind {
         return Some(RectVisualAcquisition::Snap(kind, draw.current));
     }
-    if let Some(axis_lock) = draw.axis_lock {
+    if let Some(axis_lock) = draw.axis_lock.or(draw.inferred_axis) {
         return Some(RectVisualAcquisition::Axis(axis_lock));
     }
     (draw.inference != RectEndpointInference::None)
@@ -3415,9 +3547,8 @@ pub fn draw_rect_gizmo(
 }
 
 pub fn refresh_editor_pointer_marker(
-    keys: Res<ButtonInput<KeyCode>>,
     mode: Res<ModeContext>,
-    toolbelt: Res<ToolbeltState>,
+    tool_controller: Res<ToolController>,
     draw: Res<RectDrawState>,
     world: Res<VoxelWorld>,
     mut marker: ResMut<SketchEditorPointerMarker>,
@@ -3426,7 +3557,8 @@ pub fn refresh_editor_pointer_marker(
         Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
     )>,
 ) {
-    if !draw_rect_active(&mode, &keys, &draw) {
+    let active_editor_tool = tool_controller.active_tool();
+    if !draw_rect_active(&mode, active_editor_tool) {
         marker.clear();
         return;
     }
@@ -3434,7 +3566,10 @@ pub fn refresh_editor_pointer_marker(
         return;
     }
 
-    let active_tool = mode.build_tool().unwrap_or(toolbelt.tool);
+    let Some(active_tool) = active_draw_tool(&mode, active_editor_tool) else {
+        marker.clear();
+        return;
+    };
     let (cursor_locked, cursor_visible, cursor_position) = {
         let window_q = view_q.p0();
         let window = window_q.get_single().ok();
@@ -3451,6 +3586,7 @@ pub fn refresh_editor_pointer_marker(
     };
     let Some((origin, dir)) = draw_input_ray(
         active_tool,
+        active_editor_tool,
         cursor_locked,
         cursor_visible,
         cursor_position,
@@ -3466,7 +3602,7 @@ pub fn refresh_editor_pointer_marker(
         &draw,
         &world,
         active_tool,
-        toolbelt.pencil_workflow_active(),
+        active_editor_tool == EditorToolId::Pencil,
         origin,
         dir,
     );
@@ -3509,9 +3645,8 @@ pub fn draw_editor_pointer_marker(marker: Res<SketchEditorPointerMarker>, mut gi
 }
 
 pub fn refresh_editor_screen_cursor(
-    keys: Res<ButtonInput<KeyCode>>,
     mode: Res<ModeContext>,
-    toolbelt: Res<ToolbeltState>,
+    tool_controller: Res<ToolController>,
     draw: Res<RectDrawState>,
     marker: Res<SketchEditorPointerMarker>,
     ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
@@ -3519,13 +3654,17 @@ pub fn refresh_editor_screen_cursor(
     window_q: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
 ) {
-    if !draw_rect_active(&mode, &keys, &draw) {
+    let active_editor_tool = tool_controller.active_tool();
+    if !draw_rect_active(&mode, active_editor_tool) {
         screen_cursor.clear();
         return;
     }
 
-    let active_tool = mode.build_tool().unwrap_or(toolbelt.tool);
-    if !matches!(active_tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt) {
+    let Some(active_tool) = active_draw_tool(&mode, active_editor_tool) else {
+        screen_cursor.clear();
+        return;
+    };
+    if active_tool != ToolbeltTool::DrawRect {
         screen_cursor.clear();
         return;
     }
@@ -3851,7 +3990,14 @@ mod tests {
 
         assert!(!rect_should_commit_on_start_intent(second_click, &draw));
         assert_eq!(
-            rect_pointer_loss_disposition(&draw, ToolbeltTool::DrawRect, false, false, false,),
+            rect_pointer_loss_disposition(
+                &draw,
+                ToolbeltTool::DrawRect,
+                EditorToolId::Rectangle,
+                false,
+                false,
+                false,
+            ),
             RectPointerLossDisposition::Cancel
         );
         clear_rect_preview(&mut draw);
@@ -3866,12 +4012,38 @@ mod tests {
         draw.pointer_valid = true;
 
         assert_eq!(
-            rect_pointer_loss_disposition(&draw, ToolbeltTool::DrawRect, false, true, true,),
+            rect_pointer_loss_disposition(
+                &draw,
+                ToolbeltTool::DrawRect,
+                EditorToolId::Rectangle,
+                false,
+                true,
+                true,
+            ),
             RectPointerLossDisposition::SuspendForOrbit
         );
         assert_eq!(
-            rect_pointer_loss_disposition(&draw, ToolbeltTool::DrawRect, true, true, false,),
+            rect_pointer_loss_disposition(
+                &draw,
+                ToolbeltTool::DrawRect,
+                EditorToolId::Rectangle,
+                true,
+                true,
+                false,
+            ),
             RectPointerLossDisposition::None
+        );
+        assert_eq!(
+            rect_pointer_loss_disposition(
+                &draw,
+                ToolbeltTool::DrawRect,
+                EditorToolId::Rectangle,
+                false,
+                true,
+                false,
+            ),
+            RectPointerLossDisposition::SuspendForOrbit,
+            "the RMB release frame can still report the previous captured cursor state"
         );
     }
 
@@ -4442,6 +4614,7 @@ mod tests {
                 )
             })
             .expect("semantic opening id");
+        let opening_entities = ids.clone();
         assert!(sketch_links
             .links_for_cell(IVec3::new(1, 1, 0))
             .iter()
@@ -4482,15 +4655,63 @@ mod tests {
             crate::sketch_model::SketchEntityKind::Room { wall_thickness, .. }
                 if (*wall_thickness - 1.0).abs() < f32::EPSILON
         )));
+
+        let room_undo = history
+            .undo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links)
+            .expect("room history is consistent")
+            .expect("room undo step");
+        assert!(room_undo.label.contains("room"));
+        assert_eq!(
+            sketch_doc
+                .context(sketch_doc.active_context())
+                .unwrap()
+                .entities,
+            opening_entities,
+            "one undo must remove the room face and room volume together"
+        );
+
+        history
+            .undo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links)
+            .expect("opening history is consistent")
+            .expect("opening undo step");
+        assert!(sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .is_empty());
+        for x in 0..=4 {
+            for y in 0..=3 {
+                assert_eq!(world.voxel_at(x, y, 0), Voxel::from(BlockType::Stone));
+            }
+        }
+
+        history
+            .redo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links)
+            .expect("opening redo history is consistent")
+            .expect("opening redo step");
+        history
+            .redo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links)
+            .expect("room redo history is consistent")
+            .expect("room redo step");
+        assert!(sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .iter()
+            .any(|id| matches!(
+                sketch_doc.entity(*id).map(|entity| &entity.kind),
+                Some(crate::sketch_model::SketchEntityKind::Room { .. })
+            )));
     }
 
     #[test]
-    fn default_build_tool_accepts_smart_endpoint_fill() {
+    fn canonical_editor_tool_owns_the_draw_surface() {
         let mode = ModeContext::default();
-        let keys = ButtonInput::<KeyCode>::default();
-        let draw = RectDrawState::default();
 
-        assert!(draw_rect_active(&mode, &keys, &draw));
+        assert!(draw_rect_active(&mode, EditorToolId::Pencil));
+        assert!(draw_rect_active(&mode, EditorToolId::Rectangle));
+        assert!(draw_rect_active(&mode, EditorToolId::Room));
+        assert!(!draw_rect_active(&mode, EditorToolId::Select));
     }
 
     #[test]
@@ -4534,16 +4755,27 @@ mod tests {
     }
 
     #[test]
-    fn smart_right_mouse_cut_keeps_endpoint_tracking() {
+    fn smart_right_mouse_is_orbit_and_freezes_endpoint_tracking() {
         assert!(
-            rect_draw_endpoint_updates(true, true),
-            "classic smart RMB cut gestures still need endpoint tracking while held"
+            !rect_draw_endpoint_updates(true, true),
+            "RMB must remain exclusive camera orbit for every editor tool"
         );
+
+        let intent = rect_start_intent(
+            ToolbeltTool::BrushCut,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert!(!intent.cut && !intent.fill);
     }
 
     #[test]
-    fn sketch_modifier_left_mouse_selects_cut_and_room_cut() {
-        let cut = rect_start_intent(
+    fn sketch_modifiers_do_not_secretly_change_the_active_tool() {
+        let ctrl = rect_start_intent(
             ToolbeltTool::DrawRect,
             true,
             false,
@@ -4552,11 +4784,12 @@ mod tests {
             false,
             false,
         );
-        assert!(cut.cut);
-        assert!(!cut.room_cut);
-        assert_eq!(cut.button, RectDragButton::Left);
+        assert!(ctrl.fill);
+        assert!(!ctrl.cut);
+        assert!(!ctrl.room_cut);
+        assert_eq!(ctrl.button, RectDragButton::Left);
 
-        let room = rect_start_intent(
+        let shift = rect_start_intent(
             ToolbeltTool::DrawRect,
             true,
             false,
@@ -4565,9 +4798,10 @@ mod tests {
             false,
             false,
         );
-        assert!(room.cut);
-        assert!(room.room_cut);
-        assert_eq!(room.button, RectDragButton::Left);
+        assert!(shift.fill);
+        assert!(!shift.cut);
+        assert!(!shift.room_cut);
+        assert_eq!(shift.button, RectDragButton::Left);
     }
 
     #[test]
@@ -4642,8 +4876,8 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_left_mouse_cuts_openings_even_inside_room_workflow() {
-        let cut = rect_start_intent(
+    fn modifier_cannot_override_the_direct_room_workflow() {
+        let room = rect_start_intent(
             ToolbeltTool::DrawRect,
             true,
             false,
@@ -4653,9 +4887,33 @@ mod tests {
             true,
         );
 
-        assert!(cut.cut);
-        assert!(!cut.room_cut);
-        assert_eq!(cut.button, RectDragButton::Left);
+        assert!(room.cut);
+        assert!(room.room_cut);
+        assert_eq!(room.button, RectDragButton::Left);
+    }
+
+    #[test]
+    fn canonical_shape_tool_selects_its_own_geometry_workflow() {
+        assert_eq!(
+            active_shape_workflow(EditorToolId::Circle),
+            SketchShapeWorkflow::Circle
+        );
+        assert_eq!(
+            active_shape_workflow(EditorToolId::Polygon),
+            SketchShapeWorkflow::Polygon
+        );
+        assert_eq!(
+            active_shape_workflow(EditorToolId::Arc),
+            SketchShapeWorkflow::Arc
+        );
+        assert_eq!(
+            active_shape_workflow(EditorToolId::Freehand),
+            SketchShapeWorkflow::Freehand
+        );
+        assert_eq!(
+            active_shape_workflow(EditorToolId::Rectangle),
+            SketchShapeWorkflow::Rectangle
+        );
     }
 
     #[test]
@@ -4938,6 +5196,73 @@ mod tests {
     }
 
     #[test]
+    fn natural_screen_inference_acquires_visible_world_axes_without_arrow_keys() {
+        let viewport = Vec2::new(200.0, 200.0);
+        assert_eq!(
+            inferred_axis_lock_from_screen(
+                Vec3::ZERO,
+                Vec2::new(170.0, 102.0),
+                Mat4::IDENTITY,
+                viewport,
+                NATURAL_AXIS_SCREEN_RADIUS,
+            ),
+            Some(RectAxisLock::X)
+        );
+        assert_eq!(
+            inferred_axis_lock_from_screen(
+                Vec3::ZERO,
+                Vec2::new(98.0, 30.0),
+                Mat4::IDENTITY,
+                viewport,
+                NATURAL_AXIS_SCREEN_RADIUS,
+            ),
+            Some(RectAxisLock::Y)
+        );
+    }
+
+    #[test]
+    fn natural_screen_inference_rejects_far_or_view_parallel_axes() {
+        let viewport = Vec2::new(200.0, 200.0);
+        assert_eq!(
+            inferred_axis_lock_from_screen(
+                Vec3::ZERO,
+                Vec2::new(170.0, 170.0),
+                Mat4::IDENTITY,
+                viewport,
+                NATURAL_AXIS_SCREEN_RADIUS,
+            ),
+            None
+        );
+        assert_ne!(
+            inferred_axis_lock_from_screen(
+                Vec3::ZERO,
+                Vec2::new(100.0, 30.0),
+                Mat4::IDENTITY,
+                viewport,
+                NATURAL_AXIS_SCREEN_RADIUS,
+            ),
+            Some(RectAxisLock::Z),
+            "an axis aimed directly through the camera has no stable screen direction"
+        );
+    }
+
+    #[test]
+    fn natural_screen_inference_acquires_visible_depth_axis() {
+        let viewport = Vec2::new(200.0, 200.0);
+        let view_projection = Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        assert_eq!(
+            inferred_axis_lock_from_screen(
+                Vec3::ZERO,
+                Vec2::new(100.0, 30.0),
+                view_projection,
+                viewport,
+                NATURAL_AXIS_SCREEN_RADIUS,
+            ),
+            Some(RectAxisLock::Z)
+        );
+    }
+
+    #[test]
     fn pencil_axis_lock_projects_endpoint_from_camera_ray() {
         let endpoint = snap_pencil_endpoint_to_axis_from_ray(
             IVec3::ZERO,
@@ -5117,6 +5442,43 @@ mod tests {
     }
 
     #[test]
+    fn pencil_semantic_endpoint_keeps_full_three_dimensional_target() {
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let edge = sketch_doc
+            .draw_pencil_line(
+                sketch_doc.active_context(),
+                Vec3::new(0.5, 4.5, 0.5),
+                Vec3::new(8.5, 12.5, 6.5),
+            )
+            .expect("edge");
+        let target = Vec3::new(8.5, 12.5, 6.5);
+        let hit = crate::sketch_model::HitRecord::new(
+            edge,
+            [],
+            crate::sketch_model::HitKind::Edge,
+            target,
+            0.0,
+        );
+
+        let input = semantic_draw_input_point(
+            &sketch_doc,
+            Some(&hit),
+            Some(target),
+            IVec3::new(0, 4, 0),
+            IVec3::Y,
+            IVec3::X,
+            IVec3::Z,
+            true,
+            None,
+        )
+        .expect("semantic endpoint");
+
+        assert_eq!(input.kind, RectFaceSnapKind::Endpoint);
+        assert_eq!(input.cell, IVec3::new(8, 12, 6));
+        assert_eq!(input.point, target);
+    }
+
+    #[test]
     fn semantic_draw_screen_space_snap_prefers_cursor_endpoint_over_hover_cell() {
         let mut sketch_doc = crate::sketch_model::SketchDocument::new();
         let _near_hover_edge = sketch_doc
@@ -5173,6 +5535,43 @@ mod tests {
         );
         assert_eq!(input.kind, RectFaceSnapKind::Endpoint);
         assert_eq!(input.cell, IVec3::new(12, 4, 0));
+    }
+
+    #[test]
+    fn semantic_screen_snap_rejects_points_hidden_behind_visible_surface_depth() {
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        sketch_doc
+            .draw_pencil_line(
+                sketch_doc.active_context(),
+                Vec3::new(-0.1, 0.0, 0.2),
+                Vec3::new(0.1, 0.0, 0.2),
+            )
+            .expect("edge");
+        let viewport = Vec2::new(200.0, 200.0);
+        let cursor = crate::sketch_model::project_world_to_screen(
+            Vec3::new(0.1, 0.0, 0.2),
+            Mat4::IDENTITY,
+            viewport,
+        )
+        .expect("projection")
+        .screen;
+
+        let hidden = semantic_draw_screen_space_input_point(
+            &sketch_doc,
+            None,
+            Some(Vec3::new(0.1, 0.0, 0.6)),
+            IVec3::ZERO,
+            IVec3::Y,
+            IVec3::X,
+            IVec3::Z,
+            true,
+            None,
+            cursor,
+            Mat4::IDENTITY,
+            viewport,
+        );
+
+        assert!(hidden.is_none());
     }
 
     #[test]
@@ -5352,6 +5751,7 @@ mod tests {
         assert!(
             editor_pointer_ray_available(
                 ToolbeltTool::DrawRect,
+                EditorToolId::Rectangle,
                 true,
                 true,
                 Some(Vec2::new(1420.0, 730.0))
@@ -5365,6 +5765,7 @@ mod tests {
         assert!(
             !editor_pointer_ray_available(
                 ToolbeltTool::DrawRect,
+                EditorToolId::Rectangle,
                 true,
                 false,
                 Some(Vec2::new(1420.0, 730.0))
@@ -5375,18 +5776,41 @@ mod tests {
 
     #[test]
     fn pointer_editor_tools_do_not_fall_back_to_crosshair_without_cursor() {
-        assert!(editor_pointer_tool_requires_cursor(ToolbeltTool::DrawRect));
-        assert!(editor_pointer_tool_requires_cursor(ToolbeltTool::Sculpt));
-        assert!(!editor_pointer_tool_requires_cursor(
-            ToolbeltTool::BrushPlace
+        assert!(editor_pointer_tool_requires_cursor(
+            ToolbeltTool::DrawRect,
+            EditorToolId::Rectangle
+        ));
+        assert!(editor_pointer_tool_requires_cursor(
+            ToolbeltTool::Sculpt,
+            EditorToolId::PushPull
+        ));
+        assert!(editor_pointer_tool_requires_cursor(
+            ToolbeltTool::BrushPlace,
+            EditorToolId::Select
+        ));
+        assert!(editor_pointer_tool_requires_cursor(
+            ToolbeltTool::BrushCut,
+            EditorToolId::Select
         ));
 
         assert!(
-            !editor_pointer_ray_available(ToolbeltTool::DrawRect, false, true, None),
+            !editor_pointer_ray_available(
+                ToolbeltTool::DrawRect,
+                EditorToolId::Rectangle,
+                false,
+                true,
+                None
+            ),
             "Pencil/Rectangle must not build from the camera center when Windows drops the pointer position"
         );
         assert!(
-            !editor_pointer_ray_available(ToolbeltTool::Sculpt, true, true, None),
+            !editor_pointer_ray_available(
+                ToolbeltTool::Sculpt,
+                EditorToolId::PushPull,
+                true,
+                true,
+                None
+            ),
             "Push/Pull must wait for a real editor pointer instead of cutting or pulling under the crosshair"
         );
     }

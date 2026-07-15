@@ -186,7 +186,9 @@ struct EditorWorldTools<'w> {
 /// Apply the hacker terminal theme. Re-runs whenever the user picks a
 /// new colour variant in the SYSTEM tab so the change is instant.
 fn style_egui(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     set_reduced_motion(ctx, settings.reduce_motion);
     apply_hacker_theme(ctx, settings.theme);
 }
@@ -196,7 +198,9 @@ fn style_egui(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
 /// cost) so we just listen for `WorldSettings` changes.
 fn restyle_on_change(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
     if settings.is_changed() {
-        let ctx = contexts.ctx_mut();
+        let Some(ctx) = contexts.try_ctx_mut() else {
+            return;
+        };
         set_reduced_motion(ctx, settings.reduce_motion);
         apply_hacker_theme(ctx, settings.theme);
     }
@@ -265,7 +269,9 @@ fn draw_editor(
     fps_hist: Res<FpsHistory>,
     mut tools: EditorWorldTools,
 ) {
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     handle_editor_keyboard(&tools.keys, &mut state);
 
     let anim = ctx.animate_bool_with_time(egui::Id::new("editor_open"), state.open, 0.18);

@@ -41,6 +41,7 @@ use crate::player::Player;
 use crate::sculpt::face::{collect_face, FaceRegion};
 use crate::sculpt::raycast::dda_voxel;
 use crate::sculpt::state::{HoverHit, SculptMode, SculptState};
+use crate::sketch_model::{EditorToolId, ToolController};
 use crate::toolbelt::{ToolbeltState, ToolbeltTool};
 use crate::world::{VoxelWorld, WorldEditBatch};
 
@@ -184,85 +185,38 @@ impl PushPullReference {
     }
 }
 
-fn shape_alt_pressed(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
+fn sculpt_active(mode: &ModeContext, active_editor_tool: EditorToolId) -> bool {
+    mode.is_build_live() && active_editor_tool == EditorToolId::PushPull
 }
 
-/// Returns `true` while Push/Pull owns the current Shape gesture. Fill
-/// and Push/Pull are paired: the selected tool is the default, while
-/// Alt temporarily invokes the other one without changing toolbelt state.
-fn sculpt_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, drag_active: bool) -> bool {
-    if !mode.is_build_live() {
-        return false;
-    }
-    match mode.build_tool() {
-        Some(ToolbeltTool::Sculpt) => drag_active || !shape_alt_pressed(keys),
-        Some(ToolbeltTool::DrawRect) => drag_active || shape_alt_pressed(keys),
-        _ => false,
-    }
-}
-
-fn build_tool_needs_semantic_hover(tool: Option<ToolbeltTool>) -> bool {
+fn legacy_crosshair_tool(tool: Option<ToolbeltTool>) -> bool {
     matches!(
         tool,
-        Some(
-            ToolbeltTool::Navigate
-                | ToolbeltTool::DrawRect
-                | ToolbeltTool::TransformMove
-                | ToolbeltTool::TransformScale
-                | ToolbeltTool::TransformRotate
-                | ToolbeltTool::MaterialPicker
-        )
+        Some(ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut)
     )
 }
 
-fn editor_tool_needs_semantic_hover(active_editor_tool: crate::sketch_model::EditorToolId) -> bool {
-    matches!(
-        active_editor_tool,
-        crate::sketch_model::EditorToolId::Select
-            | crate::sketch_model::EditorToolId::Move
-            | crate::sketch_model::EditorToolId::Scale
-            | crate::sketch_model::EditorToolId::Rotate
-            | crate::sketch_model::EditorToolId::Material
-    )
+fn editor_tool_needs_semantic_hover(active_editor_tool: EditorToolId) -> bool {
+    active_editor_tool.uses_pointer_surface()
 }
 
-fn semantic_hover_active(
-    mode: &ModeContext,
-    keys: &ButtonInput<KeyCode>,
-    drag_active: bool,
-    active_editor_tool: crate::sketch_model::EditorToolId,
-) -> bool {
-    if sculpt_active(mode, keys, drag_active) {
-        return true;
-    }
+fn semantic_hover_active(mode: &ModeContext, active_editor_tool: EditorToolId) -> bool {
     mode.is_build_live()
-        && (build_tool_needs_semantic_hover(mode.build_tool())
+        && (legacy_crosshair_tool(mode.build_tool())
             || editor_tool_needs_semantic_hover(active_editor_tool))
 }
 
 fn semantic_hover_requires_pointer(
     build_tool: Option<ToolbeltTool>,
-    active_editor_tool: crate::sketch_model::EditorToolId,
+    active_editor_tool: EditorToolId,
 ) -> bool {
-    matches!(
-        build_tool,
-        Some(
-            ToolbeltTool::Navigate
-                | ToolbeltTool::DrawRect
-                | ToolbeltTool::Sculpt
-                | ToolbeltTool::TransformMove
-                | ToolbeltTool::TransformScale
-                | ToolbeltTool::TransformRotate
-                | ToolbeltTool::MaterialPicker
-        )
-    ) || editor_tool_needs_semantic_hover(active_editor_tool)
+    !legacy_crosshair_tool(build_tool) && editor_tool_needs_semantic_hover(active_editor_tool)
 }
 
 #[cfg(test)]
 fn semantic_hover_uses_pointer_ray(
     build_tool: Option<ToolbeltTool>,
-    active_editor_tool: crate::sketch_model::EditorToolId,
+    active_editor_tool: EditorToolId,
     _cursor_locked: bool,
 ) -> bool {
     semantic_hover_requires_pointer(build_tool, active_editor_tool)
@@ -270,15 +224,15 @@ fn semantic_hover_uses_pointer_ray(
 
 fn semantic_hover_allows_crosshair_fallback(
     build_tool: Option<ToolbeltTool>,
-    active_editor_tool: crate::sketch_model::EditorToolId,
+    _active_editor_tool: EditorToolId,
     _cursor_locked: bool,
 ) -> bool {
-    !semantic_hover_requires_pointer(build_tool, active_editor_tool)
+    legacy_crosshair_tool(build_tool)
 }
 
 fn semantic_hover_ray(
     mode: &ModeContext,
-    active_editor_tool: crate::sketch_model::EditorToolId,
+    active_editor_tool: EditorToolId,
     window: Option<&bevy::window::Window>,
     camera: &Camera,
     cam_tf: &GlobalTransform,
@@ -313,10 +267,9 @@ fn semantic_hover_ray(
 /// only when the sculpt tool is live; resets hover to `None` otherwise
 /// so stale highlights don't bleed into other tools.
 pub fn update_hover(
-    keys: Res<ButtonInput<KeyCode>>,
     mode: Res<ModeContext>,
     drag: Res<PushPullDrag>,
-    tool_controller: Res<crate::sketch_model::ToolController>,
+    tool_controller: Res<ToolController>,
     world: Res<VoxelWorld>,
     windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
     cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
@@ -327,7 +280,7 @@ pub fn update_hover(
     if drag.active {
         return;
     }
-    if !semantic_hover_active(&mode, &keys, drag.active, tool_controller.active_tool()) {
+    if !semantic_hover_active(&mode, tool_controller.active_tool()) {
         if state.hover.is_some() {
             state.hover = None;
             state.mode = SculptMode::Idle;
@@ -457,7 +410,6 @@ pub fn semantic_select_input(
 ) {
     if !semantic_select_input_active(
         mode.is_build_live(),
-        mode.build_tool(),
         tool_controller.active_tool(),
         mouse.just_pressed(MouseButton::Left),
         ui_focus
@@ -486,19 +438,14 @@ pub fn semantic_select_input(
 
 fn semantic_select_input_active(
     build_live: bool,
-    build_tool: Option<ToolbeltTool>,
-    active_editor_tool: crate::sketch_model::EditorToolId,
+    active_editor_tool: EditorToolId,
     left_just_pressed: bool,
     pointer_over_editor_ui: bool,
 ) -> bool {
     build_live
         && left_just_pressed
         && !pointer_over_editor_ui
-        && (build_tool == Some(ToolbeltTool::Navigate)
-            || matches!(
-                active_editor_tool,
-                crate::sketch_model::EditorToolId::Select
-            ))
+        && active_editor_tool == EditorToolId::Select
 }
 
 fn apply_semantic_selection_click(
@@ -520,23 +467,25 @@ pub fn reference_input(
     mouse: Res<ButtonInput<MouseButton>>,
     mode: Res<ModeContext>,
     drag: Res<PushPullDrag>,
+    tool_controller: Res<ToolController>,
     world: Res<VoxelWorld>,
     cam_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
     mut reference: ResMut<PushPullReference>,
     mut toolbelt: ResMut<ToolbeltState>,
 ) {
-    if !sculpt_active(&mode, &keys, drag.active) || drag.active {
+    if !sculpt_active(&mode, tool_controller.active_tool()) || drag.active {
         return;
     }
 
     if keys.just_pressed(KeyCode::Escape) && reference.start.is_some() {
         reference.clear();
         toolbelt.status =
-            "Push reference cleared. RMB sets corner A, RMB again sets target corner B.".into();
+            "Push reference cleared. Ctrl+MMB sets A, then B; RMB always orbits.".into();
         return;
     }
 
-    if !mouse.just_pressed(MouseButton::Right) {
+    let ctrl_held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if !(ctrl_held && mouse.just_pressed(MouseButton::Middle)) {
         return;
     }
 
@@ -561,7 +510,7 @@ pub fn reference_input(
         reference.start = Some(point);
         reference.end = None;
         toolbelt.status = format!(
-            "Push reference A set at {} {}. RMB another endpoint/midpoint/face center for B.",
+            "Push reference A set at {} {}. Ctrl+MMB another endpoint/midpoint/face center for B.",
             point.kind.label(),
             fmt_point(point.point)
         );
@@ -728,7 +677,6 @@ fn project_screen_dir(
 /// click anchor, and the screen-space normal.
 #[allow(clippy::too_many_arguments)]
 pub fn begin_drag(
-    keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mode: Res<ModeContext>,
     mut toolbelt: ResMut<ToolbeltState>,
@@ -738,12 +686,12 @@ pub fn begin_drag(
     cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
     mut gesture_lock: ResMut<BuildGestureLock>,
     mut drag: ResMut<PushPullDrag>,
-    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut tool_controller: ResMut<ToolController>,
 ) {
     if drag.active {
         return;
     }
-    if !sculpt_active(&mode, &keys, drag.active) {
+    if !sculpt_active(&mode, tool_controller.active_tool()) {
         return;
     }
     if !mouse.just_pressed(MouseButton::Left) {
@@ -801,18 +749,13 @@ pub fn begin_drag(
         .unwrap_or(Vec2::ZERO);
     drag.motion_len = 0.0;
     drag.click_finish = true;
-    drag.tool_generation = toolbelt.selection_generation();
+    drag.tool_generation = tool_controller.tool_generation();
     drag.last_d = 0;
     drag.reference_d = reference_d;
     drag.preview.clear();
     gesture_lock.lock(PUSH_PULL_OWNER);
     tool_controller.begin_transaction("Push/Pull preview");
-    toolbelt.status = if mode.build_tool() == Some(ToolbeltTool::DrawRect) {
-        format!(
-            "Quick Push/Pull started: {} cells locked. Move to choose depth; click again to commit. RMB orbits.",
-            drag.face_cells.len()
-        )
-    } else if let Some(d) = reference_d {
+    toolbelt.status = if let Some(d) = reference_d {
         if reference_raw != reference_d {
             format!(
                 "Push Pull Face started with reference snap {d:+} layers (capped at {max_d}). Move to tune; click to commit."
@@ -847,7 +790,7 @@ pub fn update_drag(
     mut state: ResMut<SculptState>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut gesture_lock: ResMut<BuildGestureLock>,
-    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut tool_controller: ResMut<ToolController>,
 ) {
     if !drag.active {
         // Drain the queue so events don't pile up between drags.
@@ -857,7 +800,7 @@ pub fn update_drag(
     }
 
     gesture_lock.lock(PUSH_PULL_OWNER);
-    if pushpull_should_cancel_for_tool_selection(&drag, toolbelt.selection_generation()) {
+    if pushpull_should_cancel_for_tool_selection(&drag, tool_controller.tool_generation()) {
         revert_preview(&mut world, &mut drag);
         state.status = "Sculpt: cancelled by toolbox switch.".into();
         toolbelt.status =
@@ -870,7 +813,7 @@ pub fn update_drag(
         return;
     }
 
-    if !sculpt_active(&mode, &keys, drag.active) {
+    if !sculpt_active(&mode, tool_controller.active_tool()) {
         revert_preview(&mut world, &mut drag);
         state.status = "Sculpt: cancelled by tool switch.".into();
         toolbelt.status = "Push Pull Face cancelled by tool switch. Preview reverted.".into();
@@ -1170,6 +1113,7 @@ fn record_pushpull_semantics_for_history(
     sketch_doc: &mut crate::sketch_model::SketchDocument,
     sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
 ) -> Option<BuilderHistorySketchMeta> {
+    let undo_count_before = sketch_doc.undo_count();
     let records = match record_pushpull_semantics(drag, sketch_doc) {
         Ok(records) => records,
         Err(error) => {
@@ -1178,6 +1122,10 @@ fn record_pushpull_semantics_for_history(
         }
     };
     if records.is_empty() {
+        return None;
+    }
+    let document_steps = sketch_doc.undo_count().saturating_sub(undo_count_before);
+    if document_steps == 0 {
         return None;
     }
     register_pushpull_semantic_links(
@@ -1189,6 +1137,7 @@ fn record_pushpull_semantics_for_history(
     );
     Some(BuilderHistorySketchMeta::SketchCreated {
         link_snapshots: sketch_links.snapshot_entities(records.iter().map(|(entity, _)| *entity)),
+        document_steps,
     })
 }
 
@@ -1374,36 +1323,38 @@ pub fn universal_undo_input(
         return;
     }
     if keys.just_pressed(KeyCode::KeyZ) {
-        let undone = history.pop_undo_detailed(&mut world);
-        if undone.is_some() {
-            if let Some(step) = &undone {
-                step.apply_sketch_undo(&mut *sketch_doc, &mut *sketch_links);
-            }
+        let undone = history.undo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links);
+        if undone.as_ref().is_ok_and(|step| step.is_some()) {
             clear_stale_editor_selection_after_history_step(
                 &mut tool_controller,
                 &mut semantic_hover,
             );
         }
         state.status = match undone {
-            Some(step) => format!("Undo '{}': {} Voxel.", step.label, step.voxel_count),
-            None => "Undo: nichts vorhanden.".into(),
+            Ok(Some(step)) => format!("Undo '{}': {} Voxel.", step.label, step.voxel_count),
+            Ok(None) => "Undo: nothing to restore.".into(),
+            Err(step) => format!(
+                "Undo '{}' blocked: semantic history mismatch; world left unchanged.",
+                step.label
+            ),
         };
         toolbelt.status = state.status.clone();
         mode.status = state.status.clone();
     } else if keys.just_pressed(KeyCode::KeyY) || keys.just_pressed(KeyCode::KeyR) {
-        let redone = history.pop_redo_detailed(&mut world);
-        if redone.is_some() {
-            if let Some(step) = &redone {
-                step.apply_sketch_redo(&mut *sketch_doc, &mut *sketch_links);
-            }
+        let redone = history.redo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links);
+        if redone.as_ref().is_ok_and(|step| step.is_some()) {
             clear_stale_editor_selection_after_history_step(
                 &mut tool_controller,
                 &mut semantic_hover,
             );
         }
         state.status = match redone {
-            Some(step) => format!("Redo '{}': {} Voxel.", step.label, step.voxel_count),
-            None => "Redo: nichts vorhanden.".into(),
+            Ok(Some(step)) => format!("Redo '{}': {} Voxel.", step.label, step.voxel_count),
+            Ok(None) => "Redo: nothing to restore.".into(),
+            Err(step) => format!(
+                "Redo '{}' blocked: semantic history mismatch; world left unchanged.",
+                step.label
+            ),
         };
         toolbelt.status = state.status.clone();
         mode.status = state.status.clone();
@@ -1577,44 +1528,26 @@ mod tests {
     }
 
     #[test]
-    fn semantic_hover_runs_for_select_and_transform_tools() {
-        assert!(build_tool_needs_semantic_hover(Some(
-            ToolbeltTool::Navigate
-        )));
-        assert!(build_tool_needs_semantic_hover(Some(
-            ToolbeltTool::DrawRect
-        )));
-        assert!(build_tool_needs_semantic_hover(Some(
-            ToolbeltTool::TransformMove
-        )));
-        assert!(build_tool_needs_semantic_hover(Some(
-            ToolbeltTool::TransformScale
-        )));
-        assert!(build_tool_needs_semantic_hover(Some(
-            ToolbeltTool::TransformRotate
-        )));
-        assert!(build_tool_needs_semantic_hover(Some(
-            ToolbeltTool::MaterialPicker
-        )));
-
-        assert!(editor_tool_needs_semantic_hover(
-            crate::sketch_model::EditorToolId::Select
-        ));
-        assert!(editor_tool_needs_semantic_hover(
-            crate::sketch_model::EditorToolId::Move
-        ));
-        assert!(editor_tool_needs_semantic_hover(
-            crate::sketch_model::EditorToolId::Scale
-        ));
-        assert!(editor_tool_needs_semantic_hover(
-            crate::sketch_model::EditorToolId::Rotate
-        ));
-        assert!(editor_tool_needs_semantic_hover(
-            crate::sketch_model::EditorToolId::Material
-        ));
-        assert!(!editor_tool_needs_semantic_hover(
-            crate::sketch_model::EditorToolId::Rectangle
-        ));
+    fn semantic_hover_runs_for_every_canonical_pointer_tool() {
+        for tool in [
+            EditorToolId::Select,
+            EditorToolId::Pencil,
+            EditorToolId::Rectangle,
+            EditorToolId::PushPull,
+            EditorToolId::Move,
+            EditorToolId::Scale,
+            EditorToolId::Rotate,
+            EditorToolId::Room,
+            EditorToolId::CutOpening,
+            EditorToolId::Road,
+            EditorToolId::BotArea,
+            EditorToolId::Material,
+        ] {
+            assert!(editor_tool_needs_semantic_hover(tool), "{tool:?}");
+        }
+        assert!(legacy_crosshair_tool(Some(ToolbeltTool::BrushPlace)));
+        assert!(legacy_crosshair_tool(Some(ToolbeltTool::BrushCut)));
+        assert!(!legacy_crosshair_tool(Some(ToolbeltTool::DrawRect)));
     }
 
     #[test]
@@ -1945,56 +1878,38 @@ mod tests {
     fn semantic_select_input_only_runs_for_mouse_first_select_surface() {
         assert!(semantic_select_input_active(
             true,
-            Some(ToolbeltTool::Navigate),
-            crate::sketch_model::EditorToolId::Rectangle,
-            true,
-            false
-        ));
-        assert!(semantic_select_input_active(
-            true,
-            Some(ToolbeltTool::DrawRect),
-            crate::sketch_model::EditorToolId::Select,
+            EditorToolId::Select,
             true,
             false
         ));
         assert!(!semantic_select_input_active(
             true,
-            Some(ToolbeltTool::DrawRect),
-            crate::sketch_model::EditorToolId::Rectangle,
+            EditorToolId::Rectangle,
             true,
             false
         ));
         assert!(
             !semantic_select_input_active(
                 true,
-                Some(ToolbeltTool::DrawRect),
-                crate::sketch_model::EditorToolId::Move,
+                EditorToolId::Move,
                 true,
                 false
             ),
             "Move starts a transform from the existing selection; selection clicks must not steal the same press"
         );
         assert!(
-            !semantic_select_input_active(
-                true,
-                Some(ToolbeltTool::DrawRect),
-                crate::sketch_model::EditorToolId::Rotate,
-                true,
-                false
-            ),
+            !semantic_select_input_active(true, EditorToolId::Rotate, true, false),
             "Rotate must not have its first click reinterpreted as selection"
         );
         assert!(!semantic_select_input_active(
             true,
-            Some(ToolbeltTool::Navigate),
-            crate::sketch_model::EditorToolId::Select,
+            EditorToolId::Select,
             true,
             true
         ));
         assert!(!semantic_select_input_active(
             false,
-            Some(ToolbeltTool::Navigate),
-            crate::sketch_model::EditorToolId::Select,
+            EditorToolId::Select,
             true,
             false
         ));

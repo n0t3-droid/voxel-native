@@ -47,6 +47,8 @@ impl Plugin for SculptPlugin {
             .init_resource::<pushpull::PushPullReference>()
             .init_resource::<pushpull::HoverFace>()
             .init_resource::<transform::SemanticMoveDrag>()
+            .init_resource::<transform::SemanticRotateDrag>()
+            .init_resource::<transform::SemanticScaleDrag>()
             // Hover → face resolve → input → preview update → gizmo.
             // Order matters: drag-end must run AFTER update_drag so the
             // last applied preview is visible in `world.voxel_at` when
@@ -60,6 +62,18 @@ impl Plugin for SculptPlugin {
                     transform::begin_move_drag,
                     transform::update_move_drag,
                     transform::end_move_drag,
+                    transform::begin_rotate_drag,
+                    transform::update_rotate_drag,
+                    transform::end_rotate_drag,
+                    transform::begin_scale_drag,
+                    transform::update_scale_drag,
+                    transform::end_scale_drag,
+                )
+                    .chain(),
+            )
+            .add_systems(
+                Update,
+                (
                     pushpull::reference_input,
                     pushpull::begin_drag,
                     pushpull::update_drag,
@@ -68,12 +82,15 @@ impl Plugin for SculptPlugin {
                     pushpull::draw_face_gizmo,
                     pushpull::draw_reference_gizmo,
                     transform::draw_move_gizmo,
+                    transform::draw_rotate_gizmo,
+                    transform::draw_scale_gizmo,
                     draw::rect_draw_input,
                     draw::draw_rect_gizmo,
                     smart::smart_tower_input,
                     smart::smart_tower_gizmo,
                 )
-                    .chain(),
+                    .chain()
+                    .after(transform::end_scale_drag),
             )
             .add_systems(
                 Update,

@@ -20,7 +20,7 @@ use bevy::render::render_asset::RenderAssetUsages;
 
 use crate::blocks::{
     effective_material_for_voxel, material_is_custom, voxel_color, voxel_is_emissive,
-    voxel_is_opaque, MaterialId, Voxel, AIR, DEFAULT_MATERIAL,
+    voxel_is_opaque, BlockType, MaterialId, Voxel, AIR, DEFAULT_MATERIAL,
 };
 use crate::chunk::{ChunkPos, CHUNK_SIZE, CHUNK_SIZE_I};
 
@@ -212,6 +212,7 @@ pub fn build_mesh_ex<F: Fn(i32, i32, i32) -> Voxel>(
                             &mut colors,
                             &mut uvs,
                             &mut indices,
+                            [ox, oy, oz],
                             axis,
                             u,
                             v,
@@ -423,6 +424,7 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
                             &mut buf.colors,
                             &mut buf.uvs,
                             &mut buf.indices,
+                            [ox, oy, oz],
                             axis,
                             u,
                             v,
@@ -470,6 +472,7 @@ fn emit_quad(
     colors: &mut Vec<[f32; 4]>,
     uvs: &mut Vec<[f32; 2]>,
     indices: &mut Vec<u32>,
+    world_origin: [i32; 3],
     axis: usize,
     u: usize,
     v: usize,
@@ -520,17 +523,26 @@ fn emit_quad(
         positions.extend_from_slice(&[p00f, p01f, p11f, p10f]);
     }
 
-    // UVs: emit in block-space, matching the position order. The sampler
-    // wraps (Repeat), so a W×H greedy-merged quad tiles the grain
-    // texture W×H times — one copy per block. This is the trick that
-    // lets us keep greedy meshing AND get per-block texture detail
-    // without a custom shader.
-    let wf = w as f32;
-    let hf = h as f32;
+    // UVs are anchored to world axes instead of restarting at every greedy
+    // quad/chunk. Natural terrain uses broader projection so macro detail
+    // survives without the obvious one-tile-per-block checker pattern.
+    // This changes only vertex data: topology, material buckets and draw-call
+    // count remain identical. Custom and authored object materials retain
+    // their original one-tile-per-block scale.
+    let [uv00, uv10, uv11, uv01] = world_uv_rect(
+        world_origin,
+        u,
+        v,
+        u0,
+        v0,
+        w,
+        h,
+        texture_world_scale(voxel, material),
+    );
     if positive {
-        uvs.extend_from_slice(&[[0.0, 0.0], [wf, 0.0], [wf, hf], [0.0, hf]]);
+        uvs.extend_from_slice(&[uv00, uv10, uv11, uv01]);
     } else {
-        uvs.extend_from_slice(&[[0.0, 0.0], [0.0, hf], [wf, hf], [wf, 0.0]]);
+        uvs.extend_from_slice(&[uv00, uv01, uv11, uv10]);
     }
 
     // AO -> brightness multiplier. 0 (deeply occluded) → dim; 3 (open
@@ -590,4 +602,98 @@ fn emit_quad(
         base_idx + 2,
         base_idx + 3,
     ]);
+}
+
+#[inline]
+fn texture_world_scale(voxel: Voxel, material: MaterialId) -> f32 {
+    if material_is_custom(material) {
+        return 1.0;
+    }
+
+    match BlockType::from_voxel(voxel) {
+        BlockType::Water => 0.125,
+        BlockType::Stone
+        | BlockType::Dirt
+        | BlockType::Grass
+        | BlockType::Sand
+        | BlockType::Snow
+        | BlockType::TundraGrass
+        | BlockType::SavannaGrass
+        | BlockType::Gravel
+        | BlockType::Bedrock
+        | BlockType::RedSand
+        | BlockType::RedStone
+        | BlockType::MesaClay
+        | BlockType::MossStone
+        | BlockType::Limestone
+        | BlockType::Basalt
+        | BlockType::AlienMoss
+        | BlockType::BoneRock
+        | BlockType::GlowSand => 0.25,
+        _ => 1.0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn world_uv_rect(
+    world_origin: [i32; 3],
+    u_axis: usize,
+    v_axis: usize,
+    u0: i32,
+    v0: i32,
+    width: i32,
+    height: i32,
+    scale: f32,
+) -> [[f32; 2]; 4] {
+    let u_min = (world_origin[u_axis] + u0) as f32 * scale;
+    let v_min = (world_origin[v_axis] + v0) as f32 * scale;
+    let u_max = (world_origin[u_axis] + u0 + width) as f32 * scale;
+    let v_max = (world_origin[v_axis] + v0 + height) as f32 * scale;
+    [
+        [u_min, v_min],
+        [u_max, v_min],
+        [u_max, v_max],
+        [u_min, v_max],
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::CUSTOM_MATERIAL_BASE;
+
+    #[test]
+    fn natural_terrain_uvs_are_coarser_than_authored_materials() {
+        let grass = texture_world_scale(BlockType::Grass as Voxel, BlockType::Grass as MaterialId);
+        let water = texture_world_scale(BlockType::Water as Voxel, BlockType::Water as MaterialId);
+        let roof = texture_world_scale(
+            BlockType::RoofTile as Voxel,
+            BlockType::RoofTile as MaterialId,
+        );
+        let custom = texture_world_scale(BlockType::Grass as Voxel, CUSTOM_MATERIAL_BASE);
+
+        assert_eq!(grass, 0.25);
+        assert_eq!(water, 0.125);
+        assert_eq!(roof, 1.0);
+        assert_eq!(custom, 1.0);
+    }
+
+    #[test]
+    fn world_anchored_uvs_join_across_greedy_quad_boundaries() {
+        let left = world_uv_rect([0, 0, 0], 0, 2, 0, 3, 7, 4, 0.25);
+        let right = world_uv_rect([0, 0, 0], 0, 2, 7, 3, 5, 4, 0.25);
+
+        assert_eq!(left[1], right[0]);
+        assert_eq!(left[2], right[3]);
+    }
+
+    #[test]
+    fn world_anchored_uvs_join_across_chunk_boundaries() {
+        let left = world_uv_rect([0, 0, 0], 0, 2, CHUNK_SIZE_I - 2, 4, 2, 3, 0.25);
+        let right = world_uv_rect([CHUNK_SIZE_I, 0, 0], 0, 2, 0, 4, 3, 3, 0.25);
+
+        assert_eq!(left[1], right[0]);
+        assert_eq!(left[2], right[3]);
+    }
 }

@@ -851,7 +851,6 @@ pub struct ChunkStreamer {
     /// asset-GC sweep (which caused long-session memory drift).
     pub entities: AHashMap<ChunkPos, Vec<ChunkMeshEntity>>,
     pub material: Option<Handle<StandardMaterial>>,
-    pub water_material: Option<Handle<StandardMaterial>>,
     /// In-flight terrain-generation tasks (one per chunk position).
     pub pending_terrain: AHashMap<ChunkPos, Task<(ChunkPos, SharedVoxels)>>,
     /// In-flight meshing tasks (one per chunk position). `None` mesh =
@@ -937,14 +936,6 @@ fn init_world(
         base_color_texture: Some(grain.clone()),
         perceptual_roughness: 1.0,
         reflectance: 0.05,
-        ..default()
-    }));
-
-    streamer.water_material = Some(materials.add(StandardMaterial {
-        base_color: Color::srgba(0.2, 0.55, 0.85, 0.6),
-        perceptual_roughness: 0.1,
-        reflectance: 0.3,
-        alpha_mode: AlphaMode::AlphaToCoverage,
         ..default()
     }));
 }

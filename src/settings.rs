@@ -648,15 +648,6 @@ impl WorldSettings {
         self.cycle_speed = finite_or(self.cycle_speed, 0.01).clamp(0.0, 2.0);
         self.hud_panel_opacity =
             finite_or(self.hud_panel_opacity, default_hud_panel_opacity()).clamp(0.35, 0.92);
-        self.theme.style = crate::theme::ThemeStyle::LiquidGlass;
-        if self.theme.color == crate::theme::ThemeColor::Green {
-            self.theme.color = crate::theme::ThemeColor::Sakura;
-        }
-        self.theme.scanlines = false;
-        self.visual_preset = VisualPreset::NaturalWorld;
-        self.companion_ui.show_companion_dock = false;
-        self.companion_ui.editor_assist_enabled = false;
-
         self.weather.rain_intensity = finite_or(self.weather.rain_intensity, 0.0).clamp(0.0, 1.0);
         self.weather.snow_intensity = finite_or(self.weather.snow_intensity, 0.0).clamp(0.0, 1.0);
         self.weather.fog_density = finite_or(self.weather.fog_density, 0.0).clamp(0.0, 1.0);
@@ -1275,11 +1266,11 @@ mod tests {
         assert_eq!(settings.weather.fog_density, 1.0);
         assert_eq!(settings.weather.wind_x, 12.0);
         assert_eq!(settings.weather.wind_z, -12.0);
-        assert_eq!(settings.theme.style, crate::theme::ThemeStyle::LiquidGlass);
-        assert!(!settings.theme.scanlines);
-        assert_eq!(settings.visual_preset, VisualPreset::NaturalWorld);
-        assert!(!settings.companion_ui.show_companion_dock);
-        assert!(!settings.companion_ui.editor_assist_enabled);
+        assert_eq!(settings.theme.style, crate::theme::ThemeStyle::ClassicCrt);
+        assert!(settings.theme.scanlines);
+        assert_eq!(settings.visual_preset, VisualPreset::NeonShuttle);
+        assert!(settings.companion_ui.show_companion_dock);
+        assert!(settings.companion_ui.editor_assist_enabled);
     }
 
     #[test]
@@ -1387,12 +1378,12 @@ mod tests {
     }
 
     #[test]
-    fn old_green_terminal_accent_migrates_to_zen_sakura() {
+    fn runtime_safety_preserves_user_selected_theme_color() {
         let mut settings = WorldSettings::default();
         settings.theme.color = crate::theme::ThemeColor::Green;
 
         settings.normalize_runtime_safety();
 
-        assert_eq!(settings.theme.color, crate::theme::ThemeColor::Sakura);
+        assert_eq!(settings.theme.color, crate::theme::ThemeColor::Green);
     }
 }

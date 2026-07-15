@@ -35,6 +35,14 @@ pub const MATERIAL_DIR: &str = "textures/materials";
 /// enough that the repeated terrain texture survives mip/downsample blending.
 pub const BUILTIN_SWATCH_SIZE: u32 = 128;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TerrainMaterialProfile {
+    base_alpha: f32,
+    perceptual_roughness: f32,
+    reflectance: f32,
+    alpha_mode: AlphaMode,
+}
+
 #[derive(Resource, Default)]
 pub struct MaterialLibrary {
     pub handles: std::collections::BTreeMap<MaterialId, Handle<StandardMaterial>>,
@@ -55,6 +63,28 @@ pub(crate) fn terrain_alpha_mode_for_block(block: BlockType) -> AlphaMode {
     }
 }
 
+fn terrain_material_profile(block: BlockType) -> TerrainMaterialProfile {
+    let alpha = block.color().to_srgba().alpha;
+    if block == BlockType::Water {
+        // Water opacity comes from the mesh's voxel tint. The material and
+        // procedural ripple albedo stay opaque, avoiding alpha being
+        // multiplied by texture, material and vertex color.
+        TerrainMaterialProfile {
+            base_alpha: 1.0,
+            perceptual_roughness: 0.18,
+            reflectance: 0.50,
+            alpha_mode: AlphaMode::AlphaToCoverage,
+        }
+    } else {
+        TerrainMaterialProfile {
+            base_alpha: alpha,
+            perceptual_roughness: 1.0,
+            reflectance: 0.05,
+            alpha_mode: terrain_alpha_mode_for_block(block),
+        }
+    }
+}
+
 impl MaterialLibrary {
     pub fn rebuild(
         &mut self,
@@ -71,7 +101,7 @@ impl MaterialLibrary {
                 swatch.height,
                 swatch.rgba.clone(),
             ));
-            let alpha = swatch.block.color().to_srgba().alpha;
+            let profile = terrain_material_profile(swatch.block);
             let emissive = if swatch.block.is_emissive() {
                 let lin = swatch.block.color().to_linear();
                 LinearRgba::rgb(
@@ -83,12 +113,12 @@ impl MaterialLibrary {
                 LinearRgba::BLACK
             };
             let handle = materials.add(StandardMaterial {
-                base_color: Color::WHITE.with_alpha(alpha),
+                base_color: Color::WHITE.with_alpha(profile.base_alpha),
                 base_color_texture: Some(image),
                 emissive,
-                perceptual_roughness: 1.0,
-                reflectance: 0.05,
-                alpha_mode: terrain_alpha_mode_for_block(swatch.block),
+                perceptual_roughness: profile.perceptual_roughness,
+                reflectance: profile.reflectance,
+                alpha_mode: profile.alpha_mode,
                 ..default()
             });
             let id = swatch.block as MaterialId;
@@ -381,7 +411,14 @@ fn bake_block_swatch(
     let color = block.color();
     let rgba = color.to_srgba();
     let base = [rgba.red, rgba.green, rgba.blue];
-    let alpha = (rgba.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    // Water opacity belongs to its material/voxel tint, not its albedo map.
+    // Keeping ripple texels opaque prevents accidental alpha multiplication
+    // while retaining the existing procedural ripple colour resource.
+    let alpha = if block == BlockType::Water {
+        u8::MAX
+    } else {
+        (rgba.alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+    };
 
     let seed_base = block as u32;
     let perlin = Perlin::new(seed_base + 101);
@@ -795,5 +832,37 @@ mod tests {
                 "{block:?} should stay out of Bevy's sorted alpha-blend terrain path"
             );
         }
+    }
+
+    #[test]
+    fn water_material_uses_reflective_low_roughness_profile() {
+        let water = terrain_material_profile(BlockType::Water);
+        let grass = terrain_material_profile(BlockType::Grass);
+
+        assert!(water.perceptual_roughness < 0.25);
+        assert!(water.reflectance >= 0.45);
+        assert!(water.perceptual_roughness < grass.perceptual_roughness);
+        assert!(water.reflectance > grass.reflectance);
+        assert_eq!(water.alpha_mode, AlphaMode::AlphaToCoverage);
+        assert_eq!(water.base_alpha, 1.0);
+        assert!((0.50..=0.80).contains(&BlockType::Water.color().to_srgba().alpha));
+    }
+
+    #[test]
+    fn water_ripple_albedo_is_opaque_and_keeps_visible_detail() {
+        let swatch = bake_block_swatch(
+            BlockType::Water,
+            "water",
+            BlockStyle::Water,
+            BUILTIN_SWATCH_SIZE,
+        );
+
+        assert!(swatch.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        let signatures = downsample_signature_count(&swatch, 4);
+        assert!(
+            signatures > 8,
+            "water only preserved {signatures} ripple signatures"
+        );
+        assert!(luma_range(&swatch) > 8);
     }
 }
