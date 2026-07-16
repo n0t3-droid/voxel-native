@@ -2134,7 +2134,7 @@ fn draw_editor_drawer(
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
                         for (label, size) in brush_presets() {
-                            if brush_preset_chip(ui, label, size, brush) {
+                            if brush_preset_chip(ui, label, size, brush, theme) {
                                 result.brush_preset = Some(size);
                             }
                         }
@@ -2693,26 +2693,17 @@ fn brush_presets() -> [(&'static str, IVec3); 6] {
     ]
 }
 
-fn brush_preset_chip(ui: &mut egui::Ui, label: &'static str, size: IVec3, brush: IVec3) -> bool {
+fn brush_preset_chip(
+    ui: &mut egui::Ui,
+    label: &'static str,
+    size: IVec3,
+    brush: IVec3,
+    theme: crate::theme::ThemeSettings,
+) -> bool {
     let selected = brush == size;
-    let text = egui::RichText::new(label)
-        .monospace()
-        .size(10.0)
-        .color(if selected { egui::Color32::BLACK } else { TEXT });
-    let fill = if selected {
-        AMBER
-    } else {
-        egui::Color32::from_rgba_premultiplied(0, 20, 12, 185)
-    };
-    ui.add(
-        egui::Button::new(text)
-            .fill(fill)
-            .stroke(egui::Stroke::new(1.0, AMBER.linear_multiply(0.70)))
-            .rounding(egui::Rounding::same(4.0))
-            .min_size(egui::vec2(44.0, 24.0)),
-    )
-    .on_hover_text("Live brush footprint")
-    .clicked()
+    crate::ui_kit::choice_chip_sized(ui, label, selected, 52.0, theme)
+        .on_hover_text("Live brush footprint")
+        .clicked()
 }
 
 #[cfg(test)]

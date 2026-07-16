@@ -506,11 +506,6 @@ fn draw_play_hud(
     }
 
     let ctx = contexts.ctx_mut();
-    crate::theme::set_motion_preferences(
-        ctx,
-        settings.reduce_motion,
-        settings.runtime_profile == RuntimeProfile::LowSpec,
-    );
 
     let player_position = player_q
         .get_single()

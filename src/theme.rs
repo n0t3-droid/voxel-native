@@ -463,7 +463,7 @@ fn default_scanlines() -> bool {
 }
 
 /// Persistent theme preferences. Lives inside [`crate::settings::WorldSettings`].
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeSettings {
     #[serde(default)]
     pub color: ThemeColor,
@@ -859,7 +859,6 @@ pub fn draw_theme_preview_card(
 /// the chosen primary phosphor.
 pub const AMBER: egui::Color32 = egui::Color32::from_rgb(0xE8, 0xB8, 0x5C);
 /// Hard alert colour for irreversible / destructive actions.
-pub const ALERT: egui::Color32 = egui::Color32::from_rgb(0xF2, 0x6D, 0x78);
 /// Text colour on dark panels (slightly off-white to read as monochrome).
 pub const TEXT: egui::Color32 = egui::Color32::from_rgb(0xEA, 0xF2, 0xEE);
 /// Cool secondary accent for navigation / links.
@@ -1232,10 +1231,15 @@ pub fn draw_status_bar(ui: &mut egui::Ui, theme: ThemeSettings, text: &str) {
 /// straight horizontal lines drawn in the foreground layer; cheaper
 /// than uploading a tiled texture for the area we cover.
 pub fn paint_scanlines(ctx: &egui::Context, rect: egui::Rect, theme: ThemeSettings) {
-    if !theme.scanlines {
+    if !theme.scanlines || prefers_low_spec(ctx) {
         return;
     }
-    let dim = theme.color.dim().linear_multiply(0.10);
+    let (alpha, step) = if prefers_reduced_motion(ctx) {
+        (0.07, 7.0)
+    } else {
+        (0.10, 3.0)
+    };
+    let dim = theme.color.dim().linear_multiply(alpha);
     let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("editor_scanlines"));
     let painter = ctx.layer_painter(layer);
     let mut y = rect.top().floor();
@@ -1244,7 +1248,7 @@ pub fn paint_scanlines(ctx: &egui::Context, rect: egui::Rect, theme: ThemeSettin
             [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
             egui::Stroke::new(1.0, dim),
         );
-        y += 3.0;
+        y += step;
     }
 }
 

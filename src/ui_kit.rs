@@ -108,7 +108,12 @@ fn control_visuals(
     let active = motion.selection.max(motion.press);
     let hover_fill = mix_color(colors.surface, colors.surface_hover, hover_or_focus);
     let selected_fill = mix_color(hover_fill, colors.selected, motion.selection);
-    let fill = mix_color(selected_fill, colors.surface_active, motion.press);
+    let selected_hover_fill = mix_color(
+        selected_fill,
+        colors.surface_active,
+        hover_or_focus * motion.selection * 0.16,
+    );
+    let fill = mix_color(selected_hover_fill, colors.surface_active, motion.press);
     let selected_text = theme.text_on(colors.selected);
     let active_text = theme.text_on(colors.surface_active);
     let text = mix_color(
@@ -898,18 +903,14 @@ fn paint_arc(
     };
     let arc_length = radius * std::f32::consts::TAU * sweep_turn;
     let segments = (arc_length / 2.0).ceil().clamp(3.0, 32.0) as usize;
-    let mut points = Vec::with_capacity(segments + 1);
-    for segment in 0..=segments {
+    let mut previous = point_on_turn(center, radius, start_turn);
+    for segment in 1..=segments {
         let amount = segment as f32 / segments as f32;
-        points.push(point_on_turn(
-            center,
-            radius,
-            start_turn + sweep_turn * amount,
-        ));
+        let next = point_on_turn(center, radius, start_turn + sweep_turn * amount);
+        painter.line_segment([previous, next], stroke);
+        previous = next;
     }
-    let end = points.last().copied();
-    painter.add(egui::Shape::line(points, stroke));
-    end
+    Some(previous)
 }
 
 /// Paint-only loading primitive. It never requests a repaint; callers that
@@ -1278,6 +1279,29 @@ pub fn icon_square(
     theme: ThemeSettings,
     tooltip: &str,
 ) -> egui::Response {
+    icon_square_tone(ui, icon, selected, theme, tooltip, ActionTone::Standard)
+}
+
+/// Compact destructive action with the same focus, hover and press motion as
+/// every other Kanso control. Keeping this icon-only avoids oversized text
+/// buttons in dense editor rows.
+pub fn danger_icon_square(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    theme: ThemeSettings,
+    tooltip: &str,
+) -> egui::Response {
+    icon_square_tone(ui, icon, false, theme, tooltip, ActionTone::Danger)
+}
+
+fn icon_square_tone(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    selected: bool,
+    theme: ThemeSettings,
+    tooltip: &str,
+    tone: ActionTone,
+) -> egui::Response {
     let colors = theme.semantic();
     let (rect, response) = ui.allocate_exact_size(
         egui::Vec2::splat(KANSO_LAYOUT.icon_square_size),
@@ -1286,7 +1310,7 @@ pub fn icon_square(
     let state = InteractionState::from_response(&response, selected);
     let motion = ControlMotion::sample(ui, &response, selected, MotionRole::Feedback);
     let paint_rect = motion.paint_rect(rect);
-    let visuals = control_visuals(theme, state, motion);
+    let visuals = tone_control_visuals(theme, state, motion, tone);
     let painter = ui.painter_at(rect.expand(KANSO_VISUALS.focus_gap + 3.0));
     paint_control_shell(&painter, paint_rect, colors, visuals, motion.focus);
     paint_icon(&painter, paint_rect.shrink(8.0), icon, visuals.icon);
@@ -1490,7 +1514,8 @@ mod tests {
             focused: true,
             pressed: false,
         });
-        assert_eq!(focused_selected.fill, colors.selected);
+        assert_ne!(focused_selected.fill, colors.selected);
+        assert_ne!(focused_selected.fill, colors.surface_active);
         assert_eq!(focused_selected.outline, colors.outline_active);
         assert_eq!(focused_selected.icon, colors.focus);
         assert_eq!(focused_selected.outline_width, KANSO_VISUALS.focus_width);

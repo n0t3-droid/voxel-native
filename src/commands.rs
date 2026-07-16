@@ -18,7 +18,10 @@ use crate::icons::{paint_icon, Icon};
 use crate::menu::{GameState, PauseScreen};
 use crate::player::{Player, PlayerProgressScratch};
 use crate::settings::{self, ActiveWorld, CompanionDockPosition, HudProfile, WorldSettings};
-use crate::theme::{command_frame, metric_pill, ThemeSettings, UiDensity, AMBER, CYAN, TEXT};
+use crate::theme::{
+    allows_continuous_motion, command_frame, metric_pill, ThemeSettings, UiDensity, AMBER, CYAN,
+    TEXT,
+};
 use crate::toolbelt::{ToolbeltState, ToolbeltTool};
 
 pub struct CommandDeckPlugin;
@@ -628,13 +631,21 @@ fn draw_command_palette(
     let ctx = contexts.ctx_mut();
     let theme = settings.theme;
     let screen = ctx.screen_rect();
-    let time = ctx.input(|i| i.time) as f32;
+    let continuous_motion = allows_continuous_motion(ctx);
+    let time = if continuous_motion {
+        ctx.input(|i| i.time) as f32
+    } else {
+        0.0
+    };
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
         egui::Id::new("command_palette_dim"),
     ));
     painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(190));
     draw_data_ribs(ctx, theme, time);
+    if continuous_motion {
+        ctx.request_repaint_after(std::time::Duration::from_millis(67));
+    }
 
     let width = screen.width().clamp(360.0, 860.0) - 32.0;
     let height = screen.height().clamp(420.0, 680.0) - 34.0;
@@ -721,10 +732,10 @@ fn draw_command_palette(
 
 fn draw_palette_header(ui: &mut egui::Ui, theme: ThemeSettings, state: &GameState) {
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(42.0, 42.0), egui::Sense::hover());
+        let response = crate::ui_kit::orbit_pulse(ui, true, theme);
         paint_icon(
             ui.painter(),
-            rect.shrink(4.0),
+            response.rect.shrink(11.0),
             Icon::Search,
             theme.color.primary(),
         );

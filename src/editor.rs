@@ -13,7 +13,7 @@ use crate::animation::{AnimationStudio, Interp, KeyFrame};
 use crate::blocks::{block_label, block_palette_catalog, BlockPaletteEntry, BlockType};
 use crate::builder::{BuildAction, BuilderClipboard, BuilderHistory, BuilderState};
 use crate::icons::Icon;
-use crate::neurocore::RuntimeProfile;
+use crate::neurocore::{NeuroCore, QualityState, RuntimeProfile};
 use crate::player::Player;
 use crate::settings::{
     GraphicsMode, HudProfile, SceneryQuality, TimeMode, WeatherPreset, WorldModeCard,
@@ -25,9 +25,10 @@ use crate::settings::{
 };
 use crate::textures::{bake_all_block_swatches, BlockSwatch, TEX_DIR};
 use crate::theme::{
-    apply_hacker_theme, draw_banner, draw_status_bar, draw_theme_preview_card, paint_scanlines,
-    section_box, selected_theme_preset, set_reduced_motion, status_line, term_button, ThemeColor,
-    ThemeStyle, UiDensity, ALERT, AMBER, THEME_PRESETS,
+    allows_continuous_motion, animate_bool_finite, apply_hacker_theme, draw_banner,
+    draw_status_bar, draw_theme_preview_card, paint_scanlines, section_box, selected_theme_preset,
+    set_motion_preferences, status_line, term_button, MotionRole, ThemeColor, ThemeSettings,
+    ThemeStyle, UiDensity, AMBER, THEME_PRESETS,
 };
 use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
 
@@ -151,6 +152,13 @@ pub struct TextureLibrary {
 
 pub struct EditorPlugin;
 
+#[derive(Resource, Debug, Default)]
+struct AppliedUiStyle {
+    theme: Option<ThemeSettings>,
+    reduced_motion: Option<bool>,
+    low_spec_motion: Option<bool>,
+}
+
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin)
@@ -158,11 +166,12 @@ impl Plugin for EditorPlugin {
             .insert_resource(TextureLibrary::default())
             .insert_resource(SimPause::default())
             .insert_resource(FpsHistory::default())
-            .add_systems(Startup, style_egui)
+            .init_resource::<AppliedUiStyle>()
+            .add_systems(Startup, sync_global_ui_style)
             .add_systems(
                 Update,
                 (
-                    restyle_on_change,
+                    sync_global_ui_style,
                     toggle_editor,
                     toggle_sim_pause,
                     sample_fps_history,
@@ -183,26 +192,48 @@ struct EditorWorldTools<'w> {
     selection: Res<'w, crate::selection::SelectionState>,
 }
 
-/// Apply the hacker terminal theme. Re-runs whenever the user picks a
-/// new colour variant in the SYSTEM tab so the change is instant.
-fn style_egui(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
+fn effective_low_spec_ui_motion(
+    profile: RuntimeProfile,
+    neurocore_enabled: bool,
+    quality: QualityState,
+) -> bool {
+    profile == RuntimeProfile::LowSpec
+        || (neurocore_enabled
+            && profile == RuntimeProfile::Auto
+            && matches!(quality, QualityState::Critical | QualityState::Throttled))
+}
+
+/// Keep every egui surface on one motion and theme policy. The cache avoids
+/// rebuilding the complete egui style when unrelated world settings change.
+fn sync_global_ui_style(
+    mut contexts: EguiContexts,
+    settings: Res<WorldSettings>,
+    neurocore: Option<Res<NeuroCore>>,
+    mut applied: ResMut<AppliedUiStyle>,
+) {
     let Some(ctx) = contexts.try_ctx_mut() else {
         return;
     };
-    set_reduced_motion(ctx, settings.reduce_motion);
-    apply_hacker_theme(ctx, settings.theme);
-}
+    let quality = neurocore
+        .as_deref()
+        .map(|core| core.quality)
+        .unwrap_or(QualityState::Nominal);
+    let low_spec = effective_low_spec_ui_motion(
+        settings.runtime_profile,
+        settings.neurocore_enabled,
+        quality,
+    );
 
-/// Re-apply theme when the user changes the colour / scanline / beep
-/// settings. Cheap (one-shot Visuals + Style replacement, no per-frame
-/// cost) so we just listen for `WorldSettings` changes.
-fn restyle_on_change(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
-    if settings.is_changed() {
-        let Some(ctx) = contexts.try_ctx_mut() else {
-            return;
-        };
-        set_reduced_motion(ctx, settings.reduce_motion);
+    let motion_changed = applied.reduced_motion != Some(settings.reduce_motion)
+        || applied.low_spec_motion != Some(low_spec);
+    if motion_changed {
+        set_motion_preferences(ctx, settings.reduce_motion, low_spec);
+        applied.reduced_motion = Some(settings.reduce_motion);
+        applied.low_spec_motion = Some(low_spec);
+    }
+    if motion_changed || applied.theme != Some(settings.theme) {
         apply_hacker_theme(ctx, settings.theme);
+        applied.theme = Some(settings.theme);
     }
 }
 
@@ -274,7 +305,12 @@ fn draw_editor(
     };
     handle_editor_keyboard(&tools.keys, &mut state);
 
-    let anim = ctx.animate_bool_with_time(egui::Id::new("editor_open"), state.open, 0.18);
+    let anim = animate_bool_finite(
+        ctx,
+        egui::Id::new("editor_open"),
+        state.open,
+        MotionRole::Panel,
+    );
     if anim <= 0.001 {
         return;
     }
@@ -295,7 +331,12 @@ fn draw_editor(
     let slide_x = (1.0 - eased) * 32.0;
     let pos = egui::pos2(target_pos.x + slide_x, target_pos.y);
     let panel_rect = egui::Rect::from_min_size(pos, egui::vec2(panel_w, panel_h));
-    let ui_time = ctx.input(|i| i.time) as f32;
+    let continuous_motion = allows_continuous_motion(ctx);
+    let ui_time = if continuous_motion {
+        ctx.input(|i| i.time) as f32
+    } else {
+        0.0
+    };
 
     // Keep the game readable behind the editor; the panel is an in-world
     // hologram, not a modal desktop window.
@@ -317,7 +358,17 @@ fn draw_editor(
             .linear_multiply(0.55 + eased * 0.35),
     );
 
-    draw_editor_hologram_backplate(ctx, panel_rect, settings.theme, ui_time, eased);
+    draw_editor_hologram_backplate(
+        ctx,
+        panel_rect,
+        settings.theme,
+        ui_time,
+        eased,
+        continuous_motion,
+    );
+    if continuous_motion && state.open {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
 
     let response = egui::Window::new("voxel_native_editor")
         .title_bar(false)
@@ -469,6 +520,7 @@ fn draw_editor_hologram_backplate(
     theme: crate::theme::ThemeSettings,
     time: f32,
     alpha: f32,
+    continuous_motion: bool,
 ) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Middle,
@@ -514,7 +566,12 @@ fn draw_editor_hologram_backplate(
         );
     }
 
-    let sweep_x = rect.left() + ((time * 0.18).fract()) * rect.width();
+    let sweep_phase = if continuous_motion {
+        (time * 0.18).fract()
+    } else {
+        0.72
+    };
+    let sweep_x = rect.left() + sweep_phase * rect.width();
     painter.line_segment(
         [
             egui::pos2(sweep_x, rect.top()),
@@ -535,7 +592,11 @@ fn draw_editor_hologram_backplate(
     for i in 0..=rows {
         let k = i as f32 / rows as f32;
         let y = rect.top() + k * rect.height();
-        let pulse = ((time * 2.0 + i as f32 * 0.7).sin() * 0.5 + 0.5) * 28.0;
+        let pulse = if continuous_motion {
+            ((time * 2.0 + i as f32 * 0.7).sin() * 0.5 + 0.5) * 28.0
+        } else {
+            8.0
+        };
         painter.line_segment(
             [
                 egui::pos2(rect.left() - 8.0, y),
@@ -573,14 +634,11 @@ fn draw_header(ui: &mut egui::Ui, state: &mut EditorState, theme: crate::theme::
         crate::ui_kit::status_chip(ui, Icon::Hud, "STYLE", style_label, theme);
         crate::ui_kit::status_chip(ui, Icon::Help, "TOOLS", "sidebar tabs / page step", theme);
     });
-    // Tiny inline close "x" so the panel still has a visible close.
+    // Keep the close action compact while sharing the editor-wide interaction
+    // motion and danger semantics.
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let btn = egui::Button::new(egui::RichText::new("[ X ]").color(ALERT).monospace())
-                .fill(egui::Color32::BLACK)
-                .stroke(egui::Stroke::new(1.0, ALERT))
-                .rounding(egui::Rounding::ZERO);
-            if ui.add(btn).clicked() {
+            if crate::ui_kit::danger_icon_square(ui, Icon::Close, theme, "Close editor").clicked() {
                 state.open = false;
             }
         });
@@ -1384,6 +1442,94 @@ fn draw_player_tab(ui: &mut egui::Ui, player_q: &mut Query<(&mut Transform, &mut
     ui.add(egui::Slider::new(&mut player.sensitivity, 0.0005..=0.01).text("Maus-Sensitivitaet"));
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamingUiPhase {
+    Idle,
+    Scanning {
+        cursor: usize,
+        total: usize,
+    },
+    Building {
+        terrain: usize,
+        meshes: usize,
+        dirty: usize,
+    },
+    Ready,
+}
+
+fn classify_streaming_ui_phase(
+    frontier_complete: bool,
+    load_cursor: usize,
+    load_total: usize,
+    pending_terrain: usize,
+    pending_meshes: usize,
+    dirty_chunks: usize,
+) -> StreamingUiPhase {
+    if frontier_complete && pending_terrain == 0 && pending_meshes == 0 && dirty_chunks == 0 {
+        StreamingUiPhase::Ready
+    } else if !frontier_complete && load_total > 0 && load_cursor < load_total {
+        StreamingUiPhase::Scanning {
+            cursor: load_cursor.min(load_total),
+            total: load_total,
+        }
+    } else if pending_terrain > 0 || pending_meshes > 0 || dirty_chunks > 0 {
+        StreamingUiPhase::Building {
+            terrain: pending_terrain,
+            meshes: pending_meshes,
+            dirty: dirty_chunks,
+        }
+    } else {
+        StreamingUiPhase::Idle
+    }
+}
+
+fn draw_streaming_activity(
+    ui: &mut egui::Ui,
+    world: &VoxelWorld,
+    streamer: &ChunkStreamer,
+    theme: ThemeSettings,
+) {
+    let phase = classify_streaming_ui_phase(
+        streamer.frontier_complete,
+        streamer.load_cursor,
+        streamer.load_offsets.len(),
+        streamer.pending_terrain.len(),
+        streamer.pending_meshes.len(),
+        streamer.dirty_queue.len() + world.edit_dirty_chunks.len(),
+    );
+    let (state, label, value) = match phase {
+        StreamingUiPhase::Idle => (
+            crate::ui_kit::LoadingState::Idle,
+            "WORLD STREAM",
+            "Waiting for a world anchor".to_owned(),
+        ),
+        StreamingUiPhase::Scanning { cursor, total } => (
+            crate::ui_kit::LoadingState::Progress(cursor as f32 / total.max(1) as f32),
+            "WORLD SCAN",
+            format!("Frontier {cursor}/{total} // nearby first"),
+        ),
+        StreamingUiPhase::Building {
+            terrain,
+            meshes,
+            dirty,
+        } => (
+            crate::ui_kit::LoadingState::Indeterminate,
+            "WORLD BUILD",
+            format!("Terrain {terrain} // meshes {meshes} // updates {dirty}"),
+        ),
+        StreamingUiPhase::Ready => (
+            crate::ui_kit::LoadingState::Complete,
+            "WORLD READY",
+            format!(
+                "{} chunks // {} visible mesh groups",
+                world.chunks.len(),
+                streamer.entities.len()
+            ),
+        ),
+    };
+    crate::ui_kit::activity_status(ui, state, label, &value, theme);
+}
+
 fn draw_system_tab(
     ui: &mut egui::Ui,
     state: &mut EditorState,
@@ -1428,6 +1574,9 @@ fn draw_system_tab(
         .size(11.0)
         .color(AMBER),
     );
+    ui.add_space(6.0);
+
+    draw_streaming_activity(ui, world, streamer, settings.theme);
     ui.add_space(6.0);
 
     section_heading(ui, "HUD + READABILITY");
@@ -1742,6 +1891,62 @@ mod tests {
 
         assert!(editor_action_hint().contains("Toolbox"));
         assert!(editor_action_hint().contains("Save"));
+    }
+
+    #[test]
+    fn ui_motion_follows_explicit_and_adaptive_low_spec_states() {
+        assert!(effective_low_spec_ui_motion(
+            RuntimeProfile::LowSpec,
+            false,
+            QualityState::Nominal
+        ));
+        assert!(effective_low_spec_ui_motion(
+            RuntimeProfile::Auto,
+            true,
+            QualityState::Critical
+        ));
+        assert!(effective_low_spec_ui_motion(
+            RuntimeProfile::Auto,
+            true,
+            QualityState::Throttled
+        ));
+        assert!(!effective_low_spec_ui_motion(
+            RuntimeProfile::Auto,
+            false,
+            QualityState::Critical
+        ));
+        assert!(!effective_low_spec_ui_motion(
+            RuntimeProfile::Balanced,
+            true,
+            QualityState::Critical
+        ));
+    }
+
+    #[test]
+    fn streaming_status_only_reports_ready_when_every_queue_is_drained() {
+        assert_eq!(
+            classify_streaming_ui_phase(true, 16, 16, 0, 0, 0),
+            StreamingUiPhase::Ready
+        );
+        assert_eq!(
+            classify_streaming_ui_phase(false, 4, 16, 0, 0, 0),
+            StreamingUiPhase::Scanning {
+                cursor: 4,
+                total: 16
+            }
+        );
+        assert_eq!(
+            classify_streaming_ui_phase(true, 16, 16, 2, 3, 4),
+            StreamingUiPhase::Building {
+                terrain: 2,
+                meshes: 3,
+                dirty: 4
+            }
+        );
+        assert_eq!(
+            classify_streaming_ui_phase(false, 0, 0, 0, 0, 0),
+            StreamingUiPhase::Idle
+        );
     }
 }
 
@@ -2447,7 +2652,9 @@ fn draw_animation_tab(ui: &mut egui::Ui, studio: &mut AnimationStudio) {
                                 ui.selectable_value(&mut k.interp, mode, mode.label());
                             }
                         });
-                    if ui.small_button("X").clicked() {
+                    if crate::ui_kit::danger_icon_square(ui, Icon::Delete, theme, "Delete keyframe")
+                        .clicked()
+                    {
                         remove = Some(i);
                     }
                 });
