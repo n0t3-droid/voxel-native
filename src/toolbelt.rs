@@ -4,17 +4,23 @@
 //! moving/flying while LMB/RMB works directly in the world. Weapons are
 //! holstered for the whole edit state, including the drawer.
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
-use crate::blocks::{block_label, block_palette_catalog, BlockPaletteEntry, BlockType};
+use crate::blocks::{block_label, BlockType};
 use crate::builder::{BuilderHistory, BuilderState};
 use crate::city::CityTool;
+use crate::creator_library::{
+    apply_creator_library_action, draw_creator_library, CreatorLibraryAction, CreatorLibraryEffect,
+    CreatorLibraryState,
+};
 use crate::icons::{paint_icon, Icon};
 use crate::menu::GameState;
 use crate::mode::{ActiveMode, ModeContext};
 use crate::settings::WorldSettings;
+use crate::ships::{ShipInventory, ShipPlacementState};
 use crate::theme::{AMBER, TEXT};
 use crate::world::VoxelWorld;
 
@@ -657,6 +663,13 @@ impl Plugin for ToolbeltPlugin {
     }
 }
 
+#[derive(SystemParam)]
+struct CreatorLibraryParams<'w> {
+    library: ResMut<'w, CreatorLibraryState>,
+    ships: ResMut<'w, ShipInventory>,
+    placement: ResMut<'w, ShipPlacementState>,
+}
+
 fn draw_toolbelt(
     mut contexts: EguiContexts,
     time: Res<Time>,
@@ -672,6 +685,7 @@ fn draw_toolbelt(
     mut tool_controller: ResMut<crate::sketch_model::ToolController>,
     mut semantic_hover: ResMut<crate::sketch_model::SemanticHoverHit>,
     mut wheel: EventReader<MouseWheel>,
+    mut creator: CreatorLibraryParams,
 ) {
     if !mode.is_build() {
         ui_focus.pointer_over_editor_ui = false;
@@ -682,7 +696,11 @@ fn draw_toolbelt(
         return;
     }
 
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        ui_focus.pointer_over_editor_ui = false;
+        wheel.clear();
+        return;
+    };
     let theme = settings.theme;
     let primary = theme.color.primary();
     let expanded = mode.is_build_picker();
@@ -711,6 +729,8 @@ fn draw_toolbelt(
         ui_focus.hover_drawer_group,
         theme,
         primary,
+        &mut creator.library,
+        &creator.ships,
         ctx,
     );
     ui_focus.pointer_over_editor_ui = dock.wheel_navigation_hovered || dock.hover_bridge_hovered;
@@ -770,11 +790,28 @@ fn draw_toolbelt(
             sketch_doc.default_material(),
         );
     }
-    if let Some(block) = dock.block_choice {
-        builder.block = block;
-        builder.status = format!("Material: {}", block_label(block));
-        toolbelt.status = builder.status.clone();
-        mode.status = builder.status.clone();
+    let library_action = dock
+        .creator_action
+        .or_else(|| dock.block_choice.map(CreatorLibraryAction::SelectMaterial));
+    if let Some(action) = library_action {
+        let effect = apply_creator_library_action(
+            action,
+            &mut creator.library,
+            &mut builder,
+            &mut creator.ships,
+            &mut creator.placement,
+            &mut mode,
+        );
+        match effect {
+            CreatorLibraryEffect::MaterialSelected => {
+                builder.status = creator.library.status.clone();
+                toolbelt.status = builder.status.clone();
+                mode.status = builder.status.clone();
+            }
+            CreatorLibraryEffect::PlacementStarted => {
+                toolbelt.status = mode.status.clone();
+            }
+        }
     }
     if dock.toggle_picker {
         let tool = mode.build_tool().unwrap_or(toolbelt.tool);
@@ -957,6 +994,7 @@ struct BuildDockResult {
     brush_preset: Option<IVec3>,
     workflow_preset: Option<BuildWorkflowPreset>,
     block_choice: Option<BlockType>,
+    creator_action: Option<CreatorLibraryAction>,
     history_command: Option<HistoryCommand>,
 }
 
@@ -1772,6 +1810,8 @@ fn draw_build_dock(
     retained_hover_group: Option<ToolboxGroupId>,
     theme: crate::theme::ThemeSettings,
     primary: egui::Color32,
+    creator_library: &mut CreatorLibraryState,
+    ships: &ShipInventory,
     ctx: &egui::Context,
 ) -> BuildDockResult {
     let mut result = BuildDockResult::default();
@@ -1821,6 +1861,8 @@ fn draw_build_dock(
                 brush,
                 theme,
                 colors.info,
+                creator_library,
+                ships,
                 &mut result,
             );
         }
@@ -2082,12 +2124,18 @@ fn draw_editor_drawer(
     brush: IVec3,
     theme: crate::theme::ThemeSettings,
     accent: egui::Color32,
+    creator_library: &mut CreatorLibraryState,
+    ships: &ShipInventory,
     result: &mut BuildDockResult,
 ) {
     let colors = theme.semantic();
     let frame =
         crate::ui_kit::toolbench_frame(theme).inner_margin(egui::Margin::symmetric(10.0, 10.0));
 
+    let drawer_width = (ctx.screen_rect().width() - TOOLBOX_DRAWER_LEFT - 28.0)
+        .max(180.0)
+        .min(520.0);
+    let compact_library = drawer_width < 430.0;
     let area = egui::Area::new(egui::Id::new("voxel_native_sketch_editor_drawer"))
         .anchor(
             egui::Align2::LEFT_CENTER,
@@ -2096,14 +2144,14 @@ fn draw_editor_drawer(
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
-                ui.set_width(386.0);
+                ui.set_width(drawer_width);
                 ui.spacing_mut().item_spacing = egui::vec2(6.0, 7.0);
                 ui.horizontal(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
                     paint_icon(ui.painter(), rect, Icon::Drawer, accent);
                     ui.label(
-                        egui::RichText::new("STYLE & MATERIALS")
+                        egui::RichText::new("CREATOR LIBRARY")
                             .monospace()
                             .size(11.0)
                             .strong()
@@ -2141,7 +2189,25 @@ fn draw_editor_drawer(
                     });
                 }
                 crate::ui_kit::compact_separator(ui, theme);
-                material_catalog_panel(ui, active_block, theme, result);
+                let max_height = (ctx.screen_rect().height() - 150.0).clamp(260.0, 680.0);
+                let library_result = egui::ScrollArea::vertical()
+                    .id_source("sketch_editor_creator_library")
+                    .max_height(max_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        draw_creator_library(
+                            ui,
+                            creator_library,
+                            active_block,
+                            ships,
+                            compact_library,
+                            theme,
+                        )
+                    })
+                    .inner;
+                if library_result.action.is_some() {
+                    result.creator_action = library_result.action;
+                }
             });
         });
     result.wheel_navigation_hovered |= area.response.hovered();
@@ -2569,117 +2635,6 @@ fn contextual_action_hints(
     }
 
     tool.action_hints(picker_open)
-}
-
-fn block_egui_color(block: BlockType) -> egui::Color32 {
-    let c = block.color().to_srgba();
-    egui::Color32::from_rgba_unmultiplied(
-        (c.red.clamp(0.0, 1.0) * 255.0).round() as u8,
-        (c.green.clamp(0.0, 1.0) * 255.0).round() as u8,
-        (c.blue.clamp(0.0, 1.0) * 255.0).round() as u8,
-        (c.alpha.clamp(0.35, 1.0) * 255.0).round() as u8,
-    )
-}
-
-fn material_catalog_panel(
-    ui: &mut egui::Ui,
-    active_block: BlockType,
-    theme: crate::theme::ThemeSettings,
-    result: &mut BuildDockResult,
-) {
-    let colors = theme.semantic();
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("MATERIALS")
-                .monospace()
-                .size(10.0)
-                .strong()
-                .color(colors.info),
-        );
-        ui.label(
-            egui::RichText::new(block_label(active_block))
-                .monospace()
-                .size(10.5)
-                .color(AMBER),
-        );
-    });
-    egui::ScrollArea::vertical()
-        .id_source("build_studio_material_catalog")
-        .max_height(176.0)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            for category in block_palette_catalog() {
-                let selected_category = category
-                    .entries
-                    .iter()
-                    .any(|entry| entry.block == active_block);
-                egui::CollapsingHeader::new(format!("{} - {}", category.label, category.hint))
-                    .default_open(selected_category)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
-                            for entry in category.entries {
-                                if material_swatch_chip(ui, *entry, active_block, theme) {
-                                    result.block_choice = Some(entry.block);
-                                }
-                            }
-                        });
-                    });
-            }
-        });
-}
-
-fn material_swatch_chip(
-    ui: &mut egui::Ui,
-    entry: BlockPaletteEntry,
-    active_block: BlockType,
-    theme: crate::theme::ThemeSettings,
-) -> bool {
-    let selected = active_block == entry.block;
-    let colors = theme.semantic();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(128.0, 40.0), egui::Sense::click());
-    let fill = if selected {
-        egui::Color32::from_rgba_premultiplied(70, 45, 0, 226)
-    } else if response.hovered() {
-        colors.surface_strong
-    } else {
-        egui::Color32::from_rgba_premultiplied(0, 12, 8, 184)
-    };
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, egui::Rounding::same(5.0), fill);
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(5.0),
-        egui::Stroke::new(1.0, if selected { AMBER } else { colors.stroke }),
-    );
-    let swatch = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 6.0), egui::vec2(28.0, 28.0));
-    painter.rect_filled(
-        swatch,
-        egui::Rounding::same(4.0),
-        block_egui_color(entry.block),
-    );
-    painter.rect_stroke(
-        swatch,
-        egui::Rounding::same(4.0),
-        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(70)),
-    );
-    painter.text(
-        rect.min + egui::vec2(40.0, 15.0),
-        egui::Align2::LEFT_CENTER,
-        entry.label,
-        egui::FontId::monospace(9.5),
-        if selected { AMBER } else { TEXT },
-    );
-    painter.text(
-        rect.min + egui::vec2(40.0, 29.0),
-        egui::Align2::LEFT_CENTER,
-        entry.role,
-        egui::FontId::monospace(7.5),
-        colors.text_muted,
-    );
-    response
-        .on_hover_text(format!("{}: {}", entry.label, entry.role))
-        .clicked()
 }
 
 fn brush_presets() -> [(&'static str, IVec3); 6] {

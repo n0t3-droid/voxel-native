@@ -522,6 +522,7 @@ fn cursor_policy_for(
         ActiveMode::BuildPicker { .. }
         | ActiveMode::Editor { .. }
         | ActiveMode::Inventory
+        | ActiveMode::ShipPlacement { .. }
         | ActiveMode::Paused
         | ActiveMode::CommandPalette => CursorPolicy::ReleasedVisible,
         ActiveMode::BuildLive { .. } if pointer_editor_tool => {
@@ -531,10 +532,9 @@ fn cursor_policy_for(
                 CursorPolicy::ReleasedVisible
             }
         }
-        ActiveMode::BuildLive { .. }
-        | ActiveMode::Combat
-        | ActiveMode::ShipPlacement { .. }
-        | ActiveMode::ShipFlight { .. } => CursorPolicy::LockedHidden,
+        ActiveMode::BuildLive { .. } | ActiveMode::Combat | ActiveMode::ShipFlight { .. } => {
+            CursorPolicy::LockedHidden
+        }
     }
 }
 
@@ -811,12 +811,9 @@ mod tests {
     }
 
     #[test]
-    fn cursor_policy_locks_direct_play_modes_immediately() {
+    fn cursor_policy_locks_direct_control_modes_immediately() {
         for mode in [
             ActiveMode::Combat,
-            ActiveMode::ShipPlacement {
-                kind: ShipKind::ScoutShuttle,
-            },
             ActiveMode::ShipFlight {
                 entity: Entity::from_raw(1),
             },
@@ -827,6 +824,24 @@ mod tests {
                 "{mode:?} must keep direct-control capture despite stale editor UI focus"
             );
         }
+    }
+
+    #[test]
+    fn cursor_policy_releases_for_ship_placement() {
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::ShipPlacement {
+                    kind: ShipKind::ScoutShuttle,
+                },
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            CursorPolicy::ReleasedVisible
+        );
     }
 
     #[test]

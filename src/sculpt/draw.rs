@@ -3714,7 +3714,9 @@ pub fn draw_editor_screen_cursor(
         return;
     }
 
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Tooltip,
         egui::Id::new("sketch_editor_screen_cursor"),

@@ -16,6 +16,10 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use bevy_egui::{egui, EguiContexts};
 
 use crate::commands::CommandPaletteState;
+use crate::creator_library::{
+    apply_creator_library_action, draw_creator_library, CreatorAssetId, CreatorLibraryEffect,
+    CreatorLibraryState,
+};
 use crate::editor::EditorState;
 use crate::hud::HotbarState;
 use crate::icons::Icon;
@@ -23,22 +27,47 @@ use crate::mode::ModeContext;
 use crate::player::Player;
 use crate::player::PlayerProgressScratch;
 use crate::settings::{self, ActiveWorld, SceneryQuality, WorldMeta, WorldSettings};
-use crate::theme::{command_frame, metric_pill};
+use crate::theme::metric_pill;
 use crate::ui_kit::{ActionTone, LoadingState};
 use crate::world::{ChunkStreamer, VoxelWorld};
 
 const START_TITLE: &str = "R93G SAKURA ZEN";
 const START_SUBTITLE: &str = "mouse-first sketch dojo // blossom worlds // fast low-end streaming";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum InventoryPage {
-    Blocks,
-    Ships,
+    Creator,
     Companions,
     Hotbar,
 }
 
-const ALL_INVENTORY_CATEGORIES: usize = usize::MAX;
+impl InventoryPage {
+    const ALL: [(Self, Icon, &'static str); 3] = [
+        (Self::Creator, Icon::Drawer, "Creator"),
+        (Self::Companions, Icon::Follow, "Companions"),
+        (Self::Hotbar, Icon::Grid, "Hotbar"),
+    ];
+
+    const fn status(self) -> &'static str {
+        match self {
+            Self::Creator => "MATERIALS + SHUTTLES",
+            Self::Companions => "COMPANION LINK",
+            Self::Hotbar => "QUICK SLOT MAP",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InventoryExit {
+    PauseMenu,
+    ResumeWorld,
+}
+
+impl InventoryExit {
+    const fn resumes_world(self) -> bool {
+        matches!(self, Self::ResumeWorld)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InventoryBlockEntry {
@@ -224,6 +253,10 @@ fn clear_pending_load(mut pending: ResMut<PendingWorldLoad>) {
     }
 }
 
+fn active_mode_owns_escape(mode: Option<&ModeContext>) -> bool {
+    mode.is_some_and(ModeContext::is_ship_placement)
+}
+
 /// ESC and E drive the state machine. The editor window close button also
 /// flips PauseScreen back to Menu, but key handling lives here for clarity.
 fn handle_keys(
@@ -252,6 +285,11 @@ fn handle_keys(
 
     match state.get() {
         GameState::InGame => {
+            // Placement gestures own Escape so cancellation cannot leak into
+            // the pause state machine during the same frame.
+            if keys.just_pressed(KeyCode::Escape) && active_mode_owns_escape(mode.as_deref()) {
+                return;
+            }
             // E cycles Build Studio tools — don't open inventory mid-build.
             // ESC always opens pause so you are never trapped in a tool gesture.
             if mode.as_deref().map(|m| m.is_build()).unwrap_or(false)
@@ -520,6 +558,117 @@ fn inventory_grid_metrics(available_width: f32) -> (usize, f32) {
     let tile_width =
         ((available_width - GAP * columns.saturating_sub(1) as f32) / columns as f32).max(112.0);
     (columns, tile_width)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuOverlayKind {
+    Pause,
+    Inventory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MenuOverlayLayout {
+    size: egui::Vec2,
+    compact: bool,
+}
+
+fn menu_overlay_layout(viewport: egui::Vec2, kind: MenuOverlayKind) -> MenuOverlayLayout {
+    let viewport = egui::vec2(
+        if viewport.x.is_finite() {
+            viewport.x.max(1.0)
+        } else {
+            1.0
+        },
+        if viewport.y.is_finite() {
+            viewport.y.max(1.0)
+        } else {
+            1.0
+        },
+    );
+    let (target, compact_below) = match kind {
+        MenuOverlayKind::Pause => (egui::vec2(520.0, 660.0), egui::vec2(440.0, 560.0)),
+        MenuOverlayKind::Inventory => (egui::vec2(980.0, 700.0), egui::vec2(720.0, 600.0)),
+    };
+    let margin = if viewport.x < 420.0 || viewport.y < 420.0 {
+        8.0
+    } else {
+        20.0
+    };
+    let available = egui::vec2(
+        (viewport.x - margin * 2.0).max(1.0),
+        (viewport.y - margin * 2.0).max(1.0),
+    );
+    let size = egui::vec2(target.x.min(available.x), target.y.min(available.y));
+
+    MenuOverlayLayout {
+        size,
+        compact: size.x < compact_below.x || size.y < compact_below.y,
+    }
+}
+
+fn draw_menu_overlay_scrim(
+    ctx: &egui::Context,
+    id: &'static str,
+    theme: crate::theme::ThemeSettings,
+    alpha: u8,
+) {
+    let colors = theme.semantic();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new(id),
+    ));
+    painter.rect_filled(
+        ctx.screen_rect(),
+        0.0,
+        start_menu_alpha(colors.background, alpha),
+    );
+}
+
+fn draw_menu_overlay_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    metric_label: &str,
+    metric_value: &str,
+    compact: bool,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    ui.horizontal_wrapped(|ui| {
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new("R93G // ZEN OPERATING LAYER")
+                    .size(9.5)
+                    .strong()
+                    .monospace()
+                    .color(colors.accent),
+            );
+            ui.label(
+                egui::RichText::new(title)
+                    .size(if compact { 20.0 } else { 25.0 })
+                    .strong()
+                    .monospace()
+                    .color(colors.text),
+            );
+            ui.label(
+                egui::RichText::new(subtitle)
+                    .size(10.5)
+                    .monospace()
+                    .color(colors.text_muted),
+            );
+        });
+        if !compact {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                metric_pill(ui, theme, metric_label, metric_value)
+            });
+        }
+    });
+    if compact {
+        ui.add_space(5.0);
+        metric_pill(ui, theme, metric_label, metric_value);
+    }
+    ui.add_space(8.0);
+    crate::ui_kit::compact_separator(ui, theme);
 }
 
 fn start_menu_command(
@@ -1501,12 +1650,7 @@ fn draw_pause_menu(
     let Some(ctx) = contexts.try_ctx_mut() else {
         return;
     };
-    let screen = ctx.screen_rect();
-    ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Background,
-        egui::Id::new("pause_dim"),
-    ))
-    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(140));
+    draw_menu_overlay_scrim(ctx, "pause_dim", settings.theme, 176);
 
     if editor.open {
         return; // editor.rs draws its own panel on top.
@@ -1541,6 +1685,7 @@ fn draw_inventory_menu(
     mut builder: ResMut<crate::builder::BuilderState>,
     mut ship_inventory: ResMut<crate::ships::ShipInventory>,
     mut ship_placement: ResMut<crate::ships::ShipPlacementState>,
+    mut creator_library: ResMut<CreatorLibraryState>,
     mut mode: ResMut<ModeContext>,
     mut brain: ResMut<crate::bots::FriendlyWorldBrain>,
 ) {
@@ -1559,6 +1704,7 @@ fn draw_inventory_menu(
         &mut settings,
         &mut ship_inventory,
         &mut ship_placement,
+        &mut creator_library,
         &mut mode,
         &mut brain,
     );
@@ -1572,12 +1718,27 @@ mod tests {
     use crate::settings::{SceneryQuality, WorldMeta};
 
     #[test]
-    fn main_menu_does_not_force_continuous_repaint() {
+    fn menus_do_not_force_continuous_repaint() {
         let source = include_str!("menu.rs");
         assert!(
             !source.contains(concat!("request_", "repaint();")),
-            "main menu should not force an every-frame repaint; startup/menu must idle cheaply"
+            "menu surfaces should not force an every-frame repaint"
         );
+    }
+
+    #[test]
+    fn ship_placement_owns_escape_without_opening_pause() {
+        let mut placement = ModeContext::default();
+        placement.set(
+            crate::mode::ActiveMode::ShipPlacement {
+                kind: crate::ships::ShipKind::ScoutShuttle,
+            },
+            "Place Scout",
+        );
+
+        assert!(active_mode_owns_escape(Some(&placement)));
+        assert!(!active_mode_owns_escape(Some(&ModeContext::default())));
+        assert!(!active_mode_owns_escape(None));
     }
 
     #[test]
@@ -1748,6 +1909,71 @@ mod tests {
     }
 
     #[test]
+    fn pause_and_inventory_overlays_fit_small_and_desktop_viewports() {
+        let small_viewport = egui::vec2(320.0, 480.0);
+        for kind in [MenuOverlayKind::Pause, MenuOverlayKind::Inventory] {
+            let layout = menu_overlay_layout(small_viewport, kind);
+            assert!(layout.compact);
+            assert!(layout.size.x > 0.0 && layout.size.y > 0.0);
+            assert!(layout.size.x <= small_viewport.x);
+            assert!(layout.size.y <= small_viewport.y);
+        }
+
+        let desktop = egui::vec2(1440.0, 900.0);
+        let pause = menu_overlay_layout(desktop, MenuOverlayKind::Pause);
+        let inventory = menu_overlay_layout(desktop, MenuOverlayKind::Inventory);
+        assert_eq!(pause.size, egui::vec2(520.0, 660.0));
+        assert_eq!(inventory.size, egui::vec2(980.0, 700.0));
+        assert!(!pause.compact);
+        assert!(!inventory.compact);
+    }
+
+    #[test]
+    fn inventory_exit_distinguishes_pause_navigation_from_resume() {
+        assert!(!InventoryExit::PauseMenu.resumes_world());
+        assert!(InventoryExit::ResumeWorld.resumes_world());
+    }
+
+    #[test]
+    fn inventory_has_one_creator_entry_instead_of_split_asset_catalogs() {
+        assert_eq!(InventoryPage::ALL.len(), 3);
+        assert_eq!(InventoryPage::ALL[0].0, InventoryPage::Creator);
+        assert!(!InventoryPage::ALL.iter().any(|(_, _, label)| {
+            label.eq_ignore_ascii_case("blocks") || label.eq_ignore_ascii_case("ships")
+        }));
+    }
+
+    #[test]
+    fn pause_has_exactly_one_selected_primary_action() {
+        let selected: Vec<PauseAction> = PAUSE_SESSION_ACTIONS
+            .iter()
+            .chain(PAUSE_TOOL_ACTIONS.iter())
+            .filter(|spec| spec.selected)
+            .map(|spec| spec.action)
+            .collect();
+
+        assert_eq!(selected, vec![PauseAction::Resume]);
+    }
+
+    #[test]
+    fn unavailable_inventory_action_is_disabled_in_egui() {
+        let context = egui::Context::default();
+        context.begin_frame(egui::RawInput::default());
+        egui::CentralPanel::default().show(&context, |ui| {
+            let response = enabled_inventory_icon_action(
+                ui,
+                false,
+                Icon::Approve,
+                "Approve",
+                false,
+                crate::theme::ThemeSettings::default(),
+            );
+            assert!(!response.enabled());
+        });
+        let _ = context.end_frame();
+    }
+
+    #[test]
     fn pause_notice_has_a_finite_lifetime() {
         let notice = PauseNotice {
             label: "WORLD SAVE".to_owned(),
@@ -1872,6 +2098,142 @@ mod tests {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PauseAction {
+    Resume,
+    Save,
+    Inventory,
+    RepairTerrain,
+    Toolbench,
+    CommandDeck,
+    MainMenu,
+    Quit,
+}
+
+#[derive(Clone, Copy)]
+struct PauseActionSpec {
+    action: PauseAction,
+    icon: Icon,
+    label: &'static str,
+    detail: &'static str,
+    selected: bool,
+}
+
+const PAUSE_SESSION_ACTIONS: [PauseActionSpec; 3] = [
+    PauseActionSpec {
+        action: PauseAction::Resume,
+        icon: Icon::Resume,
+        label: "Resume",
+        detail: "Back to the world",
+        selected: true,
+    },
+    PauseActionSpec {
+        action: PauseAction::Save,
+        icon: Icon::Save,
+        label: "Save",
+        detail: "Write current world",
+        selected: false,
+    },
+    PauseActionSpec {
+        action: PauseAction::Inventory,
+        icon: Icon::Cube,
+        label: "Inventory",
+        detail: "Creator assets and companions",
+        selected: false,
+    },
+];
+
+const PAUSE_TOOL_ACTIONS: [PauseActionSpec; 3] = [
+    PauseActionSpec {
+        action: PauseAction::RepairTerrain,
+        icon: Icon::Wand,
+        label: "Repair Terrain",
+        detail: "Remove visual artifacts",
+        selected: false,
+    },
+    PauseActionSpec {
+        action: PauseAction::Toolbench,
+        icon: Icon::Layout,
+        label: "Toolbench",
+        detail: "HUD, world and visuals",
+        selected: false,
+    },
+    PauseActionSpec {
+        action: PauseAction::CommandDeck,
+        icon: Icon::Search,
+        label: "Command Deck",
+        detail: "Actions and keybinds",
+        selected: false,
+    },
+];
+
+fn draw_pause_action_section(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    label: &str,
+    actions: &[PauseActionSpec],
+    compact: bool,
+    emphasized: bool,
+    theme: crate::theme::ThemeSettings,
+) -> Option<PauseAction> {
+    let colors = theme.semantic();
+    let mut requested = None;
+    crate::ui_kit::surface_panel_animated(ui, theme, egui::Id::new(id), emphasized, |ui| {
+        ui.label(
+            egui::RichText::new(label)
+                .size(10.5)
+                .strong()
+                .monospace()
+                .color(colors.text_muted),
+        );
+        ui.add_space(6.0);
+        if compact {
+            for (index, spec) in actions.iter().enumerate() {
+                ui.vertical_centered(|ui| {
+                    if crate::ui_kit::major_action(
+                        ui,
+                        spec.icon,
+                        spec.label,
+                        spec.detail,
+                        spec.selected,
+                        theme,
+                    )
+                    .clicked()
+                    {
+                        requested = Some(spec.action);
+                    }
+                });
+                if index + 1 < actions.len() {
+                    ui.add_space(6.0);
+                }
+            }
+        } else {
+            for row in actions.chunks(2) {
+                ui.columns(2, |cols| {
+                    for (column, spec) in row.iter().enumerate() {
+                        cols[column].vertical_centered(|ui| {
+                            if crate::ui_kit::major_action(
+                                ui,
+                                spec.icon,
+                                spec.label,
+                                spec.detail,
+                                spec.selected,
+                                theme,
+                            )
+                            .clicked()
+                            {
+                                requested = Some(spec.action);
+                            }
+                        });
+                    }
+                });
+                ui.add_space(6.0);
+            }
+        }
+    });
+    requested
+}
+
 fn draw_pause_main(
     ctx: &egui::Context,
     next: &mut ResMut<NextState<GameState>>,
@@ -1891,43 +2253,35 @@ fn draw_pause_main(
     exit: &mut EventWriter<AppExit>,
 ) {
     let screen = ctx.screen_rect();
-    let panel_w = 500.0_f32.min(screen.width() - 40.0);
-    let panel_h = 640.0_f32.min(screen.height() - 80.0);
-    let pos = egui::pos2(
-        screen.center().x - panel_w * 0.5,
-        screen.center().y - panel_h * 0.5,
-    );
+    let layout = menu_overlay_layout(screen.size(), MenuOverlayKind::Pause);
+    let pos = screen.center() - layout.size * 0.5;
+    let notice = active_pause_notice(ctx);
+    let world_name = active
+        .map(|active| active.meta.name.as_str())
+        .unwrap_or("LOCAL WORLD");
+    let subtitle = format!("{world_name} // simulation suspended");
+    let mut requested_action = None;
 
     egui::Window::new("voxel_native_pause")
         .title_bar(false)
         .resizable(false)
         .collapsible(false)
         .movable(false)
-        .frame(command_frame(settings.theme))
+        .frame(crate::ui_kit::toolbench_frame(settings.theme))
         .fixed_pos(pos)
-        .fixed_size(egui::vec2(panel_w, panel_h))
+        .fixed_size(layout.size)
         .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("PAUSE // COMMAND HOLD")
-                        .size(28.0)
-                        .color(settings.theme.color.primary())
-                        .strong()
-                        .monospace(),
-                );
-                if let Some(active) = active {
-                    ui.label(
-                        egui::RichText::new(format!("Welt: {}", active.meta.name))
-                            .color(settings.theme.color.dim())
-                            .size(14.0),
-                    );
-                }
-            });
-            ui.add_space(10.0);
-            ui.separator();
+            draw_menu_overlay_header(
+                ui,
+                "PAUSE // COMMAND HOLD",
+                &subtitle,
+                "STATE",
+                "PAUSED",
+                layout.compact,
+                settings.theme,
+            );
             ui.add_space(8.0);
-            if let Some(notice) = active_pause_notice(ctx) {
+            if let Some(notice) = &notice {
                 crate::ui_kit::activity_status(
                     ui,
                     LoadingState::Complete,
@@ -1948,200 +2302,164 @@ fn draw_pause_main(
             egui::ScrollArea::vertical()
                 .id_source("pause_command_scroll")
                 .auto_shrink([false, false])
+                .max_height((layout.size.y - 164.0).max(180.0))
                 .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        if crate::ui_kit::major_action(
-                            ui,
-                            Icon::Resume,
-                            "Resume",
-                            "Back to the world",
-                            false,
-                            settings.theme,
-                        )
-                        .clicked()
-                        {
-                            next.set(GameState::InGame);
-                        }
+                    if let Some(action) = draw_pause_action_section(
+                        ui,
+                        "pause_session_actions",
+                        "SESSION",
+                        &PAUSE_SESSION_ACTIONS,
+                        layout.compact,
+                        true,
+                        settings.theme,
+                    ) {
+                        requested_action = Some(action);
+                    }
+                    ui.add_space(8.0);
+                    if let Some(action) = draw_pause_action_section(
+                        ui,
+                        "pause_tool_actions",
+                        "TOOLS",
+                        &PAUSE_TOOL_ACTIONS,
+                        layout.compact,
+                        false,
+                        settings.theme,
+                    ) {
+                        requested_action = Some(action);
+                    }
+                    if let Some(report) = world.last_repair_report {
                         ui.add_space(6.0);
-                        if crate::ui_kit::major_action(
-                            ui,
-                            Icon::Save,
-                            "Save",
-                            "Write current world",
-                            false,
-                            settings.theme,
-                        )
-                        .clicked()
-                        {
-                            save_current_world(
-                                settings,
-                                active,
-                                scratch,
-                                player_q,
-                                ship_q,
-                                ship_inventory,
-                                brain,
-                                world,
-                            );
-                            set_pause_notice(ctx, "WORLD SAVE", "Snapshot written");
-                        }
-                        ui.add_space(6.0);
-                        if crate::ui_kit::major_action(
-                            ui,
-                            Icon::Cube,
-                            "Inventory",
-                            "Blocks, ships, companions",
-                            false,
-                            settings.theme,
-                        )
-                        .clicked()
-                        {
-                            **pause_screen = PauseScreen::Inventory;
-                        }
-                        ui.add_space(6.0);
-                        if crate::ui_kit::major_action(
+                        let repair_text = if report.removed_chunks == 0 {
+                            format!("0 fixed / {} scanned", report.scanned_chunks)
+                        } else {
+                            format!(
+                                "{} fixed / {} scanned / {} live refreshed",
+                                report.removed_chunks,
+                                report.scanned_chunks,
+                                report.refreshed_loaded_chunks
+                            )
+                        };
+                        crate::ui_kit::status_chip(
                             ui,
                             Icon::Wand,
-                            "Repair Terrain",
-                            "Remove old visual artifact chunks",
-                            false,
+                            "REPAIR",
+                            &repair_text,
                             settings.theme,
-                        )
-                        .clicked()
-                        {
-                            let report = world.repair_visual_artifact_overrides();
-                            if report.removed_chunks > 0 {
-                                streamer.frontier_complete = false;
-                                streamer.needs_orphan_scan = true;
-                                save_current_world(
-                                    settings,
-                                    active,
-                                    scratch,
-                                    player_q,
-                                    ship_q,
-                                    ship_inventory,
-                                    brain,
-                                    world,
-                                );
-                            }
-                            info!(
-                                "Scanned {} edit chunks, repaired {}, refreshed {} loaded chunks.",
-                                report.scanned_chunks,
-                                report.removed_chunks,
-                                report.refreshed_loaded_chunks
-                            );
-                            set_pause_notice(
-                                ctx,
-                                "TERRAIN SCAN",
-                                if report.removed_chunks == 0 {
-                                    format!("No artifacts in {} chunks", report.scanned_chunks)
-                                } else {
-                                    format!("{} artifact chunks repaired", report.removed_chunks)
-                                },
-                            );
-                        }
-                        if let Some(report) = world.last_repair_report {
-                            let repair_text = if report.removed_chunks == 0 {
-                                format!("0 fixed / {} scanned", report.scanned_chunks)
-                            } else {
-                                format!(
-                                    "{} fixed / {} scanned / {} live refreshed",
-                                    report.removed_chunks,
-                                    report.scanned_chunks,
-                                    report.refreshed_loaded_chunks
-                                )
-                            };
-                            crate::ui_kit::status_chip(
+                        );
+                    }
+                    ui.add_space(8.0);
+                    crate::ui_kit::surface_panel(ui, settings.theme, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            if crate::ui_kit::icon_action(
                                 ui,
-                                Icon::Wand,
-                                "REPAIR",
-                                &repair_text,
+                                Icon::Open,
+                                "Main Menu",
+                                false,
                                 settings.theme,
-                            );
-                        }
-                        ui.add_space(6.0);
-                        if crate::ui_kit::major_action(
-                            ui,
-                            Icon::Layout,
-                            "Toolbench",
-                            "HUD, world and visual settings",
-                            false,
-                            settings.theme,
-                        )
-                        .clicked()
-                        {
-                            editor.open = true;
-                        }
-                        ui.add_space(6.0);
-                        if crate::ui_kit::major_action(
-                            ui,
-                            Icon::Search,
-                            "Command Deck",
-                            "Search actions and keybinds",
-                            false,
-                            settings.theme,
-                        )
-                        .clicked()
-                        {
-                            command_palette.open();
-                        }
-                        ui.add_space(6.0);
-                        if crate::ui_kit::major_action(
-                            ui,
-                            Icon::Open,
-                            "Main Menu",
-                            "Save and leave this world",
-                            false,
-                            settings.theme,
-                        )
-                        .clicked()
-                        {
-                            save_current_world(
-                                settings,
-                                active,
-                                scratch,
-                                player_q,
-                                ship_q,
-                                ship_inventory,
-                                brain,
-                                world,
-                            );
-                            // Wipe chunk entities so the next world starts clean.
-                            world.clear_chunks();
-                            for (ship, _, _) in ship_q.iter() {
-                                if let Some(entity_commands) = commands.get_entity(ship) {
-                                    entity_commands.despawn_recursive();
-                                }
-                            }
-                            for (_, group) in streamer.entities.drain() {
-                                for entry in group {
-                                    if let Some(entity_commands) = commands.get_entity(entry.entity)
-                                    {
-                                        entity_commands.despawn_recursive();
-                                    }
-                                }
-                            }
-                            next.set(GameState::MainMenu);
-                        }
-                        ui.add_space(6.0);
-                        if crate::ui_kit::danger_action(ui, Icon::Quit, "Quit", settings.theme)
+                            )
                             .clicked()
-                        {
-                            save_current_world(
-                                settings,
-                                active,
-                                scratch,
-                                player_q,
-                                ship_q,
-                                ship_inventory,
-                                brain,
-                                world,
-                            );
-                            exit.send(AppExit::Success);
-                        }
+                            {
+                                requested_action = Some(PauseAction::MainMenu);
+                            }
+                            if crate::ui_kit::danger_action(ui, Icon::Quit, "Quit", settings.theme)
+                                .clicked()
+                            {
+                                requested_action = Some(PauseAction::Quit);
+                            }
+                        });
                     });
                 });
         });
+
+    match requested_action {
+        Some(PauseAction::Resume) => next.set(GameState::InGame),
+        Some(PauseAction::Save) => {
+            save_current_world(
+                settings,
+                active,
+                scratch,
+                player_q,
+                ship_q,
+                ship_inventory,
+                brain,
+                world,
+            );
+            set_pause_notice(ctx, "WORLD SAVE", "Snapshot written");
+        }
+        Some(PauseAction::Inventory) => **pause_screen = PauseScreen::Inventory,
+        Some(PauseAction::RepairTerrain) => {
+            let report = world.repair_visual_artifact_overrides();
+            if report.removed_chunks > 0 {
+                streamer.frontier_complete = false;
+                streamer.needs_orphan_scan = true;
+                save_current_world(
+                    settings,
+                    active,
+                    scratch,
+                    player_q,
+                    ship_q,
+                    ship_inventory,
+                    brain,
+                    world,
+                );
+            }
+            info!(
+                "Scanned {} edit chunks, repaired {}, refreshed {} loaded chunks.",
+                report.scanned_chunks, report.removed_chunks, report.refreshed_loaded_chunks
+            );
+            set_pause_notice(
+                ctx,
+                "TERRAIN SCAN",
+                if report.removed_chunks == 0 {
+                    format!("No artifacts in {} chunks", report.scanned_chunks)
+                } else {
+                    format!("{} artifact chunks repaired", report.removed_chunks)
+                },
+            );
+        }
+        Some(PauseAction::Toolbench) => editor.open = true,
+        Some(PauseAction::CommandDeck) => command_palette.open(),
+        Some(PauseAction::MainMenu) => {
+            save_current_world(
+                settings,
+                active,
+                scratch,
+                player_q,
+                ship_q,
+                ship_inventory,
+                brain,
+                world,
+            );
+            world.clear_chunks();
+            for (ship, _, _) in ship_q.iter() {
+                if let Some(entity_commands) = commands.get_entity(ship) {
+                    entity_commands.despawn_recursive();
+                }
+            }
+            for (_, group) in streamer.entities.drain() {
+                for entry in group {
+                    if let Some(entity_commands) = commands.get_entity(entry.entity) {
+                        entity_commands.despawn_recursive();
+                    }
+                }
+            }
+            next.set(GameState::MainMenu);
+        }
+        Some(PauseAction::Quit) => {
+            save_current_world(
+                settings,
+                active,
+                scratch,
+                player_q,
+                ship_q,
+                ship_inventory,
+                brain,
+                world,
+            );
+            exit.send(AppExit::Success);
+        }
+        None => {}
+    }
 }
 
 fn draw_inventory(
@@ -2153,51 +2471,20 @@ fn draw_inventory(
     settings: &mut WorldSettings,
     ship_inventory: &mut crate::ships::ShipInventory,
     ship_placement: &mut crate::ships::ShipPlacementState,
+    creator_library: &mut CreatorLibraryState,
     mode: &mut ModeContext,
     brain: &mut crate::bots::FriendlyWorldBrain,
 ) {
     let theme = settings.theme;
-    let colors = theme.semantic();
-    // A single quiet scrim keeps the modal readable without a full-screen
-    // stack of scanline draw calls.
-    egui::Area::new(egui::Id::new("inv_backdrop"))
-        .fixed_pos(egui::pos2(0.0, 0.0))
-        .order(egui::Order::Background)
-        .show(ctx, |ui| {
-            let rect = ctx.screen_rect();
-            let p = ui.painter();
-            // Deep base — almost black with a hint of cool blue.
-            p.rect_filled(
-                rect,
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(
-                    colors.background.r(),
-                    colors.background.g(),
-                    colors.background.b(),
-                    238,
-                ),
-            );
-            p.line_segment(
-                [
-                    egui::pos2(rect.left(), rect.top() + 1.0),
-                    egui::pos2(rect.right(), rect.top() + 1.0),
-                ],
-                egui::Stroke::new(1.0, colors.outline),
-            );
-        });
+    draw_menu_overlay_scrim(ctx, "inv_backdrop", theme, 238);
 
     let screen = ctx.screen_rect();
-    let panel_w = 980.0_f32.min(screen.width() - 40.0);
-    let panel_h = 700.0_f32.min(screen.height() - 60.0);
-    let pos = egui::pos2(
-        screen.center().x - panel_w * 0.5,
-        screen.center().y - panel_h * 0.5,
-    );
+    let layout = menu_overlay_layout(screen.size(), MenuOverlayKind::Inventory);
+    let pos = screen.center() - layout.size * 0.5;
 
-    let catalog = crate::blocks::block_palette_catalog();
     let palette = inventory_block_entries();
 
-    let mut frame = command_frame(theme);
+    let mut frame = crate::ui_kit::toolbench_frame(theme);
     frame.inner_margin = egui::Margin::symmetric(20.0, 18.0);
 
     egui::Window::new("voxel_native_inventory")
@@ -2206,359 +2493,264 @@ fn draw_inventory(
         .collapsible(false)
         .movable(false)
         .fixed_pos(pos)
-        .fixed_size(egui::vec2(panel_w, panel_h))
+        .fixed_size(layout.size)
         .frame(frame)
         .show(ctx, |ui| {
-            // -------- Header (title + accent bar) --------
-            ui.horizontal(|ui| {
-                // Cyan accent bar on the left.
-                let (bar_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(4.0, 32.0), egui::Sense::hover());
-                ui.painter().rect_filled(
-                    bar_rect,
-                    egui::Rounding::same(2.0),
-                    colors.accent,
-                );
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("INVENTAR")
-                            .size(24.0)
-                            .color(colors.text)
-                            .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new("Block waehlen ▸ Slot zuweisen ▸ bauen")
-                            .size(11.0)
-                            .color(colors.text_muted),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new("E / ESC ▸ schliessen")
-                            .size(11.0)
-                            .color(colors.text_muted),
-                    );
-                });
-            });
-            ui.add_space(14.0);
+            draw_menu_overlay_header(
+                ui,
+                "CREATOR LIBRARY // ASSET DECK",
+                "Search once // choose materials // drag shuttles into the world",
+                "E / ESC",
+                "RESUME",
+                layout.compact,
+                theme,
+            );
+            ui.add_space(10.0);
 
             // -------- Persisted UI state --------
             let mut active_page: InventoryPage = ui
                 .data_mut(|d| d.get_temp(egui::Id::new("inv_page")))
-                .unwrap_or(InventoryPage::Blocks);
-            let default_block = if palette.iter().any(|entry| entry.block == builder.block) {
-                builder.block
-            } else {
-                palette
-                    .first()
-                    .map(|entry| entry.block)
-                    .unwrap_or(crate::blocks::BlockType::Stone)
-            };
-            let mut selected: crate::blocks::BlockType = ui
-                .data_mut(|d| d.get_temp(egui::Id::new("inv_selected")))
-                .unwrap_or(default_block);
-            if !palette.iter().any(|entry| entry.block == selected) {
-                selected = default_block;
-            }
-            let mut active_category: usize = ui
-                .data_mut(|d| d.get_temp(egui::Id::new("inv_catalog_category")))
-                .unwrap_or(ALL_INVENTORY_CATEGORIES);
-            if active_category != ALL_INVENTORY_CATEGORIES && active_category >= catalog.len() {
-                active_category = ALL_INVENTORY_CATEGORIES;
-            }
-            let mut search: String = ui
-                .data_mut(|d| d.get_temp(egui::Id::new("inv_search")))
-                .unwrap_or_default();
+                .unwrap_or(InventoryPage::Creator);
 
             ui.horizontal_wrapped(|ui| {
-                for (page, icon, label) in [
-                    (InventoryPage::Blocks, Icon::Cube, "Blocks"),
-                    (InventoryPage::Ships, Icon::Globe, "Ships"),
-                    (InventoryPage::Companions, Icon::Follow, "Companions"),
-                    (InventoryPage::Hotbar, Icon::Grid, "Hotbar"),
-                ] {
+                for (page, icon, label) in InventoryPage::ALL {
                     if crate::ui_kit::tab_chip(ui, icon, label, active_page == page, theme)
                         .clicked()
                     {
                         active_page = page;
                     }
                 }
-            });
-            ui.add_space(12.0);
-
-            if active_page == InventoryPage::Companions {
-                draw_inventory_companion_panel(ui, settings, brain, pause_screen, next);
-                ui.add_space(14.0);
-            }
-
-            // -------- Search + category tabs --------
-            if active_page == InventoryPage::Blocks {
-                ui.horizontal_wrapped(|ui| {
-                    ui.allocate_ui(egui::vec2(220.0, 32.0), |ui| {
-                        ui.set_width(220.0);
-                        crate::ui_kit::search_box(ui, &mut search, "Block suchen...", theme);
+                if !layout.compact {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        metric_pill(ui, theme, "VIEW", active_page.status())
                     });
-                    ui.add_space(8.0);
-                    for (category, name) in
-                        std::iter::once((ALL_INVENTORY_CATEGORIES, "ALLE")).chain(
-                            catalog
-                                .iter()
-                                .enumerate()
-                                .map(|(category, group)| (category, group.label)),
-                        )
-                    {
-                        let selected_category = active_category == category;
-                        if crate::ui_kit::choice_chip_sized(
-                            ui,
-                            name,
-                            selected_category,
-                            92.0,
-                            theme,
-                        )
-                        .clicked()
-                        {
-                            active_category = category;
-                        }
+                }
+            });
+            ui.add_space(10.0);
+
+            let mut requested_exit = None;
+            let body_height = (ui.available_height() - 58.0).max(96.0);
+            egui::ScrollArea::vertical()
+                .id_source(("inventory_page_scroll", active_page))
+                .max_height(body_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if active_page == InventoryPage::Companions {
+                        draw_inventory_companion_panel(ui, settings, brain, pause_screen, next);
+                        return;
                     }
-                });
-                ui.add_space(16.0);
-
-                // -------- Filter block list --------
-                let search_lc = search.trim().to_lowercase();
-                let visible: Vec<(usize, InventoryBlockEntry)> = palette
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .filter(|(_, entry)| {
-                        (active_category == ALL_INVENTORY_CATEGORIES
-                            || entry.category == active_category)
-                            && inventory_entry_matches(
-                                *entry,
-                                catalog[entry.category].label,
-                                &search_lc,
-                            )
-                    })
-                    .collect();
-
-                let (grid_columns, tile_width) = inventory_grid_metrics(ui.available_width() - 8.0);
-                // -------- Adaptive material grid --------
-                egui::ScrollArea::vertical()
-                    .max_height((panel_h - 340.0).max(220.0))
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        egui::Grid::new("inv_grid")
-                            .num_columns(grid_columns)
-                            .spacing([10.0, 10.0])
-                            .show(ui, |ui| {
-                                for (col_idx, (i, entry)) in visible.iter().enumerate() {
-                                    draw_block_tile(
-                                        ui,
-                                        &entry.block,
-                                        entry.label,
-                                        selected == entry.block,
-                                        |_| selected = entry.block,
-                                        *i,
-                                        tile_width,
-                                        theme,
-                                    );
-                                    if (col_idx + 1) % grid_columns == 0 {
-                                        ui.end_row();
+                    crate::ui_kit::surface_panel_animated(
+                        ui,
+                        theme,
+                        egui::Id::new(("inventory_page_panel", active_page)),
+                        true,
+                        |ui| match active_page {
+                            InventoryPage::Creator => {
+                                let library_result = draw_creator_library(
+                                    ui,
+                                    creator_library,
+                                    builder.block,
+                                    ship_inventory,
+                                    layout.compact,
+                                    theme,
+                                );
+                                if let Some(action) = library_result.action {
+                                    if apply_creator_library_action(
+                                        action,
+                                        creator_library,
+                                        builder,
+                                        ship_inventory,
+                                        ship_placement,
+                                        mode,
+                                    ) == CreatorLibraryEffect::PlacementStarted
+                                    {
+                                        requested_exit = Some(InventoryExit::ResumeWorld);
                                     }
                                 }
-                            });
-                    });
-            }
-
-            ui.add_space(14.0);
-            crate::ui_kit::compact_separator(ui, theme);
-            ui.add_space(12.0);
-
-            // -------- Selected-block info strip --------
-            let selected_entry = palette
-                .iter()
-                .find(|entry| entry.block == selected)
-                .or_else(|| palette.first())
-                .expect("canonical block palette must not be empty");
-            let sel_b = selected_entry.block;
-            let sel_name = selected_entry.label;
-            let sel_rgba = crate::blocks::voxel_color(sel_b.into());
-            if matches!(active_page, InventoryPage::Blocks | InventoryPage::Hotbar) {
-            ui.horizontal(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
-                crate::ui_kit::paint_material_swatch(
-                    ui.painter(),
-                    rect,
-                    rgba_color32(sel_rgba),
-                    5.0,
-                );
-                ui.painter().rect_stroke(
-                    rect,
-                    egui::Rounding::same(5.0),
-                    egui::Stroke::new(1.5, colors.outline_active),
-                );
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(sel_name)
-                            .size(17.0)
-                            .monospace()
-                            .color(colors.text)
-                            .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new("Aktive Auswahl ▸ klick einen Hotbar-Slot unten")
-                            .size(11.0)
-                            .monospace()
-                            .color(colors.text_muted),
+                                ui.add_space(10.0);
+                                crate::ui_kit::compact_separator(ui, theme);
+                                ui.add_space(8.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    crate::ui_kit::status_chip(
+                                        ui,
+                                        Icon::Globe,
+                                        "SHUTTLE SIM",
+                                        if settings.ship_skirmish_ai {
+                                            "ACTIVE"
+                                        } else {
+                                            "CALM"
+                                        },
+                                        theme,
+                                    );
+                                    if crate::ui_kit::icon_action(
+                                        ui,
+                                        Icon::Animation,
+                                        "Flight encounters",
+                                        settings.ship_skirmish_ai,
+                                        theme,
+                                    )
+                                    .clicked()
+                                    {
+                                        settings.ship_skirmish_ai = !settings.ship_skirmish_ai;
+                                        settings.save();
+                                    }
+                                });
+                            }
+                            InventoryPage::Companions => unreachable!(),
+                            InventoryPage::Hotbar => {
+                                let selected = match creator_library.selected {
+                                    CreatorAssetId::Material(block) => block,
+                                    CreatorAssetId::Ship(_) => builder.block,
+                                };
+                                let selected_entry = palette
+                                    .iter()
+                                    .find(|entry| entry.block == selected)
+                                    .or_else(|| palette.first())
+                                    .expect("canonical block palette must not be empty");
+                                draw_inventory_selected_material(ui, selected_entry, theme);
+                                ui.add_space(12.0);
+                                draw_inventory_hotbar(
+                                    ui,
+                                    hotbar,
+                                    builder,
+                                    selected_entry.block,
+                                    theme,
+                                );
+                            }
+                        },
                     );
                 });
-            });
-            }
 
-            ui.add_space(14.0);
-
-            // -------- Hangar shuttle row --------
-            if active_page == InventoryPage::Ships {
-            ui.label(
-                egui::RichText::new("HANGAR  SHUTTLES")
-                    .size(11.5)
-                    .monospace()
-                    .color(colors.accent)
-                    .strong(),
-            );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let r = crate::ui_kit::icon_action(
-                    ui,
-                    Icon::Animation,
-                    "Drone AI",
-                    settings.ship_skirmish_ai,
-                    theme,
-                );
-                if r.clicked() {
-                    settings.ship_skirmish_ai = !settings.ship_skirmish_ai;
-                    settings.save();
-                }
-            });
-            ui.label(
-                egui::RichText::new(
-                    "Aus = keine Orbital-Gegner beim Fliegen. Ein = Wellen, mehr mit der Zeit, Pausen bei wenig Schild.",
-                )
-                .size(10.5)
-                .monospace()
-                .color(colors.text_muted),
-            );
-            ui.add_space(6.0);
+            ui.add_space(8.0);
+            crate::ui_kit::compact_separator(ui, theme);
+            ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
-                for kind in crate::ships::ShipKind::ALL {
-                    let unlocked = ship_inventory.unlocked.contains(&kind);
-                    let selected_ship = ship_inventory.selected == kind;
-                    let resp = ui
-                        .add_enabled_ui(unlocked, |ui| {
-                            crate::ui_kit::choice_chip_sized(
-                                ui,
-                                kind.short(),
-                                selected_ship,
-                                130.0,
-                                theme,
-                            )
-                        })
-                        .inner;
-                    if resp.clicked() {
-                        ship_inventory.selected = kind;
-                        ship_placement.start(kind);
-                        mode.set(
-                            crate::mode::ActiveMode::ShipPlacement { kind },
-                            format!("Placing {}.", kind.label()),
-                        );
-                        *pause_screen = PauseScreen::Menu;
-                        next.set(GameState::InGame);
-                    }
-                    resp.on_hover_text(format!(
-                        "{} blueprint: LMB place, RMB cancel, mouse wheel rotate.",
-                        kind.label()
-                    ));
-                }
-            });
-            }
-
-            ui.add_space(14.0);
-
-            // -------- Hotbar assignment row --------
-            if matches!(active_page, InventoryPage::Blocks | InventoryPage::Hotbar) {
-            ui.label(
-                egui::RichText::new("HOTBAR  1 — 9")
-                    .size(11.5)
-                    .monospace()
-                    .color(colors.accent)
-                    .strong(),
-            );
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                for i in 0..9 {
-                    let slot = hotbar.slots[i];
-                    let is_active = hotbar.active == i;
-                    let c = slot.color.to_srgba();
-                    if crate::ui_kit::swatch_slot(
-                        ui,
-                        i,
-                        rgba_color32([c.red, c.green, c.blue, 1.0]),
-                        is_active,
-                        theme,
-                        slot.label(),
-                    )
-                    .clicked()
-                    {
-                        hotbar.assign_block(i, sel_b);
-                        apply_inventory_block_selection(builder, sel_b);
-                    }
-                    ui.add_space(4.0);
-                }
-            });
-            }
-
-            ui.add_space(16.0);
-            ui.vertical_centered(|ui| {
-                if crate::ui_kit::command_action(
-                    ui,
-                    "Schliessen (E)",
-                    None,
-                    ActionTone::Standard,
-                    40.0,
-                    theme,
-                )
-                .clicked()
+                if crate::ui_kit::icon_action(ui, Icon::Pause, "Pause menu", false, theme).clicked()
                 {
-                    *pause_screen = PauseScreen::Menu;
-                    next.set(GameState::InGame);
+                    requested_exit = Some(InventoryExit::PauseMenu);
+                }
+                if crate::ui_kit::icon_action(ui, Icon::Resume, "Resume", true, theme).clicked() {
+                    requested_exit = Some(InventoryExit::ResumeWorld);
                 }
             });
 
-            // Persist UI state so reopening preserves selection/search.
+            if let Some(exit) = requested_exit {
+                leave_inventory(pause_screen, next, exit);
+            }
+
+            // Search, category, and asset selection live in the canonical
+            // CreatorLibraryState. Only the visible page is local UI state.
             ui.data_mut(|d| {
-                d.insert_temp(egui::Id::new("inv_selected"), selected);
-                d.insert_temp(
-                    egui::Id::new("inv_catalog_category"),
-                    active_category,
-                );
-                d.insert_temp(egui::Id::new("inv_search"), search);
                 d.insert_temp(egui::Id::new("inv_page"), active_page);
             });
-
-            // The catalog is a real builder material picker, not a cosmetic
-            // hotbar swatch. Selecting a tile updates the active voxel tool
-            // immediately; assigning a slot keeps the same typed identity.
-            if builder.block != selected {
-                apply_inventory_block_selection(builder, selected);
-            }
         });
 }
 
-/// Paint a vertical-gradient swatch — top is the block's true colour
-/// brightened, bottom is the same colour darkened. Cheap fake "lit cube"
-/// look that makes the inventory tiles feel 3D without any real geometry.
+fn leave_inventory(
+    pause_screen: &mut PauseScreen,
+    next: &mut ResMut<NextState<GameState>>,
+    exit: InventoryExit,
+) {
+    *pause_screen = PauseScreen::Menu;
+    if exit.resumes_world() {
+        next.set(GameState::InGame);
+    }
+}
+
+fn enabled_inventory_icon_action(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: Icon,
+    label: &str,
+    selected: bool,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        crate::ui_kit::icon_action(ui, icon, label, selected, theme)
+    })
+    .inner
+}
+
+fn draw_inventory_selected_material(
+    ui: &mut egui::Ui,
+    selected: &InventoryBlockEntry,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    ui.horizontal_wrapped(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
+        crate::ui_kit::paint_material_swatch(
+            ui.painter(),
+            rect,
+            rgba_color32(crate::blocks::voxel_color(selected.block.into())),
+            5.0,
+        );
+        crate::theme::paint_neon_outline(
+            ui.painter(),
+            rect,
+            5.0,
+            colors.focus_glow,
+            colors.outline_active,
+            1.0,
+        );
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new(selected.label)
+                    .size(17.0)
+                    .monospace()
+                    .color(colors.text)
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new("SELECTED MATERIAL // choose a hotbar slot")
+                    .size(10.5)
+                    .monospace()
+                    .color(colors.text_muted),
+            );
+        });
+    });
+}
+
+fn draw_inventory_hotbar(
+    ui: &mut egui::Ui,
+    hotbar: &mut HotbarState,
+    builder: &mut crate::builder::BuilderState,
+    selected: crate::blocks::BlockType,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    ui.label(
+        egui::RichText::new("HOTBAR // SLOTS 1-9")
+            .size(10.5)
+            .monospace()
+            .color(colors.accent)
+            .strong(),
+    );
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        for index in 0..9 {
+            let slot = hotbar.slots[index];
+            let color = slot.color.to_srgba();
+            if crate::ui_kit::swatch_slot(
+                ui,
+                index,
+                rgba_color32([color.red, color.green, color.blue, 1.0]),
+                hotbar.active == index,
+                theme,
+                slot.label(),
+            )
+            .clicked()
+            {
+                hotbar.assign_block(index, selected);
+                apply_inventory_block_selection(builder, selected);
+            }
+        }
+    });
+}
+
+/// Companion controls share the same finite panel and control feedback as the
+/// material and ship pages.
 fn draw_inventory_companion_panel(
     ui: &mut egui::Ui,
     settings: &mut WorldSettings,
@@ -2621,21 +2813,31 @@ fn draw_inventory_companion_panel(
     });
     ui.add_space(8.0);
 
-    ui.horizontal_wrapped(|ui| {
-        for (id, name, mode, last) in companions {
-            draw_inventory_companion_card(
-                ui,
-                brain,
-                id,
-                &name,
-                &mode,
-                &last,
-                pause_screen,
-                next,
-                theme,
-            );
-        }
-    });
+    if companions.is_empty() {
+        crate::ui_kit::activity_status(
+            ui,
+            LoadingState::Idle,
+            "COMPANION LINK",
+            "No companions assigned",
+            theme,
+        );
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            for (id, name, mode, last) in companions {
+                draw_inventory_companion_card(
+                    ui,
+                    brain,
+                    id,
+                    &name,
+                    &mode,
+                    &last,
+                    pause_screen,
+                    next,
+                    theme,
+                );
+            }
+        });
+    }
 
     if settings.companion_ui.editor_assist_enabled {
         ui.add_space(8.0);
@@ -2661,14 +2863,15 @@ fn draw_inventory_companion_panel(
                 }
                 if let Some(preview) = &brain.save.companion_preview {
                     let can_approve = preview.status.is_valid();
-                    let approve = crate::ui_kit::icon_action(
+                    let approve = enabled_inventory_icon_action(
                         ui,
+                        can_approve,
                         Icon::Approve,
                         "Approve",
                         can_approve,
                         theme,
                     );
-                    if can_approve && approve.clicked() {
+                    if approve.clicked() {
                         brain.companion_command =
                             Some(crate::bots::CompanionCommand::ExecutePreview);
                         close_inventory_for_companion_command(pause_screen, next);
@@ -2696,101 +2899,123 @@ fn draw_inventory_companion_card(
     theme: crate::theme::ThemeSettings,
 ) {
     let colors = theme.semantic();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(330.0, 166.0), egui::Sense::hover());
-    let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min), None);
-    child
-        .painter()
-        .rect_filled(rect, egui::Rounding::same(8.0), colors.surface);
-    child.painter().rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.2, colors.stroke),
+    let selected = brain.selected_bot == id;
+    let width = ui.available_width().min(330.0).max(112.0);
+    let summary = if last.chars().count() > 72 {
+        format!("{}...", last.chars().take(69).collect::<String>())
+    } else {
+        last.to_owned()
+    };
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 166.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_width(width);
+            crate::ui_kit::surface_panel_animated(
+                ui,
+                theme,
+                egui::Id::new(("inventory_companion_card", id)),
+                selected,
+                |ui| {
+                    ui.set_min_size(egui::vec2((width - 24.0).max(88.0), 142.0));
+                    ui.horizontal_wrapped(|ui| {
+                        crate::ui_kit::status_chip(ui, Icon::Follow, name, mode, theme);
+                        if selected {
+                            crate::ui_kit::status_chip(
+                                ui,
+                                Icon::Approve,
+                                "LINK",
+                                "SELECTED",
+                                theme,
+                            );
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(summary)
+                            .size(10.5)
+                            .monospace()
+                            .color(colors.text_muted),
+                    );
+                    ui.add_space(5.0);
+                    crate::ui_kit::compact_separator(ui, theme);
+                    ui.add_space(5.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if crate::ui_kit::icon_action(ui, Icon::Teleport, "Here", false, theme)
+                            .on_hover_text("Place beside me")
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::PlaceSelectedNearPlayer,
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Follow, "Follow", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::FollowSelected,
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Hold, "Hold", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::HoldSelected,
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Scan, "Scan", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::ScanSelected,
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Teleport, "Pad", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::PreviewAssist(
+                                    crate::bots::CompanionAssistKind::LandingPad,
+                                ),
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Road, "Road", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::PreviewAssist(
+                                    crate::bots::CompanionAssistKind::Road,
+                                ),
+                                pause_screen,
+                                next,
+                            );
+                        }
+                    });
+                },
+            );
+        },
     );
-    child.set_clip_rect(rect.shrink(8.0));
-    child.add_space(8.0);
-    child.horizontal(|ui| {
-        let (avatar, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-        let p = ui.painter_at(avatar);
-        p.circle_filled(avatar.center(), 21.0, colors.surface_strong);
-        crate::icons::paint_icon(&p, avatar.shrink(9.0), Icon::Follow, colors.accent);
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(format!("{name} // {mode}"))
-                    .size(14.0)
-                    .strong()
-                    .color(colors.text),
-            );
-            ui.label(
-                egui::RichText::new(last)
-                    .size(10.5)
-                    .color(colors.text_muted),
-            );
-        });
-    });
-    child.add_space(6.0);
-    child.horizontal_wrapped(|ui| {
-        if crate::ui_kit::icon_action(ui, Icon::Teleport, "Here", false, theme)
-            .on_hover_text("Place beside me")
-            .clicked()
-        {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::PlaceSelectedNearPlayer,
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Follow, "Follow", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::FollowSelected,
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Hold, "Hold", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::HoldSelected,
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Scan, "Scan", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::ScanSelected,
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Teleport, "Pad", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::PreviewAssist(
-                    crate::bots::CompanionAssistKind::LandingPad,
-                ),
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Road, "Road", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::PreviewAssist(
-                    crate::bots::CompanionAssistKind::Road,
-                ),
-                pause_screen,
-                next,
-            );
-        }
-    });
 }
 
 fn issue_inventory_companion_command(
@@ -2809,8 +3034,7 @@ fn close_inventory_for_companion_command(
     pause_screen: &mut PauseScreen,
     next: &mut ResMut<NextState<GameState>>,
 ) {
-    *pause_screen = PauseScreen::Menu;
-    next.set(GameState::InGame);
+    leave_inventory(pause_screen, next, InventoryExit::ResumeWorld);
 }
 
 fn rgba_color32(rgba: [f32; 4]) -> egui::Color32 {
@@ -2827,33 +3051,6 @@ fn rgba_color32(rgba: [f32; 4]) -> egui::Color32 {
         channel(rgba[2]),
         channel(rgba[3]),
     )
-}
-
-/// Render one responsive material card through the shared interaction system.
-fn draw_block_tile(
-    ui: &mut egui::Ui,
-    b: &crate::blocks::BlockType,
-    name: &str,
-    selected: bool,
-    mut on_click: impl FnMut(usize),
-    idx: usize,
-    width: f32,
-    theme: crate::theme::ThemeSettings,
-) {
-    let detail = format!("ID {:02}", idx + 1);
-    if crate::ui_kit::swatch_card(
-        ui,
-        rgba_color32(crate::blocks::voxel_color((*b).into())),
-        name,
-        &detail,
-        selected,
-        egui::vec2(width, 82.0),
-        theme,
-    )
-    .clicked()
-    {
-        on_click(idx);
-    }
 }
 
 // ============================ Helpers =====================================

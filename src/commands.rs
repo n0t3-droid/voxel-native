@@ -628,7 +628,9 @@ fn draw_command_palette(
         return;
     }
 
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let theme = settings.theme;
     let screen = ctx.screen_rect();
     let continuous_motion = allows_continuous_motion(ctx);

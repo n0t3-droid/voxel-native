@@ -12144,6 +12144,270 @@ fn bot_root(world_name: &str) -> PathBuf {
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompanionDockAxis {
+    Vertical,
+    Horizontal,
+}
+
+#[derive(Debug, Clone)]
+struct CompanionDockEntry {
+    id: u64,
+    name: String,
+    mode: BotCompanionMode,
+    role: BotRole,
+    order: u8,
+    last_message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetDockTone {
+    Parked,
+    Queue,
+    Area,
+    Autonomy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FleetDockPresentation {
+    status_icon: crate::icons::Icon,
+    status_label: &'static str,
+    action_icon: crate::icons::Icon,
+    action_label: &'static str,
+    action_tooltip: &'static str,
+    tone: FleetDockTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompanionDockAction {
+    icon: crate::icons::Icon,
+    label: &'static str,
+    tooltip: &'static str,
+    active_mode: Option<BotCompanionMode>,
+    command: CompanionCommand,
+}
+
+impl CompanionDockAction {
+    fn is_active(self, mode: BotCompanionMode) -> bool {
+        self.active_mode == Some(mode)
+    }
+}
+
+const COMPANION_PRIMARY_ACTIONS: [CompanionDockAction; 5] = [
+    CompanionDockAction {
+        icon: crate::icons::Icon::Teleport,
+        label: "Here",
+        tooltip: "Come stand next to me",
+        active_mode: Some(BotCompanionMode::AwaitingInstruction),
+        command: CompanionCommand::PlaceSelectedNearPlayer,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Follow,
+        label: "Follow",
+        tooltip: "Fly with me",
+        active_mode: Some(BotCompanionMode::FollowingPlayer),
+        command: CompanionCommand::FollowSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Hold,
+        label: "Wait",
+        tooltip: "Stay put right here",
+        active_mode: Some(BotCompanionMode::HoldingPosition),
+        command: CompanionCommand::HoldSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Scan,
+        label: "Scan",
+        tooltip: "Look around the current area",
+        active_mode: Some(BotCompanionMode::ScanningArea),
+        command: CompanionCommand::ScanSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Pin,
+        label: "Mark",
+        tooltip: "Drop a waypoint at my position",
+        active_mode: None,
+        command: CompanionCommand::MarkWaypointSelected,
+    },
+];
+
+const COMPANION_SECONDARY_ACTIONS: [CompanionDockAction; 4] = [
+    CompanionDockAction {
+        icon: crate::icons::Icon::Follow,
+        label: "Closer",
+        tooltip: "Tighten follow distance",
+        active_mode: None,
+        command: CompanionCommand::CloserSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Follow,
+        label: "Farther",
+        tooltip: "Widen follow distance",
+        active_mode: None,
+        command: CompanionCommand::FartherSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Loop,
+        label: "Patrol",
+        tooltip: "Orbit me on a wide patrol arc",
+        active_mode: Some(BotCompanionMode::Patrolling),
+        command: CompanionCommand::PatrolSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Globe,
+        label: "Survey",
+        tooltip: "Run a wide-area survey sweep",
+        active_mode: Some(BotCompanionMode::SurveySweep),
+        command: CompanionCommand::SurveySelected,
+    },
+];
+
+fn companion_dock_axis(position: crate::settings::CompanionDockPosition) -> CompanionDockAxis {
+    match position {
+        crate::settings::CompanionDockPosition::Left
+        | crate::settings::CompanionDockPosition::Right => CompanionDockAxis::Vertical,
+        crate::settings::CompanionDockPosition::Bottom => CompanionDockAxis::Horizontal,
+    }
+}
+
+fn companion_menu_width(
+    viewport_width: f32,
+    position: crate::settings::CompanionDockPosition,
+) -> f32 {
+    let safe_viewport = if viewport_width.is_finite() {
+        (viewport_width - 32.0).max(1.0)
+    } else {
+        304.0
+    };
+    let preferred: f32 = match companion_dock_axis(position) {
+        CompanionDockAxis::Vertical => 304.0,
+        CompanionDockAxis::Horizontal => 420.0,
+    };
+    preferred.min(safe_viewport)
+}
+
+fn companion_action_columns(width: f32) -> usize {
+    if width >= 380.0 {
+        3
+    } else if width >= 250.0 {
+        2
+    } else {
+        1
+    }
+}
+
+fn companion_action_width(available_width: f32, spacing: f32) -> f32 {
+    let columns = companion_action_columns(available_width);
+    let gaps = spacing.max(0.0) * columns.saturating_sub(1) as f32;
+    ((available_width - gaps) / columns as f32).clamp(
+        crate::theme::KANSO_LAYOUT.icon_action_min_width,
+        crate::theme::KANSO_LAYOUT.icon_action_max_width,
+    )
+}
+
+fn fleet_dock_presentation(mode: BotFleetMode) -> FleetDockPresentation {
+    use crate::icons::Icon;
+
+    match mode {
+        BotFleetMode::Parked => FleetDockPresentation {
+            status_icon: Icon::Hold,
+            status_label: "PARKED",
+            action_icon: Icon::Play,
+            action_label: "Run Queue",
+            action_tooltip: "Run the saved queue without inventing new projects",
+            tone: FleetDockTone::Parked,
+        },
+        BotFleetMode::ManualQueue => FleetDockPresentation {
+            status_icon: Icon::Builder,
+            status_label: "MANUAL QUEUE",
+            action_icon: Icon::Pause,
+            action_label: "Park Fleet",
+            action_tooltip: "Park the fleet and preserve queued work",
+            tone: FleetDockTone::Queue,
+        },
+        BotFleetMode::MarkedArea => FleetDockPresentation {
+            status_icon: Icon::Grid,
+            status_label: "MARKED AREA",
+            action_icon: Icon::Pause,
+            action_label: "Park Fleet",
+            action_tooltip: "Park the fleet and preserve queued work",
+            tone: FleetDockTone::Area,
+        },
+        BotFleetMode::ContinuousAutonomy => FleetDockPresentation {
+            status_icon: Icon::Optimize,
+            status_label: "AUTONOMY",
+            action_icon: Icon::Pause,
+            action_label: "Park Fleet",
+            action_tooltip: "Park the fleet and preserve queued work",
+            tone: FleetDockTone::Autonomy,
+        },
+    }
+}
+
+fn next_fleet_mode_for_toggle(current: BotFleetMode, has_work_area: bool) -> BotFleetMode {
+    if current != BotFleetMode::Parked {
+        BotFleetMode::Parked
+    } else if has_work_area {
+        BotFleetMode::MarkedArea
+    } else {
+        BotFleetMode::ManualQueue
+    }
+}
+
+fn toggle_fleet_from_ui(brain: &mut FriendlyWorldBrain) {
+    let current = brain.save.autonomy.fleet_mode();
+    let next = next_fleet_mode_for_toggle(current, brain.save.autonomy.active_work_area.is_some());
+    brain.save.autonomy.set_fleet_mode(next);
+    brain.dirty = true;
+    brain.hud_message = if next == BotFleetMode::Parked {
+        "Fleet parked. Queued projects and progress are preserved.".into()
+    } else {
+        "Fleet running only the saved priority queue; no new projects are invented.".into()
+    };
+}
+
+fn dock_neon_feedback_amount(ctx: &egui::Context, id: egui::Id, highlighted: bool) -> f32 {
+    crate::theme::animate_bool_finite(
+        ctx,
+        id.with("dock_neon_feedback"),
+        highlighted,
+        crate::theme::MotionRole::Feedback,
+    )
+}
+
+fn paint_dock_neon_feedback(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    color: egui::Color32,
+    highlighted: bool,
+) {
+    let target = highlighted
+        || response.hovered()
+        || response.has_focus()
+        || response.is_pointer_button_down_on()
+        || response.clicked();
+    let amount = dock_neon_feedback_amount(ui.ctx(), response.id, target);
+    let glow = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 64);
+    crate::theme::paint_neon_outline(
+        ui.painter(),
+        response.rect,
+        crate::theme::KANSO_VISUALS.corner_radius,
+        glow,
+        color,
+        amount,
+    );
+}
+
+fn fleet_dock_tone_color(tone: FleetDockTone, theme: crate::theme::ThemeSettings) -> egui::Color32 {
+    let colors = theme.semantic();
+    match tone {
+        FleetDockTone::Parked => colors.text_muted,
+        FleetDockTone::Queue => colors.info,
+        FleetDockTone::Area => colors.warning,
+        FleetDockTone::Autonomy => colors.success,
+    }
+}
+
 fn draw_companion_quick_dock(
     mut contexts: EguiContexts,
     mut brain: ResMut<FriendlyWorldBrain>,
@@ -12153,9 +12417,14 @@ fn draw_companion_quick_dock(
     if !settings.companion_ui.show_companion_dock {
         return;
     }
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let theme = settings.theme;
-    let (anchor, offset) = match settings.companion_ui.dock_position {
+    let position = settings.companion_ui.dock_position;
+    let axis = companion_dock_axis(position);
+    let viewport_width = ctx.screen_rect().width();
+    let (anchor, offset) = match position {
         crate::settings::CompanionDockPosition::Left => {
             (egui::Align2::LEFT_CENTER, egui::vec2(14.0, 0.0))
         }
@@ -12168,203 +12437,232 @@ fn draw_companion_quick_dock(
     };
     let menu_key = egui::Id::new("companion_dock_open_id");
     let mut open_id = ctx.data(|d| d.get_temp::<u64>(menu_key)).unwrap_or(0);
-    let companions: Vec<(u64, String, BotCompanionMode, BotRole, u8, String)> = brain
+    let companions: Vec<CompanionDockEntry> = brain
         .save
         .agents
         .iter()
         .filter(|b| b.companion)
-        .map(|b| {
-            (
-                b.id,
-                b.name.clone(),
-                b.companion_mode,
-                b.role,
-                b.companion_order,
-                b.memory.last_message.clone(),
-            )
+        .map(|b| CompanionDockEntry {
+            id: b.id,
+            name: b.name.clone(),
+            mode: b.companion_mode,
+            role: b.role,
+            order: b.companion_order,
+            last_message: b.memory.last_message.clone(),
         })
         .collect();
+    if open_id != 0 && !companions.iter().any(|entry| entry.id == open_id) {
+        open_id = 0;
+    }
 
     egui::Area::new(egui::Id::new("voxel_native_companion_dock"))
         .anchor(anchor, offset)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            let colors = theme.semantic();
-            let frame = egui::Frame::none()
-                .fill(egui::Color32::from_rgba_unmultiplied(
-                    colors.surface_strong.r(),
-                    colors.surface_strong.g(),
-                    colors.surface_strong.b(),
-                    188,
-                ))
-                .stroke(egui::Stroke::new(1.15, colors.info))
-                .inner_margin(egui::Margin::symmetric(8.0, 8.0))
-                .rounding(egui::Rounding::same(10.0))
-                .shadow(egui::epaint::Shadow {
-                    offset: egui::vec2(0.0, 10.0),
-                    blur: 24.0,
-                    spread: 0.0,
-                    color: egui::Color32::from_black_alpha(126),
-                });
+            let frame = crate::theme::command_frame(theme)
+                .inner_margin(egui::Margin::symmetric(10.0, 10.0));
             frame.show(ui, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                let horizontal = matches!(
-                    settings.companion_ui.dock_position,
-                    crate::settings::CompanionDockPosition::Bottom
-                );
-                if horizontal {
-                    ui.horizontal(|ui| {
-                        draw_editor_dock_icon(ui, &mut editor, theme);
-                        for (id, name, mode, role, order, last) in &companions {
-                            if companion_dock_icon(
-                                ui,
-                                name,
-                                *mode,
-                                *role,
-                                *order,
-                                open_id == *id,
-                                &last,
-                            )
-                            .clicked()
-                            {
-                                brain.selected_bot = *id;
-                                open_id = if open_id == *id { 0 } else { *id };
+                ui.spacing_mut().item_spacing = theme.density.item_spacing();
+                let clicked_companion = match axis {
+                    CompanionDockAxis::Horizontal => {
+                        ui.set_max_width((viewport_width - 32.0).max(1.0));
+                        ui.horizontal_wrapped(|ui| {
+                            draw_fleet_dock_controls(ui, &mut brain, theme);
+                            draw_editor_dock_button(ui, &mut editor, theme);
+                            let mut clicked = None;
+                            for entry in &companions {
+                                if draw_companion_dock_button(ui, entry, open_id == entry.id, theme)
+                                    .clicked()
+                                {
+                                    clicked = Some(entry.id);
+                                }
                             }
-                        }
-                        draw_companion_dock_settings(ui, &mut settings);
-                    });
-                } else {
-                    draw_editor_dock_icon(ui, &mut editor, theme);
-                    for (id, name, mode, role, order, last) in &companions {
-                        if companion_dock_icon(
-                            ui,
-                            name,
-                            *mode,
-                            *role,
-                            *order,
-                            open_id == *id,
-                            &last,
-                        )
-                        .clicked()
-                        {
-                            brain.selected_bot = *id;
-                            open_id = if open_id == *id { 0 } else { *id };
-                        }
+                            draw_companion_dock_settings(ui, &mut settings, theme);
+                            clicked
+                        })
+                        .inner
                     }
-                    draw_companion_dock_settings(ui, &mut settings);
+                    CompanionDockAxis::Vertical => {
+                        draw_fleet_dock_controls(ui, &mut brain, theme);
+                        ui.horizontal(|ui| {
+                            draw_editor_dock_button(ui, &mut editor, theme);
+                            draw_companion_dock_settings(ui, &mut settings, theme);
+                        });
+                        let mut clicked = None;
+                        ui.vertical_centered(|ui| {
+                            for entry in &companions {
+                                if draw_companion_dock_button(ui, entry, open_id == entry.id, theme)
+                                    .clicked()
+                                {
+                                    clicked = Some(entry.id);
+                                }
+                            }
+                        });
+                        clicked
+                    }
+                };
+
+                if let Some(id) = clicked_companion {
+                    brain.selected_bot = id;
+                    open_id = if open_id == id { 0 } else { id };
                 }
 
                 if open_id != 0 {
-                    ui.separator();
-                    draw_companion_quick_menu(ui, &mut brain, open_id, theme);
+                    crate::ui_kit::compact_separator(ui, theme);
+                    draw_companion_quick_menu(ui, &mut brain, open_id, theme, position);
                 }
             });
         });
     ctx.data_mut(|d| d.insert_temp(menu_key, open_id));
 }
 
-fn draw_editor_dock_icon(
+fn draw_fleet_dock_controls(
     ui: &mut egui::Ui,
-    editor: &mut ResMut<EditorState>,
+    brain: &mut FriendlyWorldBrain,
     theme: crate::theme::ThemeSettings,
 ) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(54.0, 54.0), egui::Sense::click());
-    let painter = ui.painter_at(rect);
-    let fill = if editor.open {
-        egui::Color32::from_rgb(0, 210, 235)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(16, 36, 48, 202)
-    };
-    painter.rect_filled(rect, egui::Rounding::same(8.0), fill);
-    painter.rect_filled(
-        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.center().y)),
-        egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(230, 250, 255, 30),
-    );
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.4, theme.color.primary()),
-    );
-    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(25.0, 25.0));
-    crate::icons::paint_icon(
-        &painter,
-        icon_rect,
+    let mode = brain.save.autonomy.fleet_mode();
+    let presentation = fleet_dock_presentation(mode);
+    let tone_color = fleet_dock_tone_color(presentation.tone, theme);
+
+    ui.horizontal(|ui| {
+        let status = ui.scope(|ui| {
+            crate::ui_kit::status_chip(
+                ui,
+                presentation.status_icon,
+                "FLEET",
+                presentation.status_label,
+                theme,
+            );
+        });
+        let status_response = status
+            .response
+            .on_hover_text(format!("Fleet state: {}", presentation.status_label));
+        let glow = egui::Color32::from_rgba_unmultiplied(
+            tone_color.r(),
+            tone_color.g(),
+            tone_color.b(),
+            52,
+        );
+        crate::theme::paint_neon_outline(
+            ui.painter(),
+            status_response.rect,
+            crate::theme::KANSO_VISUALS.corner_radius,
+            glow,
+            tone_color,
+            if mode == BotFleetMode::Parked {
+                0.28
+            } else {
+                0.56
+            },
+        );
+
+        let tooltip = format!(
+            "{}: {}",
+            presentation.action_label, presentation.action_tooltip
+        );
+        let action = crate::ui_kit::icon_square(
+            ui,
+            presentation.action_icon,
+            mode != BotFleetMode::Parked,
+            theme,
+            &tooltip,
+        );
+        paint_dock_neon_feedback(ui, &action, tone_color, mode != BotFleetMode::Parked);
+        if action.clicked() {
+            toggle_fleet_from_ui(brain);
+        }
+    });
+}
+
+fn draw_editor_dock_button(
+    ui: &mut egui::Ui,
+    editor: &mut EditorState,
+    theme: crate::theme::ThemeSettings,
+) {
+    let selected = editor.open && editor.tab == EditorTab::Bots;
+    let response = crate::ui_kit::icon_square(
+        ui,
         crate::icons::Icon::Wand,
-        if editor.open {
-            egui::Color32::from_rgb(5, 12, 18)
-        } else {
-            theme.color.primary()
-        },
+        selected,
+        theme,
+        "Open editor on the companion tab",
     );
-    painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 7.0),
-        egui::Align2::CENTER_BOTTOM,
-        "ED",
-        egui::FontId::monospace(9.0),
-        if editor.open {
-            egui::Color32::from_rgb(5, 12, 18)
-        } else {
-            egui::Color32::from_gray(210)
-        },
-    );
+    paint_dock_neon_feedback(ui, &response, theme.semantic().accent, selected);
     if response.clicked() {
         editor.open = true;
         editor.tab = EditorTab::Bots;
     }
-    response.on_hover_text("Open editor on the companion tab");
 }
 
-fn companion_dock_icon(
-    ui: &mut egui::Ui,
-    name: &str,
+fn companion_mode_icon(mode: BotCompanionMode) -> crate::icons::Icon {
+    use crate::icons::Icon;
+
+    match mode {
+        BotCompanionMode::AwaitingInstruction => Icon::Approve,
+        BotCompanionMode::FollowingPlayer => Icon::Follow,
+        BotCompanionMode::HoldingPosition => Icon::Hold,
+        BotCompanionMode::ScanningArea => Icon::Scan,
+        BotCompanionMode::PreviewingEdit => Icon::Eye,
+        BotCompanionMode::AssistingTask => Icon::Builder,
+        BotCompanionMode::Blocked => Icon::Close,
+        BotCompanionMode::Patrolling => Icon::Loop,
+        BotCompanionMode::SurveySweep => Icon::Globe,
+    }
+}
+
+fn companion_mode_ui_color(
     mode: BotCompanionMode,
     role: BotRole,
-    order: u8,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Color32 {
+    let colors = theme.semantic();
+    match mode {
+        BotCompanionMode::AwaitingInstruction => colors.text_muted,
+        BotCompanionMode::FollowingPlayer | BotCompanionMode::ScanningArea => colors.info,
+        BotCompanionMode::HoldingPosition | BotCompanionMode::Patrolling => colors.warning,
+        BotCompanionMode::PreviewingEdit => colors.accent,
+        BotCompanionMode::AssistingTask => match role {
+            BotRole::CompanionMaker => colors.accent,
+            _ => colors.success,
+        },
+        BotCompanionMode::Blocked => colors.danger,
+        BotCompanionMode::SurveySweep => colors.success,
+    }
+}
+
+fn draw_companion_dock_button(
+    ui: &mut egui::Ui,
+    entry: &CompanionDockEntry,
     selected: bool,
-    last_message: &str,
+    theme: crate::theme::ThemeSettings,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(54.0, 54.0), egui::Sense::click());
-    let painter = ui.painter_at(rect);
-    let color = companion_mode_color(mode, role);
-    painter.rect_filled(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(16, 36, 48, 202),
+    let tooltip = format!(
+        "{} // {}\n{}",
+        entry.name,
+        entry.mode.label(),
+        entry.last_message
     );
-    painter.rect_filled(
-        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.center().y)),
-        egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(230, 250, 255, 28),
+    let response = crate::ui_kit::icon_square(
+        ui,
+        companion_mode_icon(entry.mode),
+        selected,
+        theme,
+        &tooltip,
     );
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(if selected { 2.4 } else { 1.2 }, color),
+    let color = companion_mode_ui_color(entry.mode, entry.role, theme);
+    paint_dock_neon_feedback(ui, &response, color, selected);
+
+    let badge_center = response.rect.right_top() + egui::vec2(-4.5, 4.5);
+    ui.painter().circle_filled(badge_center, 6.0, color);
+    ui.painter().text(
+        badge_center,
+        egui::Align2::CENTER_CENTER,
+        (entry.order as usize + 1).to_string(),
+        egui::FontId::monospace(8.0),
+        theme.text_on(color),
     );
-    painter.circle_filled(
-        rect.center() + egui::vec2(0.0, -3.0),
-        14.0,
-        egui::Color32::from_rgb(232, 240, 242),
-    );
-    painter.rect_filled(
-        egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, -3.0), egui::vec2(21.0, 9.0)),
-        egui::Rounding::same(5.0),
-        color,
-    );
-    painter.circle_filled(
-        rect.center() + egui::vec2(if order == 0 { -4.0 } else { 4.0 }, -3.0),
-        2.0,
-        egui::Color32::from_rgb(2, 8, 12),
-    );
-    painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 6.0),
-        egui::Align2::CENTER_BOTTOM,
-        name.chars().take(2).collect::<String>().to_uppercase(),
-        egui::FontId::monospace(9.0),
-        egui::Color32::from_gray(230),
-    );
-    response.on_hover_text(format!("{} // {}\n{}", name, mode.label(), last_message))
+    response
 }
 
 fn companion_mode_color(mode: BotCompanionMode, role: BotRole) -> egui::Color32 {
@@ -12384,25 +12682,19 @@ fn companion_mode_color(mode: BotCompanionMode, role: BotRole) -> egui::Color32 
     }
 }
 
-fn draw_companion_dock_settings(ui: &mut egui::Ui, settings: &mut ResMut<WorldSettings>) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(54.0, 28.0), egui::Sense::click());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        egui::Rounding::same(6.0),
-        egui::Color32::from_rgba_unmultiplied(20, 30, 38, 220),
-    );
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(6.0),
-        egui::Stroke::new(1.0, egui::Color32::from_gray(110)),
-    );
-    crate::icons::paint_icon(
-        &painter,
-        rect.shrink(6.0),
+fn draw_companion_dock_settings(
+    ui: &mut egui::Ui,
+    settings: &mut WorldSettings,
+    theme: crate::theme::ThemeSettings,
+) {
+    let response = crate::ui_kit::icon_square(
+        ui,
         crate::icons::Icon::Layout,
-        egui::Color32::from_gray(210),
+        false,
+        theme,
+        "Move companion dock",
     );
+    paint_dock_neon_feedback(ui, &response, theme.semantic().focus, false);
     if response.clicked() {
         settings.companion_ui.dock_position = match settings.companion_ui.dock_position {
             crate::settings::CompanionDockPosition::Left => {
@@ -12417,7 +12709,6 @@ fn draw_companion_dock_settings(ui: &mut egui::Ui, settings: &mut ResMut<WorldSe
         };
         settings.save();
     }
-    response.on_hover_text("Move companion dock");
 }
 
 fn draw_companion_quick_menu(
@@ -12425,6 +12716,7 @@ fn draw_companion_quick_menu(
     brain: &mut FriendlyWorldBrain,
     companion_id: u64,
     theme: crate::theme::ThemeSettings,
+    position: crate::settings::CompanionDockPosition,
 ) {
     let Some((name, mode, role)) = brain
         .save
@@ -12435,132 +12727,95 @@ fn draw_companion_quick_menu(
     else {
         return;
     };
-    ui.set_min_width(296.0);
-    let mood_color = companion_mode_color(mode, role);
-    let mood_glyph = companion_mode_glyph(mode);
+    let menu_width = companion_menu_width(ui.ctx().screen_rect().width(), position);
+    ui.set_width(menu_width);
+    let mood_color = companion_mode_ui_color(mode, role, theme);
     let mood_word = companion_mode_word(mode);
 
-    // ---- Mood header strip ----
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(280.0, 34.0), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(14, 22, 30, 230),
-    );
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.4, mood_color.gamma_multiply(0.85)),
-    );
-    // Pulse dot (left side).
-    let dot_c = egui::pos2(rect.left() + 18.0, rect.center().y);
-    painter.circle_filled(dot_c, 7.0, mood_color);
-    painter.circle_stroke(
-        dot_c,
-        9.0,
-        egui::Stroke::new(1.0, mood_color.gamma_multiply(0.55)),
-    );
-    // Name (white) + mood label (mood-color).
-    painter.text(
-        egui::pos2(rect.left() + 34.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        name.to_uppercase(),
-        egui::FontId::monospace(13.0),
-        theme.color.primary(),
-    );
-    painter.text(
-        egui::pos2(rect.right() - 10.0, rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        format!("{mood_glyph} {mood_word}"),
-        egui::FontId::monospace(11.0),
+    let header = ui.horizontal_wrapped(|ui| {
+        crate::ui_kit::status_chip(
+            ui,
+            crate::icons::Icon::Follow,
+            "COMPANION",
+            &name.to_uppercase(),
+            theme,
+        );
+        crate::ui_kit::status_chip(ui, companion_mode_icon(mode), "MODE", mood_word, theme);
+    });
+    let glow =
+        egui::Color32::from_rgba_unmultiplied(mood_color.r(), mood_color.g(), mood_color.b(), 52);
+    crate::theme::paint_neon_outline(
+        ui.painter(),
+        header.response.rect,
+        crate::theme::KANSO_VISUALS.corner_radius,
+        glow,
         mood_color,
+        if mode == BotCompanionMode::Blocked {
+            0.82
+        } else {
+            0.42
+        },
     );
 
-    ui.add_space(4.0);
-
-    // ---- 5 BIG primary buttons ----
-    let primary: [(&str, &str, &str, BotCompanionMode, CompanionCommand); 5] = [
-        (
-            "⤓",
-            "HERE",
-            "Come stand next to me",
-            BotCompanionMode::AwaitingInstruction,
-            CompanionCommand::PlaceSelectedNearPlayer,
-        ),
-        (
-            "➤",
-            "FOLLOW",
-            "Fly with me",
-            BotCompanionMode::FollowingPlayer,
-            CompanionCommand::FollowSelected,
-        ),
-        (
-            "■",
-            "WAIT",
-            "Stay put right here",
-            BotCompanionMode::HoldingPosition,
-            CompanionCommand::HoldSelected,
-        ),
-        (
-            "◎",
-            "SCAN",
-            "Look around for stuff",
-            BotCompanionMode::ScanningArea,
-            CompanionCommand::ScanSelected,
-        ),
-        (
-            "⚑",
-            "MARK",
-            "Drop a flag at my spot",
-            BotCompanionMode::AwaitingInstruction, // never highlighted
-            CompanionCommand::MarkWaypointSelected,
-        ),
-    ];
+    let action_width = companion_action_width(menu_width, ui.spacing().item_spacing.x);
     ui.horizontal_wrapped(|ui| {
-        for (glyph, caption, tooltip, active_mode, cmd) in primary {
-            // Don't highlight "MARK" — it's a one-shot action, not a mode.
-            let is_active = caption != "MARK" && mode == active_mode;
-            if dock_big_button(ui, glyph, caption, tooltip, is_active, mood_color).clicked() {
+        for action in COMPANION_PRIMARY_ACTIONS {
+            let active = action.is_active(mode);
+            let response =
+                draw_companion_primary_action(ui, action, active, action_width, mood_color, theme);
+            if response.clicked() {
                 brain.selected_bot = companion_id;
-                brain.companion_command = Some(cmd);
+                brain.companion_command = Some(action.command);
             }
         }
     });
 
-    // ---- Collapsible MORE drawer ----
-    egui::CollapsingHeader::new(
-        egui::RichText::new("MORE…")
-            .monospace()
-            .size(11.0)
-            .color(egui::Color32::from_rgb(170, 200, 220)),
-    )
-    .default_open(false)
-    .show(ui, |ui| {
+    let more_key = egui::Id::new(("companion_quick_more", companion_id));
+    let mut more_open = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(more_key))
+        .unwrap_or(false);
+    let more_toggle = crate::ui_kit::icon_action_sized(
+        ui,
+        crate::icons::Icon::Drawer,
+        if more_open { "Less" } else { "More" },
+        more_open,
+        action_width,
+        theme,
+    );
+    if more_toggle.clicked() {
+        more_open = !more_open;
+    }
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(more_key, more_open));
+
+    if more_open {
         ui.horizontal_wrapped(|ui| {
-            if dock_command_button(ui, "CLOSER", "Tighten follow distance").clicked() {
-                brain.selected_bot = companion_id;
-                brain.companion_command = Some(CompanionCommand::CloserSelected);
+            for action in COMPANION_SECONDARY_ACTIONS {
+                let response = crate::ui_kit::icon_action(
+                    ui,
+                    action.icon,
+                    action.label,
+                    action.is_active(mode),
+                    theme,
+                )
+                .on_hover_text(action.tooltip);
+                if response.clicked() {
+                    brain.selected_bot = companion_id;
+                    brain.companion_command = Some(action.command);
+                }
             }
-            if dock_command_button(ui, "FARTHER", "Widen follow distance").clicked() {
-                brain.selected_bot = companion_id;
-                brain.companion_command = Some(CompanionCommand::FartherSelected);
-            }
-            if dock_command_button(ui, "CITY TEAM", "Enable autonomous city and road building")
-                .clicked()
+            if crate::ui_kit::icon_action(
+                ui,
+                crate::icons::Icon::Optimize,
+                "City Autonomy",
+                brain.save.autonomy.fleet_mode() == BotFleetMode::ContinuousAutonomy,
+                theme,
+            )
+            .on_hover_text("Enable autonomous city and road building")
+            .clicked()
             {
                 brain.companion_command = Some(CompanionCommand::BuildCityAutonomy);
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            if dock_command_button(ui, "PATROL", "Orbit me on a wide patrol arc").clicked() {
-                brain.selected_bot = companion_id;
-                brain.companion_command = Some(CompanionCommand::PatrolSelected);
-            }
-            if dock_command_button(ui, "SURVEY", "Wide-area survey sweep for the planner").clicked()
-            {
-                brain.selected_bot = companion_id;
-                brain.companion_command = Some(CompanionCommand::SurveySelected);
             }
         });
         ui.horizontal_wrapped(|ui| {
@@ -12570,32 +12825,62 @@ fn draw_companion_quick_menu(
                 CompanionAssistKind::Lights,
                 CompanionAssistKind::ClearFlatten,
             ] {
-                if dock_command_button(ui, assist.label(), "Preview editor assist").clicked() {
+                if crate::ui_kit::icon_action(
+                    ui,
+                    companion_assist_icon(assist),
+                    assist.label(),
+                    false,
+                    theme,
+                )
+                .on_hover_text("Preview editor assist")
+                .clicked()
+                {
                     brain.selected_bot = companion_id;
                     brain.companion_command = Some(CompanionCommand::PreviewAssist(assist));
                 }
             }
         });
-    });
+    }
 
-    if let Some(preview) = &brain.save.companion_preview {
-        ui.label(egui::RichText::new(&preview.message).size(10.5).color(
-            if preview.status.is_valid() {
-                egui::Color32::from_rgb(120, 240, 255)
+    if let Some((message, can_approve)) = brain
+        .save
+        .companion_preview
+        .as_ref()
+        .map(|preview| (preview.message.clone(), preview.status.is_valid()))
+    {
+        crate::ui_kit::status_chip(
+            ui,
+            if can_approve {
+                crate::icons::Icon::Approve
             } else {
-                egui::Color32::from_rgb(255, 120, 90)
+                crate::icons::Icon::Close
             },
-        ));
+            "PREVIEW",
+            if can_approve { "READY" } else { "BLOCKED" },
+            theme,
+        );
+        ui.label(
+            egui::RichText::new(message)
+                .size(10.5)
+                .color(if can_approve {
+                    theme.semantic().info
+                } else {
+                    theme.semantic().danger
+                }),
+        );
         ui.horizontal(|ui| {
-            let can_approve = preview.status.is_valid();
-            let approve = crate::ui_kit::icon_action(
-                ui,
-                crate::icons::Icon::Approve,
-                "Approve",
-                can_approve,
-                theme,
-            );
-            if can_approve && approve.clicked() {
+            let approve = ui
+                .add_enabled_ui(can_approve, |ui| {
+                    crate::ui_kit::icon_action(
+                        ui,
+                        crate::icons::Icon::Approve,
+                        "Approve",
+                        false,
+                        theme,
+                    )
+                })
+                .inner;
+            if approve.clicked() {
                 brain.companion_command = Some(CompanionCommand::ExecutePreview);
             }
             if crate::ui_kit::danger_action(ui, crate::icons::Icon::Delete, "Clear", theme)
@@ -12604,20 +12889,6 @@ fn draw_companion_quick_menu(
                 brain.companion_command = Some(CompanionCommand::ClearPreview);
             }
         });
-    }
-}
-
-fn companion_mode_glyph(mode: BotCompanionMode) -> &'static str {
-    match mode {
-        BotCompanionMode::AwaitingInstruction => "◉",
-        BotCompanionMode::FollowingPlayer => "➤",
-        BotCompanionMode::HoldingPosition => "■",
-        BotCompanionMode::ScanningArea => "◎",
-        BotCompanionMode::PreviewingEdit => "✦",
-        BotCompanionMode::AssistingTask => "✧",
-        BotCompanionMode::Blocked => "✕",
-        BotCompanionMode::Patrolling => "↻",
-        BotCompanionMode::SurveySweep => "⌬",
     }
 }
 
@@ -12635,91 +12906,33 @@ fn companion_mode_word(mode: BotCompanionMode) -> &'static str {
     }
 }
 
-fn dock_big_button(
+fn draw_companion_primary_action(
     ui: &mut egui::Ui,
-    glyph: &str,
-    caption: &str,
-    tooltip: &str,
+    action: CompanionDockAction,
     active: bool,
-    accent: egui::Color32,
+    width: f32,
+    mode_color: egui::Color32,
+    theme: crate::theme::ThemeSettings,
 ) -> egui::Response {
-    let icon = match caption {
-        "HERE" => crate::icons::Icon::Teleport,
-        "FOLLOW" => crate::icons::Icon::Follow,
-        "WAIT" => crate::icons::Icon::Hold,
-        "SCAN" => crate::icons::Icon::Scan,
-        "MARK" => crate::icons::Icon::Pin,
-        _ => crate::icons::Icon::Help,
-    };
-    let _ = glyph;
-    let size = egui::vec2(52.0, 52.0);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let hovered = response.hovered();
-    let painter = ui.painter_at(rect);
-    let bg = if active {
-        egui::Color32::from_rgba_unmultiplied(
-            (accent.r() as u16 * 60 / 255) as u8,
-            (accent.g() as u16 * 60 / 255) as u8,
-            (accent.b() as u16 * 60 / 255) as u8,
-            230,
-        )
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(34, 50, 64, 240)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(20, 30, 40, 230)
-    };
-    let stroke = if active {
-        egui::Stroke::new(2.0, accent)
-    } else {
-        egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(70, 100, 120, 200),
-        )
-    };
-    painter.rect_filled(rect, egui::Rounding::same(8.0), bg);
-    painter.rect_stroke(rect, egui::Rounding::same(8.0), stroke);
-    let glyph_color = if active {
-        accent
-    } else {
-        egui::Color32::from_rgb(220, 240, 255)
-    };
-    crate::icons::paint_icon(
-        &painter,
-        egui::Rect::from_center_size(
-            egui::pos2(rect.center().x, rect.top() + 19.0),
-            egui::vec2(20.0, 20.0),
-        ),
-        icon,
-        glyph_color,
-    );
-    painter.text(
-        egui::pos2(rect.center().x, rect.bottom() - 11.0),
-        egui::Align2::CENTER_CENTER,
-        caption,
-        egui::FontId::monospace(9.0),
-        egui::Color32::from_rgb(220, 240, 255),
-    );
-    response.on_hover_text(tooltip)
+    let response =
+        crate::ui_kit::icon_action_sized(ui, action.icon, action.label, active, width, theme);
+    paint_dock_neon_feedback(ui, &response, mode_color, active);
+    response.on_hover_text(action.tooltip)
 }
 
-fn dock_command_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(label)
-                .monospace()
-                .size(10.0)
-                .strong()
-                .color(egui::Color32::from_rgb(230, 245, 255)),
-        )
-        .fill(egui::Color32::from_rgba_unmultiplied(22, 34, 44, 230))
-        .stroke(egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(80, 210, 230, 190),
-        ))
-        .rounding(egui::Rounding::same(5.0))
-        .min_size(egui::vec2(56.0, 26.0)),
-    )
-    .on_hover_text(tooltip)
+fn companion_assist_icon(assist: CompanionAssistKind) -> crate::icons::Icon {
+    use crate::icons::Icon;
+
+    match assist {
+        CompanionAssistKind::Road => Icon::Road,
+        CompanionAssistKind::LandingPad => Icon::Grid,
+        CompanionAssistKind::Lights => Icon::LightBulb,
+        CompanionAssistKind::ClearFlatten => Icon::Eraser,
+        CompanionAssistKind::Recolor => Icon::Pipette,
+        CompanionAssistKind::Repair => Icon::Wand,
+        CompanionAssistKind::Beautify => Icon::Brush,
+        CompanionAssistKind::TargetRange => Icon::Scan,
+    }
 }
 
 fn queue_smart_editor_task(
@@ -14439,6 +14652,109 @@ mod tests {
             .iter()
             .filter(|bot| bot.companion)
             .all(|bot| bot.companion_mode == BotCompanionMode::AwaitingInstruction));
+    }
+
+    #[test]
+    fn companion_dock_layout_adapts_to_anchor_and_viewport() {
+        use crate::settings::CompanionDockPosition::{Bottom, Left, Right};
+
+        assert_eq!(companion_dock_axis(Left), CompanionDockAxis::Vertical);
+        assert_eq!(companion_dock_axis(Right), CompanionDockAxis::Vertical);
+        assert_eq!(companion_dock_axis(Bottom), CompanionDockAxis::Horizontal);
+        assert_eq!(companion_menu_width(1_280.0, Left), 304.0);
+        assert_eq!(companion_menu_width(1_280.0, Bottom), 420.0);
+        assert_eq!(companion_menu_width(280.0, Bottom), 248.0);
+        assert_eq!(companion_action_columns(420.0), 3);
+        assert_eq!(companion_action_columns(304.0), 2);
+        assert_eq!(companion_action_columns(248.0), 1);
+
+        let width = companion_action_width(304.0, 7.0);
+        assert!((width - 148.5).abs() < f32::EPSILON);
+        assert!(width <= crate::theme::KANSO_LAYOUT.icon_action_max_width);
+    }
+
+    #[test]
+    fn companion_dock_primary_actions_are_distinct_and_mode_driven() {
+        for (index, action) in COMPANION_PRIMARY_ACTIONS.iter().enumerate() {
+            assert!(!action.label.is_empty());
+            assert!(!action.tooltip.is_empty());
+            assert!(companion_command_selected_only(action.command));
+            for other in COMPANION_PRIMARY_ACTIONS.iter().skip(index + 1) {
+                assert_ne!(action.label, other.label);
+                assert_ne!(action.command, other.command);
+            }
+        }
+
+        for mode in [
+            BotCompanionMode::AwaitingInstruction,
+            BotCompanionMode::FollowingPlayer,
+            BotCompanionMode::HoldingPosition,
+            BotCompanionMode::ScanningArea,
+            BotCompanionMode::PreviewingEdit,
+            BotCompanionMode::AssistingTask,
+            BotCompanionMode::Blocked,
+            BotCompanionMode::Patrolling,
+            BotCompanionMode::SurveySweep,
+        ] {
+            assert!(
+                COMPANION_PRIMARY_ACTIONS
+                    .iter()
+                    .filter(|action| action.is_active(mode))
+                    .count()
+                    <= 1
+            );
+        }
+        let mark = COMPANION_PRIMARY_ACTIONS
+            .iter()
+            .find(|action| action.command == CompanionCommand::MarkWaypointSelected)
+            .unwrap();
+        assert_eq!(
+            mark.active_mode, None,
+            "one-shot actions must not look latched"
+        );
+    }
+
+    #[test]
+    fn companion_dock_fleet_toggle_preserves_explicit_modes() {
+        assert_eq!(
+            next_fleet_mode_for_toggle(BotFleetMode::Parked, false),
+            BotFleetMode::ManualQueue
+        );
+        assert_eq!(
+            next_fleet_mode_for_toggle(BotFleetMode::Parked, true),
+            BotFleetMode::MarkedArea
+        );
+        for running in [
+            BotFleetMode::ManualQueue,
+            BotFleetMode::MarkedArea,
+            BotFleetMode::ContinuousAutonomy,
+        ] {
+            assert_eq!(
+                next_fleet_mode_for_toggle(running, true),
+                BotFleetMode::Parked
+            );
+            assert_eq!(fleet_dock_presentation(running).action_label, "Park Fleet");
+        }
+
+        let mut brain = FriendlyWorldBrain::default();
+        let projects_before = brain.save.projects.len();
+        toggle_fleet_from_ui(&mut brain);
+        assert_eq!(brain.save.autonomy.fleet_mode(), BotFleetMode::ManualQueue);
+        assert!(brain.dirty);
+        assert_eq!(brain.save.projects.len(), projects_before);
+        toggle_fleet_from_ui(&mut brain);
+        assert_eq!(brain.save.autonomy.fleet_mode(), BotFleetMode::Parked);
+        assert_eq!(brain.save.projects.len(), projects_before);
+    }
+
+    #[test]
+    fn companion_dock_neon_feedback_snaps_for_reduced_motion() {
+        let ctx = egui::Context::default();
+        crate::theme::set_reduced_motion(&ctx, true);
+        let id = egui::Id::new("companion_dock_reduced_motion_test");
+
+        assert_eq!(dock_neon_feedback_amount(&ctx, id, true), 1.0);
+        assert_eq!(dock_neon_feedback_amount(&ctx, id, false), 0.0);
     }
 
     #[test]

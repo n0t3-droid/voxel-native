@@ -137,35 +137,114 @@ impl SavedShipInstance {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementPointerSource {
+    CreatorLibrary,
+    World,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShipPlacementPhase {
+    #[default]
+    Inactive,
+    Ready,
+    PointerHeld(PlacementPointerSource),
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct ShipPlacementState {
-    pub active: bool,
+    pub phase: ShipPlacementPhase,
     pub kind: ShipKind,
     pub yaw: f32,
     pub preview: Option<Entity>,
-    pub last_pos: Vec3,
+    pub target: Option<Vec3>,
+    pub return_mode: ActiveMode,
     pub status: String,
+    preview_kind: Option<ShipKind>,
+    retired_previews: Vec<Entity>,
 }
 
 impl Default for ShipPlacementState {
     fn default() -> Self {
         Self {
-            active: false,
+            phase: ShipPlacementPhase::Inactive,
             kind: ShipKind::ScoutShuttle,
             yaw: 0.0,
             preview: None,
-            last_pos: Vec3::ZERO,
+            target: None,
+            return_mode: ActiveMode::Combat,
             status: "Hangar ready.".into(),
+            preview_kind: None,
+            retired_previews: Vec::new(),
         }
     }
 }
 
 impl ShipPlacementState {
-    pub fn start(&mut self, kind: ShipKind) {
-        self.active = true;
+    pub fn start_ready(&mut self, kind: ShipKind, return_mode: ActiveMode) {
+        self.start_with_phase(kind, return_mode, ShipPlacementPhase::Ready);
+    }
+
+    pub fn start_drag(&mut self, kind: ShipKind, return_mode: ActiveMode) {
+        self.start_with_phase(
+            kind,
+            return_mode,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary),
+        );
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.phase != ShipPlacementPhase::Inactive
+    }
+
+    /// Compatibility entry point for the legacy inventory hangar.
+    fn start_with_phase(
+        &mut self,
+        kind: ShipKind,
+        return_mode: ActiveMode,
+        phase: ShipPlacementPhase,
+    ) {
+        if self.kind != kind {
+            self.retire_preview();
+        }
         self.kind = kind;
+        self.phase = phase;
         self.yaw = 0.0;
+        self.target = None;
+        self.return_mode = return_mode;
         self.status = format!("Placing {}.", kind.label());
+    }
+
+    fn retire_preview(&mut self) {
+        if let Some(entity) = self.preview.take() {
+            self.retired_previews.push(entity);
+        }
+        self.preview_kind = None;
+    }
+
+    fn sync_preview_kind(&mut self) {
+        if self.preview.is_some() && self.preview_kind != Some(self.kind) {
+            self.retire_preview();
+        }
+    }
+
+    fn handle_pointer_edges(&mut self, just_pressed: bool, just_released: bool) -> bool {
+        if just_pressed && self.phase == ShipPlacementPhase::Ready {
+            self.phase = ShipPlacementPhase::PointerHeld(PlacementPointerSource::World);
+        }
+
+        if just_released && matches!(self.phase, ShipPlacementPhase::PointerHeld(_)) {
+            self.phase = ShipPlacementPhase::Ready;
+            return true;
+        }
+
+        false
+    }
+
+    fn deactivate(&mut self) -> ActiveMode {
+        self.phase = ShipPlacementPhase::Inactive;
+        self.target = None;
+        self.return_mode
     }
 }
 
@@ -321,6 +400,21 @@ struct ShipMotion {
 struct ShipInputCapture {
     pointer: bool,
     keyboard: bool,
+    pointer_over_ui: bool,
+}
+
+#[derive(SystemParam)]
+struct ShipPlacementFrame<'w, 's> {
+    time: Res<'w, Time>,
+    mouse: Res<'w, ButtonInput<MouseButton>>,
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    input_capture: Res<'w, ShipInputCapture>,
+    wheel: EventReader<'w, 's, MouseWheel>,
+    world: Res<'w, VoxelWorld>,
+    settings: Res<'w, WorldSettings>,
+    windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    camera:
+        Query<'w, 's, (&'static Camera, &'static GlobalTransform), (With<Camera3d>, With<Player>)>,
 }
 
 #[derive(SystemParam)]
@@ -342,21 +436,23 @@ fn capture_ship_input(
     mut egui_contexts: Query<&mut bevy_egui::EguiContext, With<PrimaryWindow>>,
     mut capture: ResMut<ShipInputCapture>,
 ) {
-    let (egui_pointer, egui_keyboard) = egui_contexts
+    let (egui_pointer, egui_keyboard, egui_pointer_over_ui) = egui_contexts
         .get_single_mut()
         .map(|mut context| {
             let context = context.get_mut();
             (
                 context.wants_pointer_input() || context.is_pointer_over_area(),
                 context.wants_keyboard_input(),
+                context.is_pointer_over_area(),
             )
         })
-        .unwrap_or((false, false));
+        .unwrap_or((false, false, false));
     let pointer_over_editor_ui = ui_focus
         .as_deref()
         .is_some_and(|focus| focus.pointer_over_editor_ui);
     capture.pointer = egui_pointer || pointer_over_editor_ui;
     capture.keyboard = egui_keyboard;
+    capture.pointer_over_ui = egui_pointer_over_ui || pointer_over_editor_ui;
 
     // E is a continuous roll axis in the cockpit, while the global menu uses
     // its pressed edge to open inventory. Egui has already seen the raw event.
@@ -3085,14 +3181,7 @@ fn cleanup_ship_runtime(
 
 #[allow(clippy::too_many_arguments)]
 fn ship_placement_input(
-    time: Res<Time>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    input_capture: Res<ShipInputCapture>,
-    mut wheel: EventReader<MouseWheel>,
-    world: Res<VoxelWorld>,
-    settings: Res<WorldSettings>,
-    camera_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
+    mut frame: ShipPlacementFrame,
     mut placement: ResMut<ShipPlacementState>,
     mut mode: ResMut<ModeContext>,
     mut commands: Commands,
@@ -3102,100 +3191,196 @@ fn ship_placement_input(
     mut fx: ResMut<ShipFxCache>,
     mut preview_q: Query<&mut Transform, With<ShipPreview>>,
 ) {
-    if !placement.active && !matches!(mode.mode, ActiveMode::ShipPlacement { .. }) {
-        return;
+    if !placement.is_active() {
+        let ActiveMode::ShipPlacement { kind } = mode.mode else {
+            return;
+        };
+        placement.start_ready(kind, mode.last_mode);
+    } else {
+        let placement_mode = ActiveMode::ShipPlacement {
+            kind: placement.kind,
+        };
+        if mode.mode == placement.return_mode {
+            mode.set(
+                placement_mode,
+                format!("Placing {}.", placement.kind.label()),
+            );
+        } else if matches!(mode.mode, ActiveMode::ShipPlacement { .. })
+            && mode.mode != placement_mode
+        {
+            mode.set(
+                placement_mode,
+                format!("Placing {}.", placement.kind.label()),
+            );
+        } else if mode.mode != placement_mode {
+            return;
+        }
     }
-    placement.active = true;
 
-    let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
-    if !ship_controls_allowed(*input_capture) {
+    placement.sync_preview_kind();
+    for entity in std::mem::take(&mut placement.retired_previews) {
+        despawn(&mut commands, entity);
+    }
+
+    let wheel_delta: f32 = frame.wheel.read().map(|ev| ev.y).sum();
+
+    // Cancellation must remain available even while egui owns pointer or
+    // keyboard focus. In particular, RMB over the Creator Library must not
+    // leave placement armed behind the overlay.
+    if frame.mouse.just_pressed(MouseButton::Right) || frame.keys.just_pressed(KeyCode::Escape) {
+        remove_placement_preview(&mut commands, &mut placement);
+        let return_mode = placement.deactivate();
+        placement.status = "Ship placement cancelled.".into();
+        mode.set(return_mode, "Ship placement cancelled.");
         return;
     }
+
+    if !placement_controls_allowed(*frame.input_capture, placement.phase) {
+        if frame.input_capture.pointer_over_ui {
+            placement.target = None;
+            remove_placement_preview(&mut commands, &mut placement);
+        }
+        if placement.handle_pointer_edges(false, frame.mouse.just_released(MouseButton::Left)) {
+            placement.status = "Move the pointer back over the world to place the ship.".into();
+        }
+        return;
+    }
+
     if wheel_delta.abs() > 0.1 {
         placement.yaw += wheel_delta.signum() * 15.0_f32.to_radians();
     }
 
-    let Ok(cam) = camera_q.get_single() else {
-        return;
-    };
-    let origin = cam.translation();
-    let forward = cam.forward();
-    let dir = Vec3::new(forward.x, forward.y, forward.z).normalize_or_zero();
-    let pos = placement_target(&world, origin, dir).unwrap_or(origin + dir * 18.0);
-    placement.last_pos = pos;
+    placement.target = frame
+        .windows
+        .get_single()
+        .ok()
+        .zip(frame.camera.get_single().ok())
+        .and_then(|(window, (camera, camera_transform))| {
+            placement_pointer_ray(window, camera, camera_transform)
+        })
+        .and_then(|(origin, dir)| placement_target(&frame.world, origin, dir));
 
-    let preview = match placement.preview {
-        Some(e) if preview_q.get_mut(e).is_ok() => e,
-        _ => {
-            let e = spawn_ship_entity(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &mut fx,
-                placement.kind,
-                pos,
-                placement.yaw,
-                true,
-                ShipVisualDetail::Core,
-                None,
-            );
-            placement.preview = Some(e);
-            e
+    if let Some(pos) = placement.target {
+        let kind = placement.kind;
+        let preview = match placement.preview {
+            Some(entity)
+                if placement.preview_kind == Some(kind) && preview_q.get_mut(entity).is_ok() =>
+            {
+                entity
+            }
+            _ => {
+                remove_placement_preview(&mut commands, &mut placement);
+                let entity = spawn_ship_entity(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut images,
+                    &mut fx,
+                    kind,
+                    pos,
+                    placement.yaw,
+                    true,
+                    ShipVisualDetail::Core,
+                    None,
+                );
+                placement.preview = Some(entity);
+                placement.preview_kind = Some(kind);
+                entity
+            }
+        };
+        if let Ok(mut transform) = preview_q.get_mut(preview) {
+            let hover = (frame.time.elapsed_seconds_wrapped() * 4.0).sin() * 0.12;
+            transform.translation = pos + Vec3::Y * hover;
+            transform.rotation = Quat::from_rotation_y(placement.yaw);
         }
-    };
-    if let Ok(mut tf) = preview_q.get_mut(preview) {
-        let hover = (time.elapsed_seconds_wrapped() * 4.0).sin() * 0.12;
-        tf.translation = pos + Vec3::Y * hover;
-        tf.rotation = Quat::from_rotation_y(placement.yaw);
+    } else {
+        remove_placement_preview(&mut commands, &mut placement);
     }
 
-    if mouse.just_pressed(MouseButton::Right) || keys.just_pressed(KeyCode::Escape) {
-        if let Some(e) = placement.preview.take() {
-            if let Some(entity_commands) = commands.get_entity(e) {
-                entity_commands.despawn_recursive();
-            }
-        }
-        placement.active = false;
-        mode.set(ActiveMode::Combat, "Ship placement cancelled.");
+    let commit_requested = placement.handle_pointer_edges(
+        frame.mouse.just_pressed(MouseButton::Left),
+        frame.mouse.just_released(MouseButton::Left),
+    );
+    if !commit_requested {
         return;
     }
 
-    if mouse.just_pressed(MouseButton::Left) {
-        if let Some(e) = placement.preview.take() {
-            if let Some(entity_commands) = commands.get_entity(e) {
-                entity_commands.despawn_recursive();
-            }
-        }
-        let ship = spawn_ship_entity(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &mut fx,
-            placement.kind,
-            pos,
-            placement.yaw,
-            false,
-            ShipVisualDetail::for_profile(settings.runtime_profile),
-            None,
-        );
-        placement.active = false;
+    let Some(pos) = placement.target else {
+        placement.status = "Ships require a visible top-facing terrain surface.".into();
         mode.set(
-            ActiveMode::Combat,
-            format!(
-                "{} placed. Aim at cockpit and click to enter.",
-                placement.kind.label()
-            ),
+            ActiveMode::ShipPlacement {
+                kind: placement.kind,
+            },
+            placement.status.clone(),
         );
-        commands
-            .entity(ship)
-            .insert(Name::new(placement.kind.label()));
+        return;
+    };
+
+    remove_placement_preview(&mut commands, &mut placement);
+    let kind = placement.kind;
+    let ship = spawn_ship_entity(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &mut fx,
+        kind,
+        pos,
+        placement.yaw,
+        false,
+        ShipVisualDetail::for_profile(frame.settings.runtime_profile),
+        None,
+    );
+    let return_mode = placement.deactivate();
+    placement.status = format!("{} placed.", kind.label());
+    mode.set(
+        return_mode,
+        format!(
+            "{} placed. Aim at cockpit and click to enter.",
+            kind.label()
+        ),
+    );
+    commands.entity(ship).insert(Name::new(kind.label()));
+}
+
+fn placement_controls_allowed(capture: ShipInputCapture, phase: ShipPlacementPhase) -> bool {
+    !capture.any()
+        || (matches!(
+            phase,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary)
+        ) && !capture.pointer_over_ui)
+}
+
+fn placement_pointer_ray(
+    window: &Window,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+) -> Option<(Vec3, Vec3)> {
+    if !window.cursor.visible {
+        return None;
     }
+
+    let cursor = window.cursor_position()?;
+    let ray = camera.viewport_to_world(camera_transform, cursor)?;
+    Some((ray.origin, *ray.direction))
+}
+
+fn remove_placement_preview(commands: &mut Commands, placement: &mut ShipPlacementState) {
+    if let Some(entity) = placement.preview.take() {
+        despawn(commands, entity);
+    }
+    placement.preview_kind = None;
 }
 
 fn placement_target(world: &VoxelWorld, origin: Vec3, dir: Vec3) -> Option<Vec3> {
-    let (_, prev) = crate::sculpt::raycast::dda_voxel(world, origin, dir, 180.0)?;
+    let (hit, prev) = crate::sculpt::raycast::dda_voxel(world, origin, dir, 180.0)?;
+    top_face_placement_target(hit, prev)
+}
+
+fn top_face_placement_target(hit: IVec3, prev: IVec3) -> Option<Vec3> {
+    if prev - hit != IVec3::Y {
+        return None;
+    }
     Some(prev.as_vec3() + Vec3::new(0.5, 1.1, 0.5))
 }
 
@@ -3390,7 +3575,9 @@ fn draw_ship_boarding_hud(
     let Some(kind) = boarding.kind else {
         return;
     };
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let screen = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -4308,7 +4495,9 @@ fn draw_ship_cockpit_hud(
     if pilot.active_ship.is_none() || !matches!(mode.mode, ActiveMode::ShipFlight { .. }) {
         return;
     }
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let screen = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -4887,6 +5076,116 @@ mod tests {
     }
 
     #[test]
+    fn ship_placement_state_tracks_ready_and_creator_drag_phases() {
+        let return_mode = ActiveMode::BuildLive {
+            tool: crate::toolbelt::ToolbeltTool::DrawRect,
+        };
+        let mut placement = ShipPlacementState::default();
+        assert_eq!(placement.phase, ShipPlacementPhase::Inactive);
+        assert!(!placement.is_active());
+
+        placement.start_ready(ShipKind::StrikeFighter, return_mode);
+        assert_eq!(placement.phase, ShipPlacementPhase::Ready);
+        assert_eq!(placement.kind, ShipKind::StrikeFighter);
+        assert_eq!(placement.return_mode, return_mode);
+        assert!(placement.is_active());
+
+        placement.start_drag(ShipKind::HeavyDropship, return_mode);
+        assert_eq!(
+            placement.phase,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary)
+        );
+        assert_eq!(placement.kind, ShipKind::HeavyDropship);
+        assert_eq!(placement.return_mode, return_mode);
+    }
+
+    #[test]
+    fn ship_placement_world_click_and_drag_release_request_commit() {
+        let mut placement = ShipPlacementState::default();
+        placement.start_ready(ShipKind::ScoutShuttle, ActiveMode::Combat);
+
+        assert!(!placement.handle_pointer_edges(false, true));
+        assert_eq!(placement.phase, ShipPlacementPhase::Ready);
+        assert!(!placement.handle_pointer_edges(true, false));
+        assert_eq!(
+            placement.phase,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::World)
+        );
+        assert!(placement.handle_pointer_edges(false, true));
+        assert_eq!(placement.phase, ShipPlacementPhase::Ready);
+
+        placement.start_drag(ShipKind::ScoutShuttle, ActiveMode::Combat);
+        assert!(placement.handle_pointer_edges(false, true));
+        assert_eq!(placement.phase, ShipPlacementPhase::Ready);
+    }
+
+    #[test]
+    fn ship_placement_deactivation_restores_saved_mode() {
+        let return_mode = ActiveMode::BuildLive {
+            tool: crate::toolbelt::ToolbeltTool::Sculpt,
+        };
+        let mut placement = ShipPlacementState::default();
+        placement.start_ready(ShipKind::ScoutShuttle, return_mode);
+
+        assert_eq!(placement.deactivate(), return_mode);
+        assert_eq!(placement.phase, ShipPlacementPhase::Inactive);
+        assert!(!placement.is_active());
+    }
+
+    #[test]
+    fn changing_ship_kind_retires_the_old_preview() {
+        let old_preview = Entity::from_raw(42);
+        let mut placement = ShipPlacementState::default();
+        placement.preview = Some(old_preview);
+        placement.preview_kind = Some(ShipKind::ScoutShuttle);
+
+        placement.start_ready(ShipKind::StrikeFighter, ActiveMode::Combat);
+
+        assert_eq!(placement.preview, None);
+        assert_eq!(placement.preview_kind, None);
+        assert_eq!(placement.retired_previews, vec![old_preview]);
+    }
+
+    #[test]
+    fn placement_capture_allows_only_creator_originated_drag() {
+        let captured = ShipInputCapture {
+            pointer: true,
+            keyboard: false,
+            pointer_over_ui: false,
+        };
+        assert!(!placement_controls_allowed(
+            captured,
+            ShipPlacementPhase::Ready
+        ));
+        assert!(!placement_controls_allowed(
+            captured,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::World)
+        ));
+        assert!(placement_controls_allowed(
+            captured,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary)
+        ));
+        assert!(!placement_controls_allowed(
+            ShipInputCapture {
+                pointer_over_ui: true,
+                ..captured
+            },
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary)
+        ));
+    }
+
+    #[test]
+    fn ship_placement_accepts_only_top_facing_terrain_hits() {
+        let hit = IVec3::new(4, 9, -2);
+        assert_eq!(
+            top_face_placement_target(hit, hit + IVec3::Y),
+            Some(Vec3::new(4.5, 11.1, -1.5))
+        );
+        assert_eq!(top_face_placement_target(hit, hit + IVec3::X), None);
+        assert_eq!(top_face_placement_target(hit, hit - IVec3::Y), None);
+    }
+
+    #[test]
     fn blueprints_are_not_empty() {
         for kind in ShipKind::ALL {
             let bp = blueprint(kind);
@@ -5391,10 +5690,12 @@ mod tests {
         assert!(!ship_controls_allowed(ShipInputCapture {
             pointer: true,
             keyboard: false,
+            ..default()
         }));
         assert!(!ship_controls_allowed(ShipInputCapture {
             pointer: false,
             keyboard: true,
+            ..default()
         }));
     }
 

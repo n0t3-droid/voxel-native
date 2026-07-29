@@ -17,6 +17,14 @@ use crate::world::{ChunkAnchor, VoxelWorld};
 
 pub struct PlayerPlugin;
 
+/// Ordering boundary for systems that consume the player's current-frame pose.
+///
+/// Weapons, interaction rays, and other camera-authored actions must run after
+/// this set so free-flight mouse steering and Q/E roll are reflected immediately
+/// instead of reading the previous frame's orientation.
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+pub(crate) struct PlayerMotionSet;
+
 /// Latest player mining + suit snapshot for world saves (avoids huge Bevy system param lists).
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct PlayerProgressScratch {
@@ -75,7 +83,8 @@ impl Plugin for PlayerPlugin {
                     update_camera_fov,
                     update_bloom_by_graphics,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(PlayerMotionSet),
             );
     }
 }
@@ -266,6 +275,27 @@ const FREE_FLIGHT_TUNING: FreeFlightTuning = FreeFlightTuning {
     auto_level_gain_per_s: 3.2,
     auto_level_deadzone_rad: 0.002,
 };
+
+#[derive(Debug, Clone, Copy)]
+struct FreeFlightMotionTuning {
+    acceleration_response_per_s: f32,
+    braking_response_per_s: f32,
+}
+
+const PLAYER_FREE_FLIGHT_MOTION: FreeFlightMotionTuning = FreeFlightMotionTuning {
+    // Reach commanded cruise speed quickly without the one-frame velocity jump
+    // that made unpiloted flight feel disconnected from the damped camera.
+    acceleration_response_per_s: 7.0,
+    // Releasing movement should settle decisively, but still preserve a short
+    // readable coast instead of snapping the player to a dead stop.
+    braking_response_per_s: 10.0,
+};
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct FreeFlightInputPolicy {
+    mouse_look: bool,
+    roll: bool,
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 struct FreeFlightAttitude {
@@ -462,7 +492,7 @@ fn prepare_player_input_capture(
         .map(crate::mode::cursor_is_captured)
         .unwrap_or(false);
     let agent_active = agent.as_deref().is_some_and(|agent| agent.active());
-    let free_flight = space_traveller_flight_context(
+    let free_flight = player_free_flight_context(
         player.flying,
         mode.as_deref().map(|mode| mode.mode),
         agent_active,
@@ -475,7 +505,7 @@ fn prepare_player_input_capture(
     }
 }
 
-fn space_traveller_flight_context(
+fn player_free_flight_context(
     flying: bool,
     mode: Option<crate::mode::ActiveMode>,
     agent_active: bool,
@@ -490,6 +520,27 @@ fn space_traveller_flight_context(
                 )
             })
             .unwrap_or(true)
+}
+
+fn free_flight_input_policy(
+    cursor_captured: bool,
+    sketch_orbiting: bool,
+    ui_claims_input: bool,
+    gesture_blocked: bool,
+) -> FreeFlightInputPolicy {
+    if ui_claims_input {
+        return FreeFlightInputPolicy::default();
+    }
+
+    FreeFlightInputPolicy {
+        // A held right mouse button temporarily owns the viewport while a
+        // pointer tool is active. This keeps orbit available during an
+        // unfinished draw gesture without committing, deleting or cancelling it.
+        mouse_look: sketch_orbiting || (cursor_captured && !gesture_blocked),
+        // Q/E remain exclusive to captured free flight so they cannot collide
+        // with editor shortcuts while the pointer is released for drawing.
+        roll: cursor_captured && !gesture_blocked,
+    }
 }
 
 fn apply_radial_deadzone(value: Vec2, deadzone: f32) -> Vec2 {
@@ -659,6 +710,34 @@ fn direct_flight_velocity(wish: Vec3, speed: f32, follows_attitude: bool) -> Vec
     }
 }
 
+fn step_free_flight_velocity(
+    current: Vec3,
+    target: Vec3,
+    dt_seconds: f32,
+    tuning: FreeFlightMotionTuning,
+) -> Vec3 {
+    if !dt_seconds.is_finite() || dt_seconds <= 0.0 {
+        return current;
+    }
+
+    let braking =
+        target.length_squared() + 1e-5 < current.length_squared() || target.dot(current) < 0.0;
+    let response = if braking {
+        tuning.braking_response_per_s
+    } else {
+        tuning.acceleration_response_per_s
+    }
+    .max(0.0);
+    if response <= f32::EPSILON {
+        return current;
+    }
+
+    // Exact exponential response is stable across frame rates and never
+    // overshoots, including a 180-degree direction change.
+    let retained = (-response * dt_seconds).exp();
+    target + (current - target) * retained
+}
+
 fn should_apply_mouse_look(
     cursor_captured: bool,
     pointer_editor_tool: bool,
@@ -719,19 +798,24 @@ fn update_look(
         pointer_editor_tool && mouse.pressed(MouseButton::Right) && !pointer_over_editor_ui;
     let ui_claims_input = input_capture.any() || pointer_over_editor_ui;
     let agent_active = agent.as_deref().is_some_and(|agent| agent.active());
-    let space_traveller_flight = space_traveller_flight_context(
+    let player_free_flight = player_free_flight_context(
         player.flying,
         mode.as_deref().map(|mode| mode.mode),
         agent_active,
     );
 
-    if space_traveller_flight {
+    if player_free_flight {
         if !free_flight.active {
             free_flight.begin_from(transform.rotation);
         }
         let gesture_blocked = gesture_lock.as_deref().is_some_and(|lock| lock.active);
-        let accepts_flight_input = cursor_locked && !ui_claims_input && !gesture_blocked;
-        let mouse_delta = if accepts_flight_input {
+        let input_policy = free_flight_input_policy(
+            cursor_locked,
+            sketch_orbiting,
+            ui_claims_input,
+            gesture_blocked,
+        );
+        let mouse_delta = if input_policy.mouse_look {
             motion_evr
                 .read()
                 .fold(Vec2::ZERO, |sum, event| sum + event.delta)
@@ -739,7 +823,7 @@ fn update_look(
             motion_evr.clear();
             Vec2::ZERO
         };
-        let roll_input = if accepts_flight_input {
+        let roll_input = if input_policy.roll {
             roll_input_axis(keys.pressed(KeyCode::KeyQ), keys.pressed(KeyCode::KeyE))
         } else {
             0.0
@@ -857,8 +941,7 @@ fn update_movement(
         }
     }
 
-    let space_traveller_flight =
-        space_traveller_flight_context(player.flying, mode_kind, agent.is_some());
+    let player_free_flight = player_free_flight_context(player.flying, mode_kind, agent.is_some());
 
     // W double-tap latches sprint (Minecraft-style). Stays on while W is
     // held and released when W is released. This avoids needing Ctrl,
@@ -876,9 +959,9 @@ fn update_movement(
         player.sprint_latched = false;
     }
 
-    // Ground/editor flight stays yaw-horizontal. Space Traveller movement
-    // follows the complete banked attitude without ever setting position.
-    let (forward, right) = if space_traveller_flight {
+    // Walking stays yaw-horizontal. Unpiloted free flight follows the complete
+    // banked attitude without ever teleporting or directly setting position.
+    let (forward, right) = if player_free_flight {
         free_flight_movement_axes(transform.rotation)
     } else {
         let yaw_rot = Quat::from_axis_angle(Vec3::Y, player.yaw);
@@ -997,18 +1080,31 @@ fn update_movement(
     );
 
     if player.flying || !world_ready {
-        // Direct velocity in fly mode (or while world streams in).
-        player.velocity =
-            direct_flight_velocity(wish, speed, player.flying && space_traveller_flight);
+        // Build a single target velocity first, then damp the unpiloted flight
+        // vector so acceleration, steering and release all agree with the
+        // bounded angular controller. Streaming freeze and non-flight fallback
+        // intentionally retain their immediate behavior.
+        let mut target_velocity =
+            direct_flight_velocity(wish, speed, player.flying && player_free_flight);
         if manual_input_allowed && keys.pressed(KeyCode::Space) {
-            player.velocity.y += speed;
+            target_velocity.y += speed;
         }
         if manual_input_allowed && keys.pressed(KeyCode::ShiftLeft) {
-            player.velocity.y -= speed;
+            target_velocity.y -= speed;
         }
         if let Some(agent) = agent {
-            player.velocity.y += agent.up * speed;
+            target_velocity.y += agent.up * speed;
         }
+        player.velocity = if player.flying && player_free_flight {
+            step_free_flight_velocity(
+                player.velocity,
+                target_velocity,
+                dt,
+                PLAYER_FREE_FLIGHT_MOTION,
+            )
+        } else {
+            target_velocity
+        };
     } else {
         // Ground movement + asymmetric gravity. Tuned for a crisp,
         // Minecraft-style hop (clears exactly one block, short airtime):
@@ -1460,43 +1556,65 @@ mod tests {
     }
 
     #[test]
-    fn space_traveller_policy_covers_unpiloted_free_flight_and_editor_orbit() {
-        assert!(space_traveller_flight_context(
+    fn player_free_flight_policy_covers_unpiloted_flight_and_editor_orbit() {
+        assert!(player_free_flight_context(
             true,
             Some(crate::mode::ActiveMode::Combat),
             false,
         ));
-        assert!(!space_traveller_flight_context(
+        assert!(!player_free_flight_context(
             false,
             Some(crate::mode::ActiveMode::Combat),
             false,
         ));
-        assert!(space_traveller_flight_context(
+        assert!(player_free_flight_context(
             true,
             Some(crate::mode::ActiveMode::BuildLive {
                 tool: crate::toolbelt::ToolbeltTool::DrawRect,
             }),
             false,
         ));
-        assert!(!space_traveller_flight_context(
+        assert!(!player_free_flight_context(
             true,
             Some(crate::mode::ActiveMode::BuildPicker {
                 tool: crate::toolbelt::ToolbeltTool::DrawRect,
             }),
             false,
         ));
-        assert!(!space_traveller_flight_context(
+        assert!(!player_free_flight_context(
             true,
             Some(crate::mode::ActiveMode::ShipFlight {
                 entity: Entity::from_raw(7),
             }),
             false,
         ));
-        assert!(!space_traveller_flight_context(
+        assert!(!player_free_flight_context(
             true,
             Some(crate::mode::ActiveMode::Combat),
             true,
         ));
+    }
+
+    #[test]
+    fn right_mouse_orbit_keeps_damped_player_look_during_an_editor_gesture() {
+        assert_eq!(
+            free_flight_input_policy(false, true, false, true),
+            FreeFlightInputPolicy {
+                mouse_look: true,
+                roll: false,
+            }
+        );
+        assert_eq!(
+            free_flight_input_policy(true, false, false, false),
+            FreeFlightInputPolicy {
+                mouse_look: true,
+                roll: true,
+            }
+        );
+        assert_eq!(
+            free_flight_input_policy(true, true, true, false),
+            FreeFlightInputPolicy::default()
+        );
     }
 
     #[test]
@@ -1621,7 +1739,17 @@ mod tests {
     }
 
     #[test]
-    fn space_traveller_velocity_follows_pitch_while_editor_flight_can_stay_level() {
+    fn q_e_roll_preserves_the_crosshair_forward_axis() {
+        let level = free_flight_rotation(0.8, -0.3, 0.0) * Vec3::NEG_Z;
+        let rolled_left = free_flight_rotation(0.8, -0.3, 0.7) * Vec3::NEG_Z;
+        let rolled_right = free_flight_rotation(0.8, -0.3, -0.7) * Vec3::NEG_Z;
+
+        assert!((rolled_left - level).length() < 1e-6);
+        assert!((rolled_right - level).length() < 1e-6);
+    }
+
+    #[test]
+    fn player_free_flight_velocity_follows_pitch_while_planar_fallback_stays_level() {
         let rotation = free_flight_rotation(0.35, -0.55, 0.4);
         let (forward, _) = free_flight_movement_axes(rotation);
 
@@ -1633,6 +1761,41 @@ mod tests {
         assert!((traveller - forward * 20.0).length() < 1e-5);
         assert!((planar.x - traveller.x).abs() < 1e-5);
         assert!((planar.z - traveller.z).abs() < 1e-5);
+    }
+
+    #[test]
+    fn player_free_flight_accelerates_and_brakes_without_velocity_snaps() {
+        let target = Vec3::new(0.0, 0.0, -24.0);
+        let accelerating =
+            step_free_flight_velocity(Vec3::ZERO, target, 0.05, PLAYER_FREE_FLIGHT_MOTION);
+        assert!(accelerating.length() > 0.0);
+        assert!(accelerating.length() < target.length());
+
+        let braking =
+            step_free_flight_velocity(accelerating, Vec3::ZERO, 0.05, PLAYER_FREE_FLIGHT_MOTION);
+        assert!(braking.length() > 0.0);
+        assert!(braking.length() < accelerating.length());
+        assert!(braking.dot(accelerating) > 0.0);
+    }
+
+    fn simulate_free_flight_acceleration(dt: f32, steps: usize) -> Vec3 {
+        let mut velocity = Vec3::ZERO;
+        for _ in 0..steps {
+            velocity = step_free_flight_velocity(
+                velocity,
+                Vec3::new(8.0, 3.0, -22.0),
+                dt,
+                PLAYER_FREE_FLIGHT_MOTION,
+            );
+        }
+        velocity
+    }
+
+    #[test]
+    fn free_flight_velocity_response_is_frame_rate_independent() {
+        let slow = simulate_free_flight_acceleration(1.0 / 30.0, 30);
+        let fast = simulate_free_flight_acceleration(1.0 / 120.0, 120);
+        assert!((slow - fast).length() < 2e-5);
     }
 
     #[test]

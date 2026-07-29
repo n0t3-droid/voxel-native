@@ -23,7 +23,7 @@ use crate::blocks::{voxel_color, voxel_is_solid, voxel_is_weapon_target, AIR};
 use crate::director::UnifiedTelemetry;
 use crate::menu::GameState;
 use crate::neurocore::{RuntimeBudget, RuntimeProfile};
-use crate::player::Player;
+use crate::player::{Player, PlayerMotionSet};
 use crate::settings::WorldSettings;
 use crate::world::{VoxelWorld, WorldEditBatch};
 
@@ -547,6 +547,7 @@ impl Plugin for WeaponsPlugin {
                     reload_input,
                     (fire_weapon, flush_drill_heat_to_suit)
                         .chain()
+                        .after(PlayerMotionSet)
                         .run_if(in_state(GameState::InGame)),
                     animate_viewmodel,
                     update_muzzle_flash,
@@ -1441,6 +1442,8 @@ struct Explosion {
 
 const MAX_PROJECTILE_LIFETIME_SECS: f32 = 6.0;
 const PROJECTILE_ARRIVAL_GRACE_SECS: f32 = 0.25;
+const WEAPON_MAX_RANGE: f32 = 10_000.0;
+const MUZZLE_RAY_EPSILON: f32 = 0.05;
 
 /// A travelling projectile carrying its delayed impact data. On
 /// arrival the stored payload is applied: break a sphere of blocks,
@@ -2870,8 +2873,8 @@ fn fire_weapon(
     world: Res<VoxelWorld>,
     scope: Res<ScopeState>,
     settings: Res<WorldSettings>,
-    mut player_q: Query<(&GlobalTransform, &mut Player)>,
-    mut weapon_q: Query<(&mut Weapon, &GlobalTransform)>,
+    mut player_q: Query<(&Transform, &mut Player)>,
+    mut weapon_q: Query<(&mut Weapon, &Transform)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -2883,7 +2886,7 @@ fn fire_weapon(
         .get_single()
         .map(crate::mode::cursor_is_captured)
         .unwrap_or(false);
-    let Ok((mut weapon, weapon_gtf)) = weapon_q.get_single_mut() else {
+    let Ok((mut weapon, weapon_tf)) = weapon_q.get_single_mut() else {
         return;
     };
     let dt = controls.time.delta_seconds();
@@ -2940,7 +2943,7 @@ fn fire_weapon(
     }
     // Spend a round.
     weapon.mag = weapon.mag.saturating_sub(1);
-    let Ok((player_gtf, mut player)) = player_q.get_single_mut() else {
+    let Ok((player_tf, mut player)) = player_q.get_single_mut() else {
         return;
     };
     let kind = weapon.kind;
@@ -2959,8 +2962,7 @@ fn fire_weapon(
     player.fov_bonus += kind.fov_kick();
     player.pitch = (player.pitch + kind.pitch_kick()).clamp(-1.54, 1.54);
 
-    let (_, wrot, wpos) = weapon_gtf.to_scale_rotation_translation();
-    let muzzle = wpos + wrot * presentation.muzzle_offset;
+    let muzzle = weapon_muzzle_world(player_tf, weapon_tf, presentation.muzzle_offset);
 
     // Muzzle point-light only (no sphere mesh — the laser bolt itself
     // carries the visible flash, and a world-space sphere in front of
@@ -2993,7 +2995,7 @@ fn fire_weapon(
         (controls.time.elapsed_seconds_wrapped() * 100_000.0) as u64 ^ 0xFACE_FEED,
     );
 
-    let forward = player_gtf.forward();
+    let forward = player_tf.forward();
     let base_dir = Vec3::new(forward.x, forward.y, forward.z).normalize_or_zero();
     // Aiming down sight tightens the shot pattern dramatically —
     // scoped full-auto still drifts a little so it doesn't feel
@@ -3001,43 +3003,40 @@ fn fire_weapon(
     let spread_scale = 1.0 - 0.9 * scope.progress.clamp(0.0, 1.0);
     let effective_spread = kind.spread() * spread_scale;
 
-    // One short signature per trigger pull is enough to sell the muzzle.
-    // Pellet weapons still launch every projectile without stacked additive
-    // geometry at nearly identical positions.
-    if fx_scale > 0.10 {
-        let flash_end = muzzle + base_dir * kind.tracer_fx().length;
-        spawn_tracer(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut fx,
-            kind,
-            muzzle,
-            flash_end,
-        );
-    }
-
     for pellet_index in 0..kind.pellets() {
-        let dir = if effective_spread > 0.0 {
+        let camera_dir = if effective_spread > 0.0 {
             random_cone_dir(base_dir, effective_spread, &mut rng)
         } else {
             base_dir
         };
 
-        // Infinite range: every weapon carries across the entire
-        // loaded world. The DDA still bounds its iteration count for
-        // safety, and a 10_000-block cap is effectively infinite at
-        // voxel scale.
-        let max_range = 10_000.0_f32;
-        let hit = dda_voxel(&world, muzzle, dir, max_range);
-        let (impact_pos, hit_block, travel_dist) = match hit {
-            Some((hx, hy, hz)) => {
-                let p = Vec3::new(hx as f32 + 0.5, hy as f32 + 0.5, hz as f32 + 0.5);
-                let d = (p - muzzle).length().max(0.5);
-                (p, Some((hx, hy, hz)), d)
-            }
-            None => (muzzle + dir * max_range, None, max_range),
-        };
+        // The camera ray is authoritative because the crosshair is centred on
+        // it. The visual projectile then converges from the offset muzzle to
+        // that target. A second DDA from the muzzle prevents firing through
+        // close cover while preserving pixel-precise aim during Q/E rolls.
+        let shot = solve_shot_path(
+            &world,
+            player_tf.translation,
+            camera_dir,
+            muzzle,
+            WEAPON_MAX_RANGE,
+        );
+
+        // One short signature per trigger pull is enough to sell the muzzle.
+        // Pellet weapons still launch every projectile without stacked additive
+        // geometry at nearly identical positions.
+        if pellet_index == 0 && fx_scale > 0.10 {
+            let flash_end = muzzle + shot.direction * kind.tracer_fx().length;
+            spawn_tracer(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut fx,
+                kind,
+                muzzle,
+                flash_end,
+            );
+        }
 
         // The travelling projectile carries this pellet's direction and hit.
         spawn_projectile(
@@ -3046,10 +3045,10 @@ fn fire_weapon(
             &mut materials,
             &mut fx,
             muzzle,
-            dir,
-            travel_dist,
-            impact_pos,
-            hit_block,
+            shot.direction,
+            shot.travel_dist,
+            shot.impact_pos,
+            shot.hit_block,
             kind,
             fx_scale,
             pellet_index == 0 && should_spawn_projectile_light(kind, fx_scale, shot_number),
@@ -4469,13 +4468,108 @@ fn update_explosions(
 // DDA voxel raycast (Amanatides-Woo)
 // ---------------------------------------------------------------------
 
-fn dda_voxel(
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VoxelRayHit {
+    block: (i32, i32, i32),
+    distance: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShotPath {
+    direction: Vec3,
+    impact_pos: Vec3,
+    hit_block: Option<(i32, i32, i32)>,
+    travel_dist: f32,
+}
+
+fn normalized_direction(direction: Vec3, fallback: Vec3) -> Vec3 {
+    let direction = direction.normalize_or_zero();
+    if direction.length_squared() > 0.5 {
+        return direction;
+    }
+
+    let fallback = fallback.normalize_or_zero();
+    if fallback.length_squared() > 0.5 {
+        fallback
+    } else {
+        Vec3::NEG_Z
+    }
+}
+
+fn weapon_muzzle_world(
+    player_transform: &Transform,
+    weapon_transform: &Transform,
+    muzzle_offset: Vec3,
+) -> Vec3 {
+    (player_transform.compute_matrix() * weapon_transform.compute_matrix())
+        .transform_point3(muzzle_offset)
+}
+
+fn converged_muzzle_direction(muzzle: Vec3, target: Vec3, camera_direction: Vec3) -> Vec3 {
+    normalized_direction(target - muzzle, camera_direction)
+}
+
+fn voxel_center(block: (i32, i32, i32)) -> Vec3 {
+    Vec3::new(
+        block.0 as f32 + 0.5,
+        block.1 as f32 + 0.5,
+        block.2 as f32 + 0.5,
+    )
+}
+
+fn solve_shot_path(
+    world: &VoxelWorld,
+    camera_origin: Vec3,
+    camera_direction: Vec3,
+    muzzle: Vec3,
+    max_range: f32,
+) -> ShotPath {
+    let range = if max_range.is_finite() {
+        max_range.max(0.5)
+    } else {
+        WEAPON_MAX_RANGE
+    };
+    let camera_direction = normalized_direction(camera_direction, Vec3::NEG_Z);
+    let camera_hit = dda_voxel_hit(world, camera_origin, camera_direction, range);
+    let intended_target = camera_hit
+        .map(|hit| voxel_center(hit.block))
+        .unwrap_or(camera_origin + camera_direction * range);
+    let direction = converged_muzzle_direction(muzzle, intended_target, camera_direction);
+    let intended_distance = (intended_target - muzzle).length().max(0.05);
+
+    // Recast from the physical muzzle toward the camera-selected target.
+    // This catches nearby cover and prevents a viewmodel offset from becoming
+    // an accidental wall-penetration exploit.
+    if let Some(hit) = dda_voxel_hit(
+        world,
+        muzzle,
+        direction,
+        intended_distance + MUZZLE_RAY_EPSILON,
+    ) {
+        return ShotPath {
+            direction,
+            impact_pos: muzzle + direction * hit.distance,
+            hit_block: Some(hit.block),
+            travel_dist: hit.distance.max(0.05),
+        };
+    }
+
+    ShotPath {
+        direction,
+        impact_pos: intended_target,
+        hit_block: camera_hit.map(|hit| hit.block),
+        travel_dist: intended_distance,
+    }
+}
+
+fn dda_voxel_hit(
     world: &VoxelWorld,
     origin: Vec3,
     dir: Vec3,
     max_dist: f32,
-) -> Option<(i32, i32, i32)> {
-    if dir.length_squared() < 1e-6 {
+) -> Option<VoxelRayHit> {
+    let dir = dir.normalize_or_zero();
+    if dir.length_squared() < 1e-6 || !origin.is_finite() || !max_dist.is_finite() {
         return None;
     }
     let mut x = origin.x.floor() as i32;
@@ -4559,7 +4653,10 @@ fn dda_voxel(
             None => AIR,
         };
         if voxel_is_weapon_target(v) {
-            return Some((x, y, z));
+            return Some(VoxelRayHit {
+                block: (x, y, z),
+                distance: t,
+            });
         }
         steps += 1;
     }
@@ -4786,6 +4883,44 @@ mod tests {
                 MAX_PROJECTILE_LIFETIME_SECS
             );
         }
+    }
+
+    #[test]
+    fn off_axis_muzzle_converges_on_the_camera_crosshair() {
+        let muzzle = Vec3::new(0.42, -0.28, -0.75);
+        let target = Vec3::new(0.0, 0.0, -120.0);
+        let direction = converged_muzzle_direction(muzzle, target, Vec3::NEG_Z);
+        let target_t = (target.z - muzzle.z) / direction.z;
+        let crossing = muzzle + direction * target_t;
+
+        assert!((crossing.x - target.x).abs() < 1e-4);
+        assert!((crossing.y - target.y).abs() < 1e-4);
+        assert!((direction.length() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn degenerate_muzzle_target_uses_the_camera_direction() {
+        let muzzle = Vec3::new(2.0, 3.0, 4.0);
+        let camera_direction = Vec3::new(0.2, -0.1, -1.0).normalize();
+        let direction = converged_muzzle_direction(muzzle, muzzle, camera_direction);
+
+        assert!((direction - camera_direction).length() < 1e-6);
+    }
+
+    #[test]
+    fn muzzle_world_transform_inherits_camera_roll_without_lag() {
+        let player = Transform::from_xyz(10.0, 20.0, 30.0).with_rotation(
+            Quat::from_axis_angle(Vec3::Y, 0.6)
+                * Quat::from_axis_angle(Vec3::X, -0.2)
+                * Quat::from_axis_angle(Vec3::Z, 0.8),
+        );
+        let weapon = Transform::from_xyz(0.3, -0.2, -0.5);
+        let muzzle_offset = Vec3::new(0.0, 0.1, -0.4);
+        let actual = weapon_muzzle_world(&player, &weapon, muzzle_offset);
+        let expected =
+            (player.compute_matrix() * weapon.compute_matrix()).transform_point3(muzzle_offset);
+
+        assert!((actual - expected).length() < 1e-6);
     }
 
     #[test]

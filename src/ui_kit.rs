@@ -10,13 +10,15 @@ use bevy_egui::egui;
 
 use crate::icons::{paint_icon, Icon};
 use crate::theme::{
-    allows_continuous_motion, animate_bool_finite, paint_focus_outline, MotionRole, SemanticColors,
-    ThemeSettings, KANSO_LAYOUT, KANSO_VISUALS,
+    allows_continuous_motion, animate_bool_finite, neon_outline_strokes, paint_focus_outline,
+    MotionRole, SemanticColors, ThemeSettings, KANSO_LAYOUT, KANSO_VISUALS,
 };
 
-const ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
+const ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(34);
 const STATIC_ACTIVITY_PHASE: f32 = 0.125;
 const STATIC_ACTIVITY_PULSE: f32 = 0.68;
+const ORBIT_ORB_COUNT: usize = 5;
+const ORBIT_TRACK_SEGMENTS: usize = 24;
 
 fn alpha_u8(alpha: f32) -> u8 {
     let alpha = if alpha.is_finite() {
@@ -869,8 +871,12 @@ fn activity_sample(time: f64, active: bool, continuous_motion: bool) -> Activity
     }
 }
 
+fn should_request_activity_repaint(sample: ActivitySample, visible: bool) -> bool {
+    sample.needs_repaint && visible
+}
+
 fn request_activity_repaint(ui: &egui::Ui, rect: egui::Rect, sample: ActivitySample) {
-    if sample.needs_repaint && ui.is_rect_visible(rect) {
+    if should_request_activity_repaint(sample, ui.is_rect_visible(rect)) {
         ui.ctx().request_repaint_after(ACTIVITY_REPAINT_INTERVAL);
     }
 }
@@ -1098,15 +1104,22 @@ pub fn activity_status(
     response.on_hover_text(format!("{label}: {value}"))
 }
 
-/// Paint-only orbital pulse. Supplying a fixed phase and intensity is fully
+/// Paint-only five-orb pulse. Supplying a fixed phase and intensity is fully
 /// static and does not interact with egui's repaint scheduler.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OrbitOrbGeometry {
+    slot: usize,
+    center: egui::Pos2,
+    radius: f32,
+    depth: f32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct OrbitGeometry {
     center: egui::Pos2,
-    orbit_radius: f32,
-    pulse_radius: f32,
-    satellite: egui::Pos2,
-    satellite_radius: f32,
+    horizontal_radius: f32,
+    vertical_radius: f32,
+    orbs: [OrbitOrbGeometry; ORBIT_ORB_COUNT],
     phase: f32,
     intensity: f32,
 }
@@ -1126,18 +1139,114 @@ fn orbit_geometry(rect: egui::Rect, phase: f32, intensity: f32) -> Option<OrbitG
     } else {
         0.0
     };
-    let satellite_radius = (diameter * 0.065).clamp(1.5, 2.25);
-    let orbit_radius = diameter * 0.5 - satellite_radius - 1.0;
+
+    let base_orb_radius = (diameter * 0.078).clamp(0.75, 2.5);
+    let halo_extent = KANSO_VISUALS.neon_glow_gap + KANSO_VISUALS.neon_glow_width * 0.5;
+    let max_orb_radius = base_orb_radius * 1.06 * 1.025;
+    let horizontal_limit = diameter * 0.5 - max_orb_radius - halo_extent;
+    if horizontal_limit <= 0.0 {
+        return None;
+    }
+
     let center = rect.center();
+    let orbit_pulse = 0.985 + intensity * 0.015;
+    let horizontal_radius = (diameter * 0.285).min(horizontal_limit) * orbit_pulse;
+    let vertical_radius = horizontal_radius * 0.56;
+    let orb_pulse = 0.975 + intensity * 0.05;
+    let mut orbs = std::array::from_fn(|slot| {
+        let turn = (phase + slot as f32 / ORBIT_ORB_COUNT as f32).rem_euclid(1.0);
+        let angle = turn * std::f32::consts::TAU;
+        let depth = angle.sin();
+        let depth_amount = (depth + 1.0) * 0.5;
+        OrbitOrbGeometry {
+            slot,
+            center: center + egui::vec2(angle.cos() * horizontal_radius, depth * vertical_radius),
+            radius: base_orb_radius * (0.82 + depth_amount * 0.24) * orb_pulse,
+            depth,
+        }
+    });
+    orbs.sort_by(|left, right| {
+        left.depth
+            .total_cmp(&right.depth)
+            .then_with(|| left.slot.cmp(&right.slot))
+    });
+
     Some(OrbitGeometry {
         center,
-        orbit_radius,
-        pulse_radius: orbit_radius * (0.62 + intensity * 0.18),
-        satellite: point_on_turn(center, orbit_radius, phase),
-        satellite_radius,
+        horizontal_radius,
+        vertical_radius,
+        orbs,
         phase,
         intensity,
     })
+}
+
+fn projected_orbit_point(geometry: &OrbitGeometry, turn: f32) -> egui::Pos2 {
+    let angle = turn * std::f32::consts::TAU;
+    geometry.center
+        + egui::vec2(
+            angle.cos() * geometry.horizontal_radius,
+            angle.sin() * geometry.vertical_radius,
+        )
+}
+
+fn paint_projected_orbit_arc(
+    painter: &egui::Painter,
+    geometry: &OrbitGeometry,
+    start_turn: f32,
+    sweep_turn: f32,
+    segments: usize,
+    stroke: egui::Stroke,
+) {
+    let segments = segments.max(1);
+    let mut points = Vec::with_capacity(segments + 1);
+    for segment in 0..=segments {
+        let amount = segment as f32 / segments as f32;
+        points.push(projected_orbit_point(
+            geometry,
+            start_turn + sweep_turn * amount,
+        ));
+    }
+    painter.add(egui::Shape::line(points, stroke));
+}
+
+fn paint_orbit_orb(
+    painter: &egui::Painter,
+    orb: OrbitOrbGeometry,
+    intensity: f32,
+    colors: SemanticColors,
+) {
+    let depth_amount = ((orb.depth + 1.0) * 0.5).clamp(0.0, 1.0);
+    let palette_amount = orb.slot as f32 / (ORBIT_ORB_COUNT - 1) as f32;
+    let tint = mix_color(colors.info, colors.accent, palette_amount);
+    let core = mix_color(tint, colors.focus, 0.18 + depth_amount * 0.55);
+    let neon_amount = (0.42 + depth_amount * 0.42 + intensity * 0.08).clamp(0.0, 1.0);
+    let outline = neon_outline_strokes(colors.focus_glow, core, neon_amount);
+
+    if let Some(strokes) = outline {
+        painter.circle_stroke(
+            orb.center,
+            orb.radius + KANSO_VISUALS.neon_glow_gap,
+            strokes.halo,
+        );
+    }
+
+    let fill = mix_color(colors.surface_strong, tint, 0.46 + depth_amount * 0.28);
+    painter.circle_filled(
+        orb.center,
+        orb.radius,
+        with_alpha(fill, 0.78 + depth_amount * 0.20),
+    );
+    if let Some(strokes) = outline {
+        painter.circle_stroke(orb.center, orb.radius, strokes.core);
+    }
+
+    let highlight_center = orb.center + egui::vec2(-orb.radius * 0.24, -orb.radius * 0.28);
+    painter.circle_filled(
+        highlight_center,
+        (orb.radius * 0.30).max(0.32),
+        with_alpha(colors.focus, 0.16 + depth_amount * 0.22 + intensity * 0.05),
+    );
 }
 
 pub fn paint_orbit_pulse(
@@ -1151,52 +1260,44 @@ pub fn paint_orbit_pulse(
     let Some(geometry) = orbit_geometry(rect, phase, intensity) else {
         return;
     };
-    painter.circle_stroke(
-        geometry.center,
-        geometry.orbit_radius,
-        egui::Stroke::new(KANSO_VISUALS.outline_width, colors.outline_disabled),
-    );
-    let arc_sweep = 0.14 + geometry.intensity * 0.12;
-    let _ = paint_arc(
+
+    paint_projected_orbit_arc(
         painter,
-        geometry.center,
-        geometry.orbit_radius,
-        geometry.phase - arc_sweep * 0.5,
-        arc_sweep,
+        &geometry,
+        0.5,
+        0.5,
+        ORBIT_TRACK_SEGMENTS / 2,
         egui::Stroke::new(
-            KANSO_VISUALS.outline_width + geometry.intensity * 0.35,
-            with_alpha(colors.accent, 0.34 + geometry.intensity * 0.42),
+            KANSO_VISUALS.outline_width,
+            with_alpha(colors.outline_disabled, 0.30),
         ),
     );
-    painter.circle_stroke(
-        geometry.center,
-        geometry.pulse_radius,
+    paint_projected_orbit_arc(
+        painter,
+        &geometry,
+        0.0,
+        0.5,
+        ORBIT_TRACK_SEGMENTS / 2,
+        egui::Stroke::new(
+            KANSO_VISUALS.outline_width,
+            with_alpha(colors.outline_hover, 0.48),
+        ),
+    );
+    paint_projected_orbit_arc(
+        painter,
+        &geometry,
+        geometry.phase - 0.07,
+        0.14,
+        4,
         egui::Stroke::new(
             KANSO_VISUALS.focus_width,
-            with_alpha(colors.accent, 0.12 + geometry.intensity * 0.34),
+            with_alpha(colors.accent, 0.18 + geometry.intensity * 0.18),
         ),
     );
-    painter.circle_filled(
-        geometry.center,
-        3.0,
-        with_alpha(colors.info, 0.10 + geometry.intensity * 0.14),
-    );
-    painter.circle_stroke(
-        geometry.center,
-        3.0,
-        egui::Stroke::new(KANSO_VISUALS.outline_width, colors.outline_hover),
-    );
-    painter.circle_filled(geometry.center, 1.4, colors.info);
-    painter.circle_filled(
-        geometry.satellite,
-        geometry.satellite_radius + 1.0,
-        with_alpha(colors.focus_glow, 0.08 + geometry.intensity * 0.18),
-    );
-    painter.circle_filled(
-        geometry.satellite,
-        geometry.satellite_radius,
-        mix_color(colors.outline_hover, colors.focus, geometry.intensity),
-    );
+
+    for orb in geometry.orbs {
+        paint_orbit_orb(painter, orb, geometry.intensity, colors);
+    }
 }
 
 /// Fixed-size orbit widget. Inactive, reduced-motion and low-spec variants
@@ -1602,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_repaints_only_for_active_full_motion() {
+    fn activity_repaints_only_for_active_visible_full_motion() {
         let idle = activity_sample(12.0, false, true);
         let frozen = activity_sample(12.0, true, false);
         let frozen_later = activity_sample(9_999.0, true, false);
@@ -1618,8 +1719,33 @@ mod tests {
         assert!((0.0..1.0).contains(&active.phase));
         assert!((0.0..=1.0).contains(&active.pulse));
         assert_eq!(invalid_time, frozen);
-        assert!(ACTIVITY_REPAINT_INTERVAL >= Duration::from_millis(30));
+        assert!(!should_request_activity_repaint(idle, true));
+        assert!(!should_request_activity_repaint(frozen, true));
+        assert!(!should_request_activity_repaint(active, false));
+        assert!(should_request_activity_repaint(active, true));
+        assert!(ACTIVITY_REPAINT_INTERVAL >= Duration::from_millis(34));
         assert!(ACTIVITY_REPAINT_INTERVAL <= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn reduced_motion_and_low_spec_produce_the_same_static_activity_sample() {
+        let ctx = egui::Context::default();
+        crate::theme::set_motion_preferences(&ctx, false, false);
+        let full = activity_sample(12.0, true, allows_continuous_motion(&ctx));
+
+        crate::theme::set_motion_preferences(&ctx, true, false);
+        let reduced = activity_sample(12.0, true, allows_continuous_motion(&ctx));
+        let reduced_later = activity_sample(9_999.0, true, allows_continuous_motion(&ctx));
+
+        crate::theme::set_motion_preferences(&ctx, false, true);
+        let low_spec = activity_sample(77.0, true, allows_continuous_motion(&ctx));
+
+        assert!(full.needs_repaint);
+        assert_eq!(reduced, reduced_later);
+        assert_eq!(reduced, low_spec);
+        assert_eq!(reduced.phase, STATIC_ACTIVITY_PHASE);
+        assert_eq!(reduced.pulse, STATIC_ACTIVITY_PULSE);
+        assert!(!reduced.needs_repaint);
     }
 
     #[test]
@@ -1633,7 +1759,7 @@ mod tests {
     }
 
     #[test]
-    fn orbit_geometry_is_clamped_static_and_inside_its_allocation() {
+    fn orbit_geometry_is_clamped_depth_sorted_and_inside_its_allocation() {
         let rect = egui::Rect::from_center_size(
             egui::pos2(40.0, 50.0),
             egui::Vec2::splat(KANSO_LAYOUT.orbit_pulse_size),
@@ -1643,23 +1769,58 @@ mod tests {
         let clamped = orbit_geometry(rect, f32::NAN, 2.0).expect("clamped orbit geometry");
 
         assert!(rect.contains(frozen.center));
-        assert!(rect.contains(frozen.satellite));
-        assert!(frozen.pulse_radius < frozen.orbit_radius);
+        assert_eq!(frozen.orbs.len(), ORBIT_ORB_COUNT);
+        assert!(frozen
+            .orbs
+            .windows(2)
+            .all(|pair| pair[0].depth <= pair[1].depth));
+        let mut slots = frozen.orbs.map(|orb| orb.slot);
+        slots.sort_unstable();
+        assert_eq!(slots, [0, 1, 2, 3, 4]);
+        assert!(frozen.orbs[0].radius < frozen.orbs[ORBIT_ORB_COUNT - 1].radius);
         assert!((0.0..1.0).contains(&frozen.phase));
         assert!((0.0..=1.0).contains(&frozen.intensity));
         assert_eq!(clamped.phase, 0.0);
         assert_eq!(clamped.intensity, 1.0);
-        let painted_satellite_radius = frozen.satellite_radius + 1.0;
-        assert!(frozen.satellite.x - painted_satellite_radius >= rect.left());
-        assert!(frozen.satellite.x + painted_satellite_radius <= rect.right());
-        assert!(frozen.satellite.y - painted_satellite_radius >= rect.top());
-        assert!(frozen.satellite.y + painted_satellite_radius <= rect.bottom());
+        let halo_extent = KANSO_VISUALS.neon_glow_gap + KANSO_VISUALS.neon_glow_width * 0.5;
+        for orb in frozen.orbs {
+            let painted_radius = orb.radius + halo_extent;
+            assert!(orb.center.x - painted_radius >= rect.left());
+            assert!(orb.center.x + painted_radius <= rect.right());
+            assert!(orb.center.y - painted_radius >= rect.top());
+            assert!(orb.center.y + painted_radius <= rect.bottom());
+        }
         assert!(orbit_geometry(
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(4.0)),
             0.0,
             0.0,
         )
         .is_none());
+    }
+
+    #[test]
+    fn orbit_pulse_is_subtle_and_fixed_inputs_are_deterministic() {
+        let rect = egui::Rect::from_center_size(
+            egui::pos2(20.0, 20.0),
+            egui::Vec2::splat(KANSO_LAYOUT.orbit_pulse_size),
+        );
+        let quiet = orbit_geometry(rect, 0.31, 0.0).expect("quiet orbit geometry");
+        let pulse = orbit_geometry(rect, 0.31, 1.0).expect("pulsed orbit geometry");
+
+        assert_eq!(
+            quiet,
+            orbit_geometry(rect, 0.31, 0.0).expect("repeatable orbit geometry")
+        );
+        for quiet_orb in quiet.orbs {
+            let pulsed_orb = pulse
+                .orbs
+                .iter()
+                .find(|orb| orb.slot == quiet_orb.slot)
+                .expect("matching pulsed orb");
+            let radius_ratio = pulsed_orb.radius / quiet_orb.radius;
+            assert!(radius_ratio > 1.0);
+            assert!(radius_ratio < 1.06);
+        }
     }
 
     #[test]

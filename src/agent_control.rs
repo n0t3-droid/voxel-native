@@ -14,6 +14,7 @@ use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts};
 use serde::{Deserialize, Serialize};
 
+use crate::icons::Icon;
 use crate::menu::{GameState, PendingWorldLoad};
 use crate::mode::{ActiveMode, ModeContext};
 use crate::player::Player;
@@ -759,86 +760,201 @@ fn agent_control_record_frame(
     }
 }
 
+const AGENT_PANEL_VIEWPORT_MARGIN: f32 = 24.0;
+const AGENT_CONTROL_PANEL_WIDTH: f32 = 390.0;
+const AGENT_OVERLAY_PANEL_WIDTH: f32 = 720.0;
+const AGENT_CONTROL_ACTION_WIDTH: f32 = 154.0;
+
+fn adaptive_agent_panel_width(screen_width: f32, preferred_width: f32) -> f32 {
+    let preferred_width = if preferred_width.is_finite() {
+        preferred_width.max(1.0)
+    } else {
+        1.0
+    };
+    if !screen_width.is_finite() {
+        return preferred_width;
+    }
+
+    (screen_width - AGENT_PANEL_VIEWPORT_MARGIN)
+        .max(1.0)
+        .min(preferred_width)
+}
+
+fn agent_control_action_spec(enabled: bool) -> (Icon, &'static str, bool) {
+    if enabled {
+        (Icon::Pause, "Agent live", true)
+    } else {
+        (Icon::Play, "Agent paused", false)
+    }
+}
+
+fn agent_control_action(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    available: bool,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Response {
+    let (icon, label, selected) = agent_control_action_spec(enabled);
+    ui.add_enabled_ui(available, |ui| {
+        crate::ui_kit::icon_action_sized(
+            ui,
+            icon,
+            label,
+            selected,
+            AGENT_CONTROL_ACTION_WIDTH,
+            theme,
+        )
+    })
+    .inner
+}
+
+fn set_agent_control_enabled(state: &mut AgentControlState, next_enabled: bool) -> bool {
+    if state.enabled == next_enabled {
+        return false;
+    }
+
+    state.sequence = state.sequence.saturating_add(1);
+    state.enabled = next_enabled;
+    state.handoff = !next_enabled;
+    state.forward = 0.0;
+    state.right = 0.0;
+    state.up = 0.0;
+    state.sprint = false;
+    state.fly = true;
+    state.look_x = 0.0;
+    state.look_y = 0.0;
+    state.yaw = None;
+    state.pitch = None;
+    state.fire = false;
+    state.scope = false;
+    state.keys.clear();
+    state.mouse_buttons.clear();
+    state.screenshot = false;
+    state.exit = false;
+    state.build_mode = if next_enabled {
+        String::new()
+    } else {
+        "combat".into()
+    };
+    state.build_tool.clear();
+    state.game_state = if next_enabled {
+        String::new()
+    } else {
+        "ingame".into()
+    };
+    state.status = if next_enabled {
+        "agent live".into()
+    } else {
+        "agent paused".into()
+    };
+    true
+}
+
+fn paint_agent_panel_outline(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    theme: crate::theme::ThemeSettings,
+    animation_id: egui::Id,
+    active: bool,
+    resting_strength: f32,
+) {
+    let colors = theme.semantic();
+    let active_amount = crate::theme::animate_bool_finite(
+        ui.ctx(),
+        animation_id,
+        active,
+        crate::theme::MotionRole::State,
+    );
+    let resting_strength = if resting_strength.is_finite() {
+        resting_strength.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let amount = resting_strength + (1.0 - resting_strength) * active_amount;
+    let core = if active {
+        colors.outline_active
+    } else {
+        colors.outline_hover
+    };
+    crate::theme::paint_neon_outline(
+        ui.painter(),
+        rect,
+        crate::theme::KANSO_VISUALS.corner_radius,
+        colors.focus_glow,
+        core,
+        amount,
+    );
+}
+
 fn agent_control_toggle_panel(
     mut contexts: EguiContexts,
     mut state: ResMut<AgentControlState>,
     runtime: Res<AgentControlRuntime>,
+    settings: Res<WorldSettings>,
 ) {
-    let anchor = if state.enabled {
-        egui::Align2::RIGHT_BOTTOM
+    let theme = settings.theme;
+    let colors = theme.semantic();
+    let control_available = state.runtime_enabled && runtime.runtime_enabled;
+    let signal_active = control_available && state.enabled && runtime.last_error.is_none();
+    let control_owner = if !control_available {
+        "UNAVAILABLE"
+    } else if state.enabled {
+        "AGENT"
     } else {
-        egui::Align2::LEFT_BOTTOM
+        "PLAYER"
     };
-    let offset = if state.enabled {
-        egui::vec2(-14.0, -14.0)
+    let status_message = runtime
+        .last_error
+        .clone()
+        .unwrap_or_else(|| state.status.clone());
+    let status_color = if runtime.last_error.is_some() {
+        colors.danger
+    } else if state.enabled {
+        colors.success
     } else {
-        egui::vec2(14.0, -14.0)
+        colors.text_muted
     };
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    let panel_width =
+        adaptive_agent_panel_width(ctx.screen_rect().width(), AGENT_CONTROL_PANEL_WIDTH);
 
     egui::Area::new(egui::Id::new("agent_control_toggle_panel"))
-        .anchor(anchor, offset)
-        .show(contexts.ctx_mut(), |ui| {
-            egui::Frame::none()
-                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 190))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    if state.enabled {
-                        egui::Color32::from_rgb(0, 240, 255)
-                    } else {
-                        egui::Color32::from_rgb(120, 160, 170)
-                    },
-                ))
-                .rounding(egui::Rounding::same(6.0))
-                .inner_margin(egui::Margin::same(6.0))
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-14.0, -14.0))
+        .show(ctx, |ui| {
+            ui.set_width(panel_width);
+            let panel = crate::ui_kit::toolbench_frame(theme)
+                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let label = if state.enabled {
-                            "AI LIVE: AN"
-                        } else {
-                            "AI LIVE: AUS"
-                        };
-                        ui.label(
-                            egui::RichText::new(label)
-                                .monospace()
-                                .color(egui::Color32::from_rgb(230, 255, 245)),
-                        );
-                        let button_label = if state.enabled { "AUS" } else { "AN" };
-                        if ui.button(button_label).clicked() {
+                    ui.horizontal_wrapped(|ui| {
+                        crate::ui_kit::orbit_pulse(ui, signal_active, theme);
+                        crate::ui_kit::status_chip(ui, Icon::Hud, "CONTROL", control_owner, theme);
+                        let response =
+                            agent_control_action(ui, state.enabled, control_available, theme);
+                        if response.clicked() {
                             let next_enabled = !state.enabled;
-                            state.sequence = state.sequence.saturating_add(1);
-                            state.enabled = next_enabled;
-                            state.handoff = !next_enabled;
-                            state.forward = 0.0;
-                            state.right = 0.0;
-                            state.up = 0.0;
-                            state.look_x = 0.0;
-                            state.look_y = 0.0;
-                            state.fire = false;
-                            state.scope = false;
-                            state.keys.clear();
-                            state.mouse_buttons.clear();
-                            state.screenshot = false;
-                            state.exit = false;
-                            state.build_mode = if next_enabled {
-                                String::new()
-                            } else {
-                                "combat".into()
-                            };
-                            state.build_tool.clear();
-                            state.game_state = if next_enabled {
-                                String::new()
-                            } else {
-                                "ingame".into()
-                            };
-                            state.status = if next_enabled {
-                                "agent live".into()
-                            } else {
-                                "agent paused".into()
-                            };
-                            write_agent_control_file(&runtime, &state);
+                            if set_agent_control_enabled(&mut state, next_enabled) {
+                                write_agent_control_file(&runtime, &state);
+                            }
                         }
                     });
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(status_message)
+                            .monospace()
+                            .size(10.5)
+                            .color(status_color),
+                    );
                 });
+            paint_agent_panel_outline(
+                ui,
+                panel.response.rect,
+                theme,
+                egui::Id::new("agent_control_toggle_outline"),
+                state.enabled && control_available,
+                0.22,
+            );
         });
 }
 
@@ -846,6 +962,7 @@ fn agent_control_overlay(
     mut contexts: EguiContexts,
     state: Res<AgentControlState>,
     runtime: Res<AgentControlRuntime>,
+    settings: Res<WorldSettings>,
     game: Res<State<GameState>>,
     active_weapon: Option<Res<ActiveWeapon>>,
     toolbelt: Option<Res<ToolbeltState>>,
@@ -854,46 +971,102 @@ fn agent_control_overlay(
     let Ok((transform, player)) = player.get_single() else {
         return;
     };
+    let theme = settings.theme;
+    let colors = theme.semantic();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    let panel_width =
+        adaptive_agent_panel_width(ctx.screen_rect().width(), AGENT_OVERLAY_PANEL_WIDTH);
+    let signal_active = runtime.last_error.is_none();
     egui::Area::new(egui::Id::new("agent_control_live_overlay"))
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(12.0, 12.0))
-        .show(contexts.ctx_mut(), |ui| {
-            egui::Frame::none()
-                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 220))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 240, 255)))
-                .rounding(egui::Rounding::same(6.0))
-                .inner_margin(egui::Margin::same(8.0))
+        .show(ctx, |ui| {
+            ui.set_width(panel_width);
+            let panel = crate::ui_kit::toolbench_frame(theme)
+                .inner_margin(egui::Margin::symmetric(14.0, 12.0))
                 .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        crate::ui_kit::orbit_pulse(ui, signal_active, theme);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("AGENT CONTROL // LIVE")
+                                    .color(colors.accent)
+                                    .size(16.0)
+                                    .strong()
+                                    .monospace(),
+                            );
+                            ui.label(
+                                egui::RichText::new(&state.status)
+                                    .color(if signal_active {
+                                        colors.success
+                                    } else {
+                                        colors.danger
+                                    })
+                                    .size(10.5)
+                                    .monospace(),
+                            );
+                        });
+                    });
+                    ui.add_space(7.0);
+                    ui.horizontal_wrapped(|ui| {
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Hud,
+                            "STATE",
+                            &format!("{:?}", game.get()),
+                            theme,
+                        );
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Follow,
+                            "SEQ",
+                            &state.sequence.to_string(),
+                            theme,
+                        );
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Player,
+                            "POS",
+                            &format!(
+                                "{:.0} / {:.0} / {:.0}",
+                                transform.translation.x,
+                                transform.translation.y,
+                                transform.translation.z
+                            ),
+                            theme,
+                        );
+                    });
+                    ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new("AGENT CONTROL LIVE")
-                            .color(egui::Color32::from_rgb(0, 240, 255))
-                            .size(17.0)
-                            .strong(),
+                        egui::RichText::new(format!(
+                            "move f {:.1} r {:.1} u {:.1}  look {:.2}/{:.2}  fly {} fire {} scope {}",
+                            state.forward,
+                            state.right,
+                            state.up,
+                            state.look_x,
+                            state.look_y,
+                            player.flying,
+                            state.fire,
+                            state.scope
+                        ))
+                        .monospace()
+                        .size(11.0)
+                        .color(colors.text_muted),
                     );
-                    ui.label(format!(
-                        "{}  seq {}  pos {:.0}/{:.0}/{:.0}",
-                        state.status,
-                        state.sequence,
-                        transform.translation.x,
-                        transform.translation.y,
-                        transform.translation.z
-                    ));
-                    ui.label(format!(
-                        "move f {:.1} r {:.1} u {:.1}  look {:.2}/{:.2}  fly {} fire {} scope {}",
-                        state.forward,
-                        state.right,
-                        state.up,
-                        state.look_x,
-                        state.look_y,
-                        player.flying,
-                        state.fire,
-                        state.scope
-                    ));
-                    ui.label(format!(
-                        "keys {:?}  mouse {:?}",
-                        state.keys, state.mouse_buttons
-                    ));
-                    ui.separator();
-                    let ocr_color = egui::Color32::from_rgb(235, 255, 245);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "keys {:?}  mouse {:?}",
+                            state.keys, state.mouse_buttons
+                        ))
+                        .monospace()
+                        .size(11.0)
+                        .color(colors.text_muted),
+                    );
+                    ui.add_space(6.0);
+                    crate::ui_kit::compact_separator(ui, theme);
+                    ui.add_space(6.0);
+                    let ocr_color = colors.text;
                     ui.monospace(
                         egui::RichText::new(format!(
                             "OCR_STATE={:?} OCR_SEQ={} OCR_STATUS={}",
@@ -955,6 +1128,14 @@ fn agent_control_overlay(
                         .size(14.0),
                     );
                 });
+            paint_agent_panel_outline(
+                ui,
+                panel.response.rect,
+                theme,
+                egui::Id::new("agent_control_live_outline"),
+                signal_active,
+                0.34,
+            );
         });
 }
 
@@ -1328,4 +1509,133 @@ fn env_f32(name: &str) -> Option<f32> {
 
 fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok()?.trim().parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pausing_agent_control_clears_synthetic_input_and_hands_back_to_player() {
+        let mut state = AgentControlState {
+            runtime_enabled: true,
+            enabled: true,
+            sequence: 41,
+            forward: 1.0,
+            right: -0.75,
+            up: 0.5,
+            sprint: true,
+            fly: false,
+            look_x: 0.3,
+            look_y: -0.2,
+            yaw: Some(1.4),
+            pitch: Some(-0.4),
+            fire: true,
+            scope: true,
+            keys: vec!["W".into(), "SHIFT".into()],
+            mouse_buttons: vec!["LMB".into()],
+            game_state: "mainmenu".into(),
+            build_mode: "build".into(),
+            build_tool: "tower".into(),
+            handoff: false,
+            screenshot: true,
+            exit: true,
+            status: "driving".into(),
+        };
+
+        assert!(set_agent_control_enabled(&mut state, false));
+        assert!(!state.enabled);
+        assert_eq!(state.sequence, 42);
+        assert!(state.handoff);
+        assert_eq!((state.forward, state.right, state.up), (0.0, 0.0, 0.0));
+        assert_eq!((state.look_x, state.look_y), (0.0, 0.0));
+        assert!(!state.sprint);
+        assert!(state.fly);
+        assert_eq!((state.yaw, state.pitch), (None, None));
+        assert!(!state.fire);
+        assert!(!state.scope);
+        assert!(state.keys.is_empty());
+        assert!(state.mouse_buttons.is_empty());
+        assert!(!state.screenshot);
+        assert!(!state.exit);
+        assert_eq!(state.build_mode, "combat");
+        assert!(state.build_tool.is_empty());
+        assert_eq!(state.game_state, "ingame");
+        assert_eq!(state.status, "agent paused");
+    }
+
+    #[test]
+    fn resuming_agent_control_is_idempotent_and_saturates_sequence() {
+        let mut state = AgentControlState {
+            runtime_enabled: true,
+            enabled: false,
+            sequence: u64::MAX,
+            handoff: true,
+            build_mode: "combat".into(),
+            build_tool: "road".into(),
+            game_state: "ingame".into(),
+            status: "agent paused".into(),
+            ..default()
+        };
+
+        assert!(set_agent_control_enabled(&mut state, true));
+        assert!(state.enabled);
+        assert_eq!(state.sequence, u64::MAX);
+        assert!(!state.handoff);
+        assert!(state.build_mode.is_empty());
+        assert!(state.build_tool.is_empty());
+        assert!(state.game_state.is_empty());
+        assert_eq!(state.status, "agent live");
+
+        assert!(!set_agent_control_enabled(&mut state, true));
+        assert_eq!(state.sequence, u64::MAX);
+    }
+
+    #[test]
+    fn control_action_exposes_selected_and_disabled_states_without_layout_shift() {
+        assert_eq!(
+            agent_control_action_spec(true),
+            (Icon::Pause, "Agent live", true)
+        );
+        assert_eq!(
+            agent_control_action_spec(false),
+            (Icon::Play, "Agent paused", false)
+        );
+
+        egui::__run_test_ui(|ui| {
+            let theme = crate::theme::ThemeSettings::default();
+            let live = agent_control_action(ui, true, true, theme);
+            let paused = agent_control_action(ui, false, true, theme);
+            let unavailable = agent_control_action(ui, false, false, theme);
+
+            assert!(live.enabled());
+            assert!(paused.enabled());
+            assert!(!unavailable.enabled());
+            assert_eq!(live.rect.size(), paused.rect.size());
+            assert_eq!(paused.rect.size(), unavailable.rect.size());
+            assert_eq!(live.rect.width(), AGENT_CONTROL_ACTION_WIDTH);
+            assert_eq!(live.rect.height(), theme.density.row_height());
+        });
+    }
+
+    #[test]
+    fn panel_width_is_finite_and_never_exceeds_the_viewport_or_preference() {
+        assert_eq!(
+            adaptive_agent_panel_width(1_920.0, AGENT_CONTROL_PANEL_WIDTH),
+            AGENT_CONTROL_PANEL_WIDTH
+        );
+        assert_eq!(
+            adaptive_agent_panel_width(320.0, AGENT_CONTROL_PANEL_WIDTH),
+            296.0
+        );
+        assert_eq!(
+            adaptive_agent_panel_width(12.0, AGENT_CONTROL_PANEL_WIDTH),
+            1.0
+        );
+        assert_eq!(
+            adaptive_agent_panel_width(f32::NAN, AGENT_OVERLAY_PANEL_WIDTH),
+            AGENT_OVERLAY_PANEL_WIDTH
+        );
+        assert_eq!(adaptive_agent_panel_width(800.0, f32::NAN), 1.0);
+    }
 }

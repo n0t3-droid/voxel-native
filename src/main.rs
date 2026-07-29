@@ -11,6 +11,7 @@ mod celestial;
 mod chunk;
 mod city;
 mod commands;
+mod creator_library;
 mod daynight;
 mod director;
 mod editor;
@@ -148,6 +149,7 @@ fn main() {
         .add_plugins(city::CityPlugin)
         .add_plugins(bots::BotsPlugin)
         .add_plugins(ships::ShipPlugin)
+        .add_plugins(creator_library::CreatorLibraryPlugin)
         .add_plugins(mode::ModePlugin)
         .add_plugins(neurocore::NeuroCorePlugin)
         .add_plugins(qa::QaPlugin)

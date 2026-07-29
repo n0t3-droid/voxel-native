@@ -1060,10 +1060,10 @@ fn city_input(
     };
     let window = windows.get_single().ok();
     let cursor_visible = window.is_some_and(|window| window.cursor.visible);
-    let pointer_over_ui = cursor_visible && {
-        let ctx = contexts.ctx_mut();
-        ctx.is_pointer_over_area() || ctx.wants_pointer_input()
-    };
+    let pointer_over_ui = cursor_visible
+        && contexts
+            .try_ctx_mut()
+            .is_some_and(|ctx| ctx.is_pointer_over_area() || ctx.wants_pointer_input());
     let Some((origin, dir)) = city_placement_ray(window, camera, cam_tf) else {
         wheel.clear();
         city.selected_road = None;
@@ -3933,6 +3933,410 @@ fn circle_xz(gizmos: &mut Gizmos, c: IVec3, radius: f32, color: Color) {
 // Contextual Hints HUD (X5)
 // ---------------------------------------------------------------------
 
+const HINT_HUD_MAX_WIDTH: f32 = 430.0;
+const HINT_HUD_STACK_BREAKPOINT: f32 = 340.0;
+const HINT_HUD_MAX_BODY_HEIGHT: f32 = 340.0;
+const HINT_HUD_KEY_HEIGHT: f32 = 24.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HintRowKind {
+    Action,
+    Status,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HintHudRow {
+    trigger: String,
+    description: String,
+    kind: HintRowKind,
+}
+
+impl HintHudRow {
+    fn action(trigger: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            trigger: trigger.into(),
+            description: description.into(),
+            kind: HintRowKind::Action,
+        }
+    }
+
+    fn status(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            trigger: label.into(),
+            description: value.into(),
+            kind: HintRowKind::Status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HintHudModel {
+    context: &'static str,
+    title: String,
+    status: String,
+    rows: Vec<HintHudRow>,
+    emphasized: bool,
+}
+
+impl HintHudModel {
+    fn new(
+        context: &'static str,
+        title: impl Into<String>,
+        status: impl Into<String>,
+        emphasized: bool,
+    ) -> Self {
+        Self {
+            context,
+            title: title.into(),
+            status: status.into(),
+            rows: Vec::with_capacity(11),
+            emphasized,
+        }
+    }
+
+    fn action(&mut self, trigger: impl Into<String>, description: impl Into<String>) {
+        self.rows.push(HintHudRow::action(trigger, description));
+    }
+
+    fn detail(&mut self, label: impl Into<String>, value: impl Into<String>) {
+        self.rows.push(HintHudRow::status(label, value));
+    }
+
+    fn longest_trigger(&self) -> usize {
+        self.rows
+            .iter()
+            .map(|row| row.trigger.chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HintHudLayout {
+    panel_width: f32,
+    body_max_height: f32,
+    key_width: f32,
+    anchor_margin: f32,
+    stacked: bool,
+}
+
+impl HintHudLayout {
+    fn for_screen(screen: egui::Vec2, longest_trigger: usize) -> Self {
+        let screen_width = if screen.x.is_finite() {
+            screen.x.max(1.0)
+        } else {
+            1280.0
+        };
+        let screen_height = if screen.y.is_finite() {
+            screen.y.max(1.0)
+        } else {
+            720.0
+        };
+        let anchor_margin = if screen_width < 360.0 { 6.0 } else { 12.0 };
+        let panel_width = (screen_width - anchor_margin * 2.0)
+            .max(1.0)
+            .min(HINT_HUD_MAX_WIDTH);
+        let stacked = panel_width < HINT_HUD_STACK_BREAKPOINT;
+        let content_width = (panel_width - 24.0).max(1.0);
+        let estimated_key_width = (longest_trigger as f32 * 7.5 + 34.0).clamp(76.0, 190.0);
+        let key_width = if stacked {
+            estimated_key_width.min(content_width)
+        } else {
+            estimated_key_width.min(content_width * 0.48)
+        };
+        let body_max_height = (screen_height - 130.0)
+            .max(48.0)
+            .min(HINT_HUD_MAX_BODY_HEIGHT);
+
+        Self {
+            panel_width,
+            body_max_height,
+            key_width,
+            anchor_margin,
+            stacked,
+        }
+    }
+}
+
+fn city_hint_hud_model(city: &CityState) -> HintHudModel {
+    let in_progress = match city.tool {
+        CityTool::Road => city.pending_road_a.is_some(),
+        CityTool::District => city.pending_district_a.is_some(),
+        CityTool::Building => city.pending_building_a.is_some(),
+        CityTool::Facade | CityTool::None => false,
+    };
+    let mut model = HintHudModel::new(
+        "CITY / HINWEISE",
+        city.tool.label(),
+        format!("SNAP / {}", city.snap.label()),
+        in_progress || (city.tool == CityTool::Road && city.selected_road.is_some()),
+    );
+
+    match city.tool {
+        CityTool::Road => {
+            if city.pending_road_a.is_some() {
+                model.action("LMB release", "Strassenende zeichnen + weiterfuehren");
+                model.detail("Auto", "Laenge / Brueckenhoehe erben");
+                model.action("RMB / Esc", "Abbrechen");
+            } else {
+                model.action("LMB hold", "Strassenstart setzen, ziehen, loslassen");
+                model.action("RMB", "Letzte Strasse loeschen");
+            }
+            if let Some(idx) = city.selected_road {
+                model.detail(format!("Komponente {}", idx + 1), "direkt editierbar");
+                model.action("Wheel", "Koerper=Breite/Radius, Griff=Brueckenhoehe");
+                model.action("Ctrl+Wheel", "Breite / Kreisradius");
+                model.action("Shift+Wheel", "Brueckenhoehe am naechsten Ende");
+                model.action("MMB / Alt+Wheel", "Textur direkt wechseln");
+            }
+            model.action("[ / ]", format!("Breite ({})", city.road_width));
+            model.action("N", "Strassen-Tool AUS");
+        }
+        CityTool::District => {
+            if city.pending_district_a.is_some() {
+                model.action("LMB release", "Bot-Stadtflaeche zeichnen");
+                model.action("RMB / Esc", "Abbrechen");
+            } else {
+                model.action("LMB hold", "Ecke A setzen, ziehen, loslassen");
+                model.action("RMB", "Letzten Bezirk loeschen");
+            }
+            model.action("[ / ]", format!("Radius ({})", city.district_radius));
+            model.action("T", "Bezirks-Tool AUS");
+        }
+        CityTool::Building => {
+            if city.pending_building_a.is_some() {
+                model.action("LMB release", "Gebaeude-Footprint zeichnen");
+                model.action("RMB / Esc", "Abbrechen");
+            } else {
+                model.action("LMB hold", "Ecke A setzen, ziehen, loslassen");
+                model.action("RMB", "Letztes Gebaeude vergessen");
+            }
+            model.action("[ / ]", format!("Etagen ({})", city.building_floors));
+            model.action("U", "Gebaeude-Tool AUS");
+        }
+        CityTool::Facade => {
+            model.action("LMB", "Fassade stempeln");
+            let name = city
+                .facades
+                .get(
+                    city.facade_selected
+                        .min(city.facades.len().saturating_sub(1)),
+                )
+                .map(|facade| facade.name.as_str())
+                .unwrap_or("(leer)");
+            model.detail("Aktiv", name);
+            model.action("F", "Fassaden-Tool AUS");
+        }
+        CityTool::None => {
+            model.action("N", "Strassen-Werkzeug");
+            model.action("T", "Bezirks-Werkzeug");
+            model.action("U", "Gebaeude-Werkzeug");
+            model.action("F", "Fassaden-Werkzeug");
+        }
+    }
+    model.action(".", "Snap-Modus wechseln");
+    model
+}
+
+fn editor_hint_hud_model(
+    selection: &crate::selection::SelectionState,
+    mirror: &crate::selection::MirrorState,
+) -> HintHudModel {
+    let (title, status) = if selection.ghosting {
+        ("GEIST AKTIV", "PLATZIERUNG")
+    } else if selection.a.is_some() {
+        ("AUSWAHL", "BEARBEITUNG")
+    } else {
+        ("EDITOR", "NAVIGATION")
+    };
+    let mut model = HintHudModel::new(
+        "EDITOR / HINWEISE",
+        title,
+        status,
+        selection.ghosting || selection.a.is_some() || mirror.x || mirror.y || mirror.z,
+    );
+
+    if selection.ghosting {
+        model.action("LMB / Enter", "Einfuegen");
+        model.action("Shift+LMB", "Stempel-Modus");
+        model.action("Mausrad / R", "Y-Drehen");
+        model.action("X / Y / Z", "Spiegeln");
+        model.action("Esc / RMB", "Abbrechen");
+    } else if selection.a.is_some() {
+        model.action("B", "2. Ecke setzen");
+        model.action("C", "Kopieren");
+        model.action("Ctrl+X", "Ausschneiden");
+        model.action("V", "Einfuegen");
+        model.action("Esc", "Auswahl loeschen");
+    } else {
+        model.action("B", "Box-Auswahl starten");
+        model.action("V", "Clipboard einfuegen");
+        model.action("M / Shift+M / Alt+M", "Spiegel X / Y / Z");
+    }
+    if mirror.x || mirror.y || mirror.z {
+        model.detail(
+            "SPIEGEL",
+            format!(
+                "X={} Y={} Z={}",
+                on_off(mirror.x),
+                on_off(mirror.y),
+                on_off(mirror.z)
+            ),
+        );
+    }
+    model
+}
+
+fn draw_hint_hud_header(
+    ui: &mut egui::Ui,
+    model: &HintHudModel,
+    layout: HintHudLayout,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    let context = egui::RichText::new(model.context)
+        .size(9.5)
+        .strong()
+        .monospace()
+        .color(colors.accent);
+    let title = egui::RichText::new(&model.title)
+        .size(14.0)
+        .strong()
+        .monospace()
+        .color(colors.text);
+    let status = egui::RichText::new(&model.status)
+        .size(10.0)
+        .monospace()
+        .color(colors.text_muted);
+
+    if layout.stacked {
+        ui.label(context);
+        ui.label(title);
+        ui.label(status);
+    } else {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(context);
+                ui.label(title);
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(status);
+            });
+        });
+    }
+}
+
+fn draw_hint_trigger(
+    ui: &mut egui::Ui,
+    row: &HintHudRow,
+    width: f32,
+    theme: crate::theme::ThemeSettings,
+) {
+    match row.kind {
+        HintRowKind::Action => {
+            ui.add_sized(
+                egui::vec2(width, HINT_HUD_KEY_HEIGHT),
+                crate::theme::term_button(&row.trigger, false, theme).sense(egui::Sense::hover()),
+            );
+        }
+        HintRowKind::Status => {
+            let colors = theme.semantic();
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, HINT_HUD_KEY_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(&row.trigger)
+                            .size(10.0)
+                            .strong()
+                            .monospace()
+                            .color(colors.accent),
+                    );
+                },
+            );
+        }
+    }
+}
+
+fn draw_hint_row(
+    ui: &mut egui::Ui,
+    row: &HintHudRow,
+    layout: HintHudLayout,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    let description_color = if row.kind == HintRowKind::Status {
+        colors.text_muted
+    } else {
+        colors.text
+    };
+    let description = || {
+        egui::Label::new(
+            egui::RichText::new(&row.description)
+                .size(11.0)
+                .monospace()
+                .color(description_color),
+        )
+        .wrap()
+    };
+
+    if layout.stacked {
+        draw_hint_trigger(ui, row, layout.key_width, theme);
+        ui.add(description());
+    } else {
+        ui.horizontal_top(|ui| {
+            draw_hint_trigger(ui, row, layout.key_width, theme);
+            let description_width = ui.available_width().max(1.0);
+            ui.add_sized(
+                egui::vec2(description_width, HINT_HUD_KEY_HEIGHT),
+                description(),
+            );
+        });
+    }
+}
+
+fn show_hint_hud(ctx: &egui::Context, theme: crate::theme::ThemeSettings, model: &HintHudModel) {
+    let layout = HintHudLayout::for_screen(ctx.screen_rect().size(), model.longest_trigger());
+    egui::Window::new("voxel_native_hints")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .movable(false)
+        .frame(egui::Frame::none())
+        .anchor(
+            egui::Align2::LEFT_BOTTOM,
+            egui::vec2(layout.anchor_margin, -layout.anchor_margin),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(layout.panel_width);
+            crate::ui_kit::surface_panel_animated(
+                ui,
+                theme,
+                egui::Id::new("voxel_native_hint_panel"),
+                model.emphasized,
+                |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+                    ui.spacing_mut().button_padding = egui::vec2(6.0, 2.0);
+                    draw_hint_hud_header(ui, model, layout, theme);
+                    ui.add_space(2.0);
+                    crate::ui_kit::compact_separator(ui, theme);
+                    ui.add_space(1.0);
+                    egui::ScrollArea::vertical()
+                        .id_source("voxel_native_hint_rows")
+                        .auto_shrink([false, true])
+                        .max_height(layout.body_max_height)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            for row in &model.rows {
+                                draw_hint_row(ui, row, layout, theme);
+                            }
+                        });
+                },
+            );
+        });
+}
+
 fn draw_hint_hud(
     mut contexts: EguiContexts,
     editor: Res<EditorState>,
@@ -3952,163 +4356,18 @@ fn draw_hint_hud(
     if !editor.open {
         return;
     }
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let theme = ctx
         .data(|d| d.get_temp::<crate::theme::ThemeSettings>(egui::Id::new("hacker_theme")))
         .unwrap_or_default();
-    let accent = theme.color.primary();
-
-    let mut lines: Vec<(String, String)> = Vec::with_capacity(12);
-
-    // --- City-tab hints ------------------------------------------------
-    if editor.tab == EditorTab::City {
-        lines.push((
-            format!("{}  /  Snap: {}", city.tool.label(), city.snap.label()),
-            String::new(),
-        ));
-        match city.tool {
-            CityTool::Road => {
-                if city.pending_road_a.is_some() {
-                    lines.push((
-                        "LMB release".into(),
-                        "Strassenende zeichnen + weiterfuehren".into(),
-                    ));
-                    lines.push(("Auto".into(), "Laenge / Brueckenhoehe erben".into()));
-                    lines.push(("RMB / Esc".into(), "Abbrechen".into()));
-                } else {
-                    lines.push((
-                        "LMB hold".into(),
-                        "Strassenstart setzen, ziehen, loslassen".into(),
-                    ));
-                    lines.push(("RMB".into(), "Letzte Strasse loeschen".into()));
-                }
-                if let Some(idx) = city.selected_road {
-                    lines.push((
-                        format!("Komponente {}", idx + 1),
-                        "direkt editierbar".into(),
-                    ));
-                    lines.push((
-                        "Wheel".into(),
-                        "Koerper=Breite/Radius, Griff=Brueckenhoehe".into(),
-                    ));
-                    lines.push(("Ctrl+Wheel".into(), "Breite / Kreisradius".into()));
-                    lines.push((
-                        "Shift+Wheel".into(),
-                        "Brueckenhoehe am naechsten Ende".into(),
-                    ));
-                    lines.push(("MMB / Alt+Wheel".into(), "Textur direkt wechseln".into()));
-                }
-                lines.push(("[ / ]".into(), format!("Breite ({})", city.road_width)));
-                lines.push(("N".into(), "Strassen-Tool AUS".into()));
-            }
-            CityTool::District => {
-                if city.pending_district_a.is_some() {
-                    lines.push(("LMB release".into(), "Bot-Stadtflaeche zeichnen".into()));
-                    lines.push(("RMB / Esc".into(), "Abbrechen".into()));
-                } else {
-                    lines.push(("LMB hold".into(), "Ecke A setzen, ziehen, loslassen".into()));
-                    lines.push(("RMB".into(), "Letzten Bezirk loeschen".into()));
-                }
-                lines.push(("[ / ]".into(), format!("Radius ({})", city.district_radius)));
-                lines.push(("T".into(), "Bezirks-Tool AUS".into()));
-            }
-            CityTool::Building => {
-                if city.pending_building_a.is_some() {
-                    lines.push(("LMB release".into(), "Gebaeude-Footprint zeichnen".into()));
-                    lines.push(("RMB / Esc".into(), "Abbrechen".into()));
-                } else {
-                    lines.push(("LMB hold".into(), "Ecke A setzen, ziehen, loslassen".into()));
-                    lines.push(("RMB".into(), "Letztes Gebaeude vergessen".into()));
-                }
-                lines.push(("[ / ]".into(), format!("Etagen ({})", city.building_floors)));
-                lines.push(("U".into(), "Gebaeude-Tool AUS".into()));
-            }
-            CityTool::Facade => {
-                lines.push(("LMB".into(), "Fassade stempeln".into()));
-                let name = city
-                    .facades
-                    .get(
-                        city.facade_selected
-                            .min(city.facades.len().saturating_sub(1)),
-                    )
-                    .map(|f| f.name.as_str())
-                    .unwrap_or("(leer)");
-                lines.push(("Aktiv".into(), name.into()));
-                lines.push(("F".into(), "Fassaden-Tool AUS".into()));
-            }
-            CityTool::None => {
-                lines.push(("N".into(), "Strassen-Werkzeug".into()));
-                lines.push(("T".into(), "Bezirks-Werkzeug".into()));
-                lines.push(("U".into(), "Gebaeude-Werkzeug".into()));
-                lines.push(("F".into(), "Fassaden-Werkzeug".into()));
-            }
-        }
-        lines.push((".".into(), "Snap-Modus wechseln".into()));
+    let model = if editor.tab == EditorTab::City {
+        city_hint_hud_model(&city)
     } else {
-        // --- Selection / modelling hints (reuse existing state) -------
-        if sel.ghosting {
-            lines.push(("GEIST AKTIV".into(), String::new()));
-            lines.push(("LMB / Enter".into(), "Einfuegen".into()));
-            lines.push(("Shift+LMB".into(), "Stempel-Modus".into()));
-            lines.push(("Mausrad / R".into(), "Y-Drehen".into()));
-            lines.push(("X / Y / Z".into(), "Spiegeln".into()));
-            lines.push(("Esc / RMB".into(), "Abbrechen".into()));
-        } else if sel.a.is_some() {
-            lines.push(("AUSWAHL".into(), String::new()));
-            lines.push(("B".into(), "2. Ecke setzen".into()));
-            lines.push(("C".into(), "Kopieren".into()));
-            lines.push(("Ctrl+X".into(), "Ausschneiden".into()));
-            lines.push(("V".into(), "Einfuegen".into()));
-            lines.push(("Esc".into(), "Auswahl loeschen".into()));
-        } else {
-            lines.push(("EDITOR".into(), String::new()));
-            lines.push(("B".into(), "Box-Auswahl starten".into()));
-            lines.push(("V".into(), "Clipboard einfuegen".into()));
-            lines.push(("M / Shift+M / Alt+M".into(), "Spiegel X / Y / Z".into()));
-        }
-        if mirror.x || mirror.y || mirror.z {
-            let m = format!(
-                "X={} Y={} Z={}",
-                on_off(mirror.x),
-                on_off(mirror.y),
-                on_off(mirror.z)
-            );
-            lines.push(("SPIEGEL".into(), m));
-        }
-    }
-
-    // --- Render ---------------------------------------------------------
-    let frame = egui::Frame::none()
-        .fill(egui::Color32::from_rgba_premultiplied(3, 6, 3, 225))
-        .stroke(egui::Stroke::new(1.0, accent))
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
-        .rounding(egui::Rounding::ZERO);
-    egui::Window::new("voxel_native_hints")
-        .title_bar(false)
-        .resizable(false)
-        .collapsible(false)
-        .movable(false)
-        .frame(frame)
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0))
-        .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            for (key, desc) in &lines {
-                ui.horizontal(|ui| {
-                    let key_text = egui::RichText::new(format!("[{}]", key))
-                        .color(accent)
-                        .monospace()
-                        .strong();
-                    ui.label(key_text);
-                    if !desc.is_empty() {
-                        ui.label(
-                            egui::RichText::new(desc)
-                                .color(crate::theme::TEXT)
-                                .monospace(),
-                        );
-                    }
-                });
-            }
-        });
+        editor_hint_hud_model(&sel, &mirror)
+    };
+    show_hint_hud(ctx, theme, &model);
 }
 
 fn on_off(b: bool) -> &'static str {
@@ -4217,6 +4476,142 @@ fn raycast_voxel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hint_row<'a>(model: &'a HintHudModel, trigger: &str) -> &'a HintHudRow {
+        model
+            .rows
+            .iter()
+            .find(|row| row.trigger == trigger)
+            .unwrap_or_else(|| panic!("missing hint row: {trigger}"))
+    }
+
+    fn run_hint_hud_frame(
+        ctx: &egui::Context,
+        model: &HintHudModel,
+        time: f64,
+    ) -> std::time::Duration {
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ctx| show_hint_hud(ctx, crate::theme::ThemeSettings::default(), model),
+        );
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .expect("root viewport output")
+            .repaint_delay
+    }
+
+    #[test]
+    fn city_hint_model_separates_road_context_status_and_actions() {
+        let mut city = CityState::default();
+        city.tool = CityTool::Road;
+        city.snap = SnapMode::Grid4;
+        city.road_width = 9;
+        city.pending_road_a = Some(IVec3::new(4, 72, 8));
+        city.selected_road = Some(2);
+
+        let model = city_hint_hud_model(&city);
+
+        assert_eq!(model.context, "CITY / HINWEISE");
+        assert_eq!(model.title, "STRASSE");
+        assert_eq!(model.status, "SNAP / Grid 4");
+        assert!(model.emphasized);
+        assert_eq!(hint_row(&model, "LMB release").kind, HintRowKind::Action);
+        assert_eq!(hint_row(&model, "Auto").kind, HintRowKind::Status);
+        assert_eq!(
+            hint_row(&model, "Komponente 3").description,
+            "direkt editierbar"
+        );
+        assert_eq!(hint_row(&model, "[ / ]").description, "Breite (9)");
+        assert!(model
+            .rows
+            .iter()
+            .all(|row| !row.trigger.is_empty() && !row.description.is_empty()));
+    }
+
+    #[test]
+    fn editor_hint_model_promotes_mode_and_keeps_mirror_detail() {
+        let selection = crate::selection::SelectionState {
+            ghosting: true,
+            ..Default::default()
+        };
+        let mirror = crate::selection::MirrorState {
+            x: true,
+            z: true,
+            ..Default::default()
+        };
+
+        let model = editor_hint_hud_model(&selection, &mirror);
+
+        assert_eq!(model.context, "EDITOR / HINWEISE");
+        assert_eq!(model.title, "GEIST AKTIV");
+        assert_eq!(model.status, "PLATZIERUNG");
+        assert!(model.emphasized);
+        assert_eq!(hint_row(&model, "LMB / Enter").kind, HintRowKind::Action);
+        assert_eq!(hint_row(&model, "SPIEGEL").kind, HintRowKind::Status);
+        assert_eq!(hint_row(&model, "SPIEGEL").description, "X=AN Y=AUS Z=AN");
+    }
+
+    #[test]
+    fn hint_layout_stacks_and_stays_inside_small_viewports() {
+        let desktop = HintHudLayout::for_screen(egui::vec2(1920.0, 1080.0), 20);
+        assert_eq!(desktop.panel_width, HINT_HUD_MAX_WIDTH);
+        assert_eq!(desktop.anchor_margin, 12.0);
+        assert!(!desktop.stacked);
+        assert_eq!(desktop.body_max_height, HINT_HUD_MAX_BODY_HEIGHT);
+
+        let compact = HintHudLayout::for_screen(egui::vec2(320.0, 480.0), 20);
+        assert!(compact.stacked);
+        assert_eq!(compact.anchor_margin, 6.0);
+        assert!(compact.panel_width + compact.anchor_margin * 2.0 <= 320.0);
+        assert!(compact.key_width <= compact.panel_width - 24.0);
+
+        let short = HintHudLayout::for_screen(egui::vec2(240.0, 220.0), 20);
+        assert!(short.stacked);
+        assert!(short.panel_width + short.anchor_margin * 2.0 <= 240.0);
+        assert_eq!(short.body_max_height, 90.0);
+    }
+
+    #[test]
+    fn hint_panel_motion_settles_and_low_spec_never_loops() {
+        let mut resting = HintHudModel::new("CITY / HINWEISE", "STRASSE", "SNAP / AUS", false);
+        resting.action("LMB", "Startpunkt setzen");
+        let mut active = resting.clone();
+        active.emphasized = true;
+
+        let full_ctx = egui::Context::default();
+        crate::theme::set_motion_preferences(&full_ctx, false, false);
+        for time in [0.0, 0.05, 0.10] {
+            run_hint_hud_frame(&full_ctx, &resting, time);
+        }
+        let transition_delay = run_hint_hud_frame(&full_ctx, &active, 0.15);
+        assert_eq!(transition_delay, std::time::Duration::ZERO);
+        for time in [0.25, 0.40, 0.60, 0.80] {
+            run_hint_hud_frame(&full_ctx, &active, time);
+        }
+        assert_eq!(
+            run_hint_hud_frame(&full_ctx, &active, 1.0),
+            std::time::Duration::MAX
+        );
+
+        let low_spec_ctx = egui::Context::default();
+        crate::theme::set_motion_preferences(&low_spec_ctx, false, true);
+        for time in [0.0, 0.10, 0.20] {
+            run_hint_hud_frame(&low_spec_ctx, &resting, time);
+        }
+        assert_eq!(
+            run_hint_hud_frame(&low_spec_ctx, &active, 0.30),
+            std::time::Duration::MAX
+        );
+        assert!(!crate::theme::allows_continuous_motion(&low_spec_ctx));
+    }
 
     #[test]
     fn road_component_adjustments_keep_geometry_and_change_style_or_width() {

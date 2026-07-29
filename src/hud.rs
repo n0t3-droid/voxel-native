@@ -505,7 +505,9 @@ fn draw_play_hud(
         return;
     }
 
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
 
     let player_position = player_q
         .get_single()
@@ -868,6 +870,63 @@ mod tests {
         assert_eq!(hotbar.slots[2].label(), "Lantern");
         assert_eq!(hotbar.active, 2);
     }
+
+    #[test]
+    fn builder_hotbar_policy_routes_blocks_without_weapon_mirroring() {
+        use crate::mode::ActiveMode;
+
+        let block = crate::blocks::BlockType::ShojiLamp;
+        let weapon = crate::weapons::WeaponKind::PlasmaRifle;
+        for mode in [
+            ActiveMode::BuildPicker {
+                tool: ToolbeltTool::DrawRect,
+            },
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::DrawRect,
+            },
+            ActiveMode::Editor {
+                tab: crate::editor::EditorTab::World,
+            },
+        ] {
+            let policy = hotbar_mode_policy(Some(mode), false);
+
+            assert_eq!(policy, HotbarModePolicy::Builder);
+            assert!(!policy.accepts_number_keys());
+            assert_eq!(
+                hotbar_sync(policy, Some(HotbarItem::Block(block)), weapon),
+                HotbarSync::BuilderBlock(block)
+            );
+        }
+    }
+
+    #[test]
+    fn weapon_hotbar_policy_is_limited_to_weapon_capable_modes() {
+        use crate::mode::ActiveMode;
+
+        let weapon = crate::weapons::WeaponKind::PlasmaRifle;
+        let combat = hotbar_mode_policy(Some(ActiveMode::Combat), true);
+        assert_eq!(combat, HotbarModePolicy::Weapons);
+        assert!(combat.accepts_number_keys());
+        assert_eq!(
+            hotbar_sync(
+                combat,
+                Some(HotbarItem::Block(crate::blocks::BlockType::Stone)),
+                weapon,
+            ),
+            HotbarSync::Weapon(weapon)
+        );
+
+        for mode in [
+            ActiveMode::Inventory,
+            ActiveMode::Paused,
+            ActiveMode::CommandPalette,
+        ] {
+            let policy = hotbar_mode_policy(Some(mode), false);
+            assert_eq!(policy, HotbarModePolicy::Suppressed);
+            assert!(!policy.accepts_number_keys());
+            assert_eq!(hotbar_sync(policy, None, weapon), HotbarSync::None);
+        }
+    }
 }
 
 fn hud_text(painter: &egui::Painter, pos: egui::Pos2, text: &str, color: egui::Color32, size: f32) {
@@ -985,6 +1044,54 @@ fn update_hint(
 pub enum HotbarItem {
     Weapon(crate::weapons::WeaponKind),
     Block(crate::blocks::BlockType),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotbarModePolicy {
+    Builder,
+    Weapons,
+    Suppressed,
+}
+
+impl HotbarModePolicy {
+    fn accepts_number_keys(self) -> bool {
+        matches!(self, Self::Weapons)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotbarSync {
+    BuilderBlock(crate::blocks::BlockType),
+    Weapon(crate::weapons::WeaponKind),
+    None,
+}
+
+fn hotbar_mode_policy(
+    active_mode: Option<crate::mode::ActiveMode>,
+    legacy_blocks_weapons: bool,
+) -> HotbarModePolicy {
+    match active_mode {
+        Some(mode) if mode.is_build() => HotbarModePolicy::Builder,
+        Some(crate::mode::ActiveMode::Editor { .. }) => HotbarModePolicy::Builder,
+        Some(mode) if mode.allows_weapons() => HotbarModePolicy::Weapons,
+        Some(_) => HotbarModePolicy::Suppressed,
+        None if legacy_blocks_weapons => HotbarModePolicy::Builder,
+        None => HotbarModePolicy::Weapons,
+    }
+}
+
+fn hotbar_sync(
+    policy: HotbarModePolicy,
+    active_item: Option<HotbarItem>,
+    active_weapon: crate::weapons::WeaponKind,
+) -> HotbarSync {
+    match (policy, active_item) {
+        (HotbarModePolicy::Builder, Some(HotbarItem::Block(block))) => {
+            HotbarSync::BuilderBlock(block)
+        }
+        (HotbarModePolicy::Weapons, _) => HotbarSync::Weapon(active_weapon),
+        _ => HotbarSync::None,
+    }
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -1262,6 +1369,7 @@ fn hotbar_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut hotbar: ResMut<HotbarState>,
     active: Res<crate::weapons::ActiveWeapon>,
+    mut builder: ResMut<crate::builder::BuilderState>,
     toolbelt: Option<Res<crate::toolbelt::ToolbeltState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
 ) {
@@ -1280,30 +1388,38 @@ fn hotbar_input(
         KeyCode::Digit8,
         KeyCode::Digit9,
     ];
-    let build_blocks_weapons = mode
+    let legacy_blocks_weapons = toolbelt
         .as_deref()
-        .map(|mode| !mode.allows_weapons())
-        .unwrap_or_else(|| {
-            toolbelt
-                .as_deref()
-                .map(|toolbelt| toolbelt.blocks_weapons())
-                .unwrap_or(false)
-        });
-    if !build_blocks_weapons {
+        .map(|toolbelt| toolbelt.blocks_weapons())
+        .unwrap_or(false);
+    let policy = hotbar_mode_policy(mode.as_deref().map(|mode| mode.mode), legacy_blocks_weapons);
+    if policy.accepts_number_keys() {
         for (i, k) in keys_list.iter().enumerate() {
             if keys.just_pressed(*k) {
                 hotbar.active = i;
             }
         }
     }
-    if let Some(idx) = hotbar
-        .slots
-        .iter()
-        .position(|slot| slot.item == HotbarItem::Weapon(active.kind))
-    {
-        if hotbar.active != idx {
-            hotbar.active = idx;
+
+    let active_item = hotbar.slots.get(hotbar.active).map(|slot| slot.item);
+    match hotbar_sync(policy, active_item, active.kind) {
+        HotbarSync::BuilderBlock(block) => {
+            if builder.block != block {
+                builder.block = block;
+            }
         }
+        HotbarSync::Weapon(kind) => {
+            if let Some(idx) = hotbar
+                .slots
+                .iter()
+                .position(|slot| slot.item == HotbarItem::Weapon(kind))
+            {
+                if hotbar.active != idx {
+                    hotbar.active = idx;
+                }
+            }
+        }
+        HotbarSync::None => {}
     }
 }
 
