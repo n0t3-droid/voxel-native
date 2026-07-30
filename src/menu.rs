@@ -21,7 +21,7 @@ use crate::creator_library::{
     CreatorLibraryState,
 };
 use crate::editor::EditorState;
-use crate::hud::HotbarState;
+use crate::hud::{HotbarState, WorldArrival};
 use crate::icons::Icon;
 use crate::mode::ModeContext;
 use crate::player::Player;
@@ -969,6 +969,7 @@ fn draw_main_menu(
     mut editor: ResMut<EditorState>,
     mut command_palette: ResMut<CommandPaletteState>,
     mut pending: ResMut<PendingWorldLoad>,
+    mut arrival: ResMut<WorldArrival>,
     mut pending_delete: ResMut<PendingWorldDelete>,
     mut exit: EventWriter<AppExit>,
 ) {
@@ -1425,10 +1426,12 @@ fn draw_main_menu(
     }
 
     if let Some(meta) = open_requested {
+        let world_name = meta.name.clone();
         apply_world_to_settings(&meta, &mut settings);
         commands.insert_resource(ActiveWorld { meta });
         editor.open = false;
         pending.0 = true;
+        arrival.begin(world_name);
         next.set(GameState::InGame);
     } else if create_requested {
         let seed = form
@@ -1437,11 +1440,13 @@ fn draw_main_menu(
             .unwrap_or_else(|_| rand_seed());
         let name = clean_new_world_name(&form.name, &worlds);
         let meta = WorldMeta::new(name, seed);
+        let world_name = meta.name.clone();
         settings::save_world(&meta);
         apply_world_to_settings(&meta, &mut settings);
         commands.insert_resource(ActiveWorld { meta });
         editor.open = false;
         pending.0 = true;
+        arrival.begin(world_name);
         form.name.clear();
         form.seed_text.clear();
         next.set(GameState::InGame);

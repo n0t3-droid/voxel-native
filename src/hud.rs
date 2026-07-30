@@ -8,15 +8,118 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts};
 
-use crate::chunk::to_i32_safe;
+use crate::chunk::{floor_to_i32_safe, to_i32_safe, CHUNK_SIZE};
 use crate::director::SimulationDirector;
 use crate::icons::{paint_icon, Icon};
 use crate::neurocore::RuntimeProfile;
 use crate::player::{Player, SuitVitals};
 use crate::settings::{HudProfile, WorldSettings};
-use crate::world::{StreamingGovernor, VoxelWorld};
+use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
 
 pub struct HudPlugin;
+
+const ARRIVAL_TIMEOUT_SECONDS: f32 = 30.0;
+const ARRIVAL_MIN_VISIBLE_SECONDS: f32 = 0.34;
+const ARRIVAL_READY_HOLD_SECONDS: f32 = 0.54;
+const ARRIVAL_STATIC_READY_HOLD_SECONDS: f32 = 0.12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WorldArrivalPhase {
+    #[default]
+    Linking,
+    Scanning,
+    Terrain,
+    Meshing,
+    Landing,
+    Ready,
+    Fallback,
+}
+
+impl WorldArrivalPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Linking => "WORLD LINK",
+            Self::Scanning => "SPAWN SURVEY",
+            Self::Terrain => "LOCAL TERRAIN",
+            Self::Meshing => "VISIBLE SURFACES",
+            Self::Landing => "PLAYER ARRIVAL",
+            Self::Ready => "WORLD READY",
+            Self::Fallback => "BACKGROUND STREAM",
+        }
+    }
+
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::Linking => "Opening the selected simulation",
+            Self::Scanning => "Prioritizing the world around your arrival point",
+            Self::Terrain => "Generating the local voxel landscape",
+            Self::Meshing => "Compiling nearby terrain for the renderer",
+            Self::Landing => "Placing you safely on the loaded surface",
+            Self::Ready => "Local world is stable and ready to explore",
+            Self::Fallback => "World is open; distant terrain continues in the background",
+        }
+    }
+
+    const fn is_complete(self) -> bool {
+        matches!(self, Self::Ready | Self::Fallback)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ArrivalSignals {
+    local_column_ready: bool,
+    local_mesh_ready: bool,
+    player_placed: bool,
+    frontier_complete: bool,
+    active_tasks: usize,
+    scan_ratio: f32,
+}
+
+impl ArrivalSignals {
+    fn is_playable(self) -> bool {
+        self.local_column_ready && self.local_mesh_ready && self.player_placed
+    }
+}
+
+/// Long-lived world-entry state. This is deliberately separate from
+/// `PendingWorldLoad`, which is a one-frame regeneration trigger.
+#[derive(Resource, Debug, Clone)]
+pub struct WorldArrival {
+    active: bool,
+    world_name: String,
+    phase: WorldArrivalPhase,
+    elapsed: f32,
+    progress: f32,
+    ready_hold: f32,
+}
+
+impl Default for WorldArrival {
+    fn default() -> Self {
+        Self {
+            active: false,
+            world_name: String::new(),
+            phase: WorldArrivalPhase::Linking,
+            elapsed: 0.0,
+            progress: 0.0,
+            ready_hold: 0.0,
+        }
+    }
+}
+
+impl WorldArrival {
+    pub fn begin(&mut self, world_name: impl Into<String>) {
+        self.active = true;
+        self.world_name = world_name.into();
+        self.phase = WorldArrivalPhase::Linking;
+        self.elapsed = 0.0;
+        self.progress = 0.02;
+        self.ready_hold = 0.0;
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HudSurface {
@@ -54,6 +157,78 @@ fn product_hud_visible(surface: HudSurface, debug_visible: bool) -> bool {
     surface == HudSurface::Play && !debug_visible
 }
 
+fn arrival_target(signals: ArrivalSignals) -> (WorldArrivalPhase, f32) {
+    let scan_ratio = if signals.scan_ratio.is_finite() {
+        signals.scan_ratio.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if signals.is_playable() {
+        return (WorldArrivalPhase::Ready, 1.0);
+    }
+    if !signals.local_column_ready {
+        let phase = if signals.active_tasks > 0 {
+            WorldArrivalPhase::Terrain
+        } else {
+            WorldArrivalPhase::Scanning
+        };
+        return (phase, 0.12 + scan_ratio * 0.38);
+    }
+    if !signals.local_mesh_ready {
+        let task_credit = if signals.active_tasks > 0 { 0.08 } else { 0.0 };
+        return (WorldArrivalPhase::Meshing, 0.62 + task_credit);
+    }
+    (WorldArrivalPhase::Landing, 0.88)
+}
+
+fn advance_world_arrival(
+    arrival: &mut WorldArrival,
+    delta_seconds: f32,
+    signals: ArrivalSignals,
+    static_motion: bool,
+) {
+    if !arrival.active {
+        return;
+    }
+    let delta_seconds = if delta_seconds.is_finite() {
+        delta_seconds.clamp(0.0, ARRIVAL_TIMEOUT_SECONDS)
+    } else {
+        0.0
+    };
+    arrival.elapsed += delta_seconds;
+
+    let (mut phase, target) = arrival_target(signals);
+    if arrival.elapsed >= ARRIVAL_TIMEOUT_SECONDS && !signals.is_playable() {
+        phase = WorldArrivalPhase::Fallback;
+    }
+    let continued_complete_phase = arrival.phase.is_complete() && arrival.phase == phase;
+    arrival.phase = phase;
+    let target = if phase == WorldArrivalPhase::Fallback {
+        1.0
+    } else {
+        target
+    };
+    arrival.progress = arrival.progress.max(target).clamp(0.0, 1.0);
+
+    if phase.is_complete() {
+        if continued_complete_phase {
+            arrival.ready_hold += delta_seconds;
+        } else {
+            arrival.ready_hold = 0.0;
+        }
+        let hold = if static_motion {
+            ARRIVAL_STATIC_READY_HOLD_SECONDS
+        } else {
+            ARRIVAL_READY_HOLD_SECONDS
+        };
+        if arrival.elapsed >= ARRIVAL_MIN_VISIBLE_SECONDS && arrival.ready_hold >= hold {
+            arrival.active = false;
+        }
+    } else {
+        arrival.ready_hold = 0.0;
+    }
+}
+
 /// Tracks whether the F3 debug overlay (FPS + pos + biome + time) is shown.
 #[derive(Resource)]
 pub struct DebugOverlay {
@@ -71,6 +246,7 @@ impl Plugin for HudPlugin {
         app.add_plugins(FrameTimeDiagnosticsPlugin)
             .insert_resource(HotbarState::default())
             .insert_resource(DebugOverlay::default())
+            .insert_resource(WorldArrival::default())
             .add_systems(
                 Startup,
                 (
@@ -84,16 +260,23 @@ impl Plugin for HudPlugin {
             )
             .add_systems(
                 Update,
+                update_world_arrival
+                    .run_if(in_state(crate::menu::GameState::InGame))
+                    .after(crate::world::WorldSet::Mesh),
+            )
+            .add_systems(
+                Update,
                 (
                     toggle_debug_overlay,
                     update_stats_text,
-                    draw_play_hud,
+                    draw_world_arrival.after(update_world_arrival),
+                    draw_play_hud.after(update_world_arrival),
                     update_hint,
                     hotbar_input.run_if(in_state(crate::menu::GameState::InGame)),
                     refresh_hotbar_contents,
                     adapt_hotbar_layout,
                     hotbar_highlight,
-                    toggle_hud_visibility,
+                    toggle_hud_visibility.after(update_world_arrival),
                     update_scope_overlay,
                     update_combo_text,
                     flash_crosshair_on_hit,
@@ -124,6 +307,7 @@ fn toggle_debug_overlay(
 fn toggle_hud_visibility(
     state: Res<State<crate::menu::GameState>>,
     overlay: Res<DebugOverlay>,
+    arrival: Res<WorldArrival>,
     mode: Option<Res<crate::mode::ModeContext>>,
     mut crosshair_q: Query<
         &mut Visibility,
@@ -165,17 +349,19 @@ fn toggle_hud_visibility(
     >,
 ) {
     let surface = current_hud_surface(&state, mode.as_deref());
-    let stats_vis = if surface == HudSurface::Play && overlay.visible {
+    let arrival_active = arrival.is_active();
+    let stats_vis = if !arrival_active && surface == HudSurface::Play && overlay.visible {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    let crosshair_vis = if matches!(surface, HudSurface::Play | HudSurface::BuildAim) {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
-    let hotbar_vis = if product_hud_visible(surface, overlay.visible) {
+    let crosshair_vis =
+        if !arrival_active && matches!(surface, HudSurface::Play | HudSurface::BuildAim) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    let hotbar_vis = if !arrival_active && product_hud_visible(surface, overlay.visible) {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -490,18 +676,206 @@ fn vitals_visible(profile: HudProfile, suit: &SuitVitals) -> bool {
         || normalized_vital(suit.oxygen, 100.0) < 0.50
 }
 
+fn update_world_arrival(
+    time: Res<Time>,
+    settings: Res<WorldSettings>,
+    world: Res<VoxelWorld>,
+    streamer: Res<ChunkStreamer>,
+    player_q: Query<(&Transform, &Player)>,
+    mut arrival: ResMut<WorldArrival>,
+) {
+    if !arrival.is_active() {
+        return;
+    }
+
+    let player = player_q.get_single().ok();
+    let (wx, wz, player_placed) = player
+        .map(|(transform, player)| {
+            (
+                floor_to_i32_safe(transform.translation.x),
+                floor_to_i32_safe(transform.translation.z),
+                player.placed_on_surface,
+            )
+        })
+        .unwrap_or((0, 0, false));
+    let cx = wx.div_euclid(CHUNK_SIZE as i32);
+    let cz = wz.div_euclid(CHUNK_SIZE as i32);
+    let local_mesh_ready = streamer.entities.iter().any(|(position, entries)| {
+        !entries.is_empty() && (position.x - cx).abs() <= 1 && (position.z - cz).abs() <= 1
+    });
+    let scan_ratio = if streamer.load_offsets.is_empty() {
+        0.0
+    } else {
+        streamer.load_cursor as f32 / streamer.load_offsets.len() as f32
+    };
+    let active_tasks = streamer
+        .pending_terrain
+        .len()
+        .saturating_add(streamer.pending_meshes.len())
+        .saturating_add(streamer.dirty_queue.len());
+    let signals = ArrivalSignals {
+        local_column_ready: world.is_column_loaded(wx, wz),
+        local_mesh_ready,
+        player_placed,
+        frontier_complete: streamer.frontier_complete,
+        active_tasks,
+        scan_ratio,
+    };
+    advance_world_arrival(
+        &mut arrival,
+        time.delta_seconds(),
+        signals,
+        uses_static_hud_motion(&settings),
+    );
+}
+
+fn draw_world_arrival(
+    mut contexts: EguiContexts,
+    arrival: Res<WorldArrival>,
+    settings: Res<WorldSettings>,
+) {
+    if !arrival.is_active() {
+        return;
+    }
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    let screen = ctx.screen_rect();
+    let theme = settings.theme;
+    let colors = theme.semantic();
+    let width = (screen.width() - 28.0).clamp(240.0, 540.0);
+    let height = (screen.height() - 28.0).clamp(152.0, 224.0);
+    let panel_rect = egui::Rect::from_center_size(screen.center(), egui::vec2(width, height));
+    let stage_value = format!("{:02}%", (arrival.progress * 100.0).round() as u32);
+    let terrain_value = if arrival.progress >= 0.62 {
+        "READY"
+    } else {
+        "WAIT"
+    };
+    let surface_value = if arrival.progress >= 0.88 {
+        "READY"
+    } else {
+        "WAIT"
+    };
+    let player_value = if arrival.phase.is_complete() {
+        "READY"
+    } else {
+        "WAIT"
+    };
+
+    egui::Area::new(egui::Id::new("r93g_world_arrival"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.set_min_size(screen.size());
+            let painter = ui.painter();
+            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(232));
+
+            let scan_y = screen.top() + screen.height() * arrival.progress;
+            painter.line_segment(
+                [
+                    egui::pos2(screen.left(), scan_y),
+                    egui::pos2(screen.right(), scan_y),
+                ],
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(
+                        colors.accent.r(),
+                        colors.accent.g(),
+                        colors.accent.b(),
+                        58,
+                    ),
+                ),
+            );
+
+            ui.allocate_ui_at_rect(panel_rect, |ui| {
+                crate::ui_kit::toolbench_frame(theme).show(ui, |ui| {
+                    ui.set_min_width((panel_rect.width() - 36.0).max(220.0));
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("R93G // WORLD ARRIVAL")
+                                    .size(10.0)
+                                    .strong()
+                                    .monospace()
+                                    .color(colors.accent),
+                            );
+                            ui.label(
+                                egui::RichText::new(&arrival.world_name)
+                                    .size(19.0)
+                                    .strong()
+                                    .monospace()
+                                    .color(colors.text),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            crate::theme::metric_pill(ui, theme, "LINK", &stage_value);
+                        });
+                    });
+                    crate::ui_kit::compact_separator(ui, theme);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        crate::ui_kit::orbit_pulse(ui, !arrival.phase.is_complete(), theme);
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.set_min_width((panel_rect.width() - 108.0).max(160.0));
+                            let loading = if arrival.phase.is_complete() {
+                                crate::ui_kit::LoadingState::Complete
+                            } else {
+                                crate::ui_kit::LoadingState::Progress(arrival.progress)
+                            };
+                            crate::ui_kit::activity_status(
+                                ui,
+                                loading,
+                                arrival.phase.label(),
+                                arrival.phase.detail(),
+                                theme,
+                            );
+                        });
+                    });
+                    ui.add_space(7.0);
+                    ui.horizontal_wrapped(|ui| {
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Chunk,
+                            "TERRAIN",
+                            terrain_value,
+                            theme,
+                        );
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Detail,
+                            "SURFACE",
+                            surface_value,
+                            theme,
+                        );
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Player,
+                            "ARRIVAL",
+                            player_value,
+                            theme,
+                        );
+                    });
+                });
+            });
+        });
+}
+
 fn draw_play_hud(
     mut contexts: EguiContexts,
     state: Res<State<crate::menu::GameState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
     debug: Res<DebugOverlay>,
+    arrival: Res<WorldArrival>,
     settings: Res<WorldSettings>,
     player_q: Query<&Transform, With<Player>>,
     brain: Option<Res<crate::bots::FriendlyWorldBrain>>,
     suit: Res<SuitVitals>,
 ) {
     let surface = current_hud_surface(&state, mode.as_deref());
-    if !product_hud_visible(surface, debug.visible) {
+    if arrival.is_active() || !product_hud_visible(surface, debug.visible) {
         return;
     }
 
@@ -846,6 +1220,120 @@ mod tests {
         assert_eq!(scope_visual_amount(0.2, true, true), 1.0);
         assert_eq!(scope_visual_amount(0.8, false, true), 0.0);
         assert_eq!(feedback_alpha(0.1, 0.25, true), 1.0);
+    }
+
+    #[test]
+    fn arrival_waits_for_local_column_mesh_and_surface_placement() {
+        let mut arrival = WorldArrival::default();
+        arrival.begin("test_world");
+
+        advance_world_arrival(
+            &mut arrival,
+            0.1,
+            ArrivalSignals {
+                scan_ratio: 0.5,
+                active_tasks: 3,
+                ..default()
+            },
+            false,
+        );
+        assert!(arrival.is_active());
+        assert_eq!(arrival.phase, WorldArrivalPhase::Terrain);
+        assert!(arrival.progress < 1.0);
+
+        advance_world_arrival(
+            &mut arrival,
+            0.1,
+            ArrivalSignals {
+                local_column_ready: true,
+                local_mesh_ready: true,
+                player_placed: false,
+                ..default()
+            },
+            false,
+        );
+        assert_eq!(arrival.phase, WorldArrivalPhase::Landing);
+        assert!(arrival.is_active());
+
+        advance_world_arrival(
+            &mut arrival,
+            0.1,
+            ArrivalSignals {
+                local_column_ready: true,
+                local_mesh_ready: true,
+                player_placed: true,
+                ..default()
+            },
+            false,
+        );
+        assert_eq!(arrival.phase, WorldArrivalPhase::Ready);
+        assert!(arrival.is_active());
+    }
+
+    #[test]
+    fn arrival_progress_is_finite_monotonic_and_clamped() {
+        let mut arrival = WorldArrival::default();
+        arrival.begin("test_world");
+        let samples = [
+            ArrivalSignals {
+                scan_ratio: 0.9,
+                active_tasks: 4,
+                ..default()
+            },
+            ArrivalSignals {
+                scan_ratio: f32::NAN,
+                ..default()
+            },
+            ArrivalSignals {
+                local_column_ready: true,
+                ..default()
+            },
+            ArrivalSignals {
+                local_column_ready: true,
+                local_mesh_ready: true,
+                ..default()
+            },
+        ];
+        let mut previous = arrival.progress;
+        for signals in samples {
+            advance_world_arrival(&mut arrival, 0.05, signals, false);
+            assert!(arrival.progress.is_finite());
+            assert!((0.0..=1.0).contains(&arrival.progress));
+            assert!(arrival.progress >= previous);
+            previous = arrival.progress;
+        }
+    }
+
+    #[test]
+    fn arrival_timeout_never_traps_the_player() {
+        let mut arrival = WorldArrival::default();
+        arrival.begin("test_world");
+        advance_world_arrival(
+            &mut arrival,
+            ARRIVAL_TIMEOUT_SECONDS,
+            ArrivalSignals::default(),
+            true,
+        );
+        assert_eq!(arrival.phase, WorldArrivalPhase::Fallback);
+        assert!(arrival.is_active());
+        advance_world_arrival(
+            &mut arrival,
+            ARRIVAL_STATIC_READY_HOLD_SECONDS,
+            ArrivalSignals::default(),
+            true,
+        );
+        assert!(!arrival.is_active());
+    }
+
+    #[test]
+    fn frontier_completion_does_not_claim_local_readiness() {
+        let (phase, progress) = arrival_target(ArrivalSignals {
+            frontier_complete: true,
+            scan_ratio: 1.0,
+            ..default()
+        });
+        assert_ne!(phase, WorldArrivalPhase::Ready);
+        assert!(progress < 1.0);
     }
 
     #[test]
