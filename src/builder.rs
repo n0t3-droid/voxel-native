@@ -168,11 +168,12 @@ impl BuilderHistory {
     /// change using the first `before` and final `after`; net no-ops are
     /// filtered so an empty drag does not clutter the stack.
     ///
-    /// The redo stack is cleared on every new edit, matching common
-    /// undo-history semantics. The per-batch cap protects low-end PCs
-    /// from a single giant operation; the stack cap is intentionally
-    /// high so mouse-first Sketch sessions do not lose early precise
-    /// edits after only a few dozen strokes.
+    /// The redo stack is cleared only after a new edit is accepted,
+    /// matching common undo-history semantics without destroying a
+    /// valid branch when a no-op or oversized request is rejected. The
+    /// per-batch cap protects low-end PCs from a single giant operation;
+    /// the stack cap is intentionally high so mouse-first Sketch sessions
+    /// do not lose early precise edits after only a few dozen strokes.
     pub fn record_external(
         &mut self,
         label: impl Into<String>,
@@ -222,9 +223,17 @@ impl BuilderHistory {
                 .into_iter()
                 .map(|(pos, before, after)| VoxelChange { pos, before, after }),
         );
+        self.record_canonical_batch(label.into(), changes, sketch_meta)
+    }
+
+    fn record_canonical_batch(
+        &mut self,
+        label: String,
+        changes: Vec<VoxelChange>,
+        sketch_meta: Option<BuilderHistorySketchMeta>,
+    ) -> BuilderHistoryRecordOutcome {
         let voxel_count = changes.len();
         if voxel_count > UNDO_CHANGE_LIMIT {
-            self.redo.clear();
             return BuilderHistoryRecordOutcome::RejectedTooManyChanges {
                 voxel_count,
                 limit: UNDO_CHANGE_LIMIT,
@@ -235,7 +244,7 @@ impl BuilderHistory {
         }
 
         self.undo.push(EditHistoryBatch {
-            label: label.into(),
+            label,
             changes,
             sketch_meta,
         });
@@ -1155,22 +1164,16 @@ fn live_stamp_mirrored(
     let xs: &[bool] = if mirror.x { &[false, true] } else { &[false] };
     let ys: &[bool] = if mirror.y { &[false, true] } else { &[false] };
     let zs: &[bool] = if mirror.z { &[false, true] } else { &[false] };
-    let mut total = 0usize;
-    let mut last_note = String::new();
+    let mut plan = VoxelEditPlan::default();
     for &fx in xs {
         for &fy in ys {
             for &fz in zs {
                 let stamped_origin = reflect_origin(origin, brush, mirror.origin, (fx, fy, fz));
-                let (n, note) =
-                    stamp_cuboid(world, history, label.clone(), stamped_origin, brush, voxel);
-                total += n;
-                if !note.is_empty() {
-                    last_note = note;
-                }
+                plan.add_cuboid(stamped_origin, brush, voxel);
             }
         }
     }
-    (total, last_note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn live_raycast_voxel(
@@ -1189,6 +1192,151 @@ fn live_raycast_voxel(
 const UNDO_CHANGE_LIMIT: usize = 250_000;
 const UNDO_STACK_LIMIT: usize = 4096;
 
+/// Stages one complete builder operation before any chunk is mutated.
+///
+/// A plan is intentionally independent from [`WorldEditBatch`]. It first
+/// folds repeated writes using last-write-wins semantics, resolves exact net
+/// changes against the current world, and validates the complete transaction
+/// against the low-end-PC history budget. Only an accepted plan reaches the
+/// world, so rejection cannot leave a partial structure or a missing undo.
+#[derive(Default)]
+struct VoxelEditPlan {
+    writes: std::collections::HashMap<IVec3, Voxel>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoxelEditPlanOutcome {
+    Applied { voxel_count: usize },
+    NoChanges,
+    RejectedTooManyChanges { voxel_count: usize, limit: usize },
+}
+
+impl VoxelEditPlanOutcome {
+    fn into_builder_result(self) -> (usize, String) {
+        match self {
+            Self::Applied { voxel_count } => (voxel_count, "Undo bereit.".into()),
+            Self::NoChanges => (0, "Keine Aenderung.".into()),
+            Self::RejectedTooManyChanges { voxel_count, limit } => (
+                0,
+                format!(
+                    "Abgebrochen: {voxel_count} Netto-Aenderungen ueberschreiten das sichere \
+                     Limit von {limit}; Welt und Undo-Verlauf bleiben unveraendert."
+                ),
+            ),
+        }
+    }
+}
+
+impl VoxelEditPlan {
+    fn set(&mut self, pos: IVec3, voxel: Voxel) {
+        self.writes.insert(pos, voxel);
+    }
+
+    fn add_cuboid(&mut self, origin: IVec3, size: IVec3, voxel: Voxel) {
+        let size = size.max(IVec3::ONE);
+        for dy in 0..size.y {
+            for dz in 0..size.z {
+                for dx in 0..size.x {
+                    self.set(
+                        IVec3::new(origin.x + dx, origin.y + dy, origin.z + dz),
+                        voxel,
+                    );
+                }
+            }
+        }
+    }
+
+    fn resolve_changes(self, world: &VoxelWorld) -> Vec<VoxelChange> {
+        let mut changes = Vec::with_capacity(self.writes.len());
+        for (pos, after) in self.writes {
+            let before = world.voxel_at(pos.x, pos.y, pos.z);
+            if before != after {
+                changes.push(VoxelChange { pos, before, after });
+            }
+        }
+        changes.sort_unstable_by_key(|change| (change.pos.x, change.pos.y, change.pos.z));
+        changes
+    }
+
+    fn commit(
+        self,
+        world: &mut VoxelWorld,
+        history: &mut BuilderHistory,
+        label: String,
+    ) -> VoxelEditPlanOutcome {
+        self.commit_with_limit(world, history, label, UNDO_CHANGE_LIMIT)
+    }
+
+    fn commit_with_limit(
+        self,
+        world: &mut VoxelWorld,
+        history: &mut BuilderHistory,
+        label: String,
+        limit: usize,
+    ) -> VoxelEditPlanOutcome {
+        // A test or future quality tier may request a stricter cap, but no
+        // caller may bypass the global undo-safety limit.
+        let effective_limit = limit.min(UNDO_CHANGE_LIMIT);
+        let changes = self.resolve_changes(world);
+        let voxel_count = changes.len();
+        if voxel_count > effective_limit {
+            return VoxelEditPlanOutcome::RejectedTooManyChanges {
+                voxel_count,
+                limit: effective_limit,
+            };
+        }
+        if changes.is_empty() {
+            return VoxelEditPlanOutcome::NoChanges;
+        }
+
+        let mut batch = WorldEditBatch::default();
+        let mut applied = Vec::with_capacity(voxel_count);
+        for change in changes {
+            let Some((before, after)) = world.edit_set_voxel_batched(
+                change.pos.x,
+                change.pos.y,
+                change.pos.z,
+                change.after,
+                &mut batch,
+            ) else {
+                continue;
+            };
+            debug_assert_eq!(before, change.before);
+            debug_assert_eq!(after, change.after);
+            applied.push(VoxelChange {
+                pos: change.pos,
+                before,
+                after,
+            });
+        }
+        world.finish_edit_batch(batch);
+
+        if applied.is_empty() {
+            return VoxelEditPlanOutcome::NoChanges;
+        }
+        let applied_count = applied.len();
+        let outcome = history.record_canonical_batch(label, applied, None);
+        debug_assert_eq!(
+            outcome,
+            BuilderHistoryRecordOutcome::Recorded {
+                voxel_count: applied_count
+            }
+        );
+        match outcome {
+            BuilderHistoryRecordOutcome::Recorded { .. } => VoxelEditPlanOutcome::Applied {
+                voxel_count: applied_count,
+            },
+            BuilderHistoryRecordOutcome::SkippedNoChanges => VoxelEditPlanOutcome::NoChanges,
+            BuilderHistoryRecordOutcome::RejectedTooManyChanges { voxel_count, limit } => {
+                // The preflight cap makes this branch unreachable. Keep a
+                // defensive result for release builds without inventing a
+                // false success status.
+                VoxelEditPlanOutcome::RejectedTooManyChanges { voxel_count, limit }
+            }
+        }
+    }
+}
+
 fn stamp_cuboid(
     world: &mut VoxelWorld,
     history: &mut BuilderHistory,
@@ -1197,30 +1345,9 @@ fn stamp_cuboid(
     size: IVec3,
     v: Voxel,
 ) -> (usize, String) {
-    let size = size.max(IVec3::ONE);
-    let mut n = 0;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
-    for dy in 0..size.y {
-        for dz in 0..size.z {
-            for dx in 0..size.x {
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(origin.x + dx, origin.y + dy, origin.z + dz),
-                    v,
-                ) {
-                    n += 1;
-                }
-            }
-        }
-    }
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    let mut plan = VoxelEditPlan::default();
+    plan.add_cuboid(origin, size, v);
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn fill_box(
@@ -1231,29 +1358,15 @@ fn fill_box(
     hi: IVec3,
     v: Voxel,
 ) -> (usize, String) {
-    let mut n = 0;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
     for y in lo.y..=hi.y {
         for z in lo.z..=hi.z {
             for x in lo.x..=hi.x {
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(x, y, z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(x, y, z), v);
             }
         }
     }
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn hollow_box(
@@ -1264,32 +1377,18 @@ fn hollow_box(
     hi: IVec3,
     shell: Voxel,
 ) -> (usize, String) {
-    let mut n = 0;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
     for y in lo.y..=hi.y {
         for z in lo.z..=hi.z {
             for x in lo.x..=hi.x {
                 let boundary =
                     x == lo.x || x == hi.x || y == lo.y || y == hi.y || z == lo.z || z == hi.z;
                 let v = if boundary { shell } else { AIR };
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(x, y, z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(x, y, z), v);
             }
         }
     }
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn paste_clipboard(
@@ -1300,10 +1399,7 @@ fn paste_clipboard(
     origin: IVec3,
     include_air: bool,
 ) -> (usize, String) {
-    let mut n = 0usize;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
     let sz = clipboard.size;
     for y in 0..sz.y {
         for z in 0..sz.z {
@@ -1312,22 +1408,11 @@ fn paste_clipboard(
                 if v == AIR && !include_air {
                     continue;
                 }
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(origin.x + x, origin.y + y, origin.z + z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(origin.x + x, origin.y + y, origin.z + z), v);
             }
         }
     }
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 #[derive(Clone, Copy)]
@@ -1346,23 +1431,11 @@ fn smart_platform(
 ) -> (usize, String) {
     let floor_y = center.y - 1;
     let radius = 8;
-    let mut n = 0usize;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
 
     for z in center.z - radius..=center.z + radius {
         for x in center.x - radius..=center.x + radius {
-            if set_recorded(
-                world,
-                &mut batch,
-                &mut changes,
-                &mut overflow,
-                IVec3::new(x, floor_y, z),
-                deck,
-            ) {
-                n += 1;
-            }
+            plan.set(IVec3::new(x, floor_y, z), deck);
 
             for y in floor_y + 1..=floor_y + 5 {
                 let edge = x == center.x - radius
@@ -1375,16 +1448,7 @@ fn smart_platform(
                 } else {
                     AIR
                 };
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(x, y, z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(x, y, z), v);
             }
         }
     }
@@ -1396,22 +1460,11 @@ fn smart_platform(
         (center.x + radius, center.z + radius),
     ] {
         for y in floor_y + 1..=floor_y + 3 {
-            if set_recorded(
-                world,
-                &mut batch,
-                &mut changes,
-                &mut overflow,
-                IVec3::new(x, y, z),
-                BlockType::GlowSand.into(),
-            ) {
-                n += 1;
-            }
+            plan.set(IVec3::new(x, y, z), BlockType::GlowSand.into());
         }
     }
 
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn smart_shelter(
@@ -1426,10 +1479,7 @@ fn smart_shelter(
     let lo = IVec3::new(center.x - 6, floor_y, center.z - 6);
     let hi = IVec3::new(center.x + 6, floor_y + 6, center.z + 6);
     let door_dir = cardinal_xz(forward);
-    let mut n = 0usize;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
 
     for y in lo.y..=hi.y {
         for z in lo.z..=hi.z {
@@ -1445,23 +1495,12 @@ fn smart_shelter(
                     v = BlockType::GlowSand.into();
                 }
 
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(x, y, z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(x, y, z), v);
             }
         }
     }
 
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn smart_path_build(
@@ -1485,10 +1524,7 @@ fn smart_path_build(
         );
     }
 
-    let mut n = 0usize;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
     let major_x = delta.x.abs() >= delta.z.abs();
     let perp = if major_x {
         IVec3::new(0, 0, 1)
@@ -1514,39 +1550,17 @@ fn smart_path_build(
             SmartPathKind::Bridge | SmartPathKind::Ramp => {
                 for w in -1..=1 {
                     let q = p + perp * w;
-                    if set_recorded(world, &mut batch, &mut changes, &mut overflow, q, deck) {
-                        n += 1;
-                    }
+                    plan.set(q, deck);
                     for clear_y in q.y + 1..=q.y + 4 {
-                        if set_recorded(
-                            world,
-                            &mut batch,
-                            &mut changes,
-                            &mut overflow,
-                            IVec3::new(q.x, clear_y, q.z),
-                            AIR,
-                        ) {
-                            n += 1;
-                        }
+                        plan.set(IVec3::new(q.x, clear_y, q.z), AIR);
                     }
                 }
                 for side in [-2, 2] {
                     let rail = p + perp * side + IVec3::Y;
-                    if set_recorded(world, &mut batch, &mut changes, &mut overflow, rail, deck) {
-                        n += 1;
-                    }
+                    plan.set(rail, deck);
                     if i % 5 == 0 {
                         let lamp = rail + IVec3::Y;
-                        if set_recorded(
-                            world,
-                            &mut batch,
-                            &mut changes,
-                            &mut overflow,
-                            lamp,
-                            BlockType::GlowSand.into(),
-                        ) {
-                            n += 1;
-                        }
+                        plan.set(lamp, BlockType::GlowSand.into());
                     }
                 }
             }
@@ -1554,55 +1568,24 @@ fn smart_path_build(
                 let floor = p - IVec3::Y;
                 for w in -2..=2 {
                     let base = floor + perp * w;
-                    if set_recorded(world, &mut batch, &mut changes, &mut overflow, base, deck) {
-                        n += 1;
-                    }
+                    plan.set(base, deck);
                     for h in 1..=4 {
-                        if set_recorded(
-                            world,
-                            &mut batch,
-                            &mut changes,
-                            &mut overflow,
-                            base + IVec3::Y * h,
-                            AIR,
-                        ) {
-                            n += 1;
-                        }
+                        plan.set(base + IVec3::Y * h, AIR);
                     }
                 }
                 for side in [-3, 3] {
                     for h in 0..=3 {
-                        if set_recorded(
-                            world,
-                            &mut batch,
-                            &mut changes,
-                            &mut overflow,
-                            floor + perp * side + IVec3::Y * h,
-                            deck,
-                        ) {
-                            n += 1;
-                        }
+                        plan.set(floor + perp * side + IVec3::Y * h, deck);
                     }
                 }
                 if i % 8 == 0 {
-                    if set_recorded(
-                        world,
-                        &mut batch,
-                        &mut changes,
-                        &mut overflow,
-                        floor + IVec3::Y * 5,
-                        BlockType::GlowSand.into(),
-                    ) {
-                        n += 1;
-                    }
+                    plan.set(floor + IVec3::Y * 5, BlockType::GlowSand.into());
                 }
             }
         }
     }
 
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn cardinal_xz(forward: Vec3) -> IVec3 {
@@ -1628,53 +1611,6 @@ fn is_light_cell(local: IVec3) -> bool {
 
 fn lerp_i32(a: i32, b: i32, t: f32) -> i32 {
     (a as f32 + (b - a) as f32 * t).round() as i32
-}
-
-fn set_recorded(
-    world: &mut VoxelWorld,
-    batch: &mut WorldEditBatch,
-    changes: &mut Vec<VoxelChange>,
-    overflow: &mut bool,
-    pos: IVec3,
-    v: Voxel,
-) -> bool {
-    let Some((before, after)) = world.edit_set_voxel_batched(pos.x, pos.y, pos.z, v, batch) else {
-        return false;
-    };
-    if !*overflow {
-        if changes.len() < UNDO_CHANGE_LIMIT {
-            changes.push(VoxelChange { pos, before, after });
-        } else {
-            changes.clear();
-            *overflow = true;
-        }
-    }
-    true
-}
-
-fn commit_history(
-    history: &mut BuilderHistory,
-    label: String,
-    changes: Vec<VoxelChange>,
-    overflow: bool,
-) -> String {
-    if overflow {
-        history.redo.clear();
-        return "Undo ausgelassen: Region zu gross.".into();
-    }
-    if changes.is_empty() {
-        return "Keine Aenderung.".into();
-    }
-    history.undo.push(EditHistoryBatch {
-        label,
-        changes,
-        sketch_meta: None,
-    });
-    if history.undo.len() > UNDO_STACK_LIMIT {
-        history.undo.remove(0);
-    }
-    history.redo.clear();
-    "Undo bereit.".into()
 }
 
 fn apply_history_batch(world: &mut VoxelWorld, batch_src: &EditHistoryBatch, undo: bool) -> usize {
@@ -2154,6 +2090,15 @@ mod tests {
         );
         assert_eq!(history.undo_len(), 1);
         assert_eq!(history.undo[0].changes.len(), UNDO_CHANGE_LIMIT);
+        history.redo.push(EditHistoryBatch {
+            label: "existing redo branch".into(),
+            changes: vec![VoxelChange {
+                pos: IVec3::new(-1, 0, 0),
+                before: AIR,
+                after: stone,
+            }],
+            sketch_meta: None,
+        });
 
         let rejected = history.record_external_with_sketch_meta_checked(
             "cap plus one transform",
@@ -2174,7 +2119,125 @@ mod tests {
         assert_eq!(history.undo_len(), 1);
         assert_eq!(history.undo[0].label, "at cap after deduplication");
         assert!(history.undo.iter().all(|batch| batch.sketch_meta.is_none()));
-        assert_eq!(history.redo_len(), 0);
+        assert_eq!(
+            history.redo_len(),
+            1,
+            "a rejected edit must not destroy an otherwise valid redo branch"
+        );
+    }
+
+    #[test]
+    fn rejected_voxel_edit_plan_leaves_world_and_history_untouched() {
+        let mut world = VoxelWorld::new();
+        let stone = Voxel::from(BlockType::Stone);
+        let limestone = Voxel::from(BlockType::Limestone);
+        let seed = IVec3::new(40, 2, 40);
+        assert!(world.edit_set_voxel(seed.x, seed.y, seed.z, stone));
+
+        let mut history = BuilderHistory::default();
+        history.record_external("seed edit", vec![(seed, AIR, stone)]);
+        history.pop_undo(&mut world).expect("create redo branch");
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
+
+        let targets = [
+            IVec3::new(1, 2, 3),
+            IVec3::new(2, 2, 3),
+            IVec3::new(3, 2, 3),
+        ];
+        let mut plan = VoxelEditPlan::default();
+        for target in targets {
+            plan.set(target, limestone);
+        }
+
+        let outcome = plan.commit_with_limit(&mut world, &mut history, "oversized test".into(), 2);
+
+        assert_eq!(
+            outcome,
+            VoxelEditPlanOutcome::RejectedTooManyChanges {
+                voxel_count: 3,
+                limit: 2,
+            }
+        );
+        assert!(targets
+            .into_iter()
+            .all(|target| world.voxel_at(target.x, target.y, target.z) == AIR));
+        assert_eq!(world.voxel_at(seed.x, seed.y, seed.z), AIR);
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
+    }
+
+    #[test]
+    fn accepted_voxel_edit_plan_is_one_exact_undoable_transaction() {
+        let mut world = VoxelWorld::new();
+        let mut history = BuilderHistory::default();
+        let a = IVec3::new(11, 12, 13);
+        let b = IVec3::new(12, 12, 13);
+        let stone = Voxel::from(BlockType::Stone);
+        let limestone = Voxel::from(BlockType::Limestone);
+        let mut plan = VoxelEditPlan::default();
+        plan.set(a, stone);
+        plan.set(b, limestone);
+
+        assert_eq!(
+            plan.commit_with_limit(&mut world, &mut history, "atomic pair".into(), 2),
+            VoxelEditPlanOutcome::Applied { voxel_count: 2 }
+        );
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), stone);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), limestone);
+        assert_eq!((history.undo_len(), history.redo_len()), (1, 0));
+
+        let undone = history.pop_undo(&mut world).expect("undo atomic pair");
+        assert_eq!(undone, ("atomic pair".into(), 2));
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), AIR);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), AIR);
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
+
+        let redone = history.pop_redo(&mut world).expect("redo atomic pair");
+        assert_eq!(redone, ("atomic pair".into(), 2));
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), stone);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), limestone);
+    }
+
+    #[test]
+    fn voxel_edit_plan_deduplicates_before_budgeting_with_last_write_wins() {
+        let mut world = VoxelWorld::new();
+        let mut history = BuilderHistory::default();
+        let a = IVec3::new(21, 22, 23);
+        let b = IVec3::new(22, 22, 23);
+        let stone = Voxel::from(BlockType::Stone);
+        let limestone = Voxel::from(BlockType::Limestone);
+        let mut plan = VoxelEditPlan::default();
+        plan.set(a, stone);
+        plan.set(a, AIR);
+        plan.set(a, limestone);
+        plan.set(b, stone);
+
+        assert_eq!(
+            plan.commit_with_limit(&mut world, &mut history, "deduplicated pair".into(), 2),
+            VoxelEditPlanOutcome::Applied { voxel_count: 2 }
+        );
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), limestone);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), stone);
+        assert_eq!(history.undo[0].changes.len(), 2);
+    }
+
+    #[test]
+    fn no_op_voxel_edit_plan_preserves_redo_branch() {
+        let mut world = VoxelWorld::new();
+        let stone = Voxel::from(BlockType::Stone);
+        let seed = IVec3::new(31, 32, 33);
+        assert!(world.edit_set_voxel(seed.x, seed.y, seed.z, stone));
+        let mut history = BuilderHistory::default();
+        history.record_external("seed edit", vec![(seed, AIR, stone)]);
+        history.pop_undo(&mut world).expect("create redo branch");
+
+        let mut plan = VoxelEditPlan::default();
+        plan.set(seed, AIR);
+        plan.set(IVec3::new(32, 32, 33), AIR);
+        assert_eq!(
+            plan.commit_with_limit(&mut world, &mut history, "no-op".into(), 2),
+            VoxelEditPlanOutcome::NoChanges
+        );
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
     }
 
     #[test]

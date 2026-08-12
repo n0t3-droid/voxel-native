@@ -24,10 +24,12 @@ use crate::blocks::{
 use crate::chunk::{
     world_to_chunk, Chunk, ChunkPos, SharedMaterials, SharedVoxels, CHUNK_SIZE_I, CHUNK_VOLUME,
 };
-use crate::mesher::build_mesh_buckets_ex;
+use crate::horizon::SharedHorizonCache;
+use crate::mesher::build_mesh_buckets_budgeted_with_horizon;
 use crate::neurocore::{QualityState, RuntimeBudget, RuntimeIntent, RuntimeProfile};
 use crate::settings::WorldSettings;
 use crate::terrain::TerrainGenerator;
+use crate::voxel_budget::{VoxelDetailTier, WorldQualityBudget};
 
 pub struct WorldPlugin;
 
@@ -37,6 +39,23 @@ pub enum WorldSet {
     Stream,
     Mesh,
 }
+
+/// Dense 16³ chunks are the interaction representation, not the horizon
+/// representation. Keeping this ceiling independent of the user's visual
+/// render distance is what makes a kilometre flight a bounded-memory
+/// operation. Far-field clipmaps/bricks can extend the view without raising
+/// this number.
+pub const MAX_FULL_CHUNK_RESIDENT: usize = 2_400;
+/// The near-field candidate disc is deliberately small and constant. The
+/// exact request planner below usually reaches the resident budget before the
+/// rim in tall terrain, but never scans an RD=64-sized disc.
+pub const MAX_INTERACTION_RADIUS_CHUNKS: i32 = 16;
+pub const MAX_IN_FLIGHT_TERRAIN_TASKS: usize = 96;
+pub const MAX_IN_FLIGHT_MESH_TASKS: usize = 64;
+pub const FULL_CHUNK_CAP_REASON: &str =
+    "Dense chunks are reserved for interaction; the visual horizon uses bounded far-field LOD";
+const GUARANTEED_INTERACTION_CORE_CHUNKS: i32 = 4;
+const PREDICTIVE_LEAD_CHUNKS: i32 = 4;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
@@ -72,13 +91,14 @@ impl Plugin for WorldPlugin {
 fn reload_material_library(
     mut library: ResMut<crate::textures::MaterialLibrary>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut vegetation_materials: ResMut<Assets<crate::vegetation::VegetationMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut world: ResMut<VoxelWorld>,
 ) {
     if !library.reload_requested {
         return;
     }
-    library.rebuild(&mut materials, &mut images);
+    library.rebuild(&mut materials, &mut vegetation_materials, &mut images);
     let mut dirty = Vec::new();
     for chunk in world.chunks.values_mut() {
         chunk.dirty = true;
@@ -104,8 +124,9 @@ fn reinit_world_for_active(
     if !pending.0 {
         return;
     }
-    world.generator =
-        TerrainGenerator::new(settings.seed).with_scenery_quality(settings.scenery_quality);
+    world.generator = TerrainGenerator::new(settings.seed)
+        .with_world_profile(settings.effective_world_profile())
+        .with_scenery_quality(settings.scenery_quality);
     world.clear_chunks();
     world.edited_overrides.clear();
     world.column_top_cy.clear();
@@ -132,6 +153,14 @@ fn reinit_world_for_active(
     streamer.last_vertical_chunks = 0;
     streamer.frontier_complete = false;
     streamer.last_anchor_cxz = None;
+    streamer.requested_chunks.clear();
+    streamer.request_epoch = streamer.request_epoch.wrapping_add(1).max(1);
+    streamer.last_priority_heading = (0, 0);
+    streamer.last_motion_hint = (0, 0);
+    streamer.telemetry = StreamingTelemetry {
+        request_epoch: streamer.request_epoch,
+        ..default()
+    };
     streamer.needs_orphan_scan = true;
     for (_, group) in streamer.entities.drain() {
         for entry in group {
@@ -151,6 +180,9 @@ pub struct VoxelWorld {
     /// RD=50 turns that into thousands of hash visits per query.
     pub loaded_column_counts: AHashMap<(i32, i32), usize>,
     pub generator: TerrainGenerator,
+    /// Cached macro-scale terrain horizons, shared by every vertical chunk
+    /// in an X/Z column. This affects rendering only and never simulation.
+    horizon_cache: SharedHorizonCache,
     /// Full chunk snapshots for chunks touched by editor/build tools. These
     /// stay resident even when the render streamer unloads the chunk, then
     /// re-apply when terrain streams back in.
@@ -432,6 +464,21 @@ pub struct StreamingGovernor {
     pub weapon_fx_scale: f32,
     pub update_cadence: f32,
     pub status: String,
+    /// Exact dense-near-field telemetry. These values are intentionally
+    /// separate from the visual render distance: distant terrain must use a
+    /// cheaper representation instead of silently growing this budget.
+    pub requested_chunks: usize,
+    pub resident_chunks: usize,
+    pub inflight_terrain: usize,
+    pub inflight_meshes: usize,
+    pub mesh_bucket_entities: usize,
+    pub peak_mesh_bucket_entities: usize,
+    pub evicted_chunks_total: u64,
+    pub cancelled_tasks_total: u64,
+    pub request_epoch: u64,
+    pub interaction_radius_chunks: i32,
+    pub full_chunk_budget: usize,
+    pub full_chunk_cap_reason: String,
 }
 
 impl Default for StreamingGovernor {
@@ -458,6 +505,18 @@ impl Default for StreamingGovernor {
             weapon_fx_scale: 1.0,
             update_cadence: 0.5,
             status: "warming up".into(),
+            requested_chunks: 0,
+            resident_chunks: 0,
+            inflight_terrain: 0,
+            inflight_meshes: 0,
+            mesh_bucket_entities: 0,
+            peak_mesh_bucket_entities: 0,
+            evicted_chunks_total: 0,
+            cancelled_tasks_total: 0,
+            request_epoch: 0,
+            interaction_radius_chunks: 0,
+            full_chunk_budget: MAX_FULL_CHUNK_RESIDENT,
+            full_chunk_cap_reason: FULL_CHUNK_CAP_REASON.to_string(),
         }
     }
 }
@@ -479,6 +538,7 @@ impl VoxelWorld {
             chunks: AHashMap::new(),
             loaded_column_counts: AHashMap::new(),
             generator: TerrainGenerator::new(12345),
+            horizon_cache: SharedHorizonCache::default(),
             edited_overrides: AHashMap::new(),
             column_top_cy: AHashMap::new(),
             edit_dirty_chunks: AHashSet::new(),
@@ -490,6 +550,7 @@ impl VoxelWorld {
     pub fn clear_chunks(&mut self) {
         self.chunks.clear();
         self.loaded_column_counts.clear();
+        self.horizon_cache.clear();
     }
 
     /// Remove saved edit chunks that are overwhelmingly old showcase /
@@ -788,6 +849,9 @@ impl VoxelWorld {
                 }
             }
         }
+        if let Some(feature_top) = self.generator.decorative_top_hint_for_chunk(cx, cz) {
+            max_block_y = max_block_y.max(feature_top);
+        }
         // +2 chunks of safety: covers trees (+6 blocks), tall features,
         // and mountain peaks that might still fall between samples.
         let top_cy = (max_block_y / s) + 2;
@@ -840,6 +904,52 @@ impl WorldEditBatch {
     }
 }
 
+/// One-frame and lifetime counters for the dense interaction bubble. Keeping
+/// this on the streamer makes it available to the HUD, Agent Control, QA, and
+/// future Mission Control feeds without scraping log text.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamingTelemetry {
+    pub requested_chunks: usize,
+    pub resident_chunks: usize,
+    pub inflight_terrain: usize,
+    pub inflight_meshes: usize,
+    pub mesh_bucket_entities: usize,
+    pub peak_mesh_bucket_entities: usize,
+    pub evicted_this_frame: usize,
+    pub evicted_chunks_total: u64,
+    pub cancelled_this_frame: usize,
+    pub cancelled_tasks_total: u64,
+    pub stale_results_total: u64,
+    pub request_epoch: u64,
+    pub interaction_radius_chunks: i32,
+    pub selected_columns: usize,
+    pub hard_resident_budget: usize,
+    pub cap_reason: &'static str,
+}
+
+impl Default for StreamingTelemetry {
+    fn default() -> Self {
+        Self {
+            requested_chunks: 0,
+            resident_chunks: 0,
+            inflight_terrain: 0,
+            inflight_meshes: 0,
+            mesh_bucket_entities: 0,
+            peak_mesh_bucket_entities: 0,
+            evicted_this_frame: 0,
+            evicted_chunks_total: 0,
+            cancelled_this_frame: 0,
+            cancelled_tasks_total: 0,
+            stale_results_total: 0,
+            request_epoch: 0,
+            interaction_radius_chunks: 0,
+            selected_columns: 0,
+            hard_resident_budget: MAX_FULL_CHUNK_RESIDENT,
+            cap_reason: FULL_CHUNK_CAP_REASON,
+        }
+    }
+}
+
 /// Tracks which chunk entities are currently spawned so we can despawn them
 /// when they stream out of range. Also keeps the async terrain and mesh
 /// task handles so we can poll them each frame without blocking.
@@ -852,10 +962,10 @@ pub struct ChunkStreamer {
     pub entities: AHashMap<ChunkPos, Vec<ChunkMeshEntity>>,
     pub material: Option<Handle<StandardMaterial>>,
     /// In-flight terrain-generation tasks (one per chunk position).
-    pub pending_terrain: AHashMap<ChunkPos, Task<(ChunkPos, SharedVoxels)>>,
+    pub pending_terrain: AHashMap<ChunkPos, (u64, Task<(ChunkPos, SharedVoxels)>)>,
     /// In-flight meshing tasks (one per chunk position). `None` mesh =
     /// chunk is empty / uniform-solid and needs no geometry.
-    pub pending_meshes: AHashMap<ChunkPos, Task<(ChunkPos, Vec<(MaterialId, Mesh)>)>>,
+    pub pending_meshes: AHashMap<ChunkPos, (u64, Task<(ChunkPos, Vec<(MaterialId, Mesh)>)>)>,
     /// Dirty-chunk set so the mesh scheduler doesn't walk the entire
     /// chunk hashmap every frame AND so a given chunk cannot end up in
     /// the work list 20× per frame. Before this was a `Vec<ChunkPos>`
@@ -897,6 +1007,17 @@ pub struct ChunkStreamer {
     /// Last anchor chunk position we scanned from. When this changes, a
     /// new frontier sweep is required.
     pub last_anchor_cxz: Option<(i32, i32)>,
+    /// Exact full-chunk request set for the current interaction bubble.
+    /// Both resident chunks and terrain tasks must be members, so their
+    /// combined count can never exceed [`MAX_FULL_CHUNK_RESIDENT`].
+    pub requested_chunks: AHashSet<ChunkPos>,
+    /// Monotonic generation of the request plan. Async jobs are tagged with
+    /// this value; a teleport replaces the plan and stale work is cancelled
+    /// before its result can be installed.
+    pub request_epoch: u64,
+    pub last_priority_heading: (i8, i8),
+    pub last_motion_hint: (i8, i8),
+    pub telemetry: StreamingTelemetry,
 }
 
 #[derive(Clone)]
@@ -910,13 +1031,15 @@ fn init_world(
     mut streamer: ResMut<ChunkStreamer>,
     mut world: ResMut<VoxelWorld>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut vegetation_materials: ResMut<Assets<crate::vegetation::VegetationMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut material_library: ResMut<crate::textures::MaterialLibrary>,
     settings: Res<WorldSettings>,
 ) {
-    world.generator =
-        TerrainGenerator::new(settings.seed).with_scenery_quality(settings.scenery_quality);
-    material_library.rebuild(&mut materials, &mut images);
+    world.generator = TerrainGenerator::new(settings.seed)
+        .with_world_profile(settings.effective_world_profile())
+        .with_scenery_quality(settings.scenery_quality);
+    material_library.rebuild(&mut materials, &mut vegetation_materials, &mut images);
 
     // Bake the procedural surface-grain texture once. 128×128 is the
     // sweet spot: still crisp at arm's length under `Repeat` sampling,
@@ -958,6 +1081,235 @@ fn priority_score(dx: i32, dz: i32, forward: Vec2) -> i32 {
     d2 + bias
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ColumnDemand {
+    top_cy: i32,
+    has_edits: bool,
+}
+
+#[derive(Debug)]
+struct InteractionRequestPlan {
+    radius: i32,
+    columns: Vec<(i32, i32, i32)>,
+    chunks: Vec<ChunkPos>,
+}
+
+/// Collapse a continuously rotating camera/motion vector into one of eight
+/// stable sectors. The hysteresis-by-quantisation prevents request churn from
+/// tiny mouse jitter while still giving the scheduler a useful frustum hint.
+fn quantized_direction(direction: Vec2) -> (i8, i8) {
+    let direction = direction.normalize_or_zero();
+    if direction == Vec2::ZERO {
+        return (0, 0);
+    }
+    let quantize = |axis: f32| {
+        if axis > 0.382_683_43 {
+            1
+        } else if axis < -0.382_683_43 {
+            -1
+        } else {
+            0
+        }
+    };
+    (quantize(direction.x), quantize(direction.y))
+}
+
+/// Build an exact, column-complete dense-chunk reservation plan. This is the key bounded
+/// representation switch: arbitrary visual RD affects far-field systems, but
+/// this planner examines at most a 16-chunk radius and admits at most 2,400
+/// full chunks. A four-chunk core is unconditionally distance-first; outside
+/// it, edited columns and predicted/frustum direction receive priority.
+fn build_interaction_request_plan<F>(
+    pcx: i32,
+    pcz: i32,
+    visual_render_distance: i32,
+    vertical_chunks: i32,
+    heading: (i8, i8),
+    motion: (i8, i8),
+    max_chunks: usize,
+    mut demand_for_column: F,
+) -> InteractionRequestPlan
+where
+    F: FnMut(i32, i32) -> ColumnDemand,
+{
+    let radius = visual_render_distance
+        .max(2)
+        .min(MAX_INTERACTION_RADIUS_CHUNKS);
+    if vertical_chunks <= 0 || max_chunks == 0 {
+        return InteractionRequestPlan {
+            radius,
+            columns: Vec::new(),
+            chunks: Vec::new(),
+        };
+    }
+
+    let radius2 = radius * radius;
+    let core2 = GUARANTEED_INTERACTION_CORE_CHUNKS * GUARANTEED_INTERACTION_CORE_CHUNKS;
+    let mut candidates = Vec::with_capacity(((radius * 2 + 1).pow(2)) as usize);
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            let d2 = dx * dx + dz * dz;
+            if d2 > radius2 {
+                continue;
+            }
+            let demand = demand_for_column(pcx + dx, pcz + dz);
+            let top_cy = demand.top_cy.clamp(0, vertical_chunks - 1);
+            let column_chunks = (top_cy + 1) as usize;
+            let predicted_dx = dx - i32::from(motion.0) * PREDICTIVE_LEAD_CHUNKS;
+            let predicted_dz = dz - i32::from(motion.1) * PREDICTIVE_LEAD_CHUNKS;
+            let predicted_d2 = predicted_dx * predicted_dx + predicted_dz * predicted_dz;
+            let forward_dot = dx * i32::from(heading.0) + dz * i32::from(heading.1);
+            let motion_dot = dx * i32::from(motion.0) + dz * i32::from(motion.1);
+            let score = d2 * 2_048 + predicted_d2 * 256 - forward_dot * 96 - motion_dot * 192;
+            let tier = if d2 <= core2 {
+                0
+            } else if demand.has_edits {
+                1
+            } else {
+                2
+            };
+            candidates.push((tier, score, d2, dx, dz, column_chunks));
+        }
+    }
+    candidates.sort_unstable_by_key(|(tier, score, d2, dx, dz, _)| {
+        (*tier, *score, *d2, dx.abs() + dz.abs(), *dz, *dx)
+    });
+
+    let mut columns = Vec::with_capacity(candidates.len());
+    let mut chunks = Vec::with_capacity(max_chunks);
+    for (_tier, score, _d2, dx, dz, column_chunks) in candidates {
+        // Admit whole columns only. Splitting a column at the budget boundary
+        // creates floating collision holes and makes an edited tower vanish
+        // halfway up. Skipping at most `vertical_chunks - 1` slots is the
+        // deterministic, safer tradeoff.
+        if chunks.len().saturating_add(column_chunks) > max_chunks {
+            continue;
+        }
+        columns.push((score, dx, dz));
+        for cy in 0..column_chunks as i32 {
+            chunks.push(ChunkPos::new(pcx + dx, cy, pcz + dz));
+        }
+    }
+
+    InteractionRequestPlan {
+        radius,
+        columns,
+        chunks,
+    }
+}
+
+fn retarget_epoch_jobs<T>(
+    jobs: &mut AHashMap<ChunkPos, (u64, T)>,
+    requested: &AHashSet<ChunkPos>,
+    epoch: u64,
+) -> usize {
+    let before = jobs.len();
+    jobs.retain(|pos, (job_epoch, _)| {
+        if requested.contains(pos) {
+            // Terrain generation and meshing are deterministic for a chunk.
+            // Retagging still-requested jobs avoids throwing away useful work;
+            // jobs outside the new epoch's exact plan are dropped/cancelled.
+            *job_epoch = epoch;
+            true
+        } else {
+            false
+        }
+    });
+    before.saturating_sub(jobs.len())
+}
+
+#[inline]
+fn task_result_is_current(
+    task_epoch: u64,
+    current_epoch: u64,
+    requested: &AHashSet<ChunkPos>,
+    pos: ChunkPos,
+) -> bool {
+    task_epoch == current_epoch && requested.contains(&pos)
+}
+
+#[inline]
+fn terrain_task_limit(runtime_limit: usize, resident: usize, requested: usize) -> usize {
+    runtime_limit
+        .min(MAX_IN_FLIGHT_TERRAIN_TASKS)
+        .min(requested.saturating_sub(resident))
+}
+
+#[inline]
+fn mesh_task_limit(runtime_limit: usize) -> usize {
+    runtime_limit.min(MAX_IN_FLIGHT_MESH_TASKS)
+}
+
+/// Automatic pressure ladder for the dense interaction radius. This is not a
+/// user tuning requirement: the horizon representation keeps its extent,
+/// while expensive editable/collidable chunks contract first and recover
+/// deterministically when NeuroCore reports headroom.
+fn adaptive_interaction_radius(
+    visual_render_distance: i32,
+    quality: QualityState,
+    pressure: f32,
+) -> i32 {
+    let pressure = if pressure.is_finite() {
+        pressure.clamp(0.0, 1.25)
+    } else {
+        1.25
+    };
+    let automatic_cap = match quality {
+        QualityState::Critical => 8,
+        QualityState::Throttled => 11,
+        QualityState::Nominal if pressure >= 0.9 => 9,
+        QualityState::Nominal if pressure >= 0.65 => 12,
+        QualityState::Nominal => MAX_INTERACTION_RADIUS_CHUNKS,
+        QualityState::Expanding | QualityState::Benchmark => MAX_INTERACTION_RADIUS_CHUNKS,
+    };
+    visual_render_distance
+        .max(GUARANTEED_INTERACTION_CORE_CHUNKS)
+        .min(automatic_cap)
+        .min(MAX_INTERACTION_RADIUS_CHUNKS)
+}
+
+fn publish_streaming_telemetry(
+    streamer: &mut ChunkStreamer,
+    resident_chunks: usize,
+    governor: &mut StreamingGovernor,
+) {
+    let telemetry = &mut streamer.telemetry;
+    telemetry.requested_chunks = streamer.requested_chunks.len();
+    telemetry.resident_chunks = resident_chunks;
+    telemetry.inflight_terrain = streamer.pending_terrain.len();
+    telemetry.inflight_meshes = streamer.pending_meshes.len();
+    telemetry.request_epoch = streamer.request_epoch;
+    telemetry.hard_resident_budget = MAX_FULL_CHUNK_RESIDENT;
+
+    governor.requested_chunks = telemetry.requested_chunks;
+    governor.resident_chunks = telemetry.resident_chunks;
+    governor.inflight_terrain = telemetry.inflight_terrain;
+    governor.inflight_meshes = telemetry.inflight_meshes;
+    governor.mesh_bucket_entities = telemetry.mesh_bucket_entities;
+    governor.peak_mesh_bucket_entities = telemetry.peak_mesh_bucket_entities;
+    governor.evicted_chunks_total = telemetry.evicted_chunks_total;
+    governor.cancelled_tasks_total = telemetry.cancelled_tasks_total;
+    governor.request_epoch = telemetry.request_epoch;
+    governor.interaction_radius_chunks = telemetry.interaction_radius_chunks;
+    governor.full_chunk_budget = telemetry.hard_resident_budget;
+    governor.full_chunk_cap_reason = telemetry.cap_reason.to_string();
+    governor.status = format!(
+        "{} // dense near {}/{} resident, {} requested, epoch {}",
+        governor.status,
+        telemetry.resident_chunks,
+        telemetry.hard_resident_budget,
+        telemetry.requested_chunks,
+        telemetry.request_epoch
+    );
+}
+
+fn refresh_mesh_entity_telemetry(streamer: &mut ChunkStreamer) {
+    let current = streamer.entities.values().map(Vec::len).sum();
+    streamer.telemetry.mesh_bucket_entities = current;
+    streamer.telemetry.peak_mesh_bucket_entities =
+        streamer.telemetry.peak_mesh_bucket_entities.max(current);
+}
+
 #[inline]
 fn biome_stream_bonus(generator: &TerrainGenerator, cx: i32, cz: i32) -> i32 {
     let wx = cx * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
@@ -965,23 +1317,133 @@ fn biome_stream_bonus(generator: &TerrainGenerator, cx: i32, cz: i32) -> i32 {
     crate::daynight::BiomeArtProfile::for_biome(generator.biome_at(wx, wz)).streaming_bonus
 }
 
-fn rebuild_load_offsets(streamer: &mut ChunkStreamer, rd: i32) {
-    streamer.load_offsets.clear();
-    let rd2 = rd * rd;
-    for dx in -rd..=rd {
-        for dz in -rd..=rd {
-            let d2 = dx * dx + dz * dz;
-            if d2 <= rd2 {
-                streamer.load_offsets.push((d2, dx, dz));
-            }
+fn rebuild_interaction_plan(
+    world: &mut VoxelWorld,
+    streamer: &mut ChunkStreamer,
+    pcx: i32,
+    pcz: i32,
+    visual_render_distance: i32,
+    vertical_chunks: i32,
+    heading: (i8, i8),
+    motion: (i8, i8),
+) {
+    let radius = visual_render_distance
+        .max(2)
+        .min(MAX_INTERACTION_RADIUS_CHUNKS);
+    let radius2 = i64::from(radius) * i64::from(radius);
+
+    // Sparse edits never become mandatory global residents. Within the
+    // interaction candidate disc their columns receive priority; outside it
+    // their persisted snapshots remain safe in `edited_overrides` until the
+    // player returns.
+    let mut edited_columns: AHashSet<(i32, i32)> = AHashSet::new();
+    for pos in world.edited_overrides.keys() {
+        let dx = i64::from(pos.x) - i64::from(pcx);
+        let dz = i64::from(pos.z) - i64::from(pcz);
+        if dx * dx + dz * dz <= radius2 && pos.y >= 0 && pos.y < vertical_chunks {
+            edited_columns.insert((pos.x, pos.z));
         }
     }
-    streamer
-        .load_offsets
-        .sort_unstable_by_key(|(d2, dx, dz)| (*d2, dx.abs() + dz.abs()));
-    streamer.load_offsets_rd = rd;
+
+    let plan = build_interaction_request_plan(
+        pcx,
+        pcz,
+        visual_render_distance,
+        vertical_chunks,
+        heading,
+        motion,
+        MAX_FULL_CHUNK_RESIDENT,
+        |cx, cz| {
+            let has_edits = edited_columns.contains(&(cx, cz));
+            ColumnDemand {
+                // Reserve the configured vertical envelope without probing
+                // 25 expensive terrain samples for every candidate column on
+                // the main thread. The scheduler resolves actual terrain tops
+                // lazily for only admitted columns, spread across frames.
+                top_cy: vertical_chunks - 1,
+                has_edits,
+            }
+        },
+    );
+
+    streamer.request_epoch = streamer.request_epoch.wrapping_add(1);
+    if streamer.request_epoch == 0 {
+        streamer.request_epoch = 1;
+    }
+    streamer.requested_chunks.clear();
+    streamer.requested_chunks.extend(plan.chunks);
+    streamer.load_offsets = plan.columns;
+    streamer.load_offsets_rd = plan.radius;
     streamer.load_cursor = 0;
     streamer.frontier_complete = false;
+    streamer.last_priority_heading = heading;
+    streamer.last_motion_hint = motion;
+
+    let cancelled_terrain = {
+        let requested = &streamer.requested_chunks;
+        retarget_epoch_jobs(
+            &mut streamer.pending_terrain,
+            requested,
+            streamer.request_epoch,
+        )
+    };
+    let cancelled_meshes = {
+        let requested = &streamer.requested_chunks;
+        retarget_epoch_jobs(
+            &mut streamer.pending_meshes,
+            requested,
+            streamer.request_epoch,
+        )
+    };
+    let cancelled = cancelled_terrain.saturating_add(cancelled_meshes);
+    streamer.telemetry.cancelled_this_frame = streamer
+        .telemetry
+        .cancelled_this_frame
+        .saturating_add(cancelled);
+    streamer.telemetry.cancelled_tasks_total = streamer
+        .telemetry
+        .cancelled_tasks_total
+        .saturating_add(cancelled as u64);
+
+    // Exact-set eviction is stronger than a retention radius: neither a
+    // multi-kilometre flight nor an extreme visual RD can leave dense chunks
+    // behind. `edited_overrides` is deliberately untouched.
+    let to_drop: Vec<ChunkPos> = world
+        .chunks
+        .keys()
+        .filter(|pos| !streamer.requested_chunks.contains(pos))
+        .copied()
+        .collect();
+    for pos in &to_drop {
+        world.remove_chunk(pos);
+    }
+    if !to_drop.is_empty() {
+        streamer.needs_orphan_scan = true;
+    }
+    streamer.telemetry.evicted_this_frame = streamer
+        .telemetry
+        .evicted_this_frame
+        .saturating_add(to_drop.len());
+    streamer.telemetry.evicted_chunks_total = streamer
+        .telemetry
+        .evicted_chunks_total
+        .saturating_add(to_drop.len() as u64);
+
+    // Caches follow the constant candidate disc rather than travelled
+    // distance, preventing a world tour from accumulating hidden metadata.
+    world.column_top_cy.retain(|(cx, cz), _| {
+        let dx = i64::from(*cx) - i64::from(pcx);
+        let dz = i64::from(*cz) - i64::from(pcz);
+        dx * dx + dz * dz <= radius2
+    });
+    world.horizon_cache.retain_within(pcx, pcz, radius);
+    {
+        let requested = &streamer.requested_chunks;
+        streamer.dirty_queue.retain(|pos| requested.contains(pos));
+    }
+    streamer.telemetry.interaction_radius_chunks = plan.radius;
+    streamer.telemetry.selected_columns = streamer.load_offsets.len();
+    streamer.telemetry.request_epoch = streamer.request_epoch;
 }
 
 #[inline]
@@ -1091,12 +1553,15 @@ fn stream_chunks(
     // boost frame into unload/generate/mesh churn as the carrier crosses
     // thousands of blocks per second. Existing terrain remains resident
     // for a seamless return; streaming resumes automatically on approach.
-    let rd = sync_streaming_governor(&mut governor, &budget, &streamer);
+    let _governed_rd = sync_streaming_governor(&mut governor, &budget, &streamer);
+    streamer.telemetry.evicted_this_frame = 0;
+    streamer.telemetry.cancelled_this_frame = 0;
     if celestial_travel
         .as_deref()
         .is_some_and(crate::celestial::CelestialTravel::suspends_ground_streaming)
     {
         governor.status = "Orbital transit // ground frontier held".to_string();
+        publish_streaming_telemetry(&mut streamer, world.chunks.len(), &mut governor);
         return;
     }
 
@@ -1108,72 +1573,72 @@ fn stream_chunks(
     let pcx = px.div_euclid(CHUNK_SIZE_I);
     let pcz = pz.div_euclid(CHUNK_SIZE_I);
 
-    let retain = rd + 2;
-    let retain2 = retain * retain;
     let vertical = settings.vertical_chunks as i32;
-
-    if streamer.load_offsets_rd != rd {
-        rebuild_load_offsets(&mut streamer, rd);
-    }
     let vertical_changed = streamer.last_vertical_chunks != vertical;
-    if vertical_changed {
-        streamer.last_vertical_chunks = vertical;
-        streamer.frontier_complete = false;
-        streamer.load_cursor = 0;
-    }
-
-    // Did the player cross a chunk boundary? That's the only event (aside
-    // from unload / pending-task completion) that can make new chunks
-    // become needed, so we only reset the frontier flag on a real move.
     let cur_anchor = (pcx, pcz);
-    let moved = streamer.last_anchor_cxz != Some(cur_anchor);
-    if moved {
-        streamer.frontier_complete = false;
-        streamer.last_anchor_cxz = Some(cur_anchor);
-        streamer.load_cursor = 0;
+    let previous_anchor = streamer.last_anchor_cxz;
+    let moved = previous_anchor != Some(cur_anchor);
+    let forward = transform.forward();
+    let heading = quantized_direction(Vec2::new(forward.x, forward.z));
+    let motion = if let Some((old_x, old_z)) = previous_anchor.filter(|_| moved) {
+        quantized_direction(Vec2::new((pcx - old_x) as f32, (pcz - old_z) as f32))
+    } else if heading != streamer.last_priority_heading {
+        // A stationary camera turn invalidates stale velocity prediction.
+        (0, 0)
+    } else {
+        streamer.last_motion_hint
+    };
+    let interaction_radius = adaptive_interaction_radius(
+        settings.render_distance as i32,
+        budget.quality,
+        budget.queue_pressure.max(budget.frame_pressure),
+    );
+    let nearby_edit_outside_plan = world.edit_dirty_chunks.iter().any(|pos| {
+        let dx = i64::from(pos.x) - i64::from(pcx);
+        let dz = i64::from(pos.z) - i64::from(pcz);
+        dx * dx + dz * dz <= i64::from(interaction_radius) * i64::from(interaction_radius)
+            && pos.y >= 0
+            && pos.y < vertical
+            && !streamer.requested_chunks.contains(pos)
+    });
+    let plan_changed = streamer.requested_chunks.is_empty()
+        || streamer.load_offsets_rd != interaction_radius
+        || moved
+        || vertical_changed
+        || nearby_edit_outside_plan;
+    if plan_changed {
+        rebuild_interaction_plan(
+            &mut world,
+            &mut streamer,
+            pcx,
+            pcz,
+            interaction_radius,
+            vertical,
+            heading,
+            motion,
+        );
     }
+    streamer.last_vertical_chunks = vertical;
+    streamer.last_anchor_cxz = Some(cur_anchor);
 
-    // 1. Unload chunks outside the retention radius (also drop stale
-    //    pending tasks for those positions so we don't keep working on
-    //    chunks the player already left behind). Only run on real
-    //    movement — a stationary player cannot invalidate the retention
-    //    set, and at RD=50 this scan touches ~47 k chunk keys.
-    if moved || vertical_changed {
-        let mut to_drop = Vec::new();
-        for pos in world.chunks.keys() {
-            let dx = pos.x - pcx;
-            let dz = pos.z - pcz;
-            if dx * dx + dz * dz > retain2 || pos.y < 0 || pos.y >= vertical {
-                to_drop.push(*pos);
-            }
-        }
-        if !to_drop.is_empty() {
-            // Space opened up at the frontier — must rescan.
-            streamer.frontier_complete = false;
-            // Mesh entities might now be orphaned — let the mesh
-            // system run its cleanup pass this frame.
-            streamer.needs_orphan_scan = true;
-        }
-        for p in &to_drop {
-            world.remove_chunk(p);
-        }
-        // Evict the column-top cache for columns that fell outside
-        // the retain radius. Without this the cache grew unbounded
-        // as the player explored — ≈24 bytes per (cx,cz) entry
-        // times millions of visited columns over a long session.
-        world
-            .column_top_cy
-            .retain(|(cx, cz), _| (cx - pcx).pow(2) + (cz - pcz).pow(2) <= retain2);
-        streamer.pending_terrain.retain(|p, _| {
-            (p.x - pcx).pow(2) + (p.z - pcz).pow(2) <= retain2 && p.y >= 0 && p.y < vertical
-        });
-        streamer.pending_meshes.retain(|p, _| {
-            (p.x - pcx).pow(2) + (p.z - pcz).pow(2) <= retain2 && p.y >= 0 && p.y < vertical
-        });
-        // Drop any dirty entries that are now out of range too.
-        streamer.dirty_queue.retain(|p| {
-            (p.x - pcx).pow(2) + (p.z - pcz).pow(2) <= retain2 && p.y >= 0 && p.y < vertical
-        });
+    // An editor operation can materialise a requested chunk while its terrain
+    // task is still running. Prefer the edited resident chunk and cancel the
+    // duplicate generator job so `resident + in-flight` remains a real memory
+    // bound rather than double-counting the same request position.
+    let terrain_before_dedup = streamer.pending_terrain.len();
+    streamer
+        .pending_terrain
+        .retain(|pos, _| !world.chunks.contains_key(pos));
+    let duplicate_jobs = terrain_before_dedup.saturating_sub(streamer.pending_terrain.len());
+    if duplicate_jobs > 0 {
+        streamer.telemetry.cancelled_this_frame = streamer
+            .telemetry
+            .cancelled_this_frame
+            .saturating_add(duplicate_jobs);
+        streamer.telemetry.cancelled_tasks_total = streamer
+            .telemetry
+            .cancelled_tasks_total
+            .saturating_add(duplicate_jobs as u64);
     }
 
     // 2. Poll finished terrain tasks and fold them back into the world.
@@ -1183,12 +1648,29 @@ fn stream_chunks(
     let terrain_apply_cap = (budget.chunks_per_frame.max(1) as usize).min(6);
     let mut applied_terrain = 0usize;
     let mut done: Vec<ChunkPos> = Vec::new();
+    let mut finished_terrain: Vec<(u64, ChunkPos, SharedVoxels)> = Vec::new();
     let mut newly_loaded: Vec<ChunkPos> = Vec::new();
-    for (pos, task) in streamer.pending_terrain.iter_mut() {
+    for (pos, (task_epoch, task)) in streamer.pending_terrain.iter_mut() {
         if applied_terrain >= terrain_apply_cap {
             break;
         }
         if let Some((cp, voxels)) = future::block_on(future::poll_once(task)) {
+            finished_terrain.push((*task_epoch, cp, voxels));
+            done.push(*pos);
+            applied_terrain += 1;
+        }
+    }
+    for p in done {
+        streamer.pending_terrain.remove(&p);
+    }
+    for (task_epoch, cp, voxels) in finished_terrain {
+        if task_result_is_current(
+            task_epoch,
+            streamer.request_epoch,
+            &streamer.requested_chunks,
+            cp,
+        ) && world.chunks.len() < MAX_FULL_CHUNK_RESIDENT
+        {
             let mut chunk = Chunk::new(cp);
             chunk.install_voxels(voxels);
             if let Some(edited) = world.edited_overrides.get(&cp).cloned() {
@@ -1197,13 +1679,14 @@ fn stream_chunks(
                 }
             }
             world.insert_chunk(cp, chunk);
-            done.push(*pos);
             newly_loaded.push(cp);
-            applied_terrain += 1;
+        } else {
+            // A teleport/replan happened after this task started. The dense
+            // result is intentionally discarded; persistent edit snapshots
+            // live separately and are not affected.
+            streamer.telemetry.stale_results_total =
+                streamer.telemetry.stale_results_total.saturating_add(1);
         }
-    }
-    for p in done {
-        streamer.pending_terrain.remove(&p);
     }
     // Enqueue every newly-loaded chunk + its 6 neighbours so seams get
     // remeshed cleanly without a whole-world scan.
@@ -1228,11 +1711,14 @@ fn stream_chunks(
     // 3. Queue new terrain jobs for nearby chunks, camera-priority first,
     //    up to `max_in_flight_terrain` tasks total across threads.
     //
-    //    Fast-path: if the frontier is fully loaded AND every pending
-    //    task slot is busy (or no slots matter because there's nothing
-    //    to schedule), skip the entire sweep. This turns RD=50 steady-
-    //    state cost from ~160 k HashMap lookups per frame down to zero.
-    let max_in_flight = budget.max_in_flight_terrain as usize;
+    //    Fast-path: if the bounded frontier is fully loaded AND every
+    //    pending task slot is busy (or no slots matter because there's
+    //    nothing to schedule), skip the entire sweep.
+    let max_in_flight = terrain_task_limit(
+        budget.max_in_flight_terrain as usize,
+        world.chunks.len(),
+        streamer.requested_chunks.len(),
+    );
     if streamer.frontier_complete || streamer.pending_terrain.len() >= max_in_flight {
         // Nothing to do — frontier already saturated or no task slots.
     } else if streamer.pending_terrain.len() < max_in_flight {
@@ -1253,23 +1739,39 @@ fn stream_chunks(
             let (_, dx, dz) = streamer.load_offsets[streamer.load_cursor];
             let cx = pcx + dx;
             let cz = pcz + dz;
-            let col_top = world.column_top_cy_cached(cx, cz);
+            let terrain_top = world.column_top_cy_cached(cx, cz).clamp(0, vertical - 1);
             let mut column_complete = true;
 
             for cy in 0..vertical {
                 let cp = ChunkPos::new(cx, cy, cz);
-                if world.chunks.contains_key(&cp) || streamer.pending_terrain.contains_key(&cp) {
+                if !streamer.requested_chunks.contains(&cp) {
                     continue;
                 }
-                if cy > col_top {
+                if cy > terrain_top && !world.edited_overrides.contains_key(&cp) {
+                    // The slot is conservatively reserved in the hard budget
+                    // but proven air for this column. Resolving this lazily
+                    // avoids a cold 25-sample probe for all 797 candidates.
+                    continue;
+                }
+                if world.chunks.contains_key(&cp) || streamer.pending_terrain.contains_key(&cp) {
                     continue;
                 }
                 if streamer.pending_terrain.len() >= max_in_flight || spawned >= spawn_budget {
                     column_complete = false;
                     break;
                 }
-                let gen =
-                    TerrainGenerator::new(gen_seed).with_scenery_quality(settings.scenery_quality);
+                if world
+                    .chunks
+                    .len()
+                    .saturating_add(streamer.pending_terrain.len())
+                    >= streamer.requested_chunks.len().min(MAX_FULL_CHUNK_RESIDENT)
+                {
+                    column_complete = false;
+                    break;
+                }
+                let gen = TerrainGenerator::new(gen_seed)
+                    .with_world_profile(settings.effective_world_profile())
+                    .with_scenery_quality(settings.scenery_quality);
                 #[cfg(target_arch = "wasm32")]
                 {
                     let mut chunk = Chunk::new(cp);
@@ -1289,7 +1791,8 @@ fn stream_chunks(
                         gen.generate(&mut chunk);
                         (cp, chunk.voxels_shared())
                     });
-                    streamer.pending_terrain.insert(cp, task);
+                    let request_epoch = streamer.request_epoch;
+                    streamer.pending_terrain.insert(cp, (request_epoch, task));
                 }
                 spawned += 1;
             }
@@ -1305,6 +1808,17 @@ fn stream_chunks(
             streamer.frontier_complete = true;
         }
     }
+
+    debug_assert!(streamer.requested_chunks.len() <= MAX_FULL_CHUNK_RESIDENT);
+    debug_assert!(world.chunks.len() <= MAX_FULL_CHUNK_RESIDENT);
+    debug_assert!(
+        world
+            .chunks
+            .len()
+            .saturating_add(streamer.pending_terrain.len())
+            <= MAX_FULL_CHUNK_RESIDENT
+    );
+    publish_streaming_telemetry(&mut streamer, world.chunks.len(), &mut governor);
 }
 
 /// Re-mesh every chunk marked dirty. Meshing runs on background threads
@@ -1320,8 +1834,22 @@ fn mesh_dirty_chunks(
     material_library: Res<crate::textures::MaterialLibrary>,
     anchors: Query<&Transform, With<ChunkAnchor>>,
 ) {
-    if !world.edit_dirty_chunks.is_empty() {
-        streamer.dirty_queue.extend(world.edit_dirty_chunks.drain());
+    {
+        // Destructure the resource so Rust can prove these are disjoint field
+        // borrows; cloning a 2,400-entry request set every frame would defeat
+        // the bounded streamer's allocation goal.
+        let streamer = &mut *streamer;
+        let requested = &streamer.requested_chunks;
+        let dirty_queue = &mut streamer.dirty_queue;
+        if !world.edit_dirty_chunks.is_empty() {
+            dirty_queue.extend(
+                world
+                    .edit_dirty_chunks
+                    .drain()
+                    .filter(|pos| requested.contains(pos)),
+            );
+        }
+        dirty_queue.retain(|pos| requested.contains(pos));
     }
 
     // Player's current chunk — used both for shadow-cull tagging on
@@ -1335,6 +1863,12 @@ fn mesh_dirty_chunks(
             )
         })
         .unwrap_or((0, 0));
+    let visual_budget = WorldQualityBudget::resolve(
+        settings.graphics,
+        settings.scenery_quality,
+        budget.profile,
+        budget.quality,
+    );
 
     // 1. Poll finished meshing tasks. Cap how many we actually *apply*
     //    (spawn entities for) per frame so a flood of finished tasks
@@ -1342,14 +1876,14 @@ fn mesh_dirty_chunks(
     let spawn_cap = budget.mesh_applies_per_frame as usize;
     let mut applied = 0usize;
     let mut done_keys: Vec<ChunkPos> = Vec::new();
-    let mut finished: Vec<(ChunkPos, Vec<(MaterialId, Mesh)>)> = Vec::new();
+    let mut finished: Vec<(u64, ChunkPos, Vec<(MaterialId, Mesh)>)> = Vec::new();
 
-    for (pos, task) in streamer.pending_meshes.iter_mut() {
+    for (pos, (task_epoch, task)) in streamer.pending_meshes.iter_mut() {
         if applied >= spawn_cap {
             break;
         }
         if let Some((cp, mesh)) = future::block_on(future::poll_once(task)) {
-            finished.push((cp, mesh));
+            finished.push((*task_epoch, cp, mesh));
             done_keys.push(*pos);
             applied += 1;
         }
@@ -1357,7 +1891,18 @@ fn mesh_dirty_chunks(
     for p in done_keys {
         streamer.pending_meshes.remove(&p);
     }
-    for (pos, buckets) in finished {
+    for (task_epoch, pos, buckets) in finished {
+        if !task_result_is_current(
+            task_epoch,
+            streamer.request_epoch,
+            &streamer.requested_chunks,
+            pos,
+        ) || !world.chunks.contains_key(&pos)
+        {
+            streamer.telemetry.stale_results_total =
+                streamer.telemetry.stale_results_total.saturating_add(1);
+            continue;
+        }
         let mut previous = streamer.entities.remove(&pos).unwrap_or_default();
         if buckets.is_empty() {
             for entry in previous {
@@ -1371,10 +1916,6 @@ fn mesh_dirty_chunks(
 
         let (ox, oy, oz) = pos.origin();
         let transform = Transform::from_xyz(ox as f32, oy as f32, oz as f32);
-        let aabb = bevy::render::primitives::Aabb::from_min_max(
-            Vec3::ZERO,
-            Vec3::splat(CHUNK_SIZE_I as f32),
-        );
         let shadow_radius = budget.shadow_radius.max(2);
         let shadow_r2 = shadow_radius * shadow_radius;
         let dx = pos.x - pcx;
@@ -1383,18 +1924,36 @@ fn mesh_dirty_chunks(
         let mut next_entries = Vec::with_capacity(buckets.len());
 
         for (material_id, mesh) in buckets {
+            let vegetation_material = material_library.vegetation_handle_for(material_id);
             let Some(material_handle) = material_library
                 .handle_for(material_id)
                 .or_else(|| streamer.material.clone())
             else {
                 continue;
             };
+            let culling_margin = if vegetation_material.is_some() {
+                crate::vegetation::MAX_VEGETATION_DISPLACEMENT_VOXELS
+            } else {
+                0.0
+            };
+            let aabb = bevy::render::primitives::Aabb::from_min_max(
+                Vec3::splat(-culling_margin),
+                Vec3::splat(CHUNK_SIZE_I as f32 + culling_margin),
+            );
 
             if let Some(idx) = previous
                 .iter()
                 .position(|entry| entry.material == material_id)
             {
                 let mut entry = previous.swap_remove(idx);
+                if let Some(mut entity_commands) = commands.get_entity(entry.entity) {
+                    if let Some(vegetation_material) = vegetation_material.clone() {
+                        entity_commands.insert(vegetation_material);
+                    } else {
+                        entity_commands.insert(material_handle.clone());
+                    }
+                    entity_commands.insert(aabb);
+                }
                 if let Some(slot) = meshes.get_mut(&entry.handle) {
                     *slot = mesh;
                 } else {
@@ -1409,7 +1968,34 @@ fn mesh_dirty_chunks(
             }
 
             let handle = meshes.add(mesh);
-            let entity = if far {
+            let entity = if let Some(vegetation_material) = vegetation_material {
+                if far {
+                    commands
+                        .spawn((
+                            MaterialMeshBundle {
+                                mesh: handle.clone(),
+                                material: vegetation_material,
+                                transform,
+                                ..default()
+                            },
+                            aabb,
+                            bevy::pbr::NotShadowCaster,
+                        ))
+                        .id()
+                } else {
+                    commands
+                        .spawn((
+                            MaterialMeshBundle {
+                                mesh: handle.clone(),
+                                material: vegetation_material,
+                                transform,
+                                ..default()
+                            },
+                            aabb,
+                        ))
+                        .id()
+                }
+            } else if far {
                 commands
                     .spawn((
                         PbrBundle {
@@ -1455,8 +2041,9 @@ fn mesh_dirty_chunks(
     }
 
     // 2. Queue new mesh jobs. Camera-priority first.
-    let max_in_flight = budget.max_in_flight_meshes as usize;
+    let max_in_flight = mesh_task_limit(budget.max_in_flight_meshes as usize);
     if streamer.pending_meshes.len() >= max_in_flight {
+        refresh_mesh_entity_telemetry(&mut streamer);
         return;
     }
 
@@ -1484,7 +2071,39 @@ fn mesh_dirty_chunks(
         max_in_flight,
         budget.queue_pressure.max(budget.frame_pressure),
     );
-    candidates.reserve(scan_budget.min(dirty_total));
+    // AHashSet iteration is deliberately unordered. Sampling only an
+    // arbitrary bounded window can therefore starve a nearby never-meshed
+    // chunk behind thousands of distant dirty entries, leaving a visible
+    // 16x16 hole even though camera-priority sorting happens afterwards.
+    // Pull a small deterministic camera neighbourhood first; the remaining
+    // global backlog keeps the old bounded scan and cannot monopolise a frame.
+    const URGENT_MESH_RADIUS: i32 = 8;
+    const URGENT_PRIORITY_BONUS: i32 = 1_000_000;
+    let urgent = take_urgent_mesh_candidates(
+        &mut streamer.dirty_queue,
+        pcx,
+        pcz,
+        settings.vertical_chunks as i32,
+        URGENT_MESH_RADIUS,
+    );
+    candidates.reserve((scan_budget + urgent.len()).min(dirty_total));
+    for p in urgent {
+        let Some(c) = world.chunks.get(&p) else {
+            continue;
+        };
+        if !c.dirty {
+            continue;
+        }
+        if streamer.pending_meshes.contains_key(&p) {
+            streamer.dirty_queue.insert(p);
+            continue;
+        }
+        let scenic = biome_stream_bonus(&world.generator, p.x, p.z);
+        candidates.push((
+            priority_score(p.x - pcx, p.z - pcz, forward) + scenic - URGENT_PRIORITY_BONUS,
+            p,
+        ));
+    }
     let queue: AHashSet<ChunkPos> = std::mem::take(&mut streamer.dirty_queue);
     let mut scanned = 0usize;
     let mut queue_iter = queue.into_iter();
@@ -1519,6 +2138,8 @@ fn mesh_dirty_chunks(
 
     #[cfg(not(target_arch = "wasm32"))]
     let pool = AsyncComputeTaskPool::get();
+    let horizon_cache = world.horizon_cache.clone();
+    let horizon_generator = std::sync::Arc::new(world.generator.clone());
     let mut slots = max_in_flight - streamer.pending_meshes.len();
     let mut scheduled_this_frame = 0usize;
 
@@ -1589,17 +2210,23 @@ fn mesh_dirty_chunks(
         // emits ~40% fewer triangles (greedy merge no longer breaks
         // on AO seams). Threshold chosen so the nearest ~60% of the
         // visible disc keeps full-quality AO.
-        let lod_radius = (budget.render_distance / 2).max(4);
         let dx = pos.x - pcx;
         let dz = pos.z - pcz;
-        let use_ao = dx * dx + dz * dz <= lod_radius * lod_radius;
+        let use_ao = visual_budget.detail_tier(dx, dz) != VoxelDetailTier::Macro;
+        let emission_budget = visual_budget.emission;
+        let column_horizon_cache = horizon_cache.clone();
+        let column_horizon_generator = std::sync::Arc::clone(&horizon_generator);
 
         #[cfg(target_arch = "wasm32")]
         {
-            let buckets = build_mesh_buckets_ex(
+            let horizon = column_horizon_cache
+                .get_or_build(pos, |x, z| column_horizon_generator.surface_height_at(x, z));
+            let buckets = build_mesh_buckets_budgeted_with_horizon(
                 pos,
                 |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
                 use_ao,
+                emission_budget,
+                Some(&horizon),
             );
             apply_mesh_buckets_now(
                 &mut commands,
@@ -1616,14 +2243,19 @@ fn mesh_dirty_chunks(
         #[cfg(not(target_arch = "wasm32"))]
         {
             let task = pool.spawn(async move {
-                let buckets = build_mesh_buckets_ex(
+                let horizon = column_horizon_cache
+                    .get_or_build(pos, |x, z| column_horizon_generator.surface_height_at(x, z));
+                let buckets = build_mesh_buckets_budgeted_with_horizon(
                     pos,
                     |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
                     use_ao,
+                    emission_budget,
+                    Some(&horizon),
                 );
                 (pos, buckets)
             });
-            streamer.pending_meshes.insert(pos, task);
+            let request_epoch = streamer.request_epoch;
+            streamer.pending_meshes.insert(pos, (request_epoch, task));
         }
         slots -= 1;
         scheduled_this_frame += 1;
@@ -1657,6 +2289,7 @@ fn mesh_dirty_chunks(
         }
         streamer.needs_orphan_scan = false;
     }
+    refresh_mesh_entity_telemetry(&mut streamer);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1708,6 +2341,41 @@ fn dirty_mesh_candidate_scan_budget(
     budget.min(dirty_total)
 }
 
+/// Remove dirty chunks in a deterministic camera-centred cylinder so they can
+/// be sorted ahead of an unordered global backlog. This is bounded by
+/// `(2r+1)^2 * vertical_chunks` and performs no whole-queue walk.
+fn take_urgent_mesh_candidates(
+    dirty: &mut AHashSet<ChunkPos>,
+    pcx: i32,
+    pcz: i32,
+    vertical_chunks: i32,
+    radius: i32,
+) -> Vec<ChunkPos> {
+    let radius = radius.max(0);
+    let vertical_chunks = vertical_chunks.max(0);
+    let side = radius.saturating_mul(2).saturating_add(1) as usize;
+    let mut urgent = Vec::with_capacity(
+        dirty.len().min(
+            side.saturating_mul(side)
+                .saturating_mul(vertical_chunks as usize),
+        ),
+    );
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx * dx + dz * dz > radius * radius {
+                continue;
+            }
+            for cy in 0..vertical_chunks {
+                let pos = ChunkPos::new(pcx + dx, cy, pcz + dz);
+                if dirty.remove(&pos) {
+                    urgent.push(pos);
+                }
+            }
+        }
+    }
+    urgent
+}
+
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 fn apply_mesh_buckets_now(
@@ -1734,8 +2402,6 @@ fn apply_mesh_buckets_now(
 
     let (ox, oy, oz) = pos.origin();
     let transform = Transform::from_xyz(ox as f32, oy as f32, oz as f32);
-    let aabb =
-        bevy::render::primitives::Aabb::from_min_max(Vec3::ZERO, Vec3::splat(CHUNK_SIZE_I as f32));
     let shadow_radius = budget.shadow_radius.max(2);
     let shadow_r2 = shadow_radius * shadow_radius;
     let dx = pos.x - pcx;
@@ -1744,18 +2410,36 @@ fn apply_mesh_buckets_now(
     let mut next_entries = Vec::with_capacity(buckets.len());
 
     for (material_id, mesh) in buckets {
+        let vegetation_material = material_library.vegetation_handle_for(material_id);
         let Some(material_handle) = material_library
             .handle_for(material_id)
             .or_else(|| streamer.material.clone())
         else {
             continue;
         };
+        let culling_margin = if vegetation_material.is_some() {
+            crate::vegetation::MAX_VEGETATION_DISPLACEMENT_VOXELS
+        } else {
+            0.0
+        };
+        let aabb = bevy::render::primitives::Aabb::from_min_max(
+            Vec3::splat(-culling_margin),
+            Vec3::splat(CHUNK_SIZE_I as f32 + culling_margin),
+        );
 
         if let Some(idx) = previous
             .iter()
             .position(|entry| entry.material == material_id)
         {
             let mut entry = previous.swap_remove(idx);
+            if let Some(mut entity_commands) = commands.get_entity(entry.entity) {
+                if let Some(vegetation_material) = vegetation_material.clone() {
+                    entity_commands.insert(vegetation_material);
+                } else {
+                    entity_commands.insert(material_handle.clone());
+                }
+                entity_commands.insert(aabb);
+            }
             if let Some(slot) = meshes.get_mut(&entry.handle) {
                 *slot = mesh;
             } else {
@@ -1770,7 +2454,34 @@ fn apply_mesh_buckets_now(
         }
 
         let handle = meshes.add(mesh);
-        let entity = if far {
+        let entity = if let Some(vegetation_material) = vegetation_material {
+            if far {
+                commands
+                    .spawn((
+                        MaterialMeshBundle {
+                            mesh: handle.clone(),
+                            material: vegetation_material,
+                            transform,
+                            ..default()
+                        },
+                        aabb,
+                        bevy::pbr::NotShadowCaster,
+                    ))
+                    .id()
+            } else {
+                commands
+                    .spawn((
+                        MaterialMeshBundle {
+                            mesh: handle.clone(),
+                            material: vegetation_material,
+                            transform,
+                            ..default()
+                        },
+                        aabb,
+                    ))
+                    .id()
+            }
+        } else if far {
             commands
                 .spawn((
                     PbrBundle {
@@ -1930,6 +2641,261 @@ mod tests {
         }
     }
 
+    fn synthetic_column_demand(cx: i32, cz: i32) -> ColumnDemand {
+        let hash = i64::from(cx)
+            .wrapping_mul(73_856_093)
+            .wrapping_add(i64::from(cz).wrapping_mul(19_349_663));
+        ColumnDemand {
+            top_cy: 2 + (hash.unsigned_abs() % 12) as i32,
+            has_edits: hash.rem_euclid(97) == 0,
+        }
+    }
+
+    #[test]
+    fn extreme_visual_distance_cannot_expand_dense_request_budget() {
+        let plan = build_interaction_request_plan(
+            0,
+            0,
+            10_000,
+            16,
+            (1, 0),
+            (1, 0),
+            MAX_FULL_CHUNK_RESIDENT,
+            |_cx, _cz| ColumnDemand {
+                top_cy: 15,
+                has_edits: false,
+            },
+        );
+        let unique: AHashSet<_> = plan.chunks.iter().copied().collect();
+
+        assert_eq!(plan.radius, MAX_INTERACTION_RADIUS_CHUNKS);
+        assert_eq!(plan.chunks.len(), MAX_FULL_CHUNK_RESIDENT);
+        assert_eq!(unique.len(), plan.chunks.len());
+        assert_eq!(plan.columns.len(), MAX_FULL_CHUNK_RESIDENT / 16);
+        assert!(plan.columns.len() < 797, "only a bounded subset is dense");
+
+        // The collision/edit core wins before predictive/frustum bias.
+        for dx in -GUARANTEED_INTERACTION_CORE_CHUNKS..=GUARANTEED_INTERACTION_CORE_CHUNKS {
+            for dz in -GUARANTEED_INTERACTION_CORE_CHUNKS..=GUARANTEED_INTERACTION_CORE_CHUNKS {
+                if dx * dx + dz * dz
+                    <= GUARANTEED_INTERACTION_CORE_CHUNKS * GUARANTEED_INTERACTION_CORE_CHUNKS
+                {
+                    assert!(unique.contains(&ChunkPos::new(dx, 0, dz)));
+                    assert!(unique.contains(&ChunkPos::new(dx, 15, dz)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn many_kilometre_flight_keeps_requests_residency_and_tasks_bounded() {
+        let mut resident = AHashSet::<ChunkPos>::new();
+        let mut terrain_jobs = AHashMap::<ChunkPos, (u64, ())>::new();
+        let mut epoch = 0_u64;
+        let mut peak_requested = 0_usize;
+        let mut peak_resident = 0_usize;
+        let mut peak_tasks = 0_usize;
+
+        // Each step jumps 2.2 km in X and varies Z. Total traversed distance
+        // is far beyond a normal play session, yet no collection is allowed
+        // to scale with the path length.
+        for step in 0_i32..320 {
+            epoch += 1;
+            let pcx = step.saturating_mul(137);
+            let pcz = (step % 17 - 8).saturating_mul(61);
+            let motion = if step % 2 == 0 { (1, 0) } else { (1, 1) };
+            let plan = build_interaction_request_plan(
+                pcx,
+                pcz,
+                64,
+                16,
+                motion,
+                motion,
+                MAX_FULL_CHUNK_RESIDENT,
+                synthetic_column_demand,
+            );
+            let requested: AHashSet<_> = plan.chunks.iter().copied().collect();
+            peak_requested = peak_requested.max(requested.len());
+
+            resident.retain(|pos| requested.contains(pos));
+            retarget_epoch_jobs(&mut terrain_jobs, &requested, epoch);
+            let task_limit = terrain_task_limit(usize::MAX, resident.len(), requested.len());
+            for pos in &plan.chunks {
+                if terrain_jobs.len() >= task_limit {
+                    break;
+                }
+                if !resident.contains(pos) && !terrain_jobs.contains_key(pos) {
+                    terrain_jobs.insert(*pos, (epoch, ()));
+                }
+            }
+            peak_resident = peak_resident.max(resident.len());
+            peak_tasks = peak_tasks.max(terrain_jobs.len());
+
+            assert!(requested.len() <= MAX_FULL_CHUNK_RESIDENT);
+            assert!(resident.len() <= MAX_FULL_CHUNK_RESIDENT);
+            assert!(terrain_jobs.len() <= MAX_IN_FLIGHT_TERRAIN_TASKS);
+            assert!(resident.len() + terrain_jobs.len() <= MAX_FULL_CHUNK_RESIDENT);
+            assert!(terrain_jobs
+                .iter()
+                .all(|(pos, (job_epoch, _))| requested.contains(pos) && *job_epoch == epoch));
+
+            // Complete a bounded wave, mimicking the real apply cap without
+            // allocating 16³ arrays in this invariant test.
+            let completed: Vec<_> = terrain_jobs.keys().take(24).copied().collect();
+            for pos in completed {
+                terrain_jobs.remove(&pos);
+                resident.insert(pos);
+            }
+
+            // Exercise the fully settled state too. The next kilometre jump
+            // then runs exact-set eviction over the largest legal resident
+            // collection rather than only a partially loaded frontier.
+            terrain_jobs.clear();
+            resident = requested;
+            peak_resident = peak_resident.max(resident.len());
+        }
+
+        assert!(
+            peak_requested > 2_000,
+            "test must meaningfully exercise the cap"
+        );
+        assert!(
+            peak_resident > 2_000,
+            "settled residency must meaningfully exercise the cap"
+        );
+        assert_eq!(peak_tasks, MAX_IN_FLIGHT_TERRAIN_TASKS);
+        println!(
+            "synthetic km route peaks: requested={peak_requested}, resident={peak_resident}, terrain_jobs={peak_tasks}"
+        );
+    }
+
+    #[test]
+    fn teleport_cancels_old_epoch_and_rejects_stale_results() {
+        let old_plan = build_interaction_request_plan(
+            0,
+            0,
+            64,
+            8,
+            (1, 0),
+            (1, 0),
+            MAX_FULL_CHUNK_RESIDENT,
+            synthetic_column_demand,
+        );
+        let new_plan = build_interaction_request_plan(
+            100_000,
+            -100_000,
+            64,
+            8,
+            (0, -1),
+            (0, -1),
+            MAX_FULL_CHUNK_RESIDENT,
+            synthetic_column_demand,
+        );
+        let new_requested: AHashSet<_> = new_plan.chunks.iter().copied().collect();
+        let mut jobs: AHashMap<_, _> = old_plan
+            .chunks
+            .iter()
+            .take(MAX_IN_FLIGHT_TERRAIN_TASKS)
+            .map(|pos| (*pos, (41_u64, ())))
+            .collect();
+        let stale_pos = old_plan.chunks[0];
+
+        let cancelled = retarget_epoch_jobs(&mut jobs, &new_requested, 42);
+
+        assert_eq!(cancelled, MAX_IN_FLIGHT_TERRAIN_TASKS);
+        assert!(jobs.is_empty());
+        assert!(!task_result_is_current(41, 42, &new_requested, stale_pos));
+        assert!(task_result_is_current(
+            42,
+            42,
+            &new_requested,
+            new_plan.chunks[0]
+        ));
+    }
+
+    #[test]
+    fn evicting_dense_chunk_never_deletes_persisted_edit_snapshot() {
+        let mut world = VoxelWorld::new();
+        let edited_pos = ChunkPos::new(0, 2, 0);
+        world.insert_chunk(edited_pos, solid_chunk(edited_pos, BlockType::Stone.into()));
+        assert!(world.edit_set_voxel(0, 32, 0, BlockType::Limestone.into()));
+        assert!(world.edited_overrides.contains_key(&edited_pos));
+        let mut streamer = ChunkStreamer::default();
+
+        let started = std::time::Instant::now();
+        rebuild_interaction_plan(
+            &mut world,
+            &mut streamer,
+            50_000,
+            50_000,
+            64,
+            8,
+            (1, 0),
+            (1, 0),
+        );
+        println!(
+            "cold teleport interaction-plan rebuild: {:.3} ms",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
+
+        assert!(!world.chunks.contains_key(&edited_pos));
+        assert!(world.edited_overrides.contains_key(&edited_pos));
+        assert_eq!(streamer.telemetry.evicted_this_frame, 1);
+    }
+
+    #[test]
+    fn automatic_pressure_ladder_preserves_horizon_setting_but_contracts_dense_near_field() {
+        assert_eq!(
+            adaptive_interaction_radius(64, QualityState::Nominal, 0.1),
+            MAX_INTERACTION_RADIUS_CHUNKS
+        );
+        assert_eq!(
+            adaptive_interaction_radius(64, QualityState::Throttled, 0.2),
+            11
+        );
+        assert_eq!(
+            adaptive_interaction_radius(64, QualityState::Critical, 0.0),
+            8
+        );
+        assert_eq!(
+            adaptive_interaction_radius(64, QualityState::Nominal, f32::NAN),
+            9
+        );
+        assert_eq!(
+            adaptive_interaction_radius(2, QualityState::Nominal, 0.0),
+            GUARANTEED_INTERACTION_CORE_CHUNKS
+        );
+    }
+
+    #[test]
+    fn mesh_bucket_entity_telemetry_tracks_current_and_lifetime_peak() {
+        let mut streamer = ChunkStreamer::default();
+        let pos = ChunkPos::new(0, 0, 0);
+        streamer.entities.insert(
+            pos,
+            vec![
+                ChunkMeshEntity {
+                    entity: Entity::from_raw(1),
+                    handle: Handle::default(),
+                    material: DEFAULT_MATERIAL,
+                },
+                ChunkMeshEntity {
+                    entity: Entity::from_raw(2),
+                    handle: Handle::default(),
+                    material: DEFAULT_MATERIAL,
+                },
+            ],
+        );
+        refresh_mesh_entity_telemetry(&mut streamer);
+        assert_eq!(streamer.telemetry.mesh_bucket_entities, 2);
+        assert_eq!(streamer.telemetry.peak_mesh_bucket_entities, 2);
+
+        streamer.entities.remove(&pos);
+        refresh_mesh_entity_telemetry(&mut streamer);
+        assert_eq!(streamer.telemetry.mesh_bucket_entities, 0);
+        assert_eq!(streamer.telemetry.peak_mesh_bucket_entities, 2);
+    }
+
     #[test]
     fn known_air_slots_do_not_need_placeholder_chunks() {
         let mut world = VoxelWorld::new();
@@ -2002,6 +2968,29 @@ mod tests {
 
         assert!(stable > pressured);
         assert_eq!(stable, 384);
+    }
+
+    #[test]
+    fn urgent_mesh_candidates_cannot_hide_behind_unordered_global_backlog() {
+        let near_surface = ChunkPos::new(4, 3, -2);
+        let near_subsurface = ChunkPos::new(-5, 1, 1);
+        let outside_radius = ChunkPos::new(9, 3, 0);
+        let outside_vertical_range = ChunkPos::new(0, 8, 0);
+        let mut dirty = AHashSet::from([
+            near_surface,
+            near_subsurface,
+            outside_radius,
+            outside_vertical_range,
+        ]);
+
+        let urgent = take_urgent_mesh_candidates(&mut dirty, 0, 0, 8, 8);
+
+        assert!(urgent.contains(&near_surface));
+        assert!(urgent.contains(&near_subsurface));
+        assert!(!urgent.contains(&outside_radius));
+        assert!(!urgent.contains(&outside_vertical_range));
+        assert!(dirty.contains(&outside_radius));
+        assert!(dirty.contains(&outside_vertical_range));
     }
 
     #[test]

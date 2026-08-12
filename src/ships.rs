@@ -3078,7 +3078,8 @@ fn spawn_saved_ships_once(
         return;
     };
     *inventory = active.meta.ship_inventory.clone();
-    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed);
+    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed)
+        .with_world_profile(settings.effective_world_profile());
     let (player_anchor, player_yaw) = resolved_world_entry_anchor(&active, &settings, &generator);
     let visual_detail = ShipVisualDetail::for_profile(settings.runtime_profile);
 
@@ -3130,7 +3131,7 @@ fn resolved_world_entry_anchor(
     let pos = active.meta.player_pos;
     let mut anchor = Vec3::new(pos[0], pos[1], pos[2]);
     let mut yaw = active.meta.player_yaw;
-    if settings.visual_preset == crate::settings::VisualPreset::NaturalWorld {
+    if settings.effective_world_profile() == crate::settings::WorldProfile::Natural {
         let bx = crate::chunk::floor_to_i32_safe(anchor.x);
         let bz = crate::chunk::floor_to_i32_safe(anchor.z);
         let surface = generator.surface_height_at(bx, bz);
@@ -3140,7 +3141,7 @@ fn resolved_world_entry_anchor(
                 yaw = 0.0;
             }
         }
-    } else if settings.visual_preset == crate::settings::VisualPreset::NeonShuttle {
+    } else if settings.effective_world_profile() == crate::settings::WorldProfile::AstralFrontier {
         let bx = crate::chunk::floor_to_i32_safe(anchor.x);
         let bz = crate::chunk::floor_to_i32_safe(anchor.z);
         if !generator.biome_at(bx, bz).is_neon_showcase() {

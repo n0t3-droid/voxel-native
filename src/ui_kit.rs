@@ -10,15 +10,15 @@ use bevy_egui::egui;
 
 use crate::icons::{paint_icon, Icon};
 use crate::theme::{
-    allows_continuous_motion, animate_bool_finite, neon_outline_strokes, paint_focus_outline,
+    allows_continuous_motion, animate_bool_finite, paint_focus_outline, paint_neon_outline,
     MotionRole, SemanticColors, ThemeSettings, KANSO_LAYOUT, KANSO_VISUALS,
 };
 
 const ACTIVITY_REPAINT_INTERVAL: Duration = Duration::from_millis(34);
 const STATIC_ACTIVITY_PHASE: f32 = 0.125;
 const STATIC_ACTIVITY_PULSE: f32 = 0.68;
-const ORBIT_ORB_COUNT: usize = 5;
-const ORBIT_TRACK_SEGMENTS: usize = 24;
+const SIGNAL_TRACK_SEGMENTS: usize = 24;
+const SIGNAL_TICK_COUNT: usize = 8;
 
 fn alpha_u8(alpha: f32) -> u8 {
     let alpha = if alpha.is_finite() {
@@ -95,6 +95,7 @@ fn control_visuals(
     state: InteractionState,
     motion: ControlMotion,
 ) -> ControlVisuals {
+    let motion = motion.sanitized();
     let colors = theme.semantic();
     if !state.enabled {
         return ControlVisuals {
@@ -146,6 +147,7 @@ fn tone_control_visuals(
     motion: ControlMotion,
     tone: ActionTone,
 ) -> ControlVisuals {
+    let motion = motion.sanitized();
     let mut visuals = control_visuals(theme, state, motion);
     if !state.enabled || !matches!(tone, ActionTone::Danger) {
         return visuals;
@@ -170,6 +172,24 @@ struct ControlMotion {
 }
 
 impl ControlMotion {
+    fn sanitized(self) -> Self {
+        fn unit(value: f32) -> f32 {
+            if value.is_finite() {
+                value.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        }
+
+        Self {
+            hover: unit(self.hover),
+            focus: unit(self.focus),
+            press: unit(self.press),
+            selection: unit(self.selection),
+            spatial_motion: self.spatial_motion,
+        }
+    }
+
     fn sample(ui: &egui::Ui, response: &egui::Response, selected: bool, role: MotionRole) -> Self {
         let enabled = response.enabled();
         let hover = animate_bool_finite(
@@ -197,7 +217,7 @@ impl ControlMotion {
             MotionRole::State,
         );
         let spatial_motion = allows_continuous_motion(ui.ctx());
-        if enabled {
+        let motion = if enabled {
             Self {
                 hover,
                 focus,
@@ -213,15 +233,17 @@ impl ControlMotion {
                 selection: 0.0,
                 spatial_motion,
             }
-        }
+        };
+        motion.sanitized()
     }
 
     fn paint_rect(self, rect: egui::Rect) -> egui::Rect {
-        if !self.spatial_motion {
+        let motion = self.sanitized();
+        if !motion.spatial_motion {
             return rect;
         }
-        let offset = -self.hover * (1.0 - self.press) * KANSO_VISUALS.hover_lift
-            + self.press * KANSO_LAYOUT.press_depth;
+        let offset = -motion.hover * (1.0 - motion.press) * KANSO_VISUALS.hover_lift
+            + motion.press * KANSO_LAYOUT.press_depth;
         rect.translate(egui::vec2(0.0, offset))
     }
 
@@ -266,6 +288,97 @@ fn paint_control_shell(
         visuals.fill,
     );
     paint_control_outline(painter, rect, colors, visuals, focus_amount);
+}
+
+/// Paint result for a canonical selectable surface. The allocation and
+/// response stay owned by the caller; only the painted rectangle may lift by
+/// a few pixels in the full-motion profile.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InteractiveSurfaceVisuals {
+    pub paint_rect: egui::Rect,
+    pub text: egui::Color32,
+    pub icon: egui::Color32,
+    pub detail: egui::Color32,
+    pub hover: f32,
+    pub focus: f32,
+    pub press: f32,
+    pub selection: f32,
+}
+
+fn surface_signal_amount(motion: ControlMotion) -> f32 {
+    let motion = motion.sanitized();
+    motion
+        .hover
+        .max(motion.focus)
+        .max(motion.press)
+        .max(motion.selection * 0.42)
+        .clamp(0.0, 1.0)
+}
+
+/// Paint a shared card/viewport shell without changing its interaction
+/// geometry. This keeps world cards, asset cards and preview surfaces visually
+/// consistent while preserving their existing click and drag semantics.
+pub fn paint_interactive_surface(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    selected: bool,
+    role: MotionRole,
+    theme: ThemeSettings,
+) -> InteractiveSurfaceVisuals {
+    let colors = theme.semantic();
+    let state = InteractionState::from_response(response, selected);
+    let motion = ControlMotion::sample(ui, response, selected, role);
+    let paint_rect = motion.paint_rect(rect);
+    let visuals = control_visuals(theme, state, motion);
+    let painter = ui.painter_at(rect.expand(KANSO_VISUALS.focus_gap + 5.0));
+
+    paint_control_shell(&painter, paint_rect, colors, visuals, motion.focus);
+
+    let signal = surface_signal_amount(motion);
+    if state.enabled && signal > 0.001 {
+        let core = mix_color(
+            colors.outline_hover,
+            colors.focus,
+            motion.focus.max(motion.selection * 0.32),
+        );
+        paint_neon_outline(
+            &painter,
+            paint_rect,
+            KANSO_VISUALS.corner_radius,
+            colors.focus_glow,
+            core,
+            signal * 0.34,
+        );
+    }
+
+    if state.enabled && motion.selection > 0.001 {
+        painter.rect_filled(
+            egui::Rect::from_min_size(paint_rect.min, egui::vec2(3.0, paint_rect.height())),
+            egui::Rounding {
+                nw: KANSO_VISUALS.corner_radius,
+                sw: KANSO_VISUALS.corner_radius,
+                ne: 0.0,
+                se: 0.0,
+            },
+            with_alpha(colors.accent, motion.selection),
+        );
+    }
+
+    InteractiveSurfaceVisuals {
+        paint_rect,
+        text: visuals.text,
+        icon: visuals.icon,
+        detail: if state.enabled {
+            mix_color(colors.text_muted, visuals.text, motion.selection * 0.22)
+        } else {
+            colors.text_disabled
+        },
+        hover: motion.hover,
+        focus: motion.focus,
+        press: motion.press,
+        selection: motion.selection,
+    }
 }
 
 pub fn toolbench_frame(theme: ThemeSettings) -> egui::Frame {
@@ -863,7 +976,14 @@ fn activity_sample(time: f64, active: bool, continuous_motion: bool) -> Activity
         };
     }
 
-    let phase = (time as f32 * 0.34).rem_euclid(1.0);
+    let phase = (time * 0.34).rem_euclid(1.0) as f32;
+    if !phase.is_finite() {
+        return ActivitySample {
+            phase: STATIC_ACTIVITY_PHASE,
+            pulse: STATIC_ACTIVITY_PULSE,
+            needs_repaint: false,
+        };
+    }
     ActivitySample {
         phase,
         pulse: 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos(),
@@ -1104,27 +1224,30 @@ pub fn activity_status(
     response.on_hover_text(format!("{label}: {value}"))
 }
 
-/// Paint-only five-orb pulse. Supplying a fixed phase and intensity is fully
-/// static and does not interact with egui's repaint scheduler.
+/// Lightweight geometric activity signal. A fixed phase is completely static;
+/// only the full-motion profile advances the highlighted trace.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct OrbitOrbGeometry {
-    slot: usize,
+struct SignalReactorGeometry {
     center: egui::Pos2,
-    radius: f32,
-    depth: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct OrbitGeometry {
-    center: egui::Pos2,
-    horizontal_radius: f32,
-    vertical_radius: f32,
-    orbs: [OrbitOrbGeometry; ORBIT_ORB_COUNT],
+    outer_radius: f32,
+    middle_radius: f32,
+    inner_radius: f32,
+    vertical_scale: f32,
     phase: f32,
     intensity: f32,
 }
 
-fn orbit_geometry(rect: egui::Rect, phase: f32, intensity: f32) -> Option<OrbitGeometry> {
+fn signal_reactor_geometry(
+    rect: egui::Rect,
+    phase: f32,
+    intensity: f32,
+) -> Option<SignalReactorGeometry> {
+    if ![rect.min.x, rect.min.y, rect.max.x, rect.max.y]
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return None;
+    }
     let diameter = rect.width().min(rect.height());
     if !diameter.is_finite() || diameter <= 6.0 {
         return None;
@@ -1140,59 +1263,42 @@ fn orbit_geometry(rect: egui::Rect, phase: f32, intensity: f32) -> Option<OrbitG
         0.0
     };
 
-    let base_orb_radius = (diameter * 0.078).clamp(0.75, 2.5);
     let halo_extent = KANSO_VISUALS.neon_glow_gap + KANSO_VISUALS.neon_glow_width * 0.5;
-    let max_orb_radius = base_orb_radius * 1.06 * 1.025;
-    let horizontal_limit = diameter * 0.5 - max_orb_radius - halo_extent;
-    if horizontal_limit <= 0.0 {
+    let radius_limit = diameter * 0.5 - halo_extent;
+    if radius_limit <= 1.0 {
         return None;
     }
 
-    let center = rect.center();
-    let orbit_pulse = 0.985 + intensity * 0.015;
-    let horizontal_radius = (diameter * 0.285).min(horizontal_limit) * orbit_pulse;
-    let vertical_radius = horizontal_radius * 0.56;
-    let orb_pulse = 0.975 + intensity * 0.05;
-    let mut orbs = std::array::from_fn(|slot| {
-        let turn = (phase + slot as f32 / ORBIT_ORB_COUNT as f32).rem_euclid(1.0);
-        let angle = turn * std::f32::consts::TAU;
-        let depth = angle.sin();
-        let depth_amount = (depth + 1.0) * 0.5;
-        OrbitOrbGeometry {
-            slot,
-            center: center + egui::vec2(angle.cos() * horizontal_radius, depth * vertical_radius),
-            radius: base_orb_radius * (0.82 + depth_amount * 0.24) * orb_pulse,
-            depth,
-        }
-    });
-    orbs.sort_by(|left, right| {
-        left.depth
-            .total_cmp(&right.depth)
-            .then_with(|| left.slot.cmp(&right.slot))
-    });
+    let pulse = 0.99 + intensity * 0.01;
+    let outer_radius = (diameter * 0.34).min(radius_limit) * pulse;
+    if outer_radius <= 1.0 {
+        return None;
+    }
 
-    Some(OrbitGeometry {
-        center,
-        horizontal_radius,
-        vertical_radius,
-        orbs,
+    Some(SignalReactorGeometry {
+        center: rect.center(),
+        outer_radius,
+        middle_radius: outer_radius * 0.69,
+        inner_radius: outer_radius * 0.34,
+        vertical_scale: 0.58,
         phase,
         intensity,
     })
 }
 
-fn projected_orbit_point(geometry: &OrbitGeometry, turn: f32) -> egui::Pos2 {
+fn projected_signal_point(geometry: &SignalReactorGeometry, radius: f32, turn: f32) -> egui::Pos2 {
     let angle = turn * std::f32::consts::TAU;
     geometry.center
         + egui::vec2(
-            angle.cos() * geometry.horizontal_radius,
-            angle.sin() * geometry.vertical_radius,
+            angle.cos() * radius,
+            angle.sin() * radius * geometry.vertical_scale,
         )
 }
 
-fn paint_projected_orbit_arc(
+fn paint_projected_signal_arc(
     painter: &egui::Painter,
-    geometry: &OrbitGeometry,
+    geometry: &SignalReactorGeometry,
+    radius: f32,
     start_turn: f32,
     sweep_turn: f32,
     segments: usize,
@@ -1202,54 +1308,16 @@ fn paint_projected_orbit_arc(
     let mut points = Vec::with_capacity(segments + 1);
     for segment in 0..=segments {
         let amount = segment as f32 / segments as f32;
-        points.push(projected_orbit_point(
+        points.push(projected_signal_point(
             geometry,
+            radius,
             start_turn + sweep_turn * amount,
         ));
     }
     painter.add(egui::Shape::line(points, stroke));
 }
 
-fn paint_orbit_orb(
-    painter: &egui::Painter,
-    orb: OrbitOrbGeometry,
-    intensity: f32,
-    colors: SemanticColors,
-) {
-    let depth_amount = ((orb.depth + 1.0) * 0.5).clamp(0.0, 1.0);
-    let palette_amount = orb.slot as f32 / (ORBIT_ORB_COUNT - 1) as f32;
-    let tint = mix_color(colors.info, colors.accent, palette_amount);
-    let core = mix_color(tint, colors.focus, 0.18 + depth_amount * 0.55);
-    let neon_amount = (0.42 + depth_amount * 0.42 + intensity * 0.08).clamp(0.0, 1.0);
-    let outline = neon_outline_strokes(colors.focus_glow, core, neon_amount);
-
-    if let Some(strokes) = outline {
-        painter.circle_stroke(
-            orb.center,
-            orb.radius + KANSO_VISUALS.neon_glow_gap,
-            strokes.halo,
-        );
-    }
-
-    let fill = mix_color(colors.surface_strong, tint, 0.46 + depth_amount * 0.28);
-    painter.circle_filled(
-        orb.center,
-        orb.radius,
-        with_alpha(fill, 0.78 + depth_amount * 0.20),
-    );
-    if let Some(strokes) = outline {
-        painter.circle_stroke(orb.center, orb.radius, strokes.core);
-    }
-
-    let highlight_center = orb.center + egui::vec2(-orb.radius * 0.24, -orb.radius * 0.28);
-    painter.circle_filled(
-        highlight_center,
-        (orb.radius * 0.30).max(0.32),
-        with_alpha(colors.focus, 0.16 + depth_amount * 0.22 + intensity * 0.05),
-    );
-}
-
-pub fn paint_orbit_pulse(
+pub fn paint_signal_reactor(
     painter: &egui::Painter,
     rect: egui::Rect,
     phase: f32,
@@ -1257,54 +1325,108 @@ pub fn paint_orbit_pulse(
     theme: ThemeSettings,
 ) {
     let colors = theme.semantic();
-    let Some(geometry) = orbit_geometry(rect, phase, intensity) else {
+    let Some(geometry) = signal_reactor_geometry(rect, phase, intensity) else {
         return;
     };
 
-    paint_projected_orbit_arc(
+    for (radius, alpha, offset) in [
+        (geometry.outer_radius, 0.52, 0.0),
+        (geometry.middle_radius, 0.40, 0.09),
+        (geometry.inner_radius, 0.34, 0.18),
+    ] {
+        paint_projected_signal_arc(
+            painter,
+            &geometry,
+            radius,
+            offset,
+            1.0,
+            SIGNAL_TRACK_SEGMENTS,
+            egui::Stroke::new(
+                KANSO_VISUALS.outline_width,
+                with_alpha(colors.outline_hover, alpha),
+            ),
+        );
+    }
+
+    paint_projected_signal_arc(
         painter,
         &geometry,
-        0.5,
-        0.5,
-        ORBIT_TRACK_SEGMENTS / 2,
-        egui::Stroke::new(
-            KANSO_VISUALS.outline_width,
-            with_alpha(colors.outline_disabled, 0.30),
-        ),
-    );
-    paint_projected_orbit_arc(
-        painter,
-        &geometry,
-        0.0,
-        0.5,
-        ORBIT_TRACK_SEGMENTS / 2,
-        egui::Stroke::new(
-            KANSO_VISUALS.outline_width,
-            with_alpha(colors.outline_hover, 0.48),
-        ),
-    );
-    paint_projected_orbit_arc(
-        painter,
-        &geometry,
-        geometry.phase - 0.07,
-        0.14,
-        4,
+        geometry.outer_radius,
+        geometry.phase - 0.075,
+        0.15,
+        5,
         egui::Stroke::new(
             KANSO_VISUALS.focus_width,
-            with_alpha(colors.accent, 0.18 + geometry.intensity * 0.18),
+            with_alpha(colors.accent, 0.36 + geometry.intensity * 0.30),
+        ),
+    );
+    paint_projected_signal_arc(
+        painter,
+        &geometry,
+        geometry.middle_radius,
+        1.0 - geometry.phase - 0.06,
+        0.12,
+        4,
+        egui::Stroke::new(
+            KANSO_VISUALS.outline_width + 0.4,
+            with_alpha(colors.info, 0.30 + geometry.intensity * 0.26),
         ),
     );
 
-    for orb in geometry.orbs {
-        paint_orbit_orb(painter, orb, geometry.intensity, colors);
+    for tick in 0..SIGNAL_TICK_COUNT {
+        let turn = tick as f32 / SIGNAL_TICK_COUNT as f32;
+        let start = projected_signal_point(&geometry, geometry.outer_radius * 0.86, turn);
+        let end = projected_signal_point(&geometry, geometry.outer_radius * 1.06, turn);
+        let color = if tick % 2 == 0 {
+            colors.info
+        } else {
+            colors.accent
+        };
+        painter.line_segment(
+            [start, end],
+            egui::Stroke::new(
+                KANSO_VISUALS.outline_width,
+                with_alpha(color, 0.42 + geometry.intensity * 0.18),
+            ),
+        );
     }
+
+    let diamond_radius = geometry.inner_radius * 0.78;
+    let diamond = (0..4)
+        .map(|corner| {
+            let angle = std::f32::consts::FRAC_PI_4 + corner as f32 * std::f32::consts::FRAC_PI_2;
+            geometry.center + egui::vec2(angle.cos(), angle.sin()) * diamond_radius
+        })
+        .collect();
+    painter.add(egui::Shape::closed_line(
+        diamond,
+        egui::Stroke::new(
+            KANSO_VISUALS.focus_width,
+            with_alpha(colors.focus, 0.54 + geometry.intensity * 0.24),
+        ),
+    ));
+    let cross_extent = geometry.inner_radius * 0.46;
+    painter.line_segment(
+        [
+            geometry.center - egui::vec2(cross_extent, 0.0),
+            geometry.center + egui::vec2(cross_extent, 0.0),
+        ],
+        egui::Stroke::new(KANSO_VISUALS.outline_width, with_alpha(colors.info, 0.48)),
+    );
+    painter.line_segment(
+        [
+            geometry.center - egui::vec2(0.0, cross_extent),
+            geometry.center + egui::vec2(0.0, cross_extent),
+        ],
+        egui::Stroke::new(KANSO_VISUALS.outline_width, with_alpha(colors.accent, 0.48)),
+    );
 }
 
-/// Fixed-size orbit widget. Inactive, reduced-motion and low-spec variants
-/// are frozen; only an active full-profile pulse schedules bounded repaints.
-pub fn orbit_pulse(ui: &mut egui::Ui, active: bool, theme: ThemeSettings) -> egui::Response {
+/// Fixed-size signal widget. Inactive, reduced-motion and low-spec variants
+/// stay frozen; only an active full-profile signal schedules bounded repaints.
+pub fn signal_reactor(ui: &mut egui::Ui, active: bool, theme: ThemeSettings) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
-        egui::Vec2::splat(KANSO_LAYOUT.orbit_pulse_size),
+        egui::Vec2::splat(KANSO_LAYOUT.signal_reactor_size),
         egui::Sense::hover(),
     );
     let sample = activity_sample(
@@ -1313,7 +1435,7 @@ pub fn orbit_pulse(ui: &mut egui::Ui, active: bool, theme: ThemeSettings) -> egu
         allows_continuous_motion(ui.ctx()),
     );
     request_activity_repaint(ui, rect, sample);
-    paint_orbit_pulse(ui.painter(), rect, sample.phase, sample.pulse, theme);
+    paint_signal_reactor(ui.painter(), rect, sample.phase, sample.pulse, theme);
     response
 }
 
@@ -1494,56 +1616,29 @@ fn card_response(
     theme: ThemeSettings,
     size: egui::Vec2,
 ) -> egui::Response {
-    let colors = theme.semantic();
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let state = InteractionState::from_response(&response, selected);
-    let motion = ControlMotion::sample(ui, &response, selected, MotionRole::State);
-    let paint_rect = motion.paint_rect(rect);
-    let visuals = control_visuals(theme, state, motion);
+    let surface =
+        paint_interactive_surface(ui, rect, &response, selected, MotionRole::State, theme);
+    let paint_rect = surface.paint_rect;
     let painter = ui.painter_at(rect.expand(KANSO_VISUALS.focus_gap + 5.0));
-    paint_control_shell(&painter, paint_rect, colors, visuals, motion.focus);
-    let signal_amount = motion
-        .hover
-        .max(motion.focus)
-        .max(motion.press)
-        .max(motion.selection);
-    if state.enabled && signal_amount > 0.001 {
-        painter.line_segment(
-            [
-                egui::pos2(paint_rect.left() + 14.0, paint_rect.top() + 2.0),
-                egui::pos2(paint_rect.right() - 14.0, paint_rect.top() + 2.0),
-            ],
-            egui::Stroke::new(
-                1.0,
-                with_alpha(
-                    mix_color(colors.outline_hover, colors.focus, motion.focus),
-                    signal_amount,
-                ),
-            ),
-        );
-    }
     let icon_rect = egui::Rect::from_min_size(
         paint_rect.min + egui::vec2(12.0, 14.0),
         egui::vec2(26.0, 26.0),
     );
-    paint_icon(&painter, icon_rect, icon, visuals.icon);
+    paint_icon(&painter, icon_rect, icon, surface.icon);
     painter.text(
         egui::pos2(paint_rect.left() + 48.0, paint_rect.top() + 18.0),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::monospace(13.0),
-        visuals.text,
+        surface.text,
     );
     painter.text(
         egui::pos2(paint_rect.left() + 48.0, paint_rect.top() + 42.0),
         egui::Align2::LEFT_CENTER,
         detail,
         egui::FontId::monospace(10.0),
-        if state.enabled {
-            colors.text_muted
-        } else {
-            colors.text_disabled
-        },
+        surface.detail,
     );
     response.on_hover_text(detail)
 }
@@ -1664,6 +1759,59 @@ mod tests {
     }
 
     #[test]
+    fn interactive_surface_signal_is_bounded_and_selection_stays_quiet() {
+        let selected = surface_signal_amount(ControlMotion {
+            hover: 0.0,
+            focus: 0.0,
+            press: 0.0,
+            selection: 1.0,
+            spatial_motion: true,
+        });
+        let saturated = surface_signal_amount(ControlMotion {
+            hover: 2.0,
+            focus: 1.5,
+            press: 3.0,
+            selection: 2.0,
+            spatial_motion: true,
+        });
+        let invalid_low = surface_signal_amount(ControlMotion {
+            hover: -2.0,
+            focus: -1.0,
+            press: -4.0,
+            selection: -3.0,
+            spatial_motion: true,
+        });
+        let invalid_non_finite = surface_signal_amount(ControlMotion {
+            hover: f32::NAN,
+            focus: f32::INFINITY,
+            press: f32::NEG_INFINITY,
+            selection: f32::NAN,
+            spatial_motion: true,
+        });
+
+        assert!((selected - 0.42).abs() <= f32::EPSILON);
+        assert_eq!(saturated, 1.0);
+        assert_eq!(invalid_low, 0.0);
+        assert_eq!(invalid_non_finite, 0.0);
+    }
+
+    #[test]
+    fn interactive_surface_keeps_the_callers_interaction_geometry() {
+        egui::__run_test_ui(|ui| {
+            let theme = ThemeSettings::default();
+            let expected_size = egui::vec2(180.0, 72.0);
+            let (rect, response) =
+                ui.allocate_exact_size(expected_size, egui::Sense::click_and_drag());
+            let visual =
+                paint_interactive_surface(ui, rect, &response, false, MotionRole::State, theme);
+
+            assert_eq!(response.rect, rect);
+            assert_eq!(response.rect.size(), expected_size);
+            assert_eq!(visual.paint_rect.size(), rect.size());
+        });
+    }
+
+    #[test]
     fn interaction_colors_interpolate_without_hard_state_jumps() {
         let theme = ThemeSettings::default();
         let colors = theme.semantic();
@@ -1695,6 +1843,43 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_control_motion_cannot_corrupt_paint_geometry_or_visuals() {
+        let theme = ThemeSettings::default();
+        let state = InteractionState {
+            enabled: true,
+            selected: true,
+            hovered: true,
+            focused: true,
+            pressed: true,
+        };
+        let motion = ControlMotion {
+            hover: f32::NAN,
+            focus: f32::INFINITY,
+            press: f32::NEG_INFINITY,
+            selection: 4.0,
+            spatial_motion: true,
+        };
+        let rect = egui::Rect::from_min_size(egui::pos2(12.0, 18.0), egui::vec2(80.0, 34.0));
+        let paint_rect = motion.paint_rect(rect);
+        let visuals = control_visuals(theme, state, motion);
+        let danger = tone_control_visuals(theme, state, motion, ActionTone::Danger);
+
+        for coordinate in [
+            paint_rect.min.x,
+            paint_rect.min.y,
+            paint_rect.max.x,
+            paint_rect.max.y,
+        ] {
+            assert!(coordinate.is_finite());
+        }
+        assert_eq!(paint_rect.size(), rect.size());
+        assert!(visuals.outline_width.is_finite());
+        assert!((KANSO_VISUALS.outline_width..=KANSO_VISUALS.focus_width)
+            .contains(&visuals.outline_width));
+        assert!(danger.outline_width.is_finite());
+    }
+
+    #[test]
     fn fitted_labels_shrink_only_when_the_container_requires_it() {
         assert_eq!(fitted_monospace_size("SHORT", 120.0, 12.0, 8.0), 12.0);
         let fitted = fitted_monospace_size("A VERY LONG COMMAND LABEL", 90.0, 12.0, 8.0);
@@ -1709,6 +1894,8 @@ mod tests {
         let frozen_later = activity_sample(9_999.0, true, false);
         let active = activity_sample(12.0, true, true);
         let invalid_time = activity_sample(f64::NAN, true, true);
+        let infinite_time = activity_sample(f64::INFINITY, true, true);
+        let huge_time = activity_sample(f64::MAX, true, true);
 
         assert!(!idle.needs_repaint);
         assert!(!frozen.needs_repaint);
@@ -1719,6 +1906,12 @@ mod tests {
         assert!((0.0..1.0).contains(&active.phase));
         assert!((0.0..=1.0).contains(&active.pulse));
         assert_eq!(invalid_time, frozen);
+        assert_eq!(infinite_time, frozen);
+        assert!(huge_time.phase.is_finite());
+        assert!(huge_time.pulse.is_finite());
+        assert!((0.0..1.0).contains(&huge_time.phase));
+        assert!((0.0..=1.0).contains(&huge_time.pulse));
+        assert!(huge_time.needs_repaint);
         assert!(!should_request_activity_repaint(idle, true));
         assert!(!should_request_activity_repaint(frozen, true));
         assert!(!should_request_activity_repaint(active, false));
@@ -1752,6 +1945,11 @@ mod tests {
     fn loading_progress_is_finite_and_clamped() {
         assert_eq!(LoadingState::Progress(-1.0).progress(), Some(0.0));
         assert_eq!(LoadingState::Progress(f32::NAN).progress(), Some(0.0));
+        assert_eq!(LoadingState::Progress(f32::INFINITY).progress(), Some(0.0));
+        assert_eq!(
+            LoadingState::Progress(f32::NEG_INFINITY).progress(),
+            Some(0.0)
+        );
         assert_eq!(LoadingState::Progress(0.4).progress(), Some(0.4));
         assert_eq!(LoadingState::Progress(2.0).progress(), Some(1.0));
         assert_eq!(LoadingState::Complete.progress(), Some(1.0));
@@ -1759,39 +1957,44 @@ mod tests {
     }
 
     #[test]
-    fn orbit_geometry_is_clamped_depth_sorted_and_inside_its_allocation() {
+    fn signal_reactor_geometry_is_clamped_and_inside_its_allocation() {
         let rect = egui::Rect::from_center_size(
             egui::pos2(40.0, 50.0),
-            egui::Vec2::splat(KANSO_LAYOUT.orbit_pulse_size),
+            egui::Vec2::splat(KANSO_LAYOUT.signal_reactor_size),
         );
-        let frozen = orbit_geometry(rect, STATIC_ACTIVITY_PHASE, STATIC_ACTIVITY_PULSE)
-            .expect("fixed-size orbit geometry");
-        let clamped = orbit_geometry(rect, f32::NAN, 2.0).expect("clamped orbit geometry");
+        let frozen = signal_reactor_geometry(rect, STATIC_ACTIVITY_PHASE, STATIC_ACTIVITY_PULSE)
+            .expect("fixed-size signal geometry");
+        let clamped =
+            signal_reactor_geometry(rect, f32::NAN, 2.0).expect("clamped signal geometry");
+        let invalid_negative = signal_reactor_geometry(rect, f32::NEG_INFINITY, f32::NEG_INFINITY)
+            .expect("sanitized signal geometry");
 
         assert!(rect.contains(frozen.center));
-        assert_eq!(frozen.orbs.len(), ORBIT_ORB_COUNT);
-        assert!(frozen
-            .orbs
-            .windows(2)
-            .all(|pair| pair[0].depth <= pair[1].depth));
-        let mut slots = frozen.orbs.map(|orb| orb.slot);
-        slots.sort_unstable();
-        assert_eq!(slots, [0, 1, 2, 3, 4]);
-        assert!(frozen.orbs[0].radius < frozen.orbs[ORBIT_ORB_COUNT - 1].radius);
+        assert!(frozen.outer_radius > frozen.middle_radius);
+        assert!(frozen.middle_radius > frozen.inner_radius);
         assert!((0.0..1.0).contains(&frozen.phase));
         assert!((0.0..=1.0).contains(&frozen.intensity));
         assert_eq!(clamped.phase, 0.0);
         assert_eq!(clamped.intensity, 1.0);
+        assert_eq!(invalid_negative.phase, 0.0);
+        assert_eq!(invalid_negative.intensity, 0.0);
         let halo_extent = KANSO_VISUALS.neon_glow_gap + KANSO_VISUALS.neon_glow_width * 0.5;
-        for orb in frozen.orbs {
-            let painted_radius = orb.radius + halo_extent;
-            assert!(orb.center.x - painted_radius >= rect.left());
-            assert!(orb.center.x + painted_radius <= rect.right());
-            assert!(orb.center.y - painted_radius >= rect.top());
-            assert!(orb.center.y + painted_radius <= rect.bottom());
-        }
-        assert!(orbit_geometry(
+        let painted_radius = frozen.outer_radius + halo_extent;
+        assert!(frozen.center.x - painted_radius >= rect.left());
+        assert!(frozen.center.x + painted_radius <= rect.right());
+        assert!(frozen.center.y - painted_radius >= rect.top());
+        assert!(frozen.center.y + painted_radius <= rect.bottom());
+        assert!(signal_reactor_geometry(
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(4.0)),
+            0.0,
+            0.0,
+        )
+        .is_none());
+        assert!(signal_reactor_geometry(
+            egui::Rect {
+                min: egui::pos2(f32::INFINITY, 0.0),
+                max: egui::pos2(f32::INFINITY, 40.0),
+            },
             0.0,
             0.0,
         )
@@ -1799,28 +2002,21 @@ mod tests {
     }
 
     #[test]
-    fn orbit_pulse_is_subtle_and_fixed_inputs_are_deterministic() {
+    fn signal_reactor_pulse_is_subtle_and_fixed_inputs_are_deterministic() {
         let rect = egui::Rect::from_center_size(
             egui::pos2(20.0, 20.0),
-            egui::Vec2::splat(KANSO_LAYOUT.orbit_pulse_size),
+            egui::Vec2::splat(KANSO_LAYOUT.signal_reactor_size),
         );
-        let quiet = orbit_geometry(rect, 0.31, 0.0).expect("quiet orbit geometry");
-        let pulse = orbit_geometry(rect, 0.31, 1.0).expect("pulsed orbit geometry");
+        let quiet = signal_reactor_geometry(rect, 0.31, 0.0).expect("quiet signal geometry");
+        let pulse = signal_reactor_geometry(rect, 0.31, 1.0).expect("pulsed signal geometry");
 
         assert_eq!(
             quiet,
-            orbit_geometry(rect, 0.31, 0.0).expect("repeatable orbit geometry")
+            signal_reactor_geometry(rect, 0.31, 0.0).expect("repeatable signal geometry")
         );
-        for quiet_orb in quiet.orbs {
-            let pulsed_orb = pulse
-                .orbs
-                .iter()
-                .find(|orb| orb.slot == quiet_orb.slot)
-                .expect("matching pulsed orb");
-            let radius_ratio = pulsed_orb.radius / quiet_orb.radius;
-            assert!(radius_ratio > 1.0);
-            assert!(radius_ratio < 1.06);
-        }
+        let radius_ratio = pulse.outer_radius / quiet.outer_radius;
+        assert!(radius_ratio > 1.0);
+        assert!(radius_ratio < 1.03);
     }
 
     #[test]
@@ -1833,10 +2029,10 @@ mod tests {
                 egui::Vec2::splat(KANSO_LAYOUT.loading_indicator_size)
             );
 
-            let orbit = orbit_pulse(ui, false, theme);
+            let signal = signal_reactor(ui, false, theme);
             assert_eq!(
-                orbit.rect.size(),
-                egui::Vec2::splat(KANSO_LAYOUT.orbit_pulse_size)
+                signal.rect.size(),
+                egui::Vec2::splat(KANSO_LAYOUT.signal_reactor_size)
             );
 
             let status = activity_status(ui, LoadingState::Idle, "WORLD LINK", "Ready", theme);

@@ -250,7 +250,10 @@ cargo build --quiet
 ```
 
 For visual or streaming changes, also run a QA world and inspect the generated
-`report.ron` plus the latest screenshot.
+`report.ron` plus the latest screenshot. Persistent panels and visual simulation
+changes must also follow the viewport, DPI, overlap, input-focus, motion, and
+evidence matrix in
+[`docs/RESPONSIVE_VISUAL_QA.md`](docs/RESPONSIVE_VISUAL_QA.md).
 
 ## Roadmap
 

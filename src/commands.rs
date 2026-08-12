@@ -18,10 +18,7 @@ use crate::icons::{paint_icon, Icon};
 use crate::menu::{GameState, PauseScreen};
 use crate::player::{Player, PlayerProgressScratch};
 use crate::settings::{self, ActiveWorld, CompanionDockPosition, HudProfile, WorldSettings};
-use crate::theme::{
-    allows_continuous_motion, command_frame, metric_pill, ThemeSettings, UiDensity, AMBER, CYAN,
-    TEXT,
-};
+use crate::theme::{command_frame, metric_pill, MotionRole, ThemeSettings, UiDensity, AMBER, CYAN};
 use crate::toolbelt::{ToolbeltState, ToolbeltTool};
 
 pub struct CommandDeckPlugin;
@@ -146,6 +143,20 @@ impl CommandContext {
             CommandContext::City => egui::Color32::from_rgb(0x60, 0xD8, 0xFF),
             CommandContext::Animation => egui::Color32::from_rgb(0xD8, 0x85, 0xFF),
             CommandContext::System => egui::Color32::from_rgb(0xC8, 0xC8, 0xC8),
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            CommandContext::Global => Icon::Globe,
+            CommandContext::Menu => Icon::Layout,
+            CommandContext::Gameplay => Icon::Player,
+            CommandContext::Combat => Icon::Intensity,
+            CommandContext::Builder => Icon::Builder,
+            CommandContext::Editor => Icon::ModeManipulate,
+            CommandContext::City => Icon::City,
+            CommandContext::Animation => Icon::Animation,
+            CommandContext::System => Icon::System,
         }
     }
 }
@@ -633,21 +644,12 @@ fn draw_command_palette(
     };
     let theme = settings.theme;
     let screen = ctx.screen_rect();
-    let continuous_motion = allows_continuous_motion(ctx);
-    let time = if continuous_motion {
-        ctx.input(|i| i.time) as f32
-    } else {
-        0.0
-    };
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
         egui::Id::new("command_palette_dim"),
     ));
     painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(190));
-    draw_data_ribs(ctx, theme, time);
-    if continuous_motion {
-        ctx.request_repaint_after(std::time::Duration::from_millis(67));
-    }
+    draw_data_ribs(ctx, theme);
 
     let width = screen.width().clamp(360.0, 860.0) - 32.0;
     let height = screen.height().clamp(420.0, 680.0) - 34.0;
@@ -734,7 +736,7 @@ fn draw_command_palette(
 
 fn draw_palette_header(ui: &mut egui::Ui, theme: ThemeSettings, state: &GameState) {
     ui.horizontal(|ui| {
-        let response = crate::ui_kit::orbit_pulse(ui, true, theme);
+        let response = crate::ui_kit::signal_reactor(ui, true, theme);
         paint_icon(
             ui.painter(),
             response.rect.shrink(11.0),
@@ -773,119 +775,120 @@ fn command_row(
     command: &CommandSpec,
 ) -> Option<CommandAction> {
     let accent = command.context.tint(theme);
-    let fill = if command.essential {
-        egui::Color32::from_rgba_premultiplied(accent.r() / 7, accent.g() / 7, accent.b() / 7, 190)
-    } else {
-        egui::Color32::from_rgba_premultiplied(0, 0, 0, 150)
-    };
     let action = command_action(command);
     let mut requested = None;
+    let layout = command_row_layout(ui.available_width());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(1.0), layout.height),
+        egui::Sense::hover(),
+    );
+    crate::ui_kit::paint_interactive_surface(
+        ui,
+        rect,
+        &response,
+        false,
+        MotionRole::Feedback,
+        theme,
+    );
 
-    egui::Frame::none()
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, accent.linear_multiply(0.70)))
-        .rounding(egui::Rounding::same(5.0))
-        .inner_margin(egui::Margin::symmetric(9.0, 7.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                paint_icon(ui.painter(), rect.shrink(3.0), command.icon, accent);
+    let content = rect.shrink2(egui::vec2(10.0, 8.0));
+    let identity = if layout.wide {
+        egui::Rect::from_min_max(
+            content.min,
+            egui::pos2(
+                (content.right() - 350.0).max(content.left() + 120.0),
+                content.bottom(),
+            ),
+        )
+    } else {
+        egui::Rect::from_min_max(
+            content.min,
+            egui::pos2(content.right(), content.top() + 45.0),
+        )
+    };
+    paint_command_identity(ui, identity, command, accent, theme);
 
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(command.label)
-                            .monospace()
-                            .strong()
-                            .color(TEXT),
-                    );
-                    ui.label(
-                        egui::RichText::new(command.detail)
-                            .monospace()
-                            .small()
-                            .color(theme.color.dim()),
-                    );
-                });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(action) = action {
-                        if action_button(ui, theme, accent).clicked() {
-                            requested = Some(action);
-                        }
-                    }
-                    key_chip(ui, theme, command.key);
-                    context_chip(ui, theme, command.context);
-                });
-            });
+    let controls = if layout.wide {
+        egui::Rect::from_min_max(
+            egui::pos2(identity.right() + 8.0, content.top()),
+            content.max,
+        )
+    } else {
+        egui::Rect::from_min_max(
+            egui::pos2(content.left(), content.bottom() - 31.0),
+            content.max,
+        )
+    };
+    ui.allocate_ui_at_rect(controls, |ui| {
+        ui.set_clip_rect(controls);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(action) = action {
+                if crate::ui_kit::icon_action_sized(ui, Icon::Play, "RUN", false, 84.0, theme)
+                    .on_hover_text("Run command")
+                    .clicked()
+                {
+                    requested = Some(action);
+                }
+            }
+            crate::ui_kit::status_chip(ui, Icon::Key, "KEY", command.key, theme);
+            crate::ui_kit::status_chip(
+                ui,
+                command.context.icon(),
+                "CTX",
+                command.context.label(),
+                theme,
+            );
         });
+    });
     requested
 }
 
-fn action_button(ui: &mut egui::Ui, theme: ThemeSettings, accent: egui::Color32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(84.0, 26.0), egui::Sense::click());
-    let fill = accent;
-    let text = theme.text_on(fill);
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, egui::Rounding::same(5.0), fill);
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(5.0),
-        egui::Stroke::new(1.0, theme.semantic().stroke),
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CommandRowLayout {
+    height: f32,
+    wide: bool,
+}
+
+fn command_row_layout(available_width: f32) -> CommandRowLayout {
+    let wide = available_width.is_finite() && available_width >= 640.0;
+    CommandRowLayout {
+        height: if wide { 64.0 } else { 94.0 },
+        wide,
+    }
+}
+
+fn paint_command_identity(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    command: &CommandSpec,
+    accent: egui::Color32,
+    theme: ThemeSettings,
+) {
+    if !rect.is_positive() {
+        return;
+    }
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - 14.0),
+        egui::vec2(28.0, 28.0),
     );
-    paint_icon(
-        &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 6.0), egui::vec2(14.0, 14.0)),
-        Icon::Play,
-        text,
+    let text_rect =
+        egui::Rect::from_min_max(egui::pos2(icon_rect.right() + 8.0, rect.top()), rect.max);
+    let painter = ui.painter_at(rect);
+    paint_icon(&painter, icon_rect.shrink(3.0), command.icon, accent);
+    painter.text(
+        egui::pos2(text_rect.left(), text_rect.top() + 3.0),
+        egui::Align2::LEFT_TOP,
+        command.label,
+        egui::FontId::monospace(13.0),
+        theme.semantic().text,
     );
     painter.text(
-        egui::pos2(rect.left() + 30.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "RUN",
-        egui::FontId::monospace(11.0),
-        text,
+        egui::pos2(text_rect.left(), text_rect.top() + 23.0),
+        egui::Align2::LEFT_TOP,
+        command.detail,
+        egui::FontId::monospace(10.5),
+        theme.color.dim(),
     );
-    response.on_hover_text("Run command")
-}
-
-fn context_chip(ui: &mut egui::Ui, theme: ThemeSettings, context: CommandContext) {
-    let tint = context.tint(theme);
-    egui::Frame::none()
-        .fill(egui::Color32::from_rgba_premultiplied(
-            tint.r() / 9,
-            tint.g() / 9,
-            tint.b() / 9,
-            160,
-        ))
-        .stroke(egui::Stroke::new(1.0, tint.linear_multiply(0.75)))
-        .rounding(egui::Rounding::same(4.0))
-        .inner_margin(egui::Margin::symmetric(7.0, 4.0))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(context.label())
-                    .monospace()
-                    .small()
-                    .strong()
-                    .color(tint),
-            );
-        });
-}
-
-fn key_chip(ui: &mut egui::Ui, theme: ThemeSettings, key: &str) {
-    egui::Frame::none()
-        .fill(egui::Color32::from_rgba_premultiplied(0, 0, 0, 180))
-        .stroke(egui::Stroke::new(1.0, theme.color.primary()))
-        .rounding(egui::Rounding::same(4.0))
-        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(key)
-                    .monospace()
-                    .small()
-                    .strong()
-                    .color(theme.color.primary()),
-            );
-        });
 }
 
 fn empty_state(ui: &mut egui::Ui, theme: ThemeSettings) {
@@ -906,14 +909,18 @@ fn empty_state(ui: &mut egui::Ui, theme: ThemeSettings) {
     });
 }
 
-fn draw_data_ribs(ctx: &egui::Context, theme: ThemeSettings, time: f32) {
+fn command_rib_alpha() -> u8 {
+    42
+}
+
+fn draw_data_ribs(ctx: &egui::Context, theme: ThemeSettings) {
     let screen = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Middle,
         egui::Id::new("command_palette_ribs"),
     ));
     let primary = theme.color.primary();
-    let alpha = (34.0 + ((time * 3.0).sin() * 0.5 + 0.5) * 24.0) as u8;
+    let alpha = command_rib_alpha();
     let color = egui::Color32::from_rgba_unmultiplied(primary.r(), primary.g(), primary.b(), alpha);
 
     let mut x = screen.left() + 18.0;
@@ -1386,6 +1393,56 @@ mod tests {
                 command.label,
                 command.key
             );
+        }
+    }
+
+    #[test]
+    fn command_rows_use_stable_responsive_geometry() {
+        let compact = command_row_layout(639.0);
+        let wide = command_row_layout(640.0);
+        let invalid = command_row_layout(f32::NAN);
+
+        assert_eq!(
+            compact,
+            CommandRowLayout {
+                height: 94.0,
+                wide: false
+            }
+        );
+        assert_eq!(
+            wide,
+            CommandRowLayout {
+                height: 64.0,
+                wide: true
+            }
+        );
+        assert_eq!(invalid, compact);
+        assert!(compact.height.is_finite() && compact.height > 0.0);
+        assert!(wide.height.is_finite() && wide.height > 0.0);
+    }
+
+    #[test]
+    fn decorative_command_ribs_are_static() {
+        assert_eq!(command_rib_alpha(), 42);
+        assert_eq!(command_rib_alpha(), command_rib_alpha());
+    }
+
+    #[test]
+    fn every_command_context_has_a_semantic_icon() {
+        let contexts = [
+            CommandContext::Global,
+            CommandContext::Menu,
+            CommandContext::Gameplay,
+            CommandContext::Combat,
+            CommandContext::Builder,
+            CommandContext::Editor,
+            CommandContext::City,
+            CommandContext::Animation,
+            CommandContext::System,
+        ];
+
+        for context in contexts {
+            let _ = context.icon();
         }
     }
 }

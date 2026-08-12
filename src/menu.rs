@@ -4,7 +4,7 @@
 //!   * Start -> MainMenu (Neue Welt / Welt laden / Einstellungen / Beenden)
 //!   * InGame + ESC -> Paused (Weiter / Speichern / Einstellungen / Hauptmenue / Beenden)
 //!   * InGame + E   -> Inventory (block palette grid)
-//!   * F3           -> build toolbelt / editor mode (via toolbelt.rs)
+//!   * F3           -> in-game engine editor panel
 //!   * Shift+F3     -> debug overlay toggle (via hud.rs)
 //!   * Space double -> toggle fly (via player.rs)
 
@@ -26,9 +26,9 @@ use crate::icons::Icon;
 use crate::mode::ModeContext;
 use crate::player::Player;
 use crate::player::PlayerProgressScratch;
-use crate::settings::{self, ActiveWorld, SceneryQuality, WorldMeta, WorldSettings};
-use crate::theme::metric_pill;
-use crate::ui_kit::{ActionTone, LoadingState};
+use crate::settings::{self, ActiveWorld, SceneryQuality, WorldMeta, WorldProfile, WorldSettings};
+use crate::theme::{metric_pill, MotionRole};
+use crate::ui_kit::{paint_interactive_surface, ActionTone, LoadingState};
 use crate::world::{ChunkStreamer, VoxelWorld};
 
 const START_TITLE: &str = "R93G SAKURA ZEN";
@@ -134,10 +134,23 @@ pub enum PauseScreen {
     // Options is handled via editor.rs (state.open == true).
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct NewWorldForm {
     pub name: String,
     pub seed_text: String,
+    pub world_profile: WorldProfile,
+}
+
+impl Default for NewWorldForm {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            seed_text: String::new(),
+            // The user's chosen North Star is the new creation default. Old
+            // saves and programmatic Natural worlds remain untouched.
+            world_profile: WorldProfile::AstralFrontier,
+        }
+    }
 }
 
 #[derive(Resource, Debug, Default)]
@@ -257,7 +270,21 @@ fn active_mode_owns_escape(mode: Option<&ModeContext>) -> bool {
     mode.is_some_and(ModeContext::is_ship_placement)
 }
 
-/// ESC and E drive the state machine. The editor window close button also
+fn apply_editor_f3(
+    game_state: &GameState,
+    keys: &ButtonInput<KeyCode>,
+    editor_open: &mut bool,
+) -> bool {
+    let shifted = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if *game_state != GameState::InGame || shifted || !keys.just_pressed(KeyCode::F3) {
+        return false;
+    }
+
+    *editor_open = !*editor_open;
+    true
+}
+
+/// F3, ESC and E drive the state machine. The editor window close button also
 /// flips PauseScreen back to Menu, but key handling lives here for clarity.
 fn handle_keys(
     keys: Res<ButtonInput<KeyCode>>,
@@ -281,6 +308,10 @@ fn handle_keys(
             }
             return;
         }
+    }
+
+    if apply_editor_f3(state.get(), &keys, &mut editor.open) {
+        return;
     }
 
     match state.get() {
@@ -746,55 +777,16 @@ fn draw_start_world_card(
     let size = egui::vec2(ui.available_width().max(1.0), START_WORLD_CARD_HEIGHT);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let focused = response.has_focus();
-    let fill = if selected {
-        colors.surface_active
-    } else if response.hovered() || focused {
-        colors.surface_hover
-    } else {
-        colors.surface
-    };
-    let outline = if selected {
-        colors.outline_active
-    } else if response.hovered() {
-        colors.outline_hover
-    } else {
-        colors.outline
-    };
+    let surface =
+        paint_interactive_surface(ui, rect, &response, selected, MotionRole::State, theme);
+    let paint_rect = surface.paint_rect;
     let painter = ui.painter_at(rect.expand(5.0));
-    painter.rect_filled(rect, egui::Rounding::same(5.0), fill);
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(5.0),
-        egui::Stroke::new(if selected { 1.5 } else { 1.0 }, outline),
-    );
-    if selected {
-        painter.rect_filled(
-            egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
-            egui::Rounding {
-                nw: 5.0,
-                sw: 5.0,
-                ne: 0.0,
-                se: 0.0,
-            },
-            colors.accent,
-        );
-    }
-    crate::theme::paint_focus_outline(&painter, rect, colors, if focused { 1.0 } else { 0.0 });
 
     let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.left() + 24.0, rect.top() + 27.0),
+        egui::pos2(paint_rect.left() + 24.0, paint_rect.top() + 27.0),
         egui::vec2(20.0, 20.0),
     );
-    crate::icons::paint_icon(
-        &painter,
-        icon_rect,
-        Icon::Globe,
-        if selected {
-            colors.accent
-        } else {
-            colors.text_muted
-        },
-    );
+    crate::icons::paint_icon(&painter, icon_rect, Icon::Globe, surface.icon);
 
     let quality = WorldQualityTier::from_quality(meta.scenery_quality);
     let quality_color = match quality {
@@ -804,7 +796,7 @@ fn draw_start_world_card(
         WorldQualityTier::Immersive => colors.accent,
     };
     let quality_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - 98.0, rect.top() + 11.0),
+        egui::pos2(paint_rect.right() - 98.0, paint_rect.top() + 11.0),
         egui::vec2(86.0, 20.0),
     );
     painter.rect_filled(
@@ -825,45 +817,45 @@ fn draw_start_world_card(
         quality_color,
     );
 
-    let title_x = rect.left() + 42.0;
+    let title_x = paint_rect.left() + 42.0;
     let title_width = (quality_rect.left() - title_x - 8.0).max(54.0);
     painter
         .with_clip_rect(egui::Rect::from_min_max(
-            egui::pos2(title_x, rect.top() + 8.0),
-            egui::pos2(quality_rect.left() - 6.0, rect.top() + 37.0),
+            egui::pos2(title_x, paint_rect.top() + 8.0),
+            egui::pos2(quality_rect.left() - 6.0, paint_rect.top() + 37.0),
         ))
         .text(
-            egui::pos2(title_x, rect.top() + 21.0),
+            egui::pos2(title_x, paint_rect.top() + 21.0),
             egui::Align2::LEFT_CENTER,
             &meta.name,
             egui::FontId::monospace(fitted_start_text_size(&meta.name, title_width, 13.0, 8.5)),
-            colors.text,
+            surface.text,
         );
 
     let edits = world_edit_summary(meta.world_edit_manifest.edited_chunks);
     let detail = format!("SEED {}  //  {edits}", meta.seed);
     painter
-        .with_clip_rect(rect.shrink2(egui::vec2(12.0, 4.0)))
+        .with_clip_rect(paint_rect.shrink2(egui::vec2(12.0, 4.0)))
         .text(
-            egui::pos2(rect.left() + 14.0, rect.top() + 51.0),
+            egui::pos2(paint_rect.left() + 14.0, paint_rect.top() + 51.0),
             egui::Align2::LEFT_CENTER,
             detail,
             egui::FontId::monospace(9.5),
-            colors.text_muted,
+            surface.detail,
         );
     painter.text(
-        egui::pos2(rect.left() + 14.0, rect.bottom() - 13.0),
+        egui::pos2(paint_rect.left() + 14.0, paint_rect.bottom() - 13.0),
         egui::Align2::LEFT_CENTER,
         format!("WORLD {:02}", ordinal + 1),
         egui::FontId::monospace(9.0),
         if latest {
             colors.success
         } else {
-            colors.text_muted
+            surface.detail
         },
     );
     painter.text(
-        egui::pos2(rect.right() - 12.0, rect.bottom() - 13.0),
+        egui::pos2(paint_rect.right() - 12.0, paint_rect.bottom() - 13.0),
         egui::Align2::RIGHT_CENTER,
         if latest {
             "LATEST SESSION"
@@ -1243,12 +1235,35 @@ fn draw_main_menu(
                                     crate::ui_kit::status_chip(
                                         ui,
                                         Icon::Detail,
-                                        "DEFAULT",
-                                        "IMMERSIVE",
+                                        "PROFILE",
+                                        form.world_profile.label(),
                                         theme,
                                     );
                                 });
                                 ui.add_space(5.0);
+
+                                ui.horizontal_wrapped(|ui| {
+                                    for profile in WorldProfile::ALL {
+                                        if crate::ui_kit::choice_chip_sized(
+                                            ui,
+                                            profile.label(),
+                                            form.world_profile == profile,
+                                            156.0,
+                                            theme,
+                                        )
+                                        .on_hover_text(profile.detail())
+                                        .clicked()
+                                        {
+                                            form.world_profile = profile;
+                                        }
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new(form.world_profile.detail())
+                                        .size(10.5)
+                                        .color(colors.text_muted),
+                                );
+                                ui.add_space(6.0);
 
                                 let name_hint = auto_world_name(&worlds);
                                 if layout.uses_split_rows() {
@@ -1439,7 +1454,7 @@ fn draw_main_menu(
             .parse::<u32>()
             .unwrap_or_else(|_| rand_seed());
         let name = clean_new_world_name(&form.name, &worlds);
-        let meta = WorldMeta::new(name, seed);
+        let meta = WorldMeta::new_with_profile(name, seed, form.world_profile);
         let world_name = meta.name.clone();
         settings::save_world(&meta);
         apply_world_to_settings(&meta, &mut settings);
@@ -1746,6 +1761,64 @@ mod tests {
         assert!(!active_mode_owns_escape(None));
     }
 
+    fn pressed_keys(keys: &[KeyCode]) -> ButtonInput<KeyCode> {
+        let mut input = ButtonInput::default();
+        for key in keys {
+            input.press(*key);
+        }
+        input
+    }
+
+    #[test]
+    fn plain_f3_toggles_editor_only_in_game() {
+        let mut open = false;
+        assert!(apply_editor_f3(
+            &GameState::InGame,
+            &pressed_keys(&[KeyCode::F3]),
+            &mut open,
+        ));
+        assert!(open);
+
+        assert!(apply_editor_f3(
+            &GameState::InGame,
+            &pressed_keys(&[KeyCode::F3]),
+            &mut open,
+        ));
+        assert!(!open);
+
+        for game_state in [GameState::Paused, GameState::MainMenu] {
+            assert!(!apply_editor_f3(
+                &game_state,
+                &pressed_keys(&[KeyCode::F3]),
+                &mut open,
+            ));
+            assert!(!open);
+        }
+    }
+
+    #[test]
+    fn shift_f3_is_reserved_for_debug_overlay() {
+        for shift in [KeyCode::ShiftLeft, KeyCode::ShiftRight] {
+            let mut open = false;
+            assert!(!apply_editor_f3(
+                &GameState::InGame,
+                &pressed_keys(&[shift, KeyCode::F3]),
+                &mut open,
+            ));
+            assert!(!open);
+        }
+    }
+
+    #[test]
+    fn held_f3_does_not_repeat_toggle() {
+        let mut keys = pressed_keys(&[KeyCode::F3]);
+        let mut open = false;
+        assert!(apply_editor_f3(&GameState::InGame, &keys, &mut open,));
+        keys.clear_just_pressed(KeyCode::F3);
+        assert!(!apply_editor_f3(&GameState::InGame, &keys, &mut open,));
+        assert!(open);
+    }
+
     #[test]
     fn start_screen_uses_zen_neon_identity() {
         assert!(START_TITLE.contains("ZEN"));
@@ -2040,10 +2113,20 @@ mod tests {
         settings.scenery_quality = SceneryQuality::Lean;
         let mut meta = WorldMeta::new("garden".to_string(), 930514);
         meta.scenery_quality = SceneryQuality::Lush;
+        meta.world_profile = WorldProfile::AstralFrontier;
 
         apply_world_to_settings(&meta, &mut settings);
 
         assert_eq!(settings.scenery_quality, SceneryQuality::Lush);
+        assert_eq!(settings.world_profile, WorldProfile::AstralFrontier);
+    }
+
+    #[test]
+    fn new_world_form_defaults_to_the_selected_astral_north_star() {
+        assert_eq!(
+            NewWorldForm::default().world_profile,
+            WorldProfile::AstralFrontier
+        );
     }
 
     #[test]
@@ -3118,6 +3201,7 @@ fn world_storage_stem_taken(
 
 fn apply_world_to_settings(meta: &WorldMeta, settings: &mut WorldSettings) {
     settings.seed = meta.seed;
+    settings.world_profile = meta.world_profile;
     settings.time_of_day = meta.time_of_day;
     settings.time_mode = meta.time_mode;
     settings.cycle_speed = meta.cycle_speed;
@@ -3148,6 +3232,7 @@ fn save_current_world(
     };
     let mut meta = active.meta.clone();
     meta.seed = settings.seed;
+    meta.world_profile = settings.world_profile;
     meta.time_of_day = settings.time_of_day;
     meta.time_mode = settings.time_mode;
     meta.cycle_speed = settings.cycle_speed;

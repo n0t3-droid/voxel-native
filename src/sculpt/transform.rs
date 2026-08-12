@@ -1,9 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
-use crate::blocks::{Voxel, AIR};
+use crate::blocks::{BlockType, Voxel, AIR};
 use crate::builder::{BuilderHistory, BuilderHistoryRecordOutcome, BuilderHistorySketchMeta};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::sculpt::state::SculptState;
@@ -169,6 +169,9 @@ impl SemanticRotateDrag {
 pub struct SemanticScaleDrag {
     active: bool,
     motion_x: f32,
+    /// `1` is identity, `2..=8` expands, `-2..=-8` shrinks by the
+    /// absolute divisor. A signed lattice ratio keeps the preview and commit
+    /// paths exact without introducing floating-point voxel ownership.
     factor: i32,
     anchor_cell: IVec3,
     selection: crate::sketch_model::SelectionSet,
@@ -682,7 +685,7 @@ pub fn begin_scale_drag(
     drag.tool_generation = tool_controller.tool_generation();
     gesture_lock.lock(SCALE_OWNER);
     toolbelt.status =
-        "Scale: drag horizontally for exact integer voxel scale. RMB orbits; Escape cancels."
+        "Scale: drag right to enlarge x2..x8 or left to shrink to 1/2..1/8. RMB orbits; Escape cancels."
             .into();
 }
 
@@ -723,8 +726,8 @@ pub fn update_scale_drag(
     if next_factor != drag.factor {
         drag.factor = next_factor;
         toolbelt.status = format!(
-            "Scale x{}: {} source cells, anchored to the minimum voxel corner. Release to commit.",
-            drag.factor,
+            "Scale {}: {} source cells, anchored to the minimum voxel corner. Release to commit.",
+            scale_factor_label(drag.factor),
             drag.cells.len()
         );
     }
@@ -756,8 +759,9 @@ pub fn end_scale_drag(
     );
     if scaled > 0 {
         toolbelt.status = format!(
-            "Scale committed: {} voxels at integer factor x{}.",
-            scaled, drag.factor
+            "Scale committed: {} voxels at {}.",
+            scaled,
+            scale_factor_label(drag.factor)
         );
     } else {
         toolbelt.status = "Scale cancelled: factor unchanged or output too large.".into();
@@ -1010,6 +1014,247 @@ fn selection_source_voxels(
     sources
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticDeleteSummary {
+    voxel_count: usize,
+    shared_voxel_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticDeleteError {
+    NoSelection,
+    LockedOrHidden,
+    NoLinkedGeometry,
+    TooLarge,
+    AlreadyHidden,
+    ModelRejected,
+    HistoryRejected,
+}
+
+fn selection_entities_are_editable(
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    selection: &crate::sketch_model::SelectionSet,
+) -> bool {
+    !selection.is_empty()
+        && selection.ordered().iter().all(|entity| {
+            sketch_doc.entity(*entity).is_some_and(|record| {
+                !record.locked
+                    && sketch_doc
+                        .entity_effective_visible(*entity)
+                        .unwrap_or(false)
+            })
+        })
+}
+
+fn commit_semantic_selection_delete(
+    world: &mut VoxelWorld,
+    history: &mut BuilderHistory,
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+    selection: &crate::sketch_model::SelectionSet,
+    label: &str,
+) -> Result<SemanticDeleteSummary, SemanticDeleteError> {
+    if selection.is_empty() {
+        return Err(SemanticDeleteError::NoSelection);
+    }
+    if !selection_entities_are_editable(sketch_doc, selection) {
+        return Err(SemanticDeleteError::LockedOrHidden);
+    }
+
+    let before_links = sketch_links.snapshot_entities(selection.ordered().iter().copied());
+    if before_links
+        .iter()
+        .all(|snapshot| snapshot.cell_links.is_empty() && snapshot.face_links.is_empty())
+    {
+        return Err(SemanticDeleteError::NoLinkedGeometry);
+    }
+
+    let selected: HashSet<_> = selection.ordered().iter().copied().collect();
+    let mut shared_voxel_count = 0_usize;
+    let mut changes = Vec::new();
+    for cell in selection_cells(sketch_links, selection) {
+        let exclusively_selected = sketch_links
+            .links_for_cell(cell)
+            .iter()
+            .all(|link| selected.contains(&link.entity));
+        if !exclusively_selected {
+            shared_voxel_count += 1;
+            continue;
+        }
+        let before = world.voxel_at(cell.x, cell.y, cell.z);
+        if before != AIR {
+            changes.push((cell, before, AIR));
+        }
+    }
+    if changes.len() > TRANSFORM_OUTPUT_LIMIT {
+        return Err(SemanticDeleteError::TooLarge);
+    }
+
+    let after_links = before_links
+        .iter()
+        .map(|snapshot| SketchVoxelEntityLinkSnapshot {
+            entity: snapshot.entity,
+            cell_links: Vec::new(),
+            face_links: Vec::new(),
+        })
+        .collect();
+    let document_before = sketch_doc.clone();
+    let summary = sketch_doc
+        .set_selection_visible(selection, false, label.to_string())
+        .map_err(|_| SemanticDeleteError::ModelRejected)?;
+    if summary.entity_count == 0 {
+        *sketch_doc = document_before;
+        return Err(SemanticDeleteError::AlreadyHidden);
+    }
+    let outcome = history.record_external_with_sketch_meta_checked(
+        label,
+        changes.clone(),
+        Some(BuilderHistorySketchMeta::SketchTransform {
+            before_links,
+            after_links,
+            document_steps: 1,
+        }),
+    );
+    if !matches!(outcome, BuilderHistoryRecordOutcome::Recorded { .. }) {
+        *sketch_doc = document_before;
+        return Err(SemanticDeleteError::HistoryRejected);
+    }
+
+    apply_voxel_transform_changes(world, &changes, true);
+    sketch_links.remove_entities(selection.ordered().iter().copied());
+    Ok(SemanticDeleteSummary {
+        voxel_count: changes.len(),
+        shared_voxel_count,
+    })
+}
+
+pub fn delete_semantic_selection_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mode: Res<ModeContext>,
+    ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
+    mut world: ResMut<VoxelWorld>,
+    mut history: ResMut<BuilderHistory>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
+    mut tool_controller: ResMut<ToolController>,
+    mut toolbelt: ResMut<ToolbeltState>,
+) {
+    if !mode.is_build_live()
+        || tool_controller.active_tool() != EditorToolId::Select
+        || ui_focus
+            .as_deref()
+            .is_some_and(|focus| focus.pointer_over_editor_ui)
+        || !(keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::Backspace))
+    {
+        return;
+    }
+
+    let selection = tool_controller.selection().clone();
+    if selection.is_empty() {
+        toolbelt.status = if tool_controller.edit_object_active() {
+            "EDIT OBJECT: select a part before pressing Delete.".into()
+        } else {
+            "Select an object before pressing Delete.".into()
+        };
+        return;
+    }
+
+    let delete_label = if tool_controller.edit_object_active() {
+        "Delete object part"
+    } else {
+        "Delete object"
+    };
+    let summary = match commit_semantic_selection_delete(
+        &mut world,
+        &mut history,
+        &mut sketch_doc,
+        &mut sketch_links,
+        &selection,
+        delete_label,
+    ) {
+        Ok(summary) => summary,
+        Err(SemanticDeleteError::LockedOrHidden) => {
+            toolbelt.status =
+                "Delete held: locked or hidden object parts are protected from editing.".into();
+            return;
+        }
+        Err(SemanticDeleteError::TooLarge | SemanticDeleteError::HistoryRejected) => {
+            toolbelt.status =
+                "Delete cancelled safely because the complete edit did not fit undo history."
+                    .into();
+            return;
+        }
+        Err(SemanticDeleteError::AlreadyHidden) => {
+            toolbelt.status = "Delete held: the selected object was already hidden.".into();
+            return;
+        }
+        Err(SemanticDeleteError::ModelRejected) => {
+            toolbelt.status =
+                "Delete cancelled safely because the object model rejected it.".into();
+            return;
+        }
+        Err(SemanticDeleteError::NoSelection | SemanticDeleteError::NoLinkedGeometry) => {
+            toolbelt.status = "Delete held: the selection has no linked object geometry.".into();
+            return;
+        }
+    };
+    let removed = summary.voxel_count;
+    if tool_controller.edit_object_active() {
+        tool_controller.remove_selection_from_edit_object();
+        toolbelt.status = if tool_controller.edit_object_active() {
+            format!(
+                "EDIT OBJECT: removed {removed} exclusive voxels and detached {} shared voxels as one undoable part edit. Select another part or press Escape.",
+                summary.shared_voxel_count
+            )
+        } else {
+            "EDIT OBJECT: the final part was removed as one undoable edit. Select another object."
+                .into()
+        };
+    } else {
+        tool_controller.clear_selection();
+        toolbelt.status =
+            format!("Deleted the complete object ({removed} voxels) as one undoable edit.");
+    }
+}
+
+pub fn draw_semantic_selection_gizmo(
+    mode: Res<ModeContext>,
+    tool_controller: Res<ToolController>,
+    sketch_links: Res<crate::sketch_model::SketchVoxelLinkIndex>,
+    time: Res<Time>,
+    mut gizmos: Gizmos,
+) {
+    if !mode.is_build_live() {
+        return;
+    }
+    let pulse = 0.72 + 0.28 * (time.elapsed_seconds() * 4.0).sin().abs();
+    if let Some(members) = tool_controller.edit_object_members() {
+        let object_cells = selection_cells(&sketch_links, members);
+        if let Some((center, scale)) = selection_bounds(&object_cells, IVec3::ZERO) {
+            gizmos.cuboid(
+                Transform::from_translation(center).with_scale(scale + Vec3::splat(0.08)),
+                Color::srgba(0.18, 0.86, 1.0, 0.28),
+            );
+        }
+        let part_cells = selection_cells(&sketch_links, tool_controller.selection());
+        if let Some((center, scale)) = selection_bounds(&part_cells, IVec3::ZERO) {
+            gizmos.cuboid(
+                Transform::from_translation(center).with_scale(scale + Vec3::splat(0.18)),
+                Color::srgba(1.0, 0.70, 0.16, pulse),
+            );
+        }
+        return;
+    }
+
+    let object_cells = selection_cells(&sketch_links, tool_controller.selection());
+    if let Some((center, scale)) = selection_bounds(&object_cells, IVec3::ZERO) {
+        gizmos.cuboid(
+            Transform::from_translation(center).with_scale(scale + Vec3::splat(0.14)),
+            Color::srgba(0.20, 0.92, 1.0, pulse),
+        );
+    }
+}
+
 fn normalized_quarter_turns(turns: i32) -> i32 {
     match turns.rem_euclid(4) {
         0 => 0,
@@ -1027,7 +1272,23 @@ fn snapped_quarter_turns(motion_x: f32) -> i32 {
 }
 
 fn snapped_scale_factor(motion_x: f32) -> i32 {
-    (1.0 + (motion_x / SCALE_PIXELS_PER_STEP).round()).clamp(1.0, SCALE_FACTOR_MAX as f32) as i32
+    let steps = (motion_x / SCALE_PIXELS_PER_STEP).round().clamp(
+        -((SCALE_FACTOR_MAX - 1) as f32),
+        (SCALE_FACTOR_MAX - 1) as f32,
+    ) as i32;
+    match steps.cmp(&0) {
+        std::cmp::Ordering::Less => steps - 1,
+        std::cmp::Ordering::Equal => 1,
+        std::cmp::Ordering::Greater => steps + 1,
+    }
+}
+
+fn scale_factor_label(factor: i32) -> String {
+    if factor < -1 {
+        format!("1/{}", factor.unsigned_abs())
+    } else {
+        format!("x{factor}")
+    }
 }
 
 fn selection_pivot_twice(cells: &[IVec3]) -> Option<IVec3> {
@@ -1199,22 +1460,51 @@ fn expanded_scale_cells(cell: IVec3, anchor: IVec3, factor: i32) -> Option<Vec<I
     Some(output)
 }
 
-fn scale_destination_cells(cells: &[IVec3], anchor: IVec3, factor: i32) -> Option<Vec<IVec3>> {
-    if factor < 1 || factor > SCALE_FACTOR_MAX {
+fn shrink_scale_cell(cell: IVec3, anchor: IVec3, divisor: i32) -> Option<IVec3> {
+    if !(2..=SCALE_FACTOR_MAX).contains(&divisor) {
         return None;
     }
-    let factor = usize::try_from(factor).ok()?;
-    let expected = cells
-        .len()
-        .checked_mul(factor.checked_mul(factor)?.checked_mul(factor)?)?;
+    let divisor = i64::from(divisor);
+    checked_ivec3(
+        i64::from(anchor.x) + (i64::from(cell.x) - i64::from(anchor.x)).div_euclid(divisor),
+        i64::from(anchor.y) + (i64::from(cell.y) - i64::from(anchor.y)).div_euclid(divisor),
+        i64::from(anchor.z) + (i64::from(cell.z) - i64::from(anchor.z)).div_euclid(divisor),
+    )
+}
+
+fn shrink_divisor(factor: i32) -> Option<i32> {
+    (-SCALE_FACTOR_MAX..=-2)
+        .contains(&factor)
+        .then_some(factor.unsigned_abs() as i32)
+}
+
+fn scale_factor_is_valid(factor: i32) -> bool {
+    (2..=SCALE_FACTOR_MAX).contains(&factor) || shrink_divisor(factor).is_some()
+}
+
+fn scale_destination_cells(cells: &[IVec3], anchor: IVec3, factor: i32) -> Option<Vec<IVec3>> {
+    if !scale_factor_is_valid(factor) {
+        return None;
+    }
+    let expected = if factor > 1 {
+        let factor = usize::try_from(factor).ok()?;
+        cells
+            .len()
+            .checked_mul(factor.checked_mul(factor)?.checked_mul(factor)?)?
+    } else {
+        cells.len()
+    };
     if expected > TRANSFORM_OUTPUT_LIMIT {
         return None;
     }
 
-    let factor = i32::try_from(factor).ok()?;
     let mut output = HashSet::with_capacity(expected);
     for cell in cells {
-        output.extend(expanded_scale_cells(*cell, anchor, factor)?);
+        if factor > 1 {
+            output.extend(expanded_scale_cells(*cell, anchor, factor)?);
+        } else {
+            output.insert(shrink_scale_cell(*cell, anchor, shrink_divisor(factor)?)?);
+        }
         if output.len() > TRANSFORM_OUTPUT_LIMIT {
             return None;
         }
@@ -1234,10 +1524,14 @@ fn selection_is_transformable(
     if selected.is_empty()
         || selection.ordered().iter().any(|entity| {
             sketch_doc.entity(*entity).is_none_or(|record| {
-                matches!(
-                    record.kind,
-                    crate::sketch_model::SketchEntityKind::Group { .. }
-                )
+                record.locked
+                    || !sketch_doc
+                        .entity_effective_visible(*entity)
+                        .unwrap_or(false)
+                    || matches!(
+                        record.kind,
+                        crate::sketch_model::SketchEntityKind::Group { .. }
+                    )
             })
         })
     {
@@ -1247,6 +1541,20 @@ fn selection_is_transformable(
     cells.iter().all(|cell| {
         sketch_links
             .links_for_cell(*cell)
+            .iter()
+            .all(|link| selected.contains(&link.entity))
+    })
+}
+
+fn destination_cells_are_available(
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    selection: &crate::sketch_model::SelectionSet,
+    cells: impl IntoIterator<Item = IVec3>,
+) -> bool {
+    let selected: HashSet<_> = selection.ordered().iter().copied().collect();
+    cells.into_iter().all(|cell| {
+        sketch_links
+            .links_for_cell(cell)
             .iter()
             .all(|link| selected.contains(&link.entity))
     })
@@ -1305,6 +1613,36 @@ fn rotate_link_snapshots(
     Some(transformed)
 }
 
+fn translate_link_snapshots(
+    snapshots: &[SketchVoxelEntityLinkSnapshot],
+    delta: IVec3,
+) -> Option<Vec<SketchVoxelEntityLinkSnapshot>> {
+    let mut transformed = Vec::with_capacity(snapshots.len());
+    let mut entry_count = 0_usize;
+    for snapshot in snapshots {
+        let mut cell_links = Vec::with_capacity(snapshot.cell_links.len());
+        for (cell, link) in &snapshot.cell_links {
+            cell_links.push((checked_add_ivec3(*cell, delta)?, *link));
+        }
+        let mut face_links = Vec::with_capacity(snapshot.face_links.len());
+        for (cell, normal, link) in &snapshot.face_links {
+            face_links.push((checked_add_ivec3(*cell, delta)?, *normal, *link));
+        }
+        entry_count = entry_count
+            .checked_add(cell_links.len())?
+            .checked_add(face_links.len())?;
+        if entry_count > TRANSFORM_OUTPUT_LIMIT {
+            return None;
+        }
+        transformed.push(SketchVoxelEntityLinkSnapshot {
+            entity: snapshot.entity,
+            cell_links,
+            face_links,
+        });
+    }
+    Some(transformed)
+}
+
 fn scaled_face_cells(cell: IVec3, normal: IVec3, anchor: IVec3, factor: i32) -> Option<Vec<IVec3>> {
     if !matches!(
         normal,
@@ -1342,16 +1680,31 @@ fn scale_link_snapshots(
     for snapshot in snapshots {
         let mut cell_links = Vec::new();
         for (cell, link) in &snapshot.cell_links {
-            for target in expanded_scale_cells(*cell, anchor, factor)? {
-                cell_links.push((target, *link));
+            if factor > 1 {
+                for target in expanded_scale_cells(*cell, anchor, factor)? {
+                    cell_links.push((target, *link));
+                }
+            } else {
+                cell_links.push((
+                    shrink_scale_cell(*cell, anchor, shrink_divisor(factor)?)?,
+                    *link,
+                ));
             }
         }
         sort_and_dedup_cell_links(&mut cell_links);
 
         let mut face_links = Vec::new();
         for (cell, normal, link) in &snapshot.face_links {
-            for target in scaled_face_cells(*cell, *normal, anchor, factor)? {
-                face_links.push((target, *normal, *link));
+            if factor > 1 {
+                for target in scaled_face_cells(*cell, *normal, anchor, factor)? {
+                    face_links.push((target, *normal, *link));
+                }
+            } else {
+                face_links.push((
+                    shrink_scale_cell(*cell, anchor, shrink_divisor(factor)?)?,
+                    *normal,
+                    *link,
+                ));
             }
         }
         sort_and_dedup_face_links(&mut face_links);
@@ -1432,6 +1785,31 @@ fn scale_voxel_destinations(
     anchor: IVec3,
     factor: i32,
 ) -> Option<HashMap<IVec3, Voxel>> {
+    if factor < -1 {
+        let divisor = shrink_divisor(factor)?;
+        let mut grouped = HashMap::<IVec3, Vec<(IVec3, Voxel)>>::new();
+        let mut ordered_sources: Vec<_> = sources
+            .iter()
+            .map(|(cell, voxel)| (*cell, *voxel))
+            .collect();
+        ordered_sources.sort_unstable_by_key(|(cell, voxel)| (cell.x, cell.y, cell.z, *voxel));
+        for (cell, voxel) in ordered_sources {
+            let target = shrink_scale_cell(cell, anchor, divisor)?;
+            grouped.entry(target).or_default().push((cell, voxel));
+        }
+        if grouped.len() > TRANSFORM_OUTPUT_LIMIT {
+            return None;
+        }
+        let mut destinations = HashMap::with_capacity(grouped.len());
+        for (target, candidates) in grouped {
+            destinations.insert(
+                target,
+                choose_shrink_voxel(&candidates, target, anchor, divisor)?,
+            );
+        }
+        return Some(destinations);
+    }
+
     let factor_usize = usize::try_from(factor).ok()?;
     let expected = sources.len().checked_mul(
         factor_usize
@@ -1450,6 +1828,67 @@ fn scale_voxel_destinations(
         }
     }
     Some(destinations)
+}
+
+fn choose_shrink_voxel(
+    candidates: &[(IVec3, Voxel)],
+    target: IVec3,
+    anchor: IVec3,
+    divisor: i32,
+) -> Option<Voxel> {
+    let divisor_i64 = i64::from(divisor);
+    let bucket_min = checked_ivec3(
+        i64::from(anchor.x) + (i64::from(target.x) - i64::from(anchor.x)) * divisor_i64,
+        i64::from(anchor.y) + (i64::from(target.y) - i64::from(anchor.y)) * divisor_i64,
+        i64::from(anchor.z) + (i64::from(target.z) - i64::from(anchor.z)) * divisor_i64,
+    )?;
+    let center_twice = [
+        i64::from(bucket_min.x) * 2 + i64::from(divisor),
+        i64::from(bucket_min.y) * 2 + i64::from(divisor),
+        i64::from(bucket_min.z) * 2 + i64::from(divisor),
+    ];
+    let mut aggregates = BTreeMap::<Voxel, (usize, i128)>::new();
+    for (cell, voxel) in candidates {
+        let point_twice = [
+            i64::from(cell.x) * 2 + 1,
+            i64::from(cell.y) * 2 + 1,
+            i64::from(cell.z) * 2 + 1,
+        ];
+        let distance = point_twice
+            .iter()
+            .zip(center_twice)
+            .map(|(point, center)| (i128::from(*point) - i128::from(center)).pow(2))
+            .sum();
+        aggregates
+            .entry(*voxel)
+            .and_modify(|aggregate| {
+                aggregate.0 += 1;
+                aggregate.1 = aggregate.1.min(distance);
+            })
+            .or_insert((1, distance));
+    }
+
+    aggregates
+        .into_iter()
+        .max_by(
+            |(voxel_a, (count_a, distance_a)), (voxel_b, (count_b, distance_b))| {
+                shrink_voxel_priority(*voxel_a)
+                    .cmp(&shrink_voxel_priority(*voxel_b))
+                    .then_with(|| count_a.cmp(count_b))
+                    .then_with(|| distance_b.cmp(distance_a))
+                    .then_with(|| voxel_b.cmp(voxel_a))
+            },
+        )
+        .map(|(voxel, _)| voxel)
+}
+
+fn shrink_voxel_priority(voxel: Voxel) -> u8 {
+    match BlockType::from_voxel(voxel) {
+        BlockType::Wood | BlockType::Bamboo => 4,
+        block if block.is_solid() => 3,
+        BlockType::Leaves | BlockType::JungleLeaves | BlockType::BlossomLeaves => 2,
+        _ => 1,
+    }
 }
 
 pub fn commit_selection_voxel_rotate(
@@ -1479,6 +1918,9 @@ pub fn commit_selection_voxel_rotate(
     let Some(destinations) = rotate_voxel_destinations(&sources, pivot_twice, axis, turns) else {
         return 0;
     };
+    if !destination_cells_are_available(sketch_links, selection, destinations.keys().copied()) {
+        return 0;
+    }
     let Some(changes) = planned_voxel_transform_changes(world, &sources, &destinations) else {
         return 0;
     };
@@ -1536,7 +1978,7 @@ pub fn commit_selection_voxel_scale(
     factor: i32,
     label: &str,
 ) -> usize {
-    if selection.is_empty() || factor <= 1 || factor > SCALE_FACTOR_MAX {
+    if selection.is_empty() || !scale_factor_is_valid(factor) {
         return 0;
     }
     let cells = selection_cells(sketch_links, selection);
@@ -1551,6 +1993,9 @@ pub fn commit_selection_voxel_scale(
     let Some(destinations) = scale_voxel_destinations(&sources, anchor, factor) else {
         return 0;
     };
+    if !destination_cells_are_available(sketch_links, selection, destinations.keys().copied()) {
+        return 0;
+    }
     let Some(changes) = planned_voxel_transform_changes(world, &sources, &destinations) else {
         return 0;
     };
@@ -1561,10 +2006,15 @@ pub fn commit_selection_voxel_scale(
 
     let document_before = sketch_doc.clone();
     let links_before = sketch_links.clone();
+    let semantic_factor = if factor > 1 {
+        factor as f32
+    } else {
+        1.0 / shrink_divisor(factor).expect("validated shrink factor") as f32
+    };
     let Ok(summary) = sketch_doc.scale_selection_about_pivot(
         selection,
         anchor.as_vec3(),
-        Vec3::splat(factor as f32),
+        Vec3::splat(semantic_factor),
         label.to_string(),
     ) else {
         return 0;
@@ -1607,55 +2057,64 @@ pub fn commit_selection_voxel_move(
         return 0;
     }
 
-    let sources = selection_source_voxels(world, sketch_links, selection);
-    if sources.is_empty() {
+    let cells = selection_cells(sketch_links, selection);
+    if cells.is_empty() || !selection_is_transformable(sketch_doc, sketch_links, selection, &cells)
+    {
         return 0;
     }
 
-    let Ok(summary) = sketch_doc.move_selection(selection, delta.as_vec3(), label.to_string())
-    else {
-        return 0;
-    };
-    if summary.entity_count == 0 {
+    let sources = selection_source_voxels(world, sketch_links, selection);
+    if sources.is_empty() || sources.len() > TRANSFORM_OUTPUT_LIMIT {
         return 0;
     }
 
     let mut destinations = HashMap::<IVec3, Voxel>::new();
     for (cell, voxel) in &sources {
-        destinations.insert(*cell + delta, *voxel);
+        let Some(target) = checked_add_ivec3(*cell, delta) else {
+            return 0;
+        };
+        destinations.insert(target, *voxel);
     }
-    let destination_cells: HashSet<IVec3> = destinations.keys().copied().collect();
+    if !destination_cells_are_available(sketch_links, selection, destinations.keys().copied()) {
+        return 0;
+    }
+    let Some(changes) = planned_voxel_transform_changes(world, &sources, &destinations) else {
+        return 0;
+    };
+    let before_links = sketch_links.snapshot_entities(selection.ordered().iter().copied());
+    let Some(after_links) = translate_link_snapshots(&before_links, delta) else {
+        return 0;
+    };
 
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::with_capacity(sources.len() + destinations.len());
-    for cell in sources.keys().copied() {
-        if destination_cells.contains(&cell) {
-            continue;
-        }
-        if let Some((before, after)) =
-            world.edit_set_voxel_batched(cell.x, cell.y, cell.z, AIR, &mut batch)
-        {
-            changes.push((cell, before, after));
-        }
+    let document_before = sketch_doc.clone();
+    let links_before = sketch_links.clone();
+    let Ok(summary) = sketch_doc.move_selection(selection, delta.as_vec3(), label.to_string())
+    else {
+        return 0;
+    };
+    if summary.entity_count == 0 {
+        *sketch_doc = document_before;
+        return 0;
     }
-    for (cell, voxel) in destinations {
-        if let Some((before, after)) =
-            world.edit_set_voxel_batched(cell.x, cell.y, cell.z, voxel, &mut batch)
-        {
-            changes.push((cell, before, after));
-        }
-    }
-    world.finish_edit_batch(batch);
+
+    apply_voxel_transform_changes(world, &changes, true);
+    sketch_links.restore_entity_snapshots(&after_links);
     let moved = sources.len();
-    history.record_external_with_sketch_meta(
+    let outcome = history.record_external_with_sketch_meta_checked(
         label.to_string(),
-        changes,
-        Some(BuilderHistorySketchMeta::SketchMove {
-            entities: selection.ordered().to_vec(),
-            delta,
+        changes.clone(),
+        Some(BuilderHistorySketchMeta::SketchTransform {
+            before_links,
+            after_links,
+            document_steps: 1,
         }),
     );
-    sketch_links.translate_entities(selection.ordered().iter().copied(), delta);
+    if !matches!(outcome, BuilderHistoryRecordOutcome::Recorded { .. }) {
+        apply_voxel_transform_changes(world, &changes, false);
+        *sketch_doc = document_before;
+        *sketch_links = links_before;
+        return 0;
+    }
     moved
 }
 
@@ -1793,6 +2252,8 @@ fn selection_bounds(cells: &[IVec3], delta: IVec3) -> Option<(Vec3, Vec3)> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use bevy::prelude::*;
 
     use crate::blocks::{BlockType, AIR};
@@ -1807,14 +2268,16 @@ mod tests {
 
     use super::{
         commit_selection_voxel_copy_array, commit_selection_voxel_move,
-        commit_selection_voxel_rotate, commit_selection_voxel_scale, expanded_scale_cells,
-        move_copy_count_from_key, move_delta_from_hover_cell, move_delta_from_reference_points,
-        move_delta_from_snap_target, move_drag_accepts_motion, move_drag_should_cancel,
-        move_grip_cell, move_grip_reference_point, move_reference_point_from_hit, move_tool_active,
+        commit_selection_voxel_rotate, commit_selection_voxel_scale,
+        commit_semantic_selection_delete, expanded_scale_cells, move_copy_count_from_key,
+        move_delta_from_hover_cell, move_delta_from_reference_points, move_delta_from_snap_target,
+        move_drag_accepts_motion, move_drag_should_cancel, move_grip_cell,
+        move_grip_reference_point, move_reference_point_from_hit, move_tool_active,
         normalized_quarter_turns, rotate_cell_quarter, rotate_face_normal_quarter,
         rotate_tool_active, rotation_lattice_offset_twice, scale_destination_cells,
-        scale_tool_active, selection_is_transformable, selection_pivot_twice, snapped_move_delta,
-        snapped_quarter_turns, snapped_scale_factor, MoveAxisLock, TransformAxis,
+        scale_tool_active, scale_voxel_destinations, selection_is_transformable,
+        selection_pivot_twice, shrink_scale_cell, snapped_move_delta, snapped_quarter_turns,
+        snapped_scale_factor, MoveAxisLock, TransformAxis,
     };
 
     #[test]
@@ -2060,6 +2523,9 @@ mod tests {
         assert_eq!(snapped_scale_factor(0.0), 1);
         assert_eq!(snapped_scale_factor(37.0), 2);
         assert_eq!(snapped_scale_factor(10_000.0), 8);
+        assert_eq!(snapped_scale_factor(-37.0), -2);
+        assert_eq!(snapped_scale_factor(-72.0), -3);
+        assert_eq!(snapped_scale_factor(-10_000.0), -8);
     }
 
     #[test]
@@ -2101,6 +2567,86 @@ mod tests {
         assert_eq!(destinations.len(), 16);
         assert_eq!(destinations.first(), Some(&IVec3::new(1, 2, 3)));
         assert_eq!(destinations.last(), Some(&IVec3::new(4, 3, 4)));
+    }
+
+    #[test]
+    fn half_scale_reduces_a_four_cube_to_a_dense_two_cube() {
+        let source: Vec<_> = (0..4)
+            .flat_map(|y| (0..4).flat_map(move |z| (0..4).map(move |x| IVec3::new(x, y, z))))
+            .collect();
+
+        let destinations =
+            scale_destination_cells(&source, IVec3::ZERO, -2).expect("half-scale lattice");
+        let mut expected: Vec<_> = (0..2)
+            .flat_map(|y| (0..2).flat_map(move |z| (0..2).map(move |x| IVec3::new(x, y, z))))
+            .collect();
+        expected.sort_unstable_by_key(|cell| (cell.x, cell.y, cell.z));
+
+        assert_eq!(destinations, expected);
+    }
+
+    #[test]
+    fn shrink_buckets_use_euclidean_division_and_fail_closed_for_invalid_extremes() {
+        assert_eq!(
+            shrink_scale_cell(IVec3::splat(-1), IVec3::ZERO, 2),
+            Some(IVec3::splat(-1)),
+            "the cell immediately below a zero anchor belongs to the negative bucket"
+        );
+        assert_eq!(
+            shrink_scale_cell(IVec3::splat(-2), IVec3::ZERO, 2),
+            Some(IVec3::splat(-1))
+        );
+        assert_eq!(
+            shrink_scale_cell(IVec3::splat(-3), IVec3::ZERO, 2),
+            Some(IVec3::splat(-2))
+        );
+        assert_eq!(
+            shrink_scale_cell(IVec3::splat(i32::MIN), IVec3::splat(i32::MAX), 2),
+            Some(IVec3::splat(-1)),
+            "i64 intermediates keep opposite i32 extremes defined"
+        );
+        assert_eq!(shrink_scale_cell(IVec3::ZERO, IVec3::ZERO, i32::MIN), None);
+        assert_eq!(
+            scale_destination_cells(&[IVec3::ZERO], IVec3::ZERO, i32::MIN),
+            None,
+            "a signed factor must be validated before taking its absolute value"
+        );
+    }
+
+    #[test]
+    fn shrink_material_reduction_is_insertion_order_independent_and_preserves_wood() {
+        let wood = BlockType::Wood as u16;
+        let leaves = BlockType::Leaves as u16;
+        let mut ordered_cells: Vec<_> = (0..2)
+            .flat_map(|y| (0..2).flat_map(move |z| (0..2).map(move |x| IVec3::new(x, y, z))))
+            .collect();
+        let mut forward = HashMap::new();
+        for cell in &ordered_cells {
+            forward.insert(*cell, leaves);
+        }
+        forward.insert(IVec3::new(1, 1, 1), wood);
+
+        ordered_cells.reverse();
+        let mut reverse = HashMap::new();
+        for cell in ordered_cells {
+            reverse.insert(
+                cell,
+                if cell == IVec3::new(1, 1, 1) {
+                    wood
+                } else {
+                    leaves
+                },
+            );
+        }
+
+        let forward_result =
+            scale_voxel_destinations(&forward, IVec3::ZERO, -2).expect("forward shrink");
+        let reverse_result =
+            scale_voxel_destinations(&reverse, IVec3::ZERO, -2).expect("reverse shrink");
+
+        assert_eq!(forward_result, reverse_result);
+        assert_eq!(forward_result.len(), 1);
+        assert_eq!(forward_result.get(&IVec3::ZERO), Some(&wood));
     }
 
     #[test]
@@ -2275,6 +2821,208 @@ mod tests {
     }
 
     #[test]
+    fn shrink_commit_and_undo_redo_keep_voxels_links_and_document_atomic() {
+        let source_cells: Vec<_> = (0..4)
+            .flat_map(|y| (0..4).flat_map(move |z| (0..4).map(move |x| IVec3::new(x, y, z))))
+            .collect();
+        let stone = BlockType::Stone as u16;
+        let mut world = VoxelWorld::new();
+        let mut seed = WorldEditBatch::default();
+        for cell in &source_cells {
+            world.edit_set_voxel_batched(cell.x, cell.y, cell.z, stone, &mut seed);
+        }
+        world.finish_edit_batch(seed);
+
+        let mut doc = SketchDocument::default();
+        let entity = doc
+            .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::new(4.0, 0.0, 0.0))
+            .expect("edge entity");
+        let mut links = SketchVoxelLinkIndex::default();
+        let link = SketchVoxelLink::new(entity, doc.active_context(), SketchVoxelLinkRole::Stroke);
+        links.link_cells(source_cells.iter().copied(), link);
+        assert_eq!(links.cells_for_entity(entity).len(), 64);
+        let mut selection = SelectionSet::default();
+        selection.select(entity);
+        let mut history = BuilderHistory::default();
+
+        let scaled = commit_selection_voxel_scale(
+            &mut world,
+            &mut history,
+            &mut doc,
+            &mut links,
+            &selection,
+            IVec3::ZERO,
+            -2,
+            "Scale selection 1/2",
+        );
+
+        assert_eq!(scaled, 8);
+        assert_eq!(links.cells_for_entity(entity).len(), 8);
+        assert_eq!(world.voxel_at(1, 1, 1), stone);
+        assert_eq!(world.voxel_at(2, 2, 2), AIR);
+        assert!(matches!(
+            &doc.entity(entity).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::ZERO && *b == Vec3::new(2.0, 0.0, 0.0)
+        ));
+
+        let undo = history
+            .pop_undo_detailed(&mut world)
+            .expect("shrink undo step");
+        assert_eq!(
+            undo.apply_sketch_undo(&mut doc, &mut links).unwrap().label,
+            "Scale selection 1/2"
+        );
+        assert!(source_cells
+            .iter()
+            .all(|cell| world.voxel_at(cell.x, cell.y, cell.z) == stone));
+        assert_eq!(links.cells_for_entity(entity).len(), 64);
+        assert!(matches!(
+            &doc.entity(entity).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::ZERO && *b == Vec3::new(4.0, 0.0, 0.0)
+        ));
+
+        let redo = history
+            .pop_redo_detailed(&mut world)
+            .expect("shrink redo step");
+        assert_eq!(
+            redo.apply_sketch_redo(&mut doc, &mut links).unwrap().label,
+            "Scale selection 1/2"
+        );
+        assert_eq!(world.voxel_at(1, 1, 1), stone);
+        assert_eq!(world.voxel_at(2, 2, 2), AIR);
+        assert_eq!(links.cells_for_entity(entity).len(), 8);
+        assert!(matches!(
+            &doc.entity(entity).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::ZERO && *b == Vec3::new(2.0, 0.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn move_and_scale_reject_destinations_linked_to_foreign_geometry() {
+        let stone = BlockType::Stone as u16;
+
+        {
+            let mut world = VoxelWorld::new();
+            let mut seed = WorldEditBatch::default();
+            world.edit_set_voxel_batched(IVec3::ZERO.x, 0, 0, stone, &mut seed);
+            world.finish_edit_batch(seed);
+
+            let mut doc = SketchDocument::default();
+            let selected_entity = doc
+                .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::X)
+                .expect("selected edge");
+            let foreign_entity = doc
+                .draw_pencil_line(
+                    doc.active_context(),
+                    Vec3::new(2.0, 0.0, 0.0),
+                    Vec3::new(3.0, 0.0, 0.0),
+                )
+                .expect("foreign edge");
+            let selected_link = SketchVoxelLink::new(
+                selected_entity,
+                doc.active_context(),
+                SketchVoxelLinkRole::Stroke,
+            );
+            let foreign_link = SketchVoxelLink::new(
+                foreign_entity,
+                doc.active_context(),
+                SketchVoxelLinkRole::Stroke,
+            );
+            let mut links = SketchVoxelLinkIndex::default();
+            links.link_cell(IVec3::ZERO, selected_link);
+            links.link_cell(IVec3::new(2, 0, 0), foreign_link);
+            let mut selection = SelectionSet::default();
+            selection.select(selected_entity);
+            let mut history = BuilderHistory::default();
+            let document_undo_before = doc.undo_count();
+
+            assert_eq!(
+                commit_selection_voxel_move(
+                    &mut world,
+                    &mut history,
+                    &mut doc,
+                    &mut links,
+                    &selection,
+                    IVec3::new(2, 0, 0),
+                    "Blocked move",
+                ),
+                0
+            );
+            assert_eq!(world.voxel_at(0, 0, 0), stone);
+            assert_eq!(world.voxel_at(2, 0, 0), AIR);
+            assert_eq!(links.primary_cell_link(IVec3::ZERO), Some(selected_link));
+            assert_eq!(
+                links.primary_cell_link(IVec3::new(2, 0, 0)),
+                Some(foreign_link)
+            );
+            assert_eq!(history.undo_len(), 0);
+            assert_eq!(doc.undo_count(), document_undo_before);
+        }
+
+        {
+            let source = IVec3::new(1, 0, 0);
+            let blocked_destination = IVec3::new(3, 0, 0);
+            let mut world = VoxelWorld::new();
+            let mut seed = WorldEditBatch::default();
+            world.edit_set_voxel_batched(source.x, source.y, source.z, stone, &mut seed);
+            world.finish_edit_batch(seed);
+
+            let mut doc = SketchDocument::default();
+            let selected_entity = doc
+                .draw_pencil_line(doc.active_context(), Vec3::X, Vec3::new(2.0, 0.0, 0.0))
+                .expect("selected edge");
+            let foreign_entity = doc
+                .draw_pencil_line(
+                    doc.active_context(),
+                    blocked_destination.as_vec3(),
+                    Vec3::new(4.0, 0.0, 0.0),
+                )
+                .expect("foreign edge");
+            let selected_link = SketchVoxelLink::new(
+                selected_entity,
+                doc.active_context(),
+                SketchVoxelLinkRole::Stroke,
+            );
+            let foreign_link = SketchVoxelLink::new(
+                foreign_entity,
+                doc.active_context(),
+                SketchVoxelLinkRole::Stroke,
+            );
+            let mut links = SketchVoxelLinkIndex::default();
+            links.link_cell(source, selected_link);
+            links.link_cell(blocked_destination, foreign_link);
+            let mut selection = SelectionSet::default();
+            selection.select(selected_entity);
+            let mut history = BuilderHistory::default();
+            let document_undo_before = doc.undo_count();
+
+            assert_eq!(
+                commit_selection_voxel_scale(
+                    &mut world,
+                    &mut history,
+                    &mut doc,
+                    &mut links,
+                    &selection,
+                    IVec3::ZERO,
+                    2,
+                    "Blocked scale",
+                ),
+                0
+            );
+            assert_eq!(world.voxel_at(source.x, source.y, source.z), stone);
+            assert_eq!(
+                links.primary_cell_link(blocked_destination),
+                Some(foreign_link)
+            );
+            assert_eq!(history.undo_len(), 0);
+            assert_eq!(doc.undo_count(), document_undo_before);
+        }
+    }
+
+    #[test]
     fn transform_rejects_cells_shared_with_unselected_semantic_geometry() {
         let mut doc = SketchDocument::default();
         let selected_entity = doc
@@ -2305,6 +3053,160 @@ mod tests {
             &selection,
             &[IVec3::ZERO]
         ));
+    }
+
+    #[test]
+    fn move_of_a_source_shared_with_an_unselected_part_is_an_atomic_no_op() {
+        let source = IVec3::new(4, 5, 6);
+        let destination = source + IVec3::X;
+        let stone = BlockType::Stone as u16;
+        let mut world = VoxelWorld::new();
+        let mut seed = WorldEditBatch::default();
+        world.edit_set_voxel_batched(source.x, source.y, source.z, stone, &mut seed);
+        world.finish_edit_batch(seed);
+
+        let mut doc = SketchDocument::default();
+        let selected_entity = doc
+            .draw_pencil_line(
+                doc.active_context(),
+                source.as_vec3(),
+                source.as_vec3() + Vec3::X,
+            )
+            .expect("selected edge");
+        let sharing_entity = doc
+            .draw_pencil_line(
+                doc.active_context(),
+                source.as_vec3(),
+                source.as_vec3() + Vec3::Y,
+            )
+            .expect("sharing edge");
+        let selected_link = SketchVoxelLink::new(
+            selected_entity,
+            doc.active_context(),
+            SketchVoxelLinkRole::Stroke,
+        );
+        let sharing_link = SketchVoxelLink::new(
+            sharing_entity,
+            doc.active_context(),
+            SketchVoxelLinkRole::Stroke,
+        );
+        let mut links = SketchVoxelLinkIndex::default();
+        links.link_cell(source, selected_link);
+        links.link_cell(source, sharing_link);
+        let links_before = links.links_for_cell(source);
+        let mut selection = SelectionSet::default();
+        selection.select(selected_entity);
+        let mut history = BuilderHistory::default();
+        let document_undo_before = doc.undo_count();
+
+        let moved = commit_selection_voxel_move(
+            &mut world,
+            &mut history,
+            &mut doc,
+            &mut links,
+            &selection,
+            IVec3::X,
+            "Move shared source",
+        );
+
+        assert_eq!(moved, 0);
+        assert_eq!(world.voxel_at(source.x, source.y, source.z), stone);
+        assert_eq!(
+            world.voxel_at(destination.x, destination.y, destination.z),
+            AIR
+        );
+        assert_eq!(links.links_for_cell(source), links_before);
+        assert!(links.links_for_cell(destination).is_empty());
+        assert_eq!(history.undo_len(), 0);
+        assert_eq!(doc.undo_count(), document_undo_before);
+        assert!(matches!(
+            &doc.entity(selected_entity).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == source.as_vec3() && *b == source.as_vec3() + Vec3::X
+        ));
+    }
+
+    #[test]
+    fn fully_shared_part_delete_is_metadata_only_and_undo_redo_atomic() {
+        let cell = IVec3::new(7, 8, 9);
+        let wood = BlockType::Wood as u16;
+        let mut world = VoxelWorld::new();
+        let mut seed = WorldEditBatch::default();
+        world.edit_set_voxel_batched(cell.x, cell.y, cell.z, wood, &mut seed);
+        world.finish_edit_batch(seed);
+
+        let mut doc = SketchDocument::default();
+        let selected_entity = doc
+            .draw_pencil_line(
+                doc.active_context(),
+                cell.as_vec3(),
+                cell.as_vec3() + Vec3::Y,
+            )
+            .expect("selected part");
+        let sharing_entity = doc
+            .draw_pencil_line(
+                doc.active_context(),
+                cell.as_vec3(),
+                cell.as_vec3() + Vec3::X,
+            )
+            .expect("sharing part");
+        let selected_link = SketchVoxelLink::new(
+            selected_entity,
+            doc.active_context(),
+            SketchVoxelLinkRole::Shape,
+        );
+        let sharing_link = SketchVoxelLink::new(
+            sharing_entity,
+            doc.active_context(),
+            SketchVoxelLinkRole::Shape,
+        );
+        let mut links = SketchVoxelLinkIndex::default();
+        links.link_cell(cell, selected_link);
+        links.link_cell(cell, sharing_link);
+        let mut selection = SelectionSet::default();
+        selection.select(selected_entity);
+        let mut history = BuilderHistory::default();
+
+        let summary = commit_semantic_selection_delete(
+            &mut world,
+            &mut history,
+            &mut doc,
+            &mut links,
+            &selection,
+            "Delete shared part",
+        )
+        .expect("metadata-only delete should be recorded");
+
+        assert_eq!(summary.voxel_count, 0);
+        assert_eq!(summary.shared_voxel_count, 1);
+        assert_eq!(world.voxel_at(cell.x, cell.y, cell.z), wood);
+        assert!(!doc.entity_effective_visible(selected_entity).unwrap());
+        assert!(doc.entity_effective_visible(sharing_entity).unwrap());
+        assert!(!links.links_for_cell(cell).contains(&selected_link));
+        assert!(links.links_for_cell(cell).contains(&sharing_link));
+        assert_eq!(history.undo_len(), 1);
+
+        let undo = history
+            .undo_with_sketch(&mut world, &mut doc, &mut links)
+            .expect("metadata undo is applicable")
+            .expect("metadata undo step");
+        assert_eq!(undo.label, "Delete shared part");
+        assert_eq!(undo.voxel_count, 0);
+        assert_eq!(world.voxel_at(cell.x, cell.y, cell.z), wood);
+        assert!(doc.entity_effective_visible(selected_entity).unwrap());
+        assert!(links.links_for_cell(cell).contains(&selected_link));
+        assert!(links.links_for_cell(cell).contains(&sharing_link));
+
+        let redo = history
+            .redo_with_sketch(&mut world, &mut doc, &mut links)
+            .expect("metadata redo is applicable")
+            .expect("metadata redo step");
+        assert_eq!(redo.label, "Delete shared part");
+        assert_eq!(redo.voxel_count, 0);
+        assert_eq!(world.voxel_at(cell.x, cell.y, cell.z), wood);
+        assert!(!doc.entity_effective_visible(selected_entity).unwrap());
+        assert!(!links.links_for_cell(cell).contains(&selected_link));
+        assert!(links.links_for_cell(cell).contains(&sharing_link));
     }
 
     #[test]

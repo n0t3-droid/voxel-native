@@ -20,7 +20,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use crate::blocks::{BlockType, Voxel, AIR};
+use crate::bot_command::BotCommandStateMachine;
+use crate::bot_executor::{
+    cancel_bot_command_jobs_on_world_unload, dispatch_authorized_bot_commands,
+    finalize_authorized_bot_commands, retire_all_bot_command_jobs, BotCommandExecutor,
+    ExactBotCommandPlan,
+};
 use crate::builder::BuilderHistory;
+use crate::chunk::{world_to_chunk, ChunkPos};
 use crate::editor::{EditorState, EditorTab};
 use crate::menu::{GameState, PendingWorldLoad};
 use crate::neurocore::RuntimeBudget;
@@ -29,6 +36,7 @@ use crate::player::Player;
 use crate::settings::SAVES_DIR;
 use crate::settings::{ActiveWorld, WorldSettings};
 use crate::ships::ShipInstance;
+use crate::terrain::TerrainGenerator;
 use crate::world::{
     save_edited_overrides_for_world, save_edited_overrides_snapshot, EditedChunkOverride,
     VoxelWorld, WorldEditBatch,
@@ -49,9 +57,13 @@ const BOT_MEET_OFFSET: f32 = 11.0;
 const BOT_BUSY_RETARGET_INTERVAL: f32 = 3.5;
 const BOT_GREETER_INTERVAL: f32 = 4.0;
 const BOT_PLAYER_EDIT_RADIUS: f32 = 14.0;
-const BOT_PLAYER_PROJECT_MARGIN: f32 = 128.0;
+const BOT_PLAYER_ADMISSION_CLEARANCE: f32 = 18.0;
 const BOT_SHIP_EDIT_RADIUS: f32 = 14.0;
-const BOT_SHIP_PROJECT_MARGIN: f32 = 32.0;
+const BOT_SHIP_ADMISSION_CLEARANCE: f32 = 32.0;
+const BOT_OBSERVER_STANDOFF: f32 = 22.0;
+const BOT_WORKFRONT_REACH: f32 = 5.5;
+const BOT_WORKFRONT_SCAN_LIMIT: u32 = 512;
+const BOT_REGULAR_CREW_LIMIT: usize = 3;
 const BOT_MAX_FRAME_EDITS: usize = 128;
 const BOT_MAX_PROJECT_SLICE_EDITS: usize = 48;
 const COMPANION_FOLLOW_DEFAULT: f32 = 8.0;
@@ -137,15 +149,26 @@ impl Plugin for BotsPlugin {
         app.insert_resource(FriendlyWorldBrain::default())
             .insert_resource(BotVisualCache::default())
             .insert_resource(BotRuntimeControl::default())
+            .init_resource::<BotCommandExecutor>()
             .add_systems(OnEnter(GameState::InGame), load_or_seed_bot_world)
-            .add_systems(OnEnter(GameState::MainMenu), cleanup_bot_entities)
+            .add_systems(
+                OnEnter(GameState::MainMenu),
+                (
+                    cancel_bot_command_jobs_on_world_unload,
+                    save_bot_world_on_world_unload,
+                    cleanup_bot_entities,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Update,
                 (
                     update_bot_runtime_control,
                     spawn_missing_bot_entities,
                     apply_bot_visual_lod,
+                    dispatch_authorized_bot_commands,
                     tick_friendly_world,
+                    finalize_authorized_bot_commands,
                     process_bot_visit_request,
                     process_companion_command,
                     draw_companion_preview_gizmos,
@@ -358,6 +381,10 @@ impl CompanionAssistKind {
 }
 
 impl FriendlyWorldBrain {
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn cockpit_line(&self) -> String {
         let active = self
             .save
@@ -450,6 +477,8 @@ pub struct BotWorldSave {
     #[serde(default)]
     pub projects: Vec<BotProject>,
     #[serde(default)]
+    exact_command_project_ids: Vec<u64>,
+    #[serde(default)]
     pub districts: Vec<BotDistrict>,
     #[serde(default)]
     pub user_roads: Vec<BotRoadGuide>,
@@ -484,6 +513,7 @@ impl Default for BotWorldSave {
             settlements: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
+            exact_command_project_ids: Vec::new(),
             districts: Vec::new(),
             user_roads: Vec::new(),
             ideas: Vec::new(),
@@ -613,6 +643,33 @@ impl BotWorldSave {
         if legacy_version >= 2 {
             ensure_companion_worker_swarms(self);
         }
+        self.exact_command_project_ids.sort_unstable();
+        self.exact_command_project_ids.dedup();
+        let existing_project_ids = self
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<HashSet<_>>();
+        self.exact_command_project_ids
+            .retain(|project_id| existing_project_ids.contains(project_id));
+        let exact_command_project_ids = self
+            .exact_command_project_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        for project in &mut self.projects {
+            let lost_exact_capability =
+                exact_command_project_ids.contains(&project.id) && !project.status.is_done();
+            if project.status == BotProjectStatus::CommandHeld || lost_exact_capability {
+                project.status = BotProjectStatus::Blocked;
+                project.blocked_reason = if lost_exact_capability {
+                    "exact command authorization is unavailable after reload; reissue the command"
+                        .into()
+                } else {
+                    "exact command session ended before the project could finish".into()
+                };
+            }
+        }
         restore_project_assignments(self);
         normalize_relationships(self);
         self.user_roads.retain(|road| road.points.len() >= 2);
@@ -643,10 +700,36 @@ impl BotWorldSave {
     }
 
     fn seed(world_name: &str, hub: Vec3, world: &VoxelWorld) -> Self {
+        Self::seed_with_surface_height(world_name, hub, |x, z| world.surface_height_at(x, z))
+    }
+
+    /// Seed a fresh bot world from the authoritative active-world seed.
+    ///
+    /// `OnEnter(InGame)` systems from separate plugins are not implicitly
+    /// ordered. Reading `VoxelWorld::generator` here used to race the world's
+    /// reinitialisation and could place a river world's hub tens of blocks
+    /// above its real terrain using the previous seed. Deriving the height
+    /// directly from `ActiveWorld.meta.seed` makes the result independent of
+    /// schedule order, just like the ship spawn path.
+    fn seed_for_active_world(
+        world_name: &str,
+        hub: Vec3,
+        seed: u32,
+        world_profile: crate::settings::WorldProfile,
+    ) -> Self {
+        let generator = TerrainGenerator::new(seed).with_world_profile(world_profile);
+        Self::seed_with_surface_height(world_name, hub, |x, z| generator.surface_height_at(x, z))
+    }
+
+    fn seed_with_surface_height(
+        world_name: &str,
+        hub: Vec3,
+        surface_height_at: impl Fn(i32, i32) -> i32,
+    ) -> Self {
         let mut save = Self::default();
         let hub_x = hub.x.round() as i32;
         let hub_z = hub.z.round() as i32;
-        let hub_y = world.surface_height_at(hub_x, hub_z) + 2;
+        let hub_y = surface_height_at(hub_x, hub_z) + 2;
         let hub = [hub_x as f32 + 0.5, hub_y as f32, hub_z as f32 + 0.5];
         save.settlements.push(BotSettlement {
             id: 1,
@@ -747,6 +830,8 @@ fn compact_project_history(save: &mut BotWorldSave) {
         .collect::<HashSet<_>>();
     save.crews
         .retain(|crew| crew.active || retained_project_ids.contains(&crew.project_id));
+    save.exact_command_project_ids
+        .retain(|project_id| retained_project_ids.contains(project_id));
 }
 
 fn normalize_legacy_companions(save: &mut BotWorldSave) {
@@ -1001,6 +1086,9 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
             bot.position = [p.x, p.y, p.z];
             bot.target = [p.x, p.y, p.z];
             bot.companion_mode = BotCompanionMode::AwaitingInstruction;
+            bot.crew_id = None;
+            bot.current_task = None;
+            bot.state = BotState::Idle;
         }
         bot.name = name.into();
         bot.role = role;
@@ -1009,9 +1097,10 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
         bot.companion_order = order;
         bot.swarm_leader_id = None;
         bot.swarm_index = 0;
-        bot.crew_id = None;
-        bot.current_task = None;
-        bot.state = BotState::Idle;
+        if bot.current_task.is_none() {
+            bot.state = BotState::Idle;
+            bot.companion_mode = BotCompanionMode::AwaitingInstruction;
+        }
         bot.memory.preferred_follow_distance = bot
             .memory
             .preferred_follow_distance
@@ -1039,7 +1128,6 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
         if core_names.contains(bot.name.as_str())
             || existing_ids.contains(&bot.id)
             || bot.companion
-            || bot.swarm_leader_id.is_some()
             || bot.current_task.is_none()
         {
             continue;
@@ -1134,6 +1222,9 @@ fn ensure_companion_worker_swarms(save: &mut BotWorldSave) {
 }
 
 fn restore_project_assignments(save: &mut BotWorldSave) {
+    save.next_crew_id = save
+        .next_crew_id
+        .max(save.crews.iter().map(|crew| crew.id).max().unwrap_or(0) + 1);
     let active_project_ids: HashSet<u64> = save
         .projects
         .iter()
@@ -1142,9 +1233,31 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
         .collect();
     save.crews
         .retain(|crew| active_project_ids.contains(&crew.project_id));
-    let crew_ids: HashSet<u64> = save.crews.iter().map(|crew| crew.id).collect();
+    for crew in &mut save.crews {
+        crew.active = true;
+    }
+    let retained_crew_ids: HashSet<u64> = save.crews.iter().map(|crew| crew.id).collect();
+    let saved_progress: HashMap<(u64, u64), f32> = save
+        .agents
+        .iter()
+        .filter_map(|bot| {
+            bot.current_task
+                .as_ref()
+                .map(|task| ((bot.id, task.project_id), task.progress))
+        })
+        .collect();
     for bot in &mut save.agents {
-        if bot.crew_id.is_some_and(|id| !crew_ids.contains(&id)) {
+        if bot
+            .current_task
+            .as_ref()
+            .is_some_and(|task| active_project_ids.contains(&task.project_id))
+        {
+            bot.current_task = None;
+        }
+        if bot
+            .crew_id
+            .is_some_and(|id| retained_crew_ids.contains(&id))
+        {
             bot.crew_id = None;
         }
         if bot
@@ -1154,9 +1267,15 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
         {
             bot.current_task = None;
         }
+        if bot
+            .crew_id
+            .is_some_and(|id| !retained_crew_ids.contains(&id))
+        {
+            bot.crew_id = None;
+        }
     }
 
-    let project_specs: Vec<_> = save
+    let mut project_specs: Vec<_> = save
         .projects
         .iter()
         .enumerate()
@@ -1170,13 +1289,37 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
                 project.crew_id,
                 project.origin,
                 project.label.clone(),
+                project.priority,
             )
         })
         .collect();
+    project_specs.sort_by_key(|spec| (std::cmp::Reverse(spec.7), spec.1));
+    let existing_bot_ids: HashSet<u64> = save.agents.iter().map(|bot| bot.id).collect();
+    let mut claimed_bot_ids = HashSet::new();
 
-    for (idx, project_id, kind, assigned_bot, crew_id, origin, label) in project_specs {
-        let valid_crew = crew_id.filter(|id| save.crews.iter().any(|crew| crew.id == *id));
+    for (idx, project_id, kind, assigned_bot, crew_id, origin, label, _) in project_specs {
+        let valid_crew = crew_id.filter(|id| {
+            save.crews
+                .iter()
+                .any(|crew| crew.id == *id && crew.project_id == project_id)
+        });
+        if let Some(id) = valid_crew {
+            if let Some(crew) = save.crews.iter_mut().find(|crew| crew.id == id) {
+                crew.bot_ids.retain(|bot_id| {
+                    existing_bot_ids.contains(bot_id) && !claimed_bot_ids.contains(bot_id)
+                });
+                crew.bot_ids.truncate(regular_crew_size(kind));
+                claimed_bot_ids.extend(crew.bot_ids.iter().copied());
+                crew.active = true;
+            }
+        }
         let crew_id = valid_crew
+            .filter(|id| {
+                save.crews
+                    .iter()
+                    .find(|crew| crew.id == *id)
+                    .is_some_and(|crew| !crew.bot_ids.is_empty())
+            })
             .or_else(|| create_project_crew(save, project_id, kind, assigned_bot, origin));
         if let Some(project) = save.projects.get_mut(idx) {
             project.crew_id = crew_id;
@@ -1190,7 +1333,30 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
             &label,
             origin,
         );
+        if let Some(id) = crew_id {
+            if let Some(crew) = save.crews.iter().find(|crew| crew.id == id) {
+                claimed_bot_ids.extend(crew.bot_ids.iter().copied());
+            }
+        }
     }
+
+    for bot in &mut save.agents {
+        let Some(task) = &mut bot.current_task else {
+            continue;
+        };
+        if let Some(progress) = saved_progress.get(&(bot.id, task.project_id)) {
+            task.progress = *progress;
+        }
+    }
+
+    let referenced_crew_ids: HashSet<u64> = save
+        .projects
+        .iter()
+        .filter(|project| !project.status.is_done())
+        .filter_map(|project| project.crew_id)
+        .collect();
+    save.crews
+        .retain(|crew| referenced_crew_ids.contains(&crew.id));
 }
 
 fn clamp_to_bounds(bounds: BotCityBounds, target: Vec3) -> Vec3 {
@@ -1949,8 +2115,14 @@ pub enum BotState {
 pub enum BotProjectStatus {
     Queued,
     Active,
+    WaitingForCrew,
     WaitingForChunks,
     WaitingForPlayer,
+    /// Temporarily held by the exact bot-command executor.
+    ///
+    /// This state is not schedulable and is converted to `Blocked` when a
+    /// save is loaded without the in-memory command capability that owns it.
+    CommandHeld,
     Complete,
     Blocked,
 }
@@ -2703,7 +2875,6 @@ struct WorkerMaterialSet {
 fn load_or_seed_bot_world(
     pending: Res<PendingWorldLoad>,
     active: Option<Res<ActiveWorld>>,
-    world: Res<VoxelWorld>,
     mut brain: ResMut<FriendlyWorldBrain>,
 ) {
     if !pending.0 {
@@ -2721,7 +2892,12 @@ fn load_or_seed_bot_world(
             active.meta.player_pos[1],
             active.meta.player_pos[2],
         );
-        save = BotWorldSave::seed(&world_name, hub, &world);
+        save = BotWorldSave::seed_for_active_world(
+            &world_name,
+            hub,
+            active.meta.seed,
+            active.meta.world_profile,
+        );
     }
     save.normalize();
     prime_autonomous_city_defaults(&mut save);
@@ -2763,8 +2939,11 @@ fn prime_autonomous_city_defaults(save: &mut BotWorldSave) {
     for bot in save.agents.iter_mut().filter(|bot| bot.companion) {
         bot.memory.work_focus = bot.memory.work_focus.min(0.75);
         bot.memory.curiosity = bot.memory.curiosity.min(0.75);
-        bot.companion_mode = BotCompanionMode::AwaitingInstruction;
-        bot.current_task = None;
+        bot.companion_mode = if bot.current_task.is_some() {
+            BotCompanionMode::AssistingTask
+        } else {
+            BotCompanionMode::AwaitingInstruction
+        };
     }
 }
 
@@ -4887,6 +5066,7 @@ fn bot_role_color(role: BotRole) -> Color {
 fn tick_friendly_world(
     time: Res<Time>,
     mut brain: ResMut<FriendlyWorldBrain>,
+    mut command_executor: ResMut<BotCommandExecutor>,
     mut world: ResMut<VoxelWorld>,
     mut history: ResMut<BuilderHistory>,
     budget: Res<RuntimeBudget>,
@@ -4967,13 +5147,28 @@ fn tick_friendly_world(
         }
     }
 
-    move_bot_memories(&mut brain.save, &world, dt, perception_ids);
-
     let mut completed = Vec::new();
     let mut blocked = Vec::new();
     let active_limit = active_project_limit_for_budget(&brain.save, &budget);
     let scheduled = scheduled_project_indices(&brain.save, brain.project_scan_cursor, active_limit);
     park_unscheduled_active_projects(&mut brain.save, &scheduled);
+    for &idx in &scheduled {
+        ensure_project_crew_for_index(&mut brain.save, idx);
+    }
+    let workfronts = scheduled
+        .iter()
+        .filter_map(|idx| {
+            let project = brain.save.projects.get(*idx)?;
+            let exact_plan = command_executor.plan_for_project(project.id);
+            next_project_workfront(project, &world, exact_plan.as_ref())
+                .map(|workfront| (*idx, workfront))
+        })
+        .collect::<Vec<_>>();
+    for (idx, workfront) in &workfronts {
+        retarget_project_crew(&mut brain.save, *idx, *workfront, &world);
+    }
+    move_bot_memories(&mut brain.save, &world, dt, perception_ids);
+
     let running_projects = scheduled.len();
     let frame_edit_budget = bot_frame_edit_budget(&budget, running_projects);
     let per_project_budget = bot_project_slice_budget(frame_edit_budget, running_projects);
@@ -4987,6 +5182,13 @@ fn tick_friendly_world(
             if remaining == 0 {
                 break;
             }
+            let project_id = brain.save.projects[idx].id;
+            let exact_plan = command_executor.plan_for_project(project_id);
+            let workfront = workfronts.iter().find_map(|(workfront_idx, workfront)| {
+                (*workfront_idx == idx).then_some(*workfront)
+            });
+            let builder_position = workfront
+                .and_then(|workfront| arrived_project_builder(&brain.save, idx, workfront));
             let result = advance_project_slice(
                 &mut brain.save.projects[idx],
                 &mut world,
@@ -4995,8 +5197,15 @@ fn tick_friendly_world(
                 &ship_positions,
                 bounds,
                 remaining.min(per_project_budget),
+                builder_position,
+                exact_plan.as_ref(),
             );
             changed_total += result.changed;
+            command_executor.record_project_progress(
+                project_id,
+                result.changed,
+                result.touched_chunks.iter().copied(),
+            );
             if result.completed {
                 completed.push(idx);
             } else if result.blocked {
@@ -5133,6 +5342,16 @@ fn add_project_with_site_search(
     player_pos: Option<Vec3>,
     ship_positions: &[Vec3],
 ) -> Result<u64, String> {
+    if manual {
+        if let Some(bot_id) = assigned_bot {
+            if !bot_can_accept_project(save, bot_id, save.next_project_id, None) {
+                return Err(format!(
+                    "{} is already assigned; choose an idle bot or finish its current task first",
+                    bot_label(save, bot_id)
+                ));
+            }
+        }
+    }
     let seq = save.projects.len() + save.completed_projects as usize;
     let site_search_player_anchor = if manual { player_pos } else { None };
     let candidates = command_site_candidates(
@@ -5214,7 +5433,7 @@ fn command_site_candidates(
     for (anchor_idx, anchor) in anchors.into_iter().enumerate() {
         for step in 0..24 {
             let player_clearance_ring =
-                size[0].max(size[2]) as f32 * 0.72 + BOT_PLAYER_PROJECT_MARGIN;
+                size[0].max(size[2]) as f32 * 0.72 + BOT_PLAYER_ADMISSION_CLEARANCE;
             let anchor_needs_clearance_ring = player_clearance_pos
                 .map(|player| {
                     Vec2::new(anchor.x - player.x, anchor.z - player.z).length()
@@ -5762,10 +5981,11 @@ fn planner_project_count(save: &BotWorldSave) -> usize {
 fn project_schedule_status_rank(status: BotProjectStatus) -> u8 {
     match status {
         BotProjectStatus::Active => 0,
-        BotProjectStatus::WaitingForPlayer => 1,
-        BotProjectStatus::WaitingForChunks => 2,
-        BotProjectStatus::Queued => 3,
-        BotProjectStatus::Complete | BotProjectStatus::Blocked => 4,
+        BotProjectStatus::WaitingForCrew => 1,
+        BotProjectStatus::WaitingForPlayer => 2,
+        BotProjectStatus::WaitingForChunks => 3,
+        BotProjectStatus::Queued => 4,
+        BotProjectStatus::CommandHeld | BotProjectStatus::Complete | BotProjectStatus::Blocked => 5,
     }
 }
 
@@ -5778,7 +5998,9 @@ fn scheduled_project_indices(save: &BotWorldSave, cursor: usize, limit: usize) -
         .projects
         .iter()
         .enumerate()
-        .filter(|(_, project)| !project.status.is_done())
+        .filter(|(_, project)| {
+            !project.status.is_done() && project.status != BotProjectStatus::CommandHeld
+        })
         .map(|(index, project)| {
             let rotated_order = (index + len - cursor % len) % len;
             (
@@ -8441,6 +8663,9 @@ fn add_project_unchecked(
         format!("Auto {} #{id}", kind.label())
     };
     let crew_id = create_project_crew(save, id, kind, assigned_bot, origin);
+    let assigned_bot = crew_id
+        .and_then(|crew_id| save.crews.iter().find(|crew| crew.id == crew_id))
+        .and_then(|crew| crew.bot_ids.first().copied());
     let concept = build_project_concept(
         save,
         kind,
@@ -8474,6 +8699,237 @@ fn add_project_unchecked(
     save.journal
         .push(BotJournalEntry::new(format!("Queued {label}.")));
     Ok(id)
+}
+
+/// Create one project for the exact bot IDs frozen in an approved command.
+///
+/// This path intentionally bypasses `pick_crew_bots`: no leader, swarm
+/// member, role fallback, or extra idle bot may be added to an approved
+/// recipient set.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_project_for_exact_bots(
+    save: &mut BotWorldSave,
+    world: &VoxelWorld,
+    source_command_id: u64,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    theme: BotTheme,
+    bot_ids: &[u64],
+    priority: u8,
+    player_pos: Option<Vec3>,
+    ship_positions: &[Vec3],
+) -> Result<u64, String> {
+    validate_project_for_exact_bots(
+        save,
+        world,
+        kind,
+        origin,
+        size,
+        bot_ids,
+        player_pos,
+        ship_positions,
+    )?;
+
+    let project_id = save.next_project_id;
+    let next_project_id = project_id
+        .checked_add(1)
+        .ok_or_else(|| "bot project id space exhausted".to_owned())?;
+    let crew_id = save.next_crew_id;
+    let next_crew_id = crew_id
+        .checked_add(1)
+        .ok_or_else(|| "bot crew id space exhausted".to_owned())?;
+    let volume = i64::from(size[0])
+        .checked_mul(i64::from(size[1]))
+        .and_then(|value| value.checked_mul(i64::from(size[2])))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "project volume does not fit the execution cursor".to_owned())?;
+    let assigned_bot = bot_ids.first().copied();
+    let label = format!(
+        "Agent command #{source_command_id}: {} #{project_id}",
+        kind.label()
+    );
+
+    save.next_project_id = next_project_id;
+    save.next_crew_id = next_crew_id;
+    save.crews.push(BotCrew {
+        id: crew_id,
+        role_focus: kind.preferred_role(),
+        bot_ids: bot_ids.to_vec(),
+        project_id,
+        active: true,
+    });
+    for (index, bot_id) in bot_ids.iter().copied().enumerate() {
+        let bot = save
+            .agents
+            .iter_mut()
+            .find(|bot| bot.id == bot_id)
+            .expect("exact bot recipients were validated before mutation");
+        bot.crew_id = Some(crew_id);
+        bot.state = BotState::Planning;
+        let offset = crew_offset(index);
+        bot.target = [
+            origin[0] as f32 + offset.x,
+            origin[1] as f32 + 2.0,
+            origin[2] as f32 + offset.z,
+        ];
+    }
+
+    let concept = build_project_concept(
+        save,
+        kind,
+        theme,
+        origin,
+        size,
+        &label,
+        true,
+        assigned_bot,
+        Some(crew_id),
+    );
+    save.projects.push(BotProject {
+        id: project_id,
+        kind,
+        label: label.clone(),
+        origin,
+        size,
+        theme,
+        status: BotProjectStatus::Queued,
+        cursor: 0,
+        total_steps: volume,
+        assigned_bot,
+        district_id: None,
+        crew_id: Some(crew_id),
+        idea_id: None,
+        blocked_reason: String::new(),
+        priority,
+        concept,
+    });
+    save.exact_command_project_ids.push(project_id);
+    assign_crew_task(
+        save,
+        Some(crew_id),
+        assigned_bot,
+        project_id,
+        kind,
+        &label,
+        origin,
+    );
+    save.journal
+        .push(BotJournalEntry::new(format!("Queued {label}.")));
+    Ok(project_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_project_for_exact_bots(
+    save: &BotWorldSave,
+    world: &VoxelWorld,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    bot_ids: &[u64],
+    player_pos: Option<Vec3>,
+    ship_positions: &[Vec3],
+) -> Result<(), String> {
+    validate_project_request(save, world, origin, size, player_pos, ship_positions)?;
+    validate_exact_project_bots(save, bot_ids)?;
+
+    if project_footprint_reserved(save, origin, size, kind) {
+        return Err("target overlaps an existing reserved bot project".into());
+    }
+    if road_project_blocks_city_footprint(save, origin, size, kind) {
+        return Err("target road would cross a reserved city footprint".into());
+    }
+    if let Some(district) = nearest_district(save, project_center(origin, size)) {
+        if project_footprint_blocks_road_corridor(save, district, origin, size, kind) {
+            return Err("target would block an existing road corridor".into());
+        }
+        if road_project_duplicates_existing_corridor(save, district, origin, size, kind) {
+            return Err("target duplicates an existing road corridor".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_exact_project_bots(
+    save: &BotWorldSave,
+    bot_ids: &[u64],
+) -> Result<(), String> {
+    if bot_ids.is_empty() {
+        return Err("exact bot command requires at least one recipient".into());
+    }
+    if bot_ids.len() > MAX_CREW_BOTS_PER_PROJECT {
+        return Err(format!(
+            "exact bot command has {} recipients; the safe maximum is {}",
+            bot_ids.len(),
+            MAX_CREW_BOTS_PER_PROJECT
+        ));
+    }
+
+    let mut seen = HashSet::with_capacity(bot_ids.len());
+    for &bot_id in bot_ids {
+        if bot_id == 0 {
+            return Err("bot id 0 is not a valid exact recipient".into());
+        }
+        if !seen.insert(bot_id) {
+            return Err(format!("bot recipient {bot_id} appears more than once"));
+        }
+        let bot = save
+            .agents
+            .iter()
+            .find(|bot| bot.id == bot_id)
+            .ok_or_else(|| format!("bot recipient {bot_id} does not exist"))?;
+        let active_crew = save
+            .crews
+            .iter()
+            .any(|crew| crew.active && crew.bot_ids.contains(&bot_id));
+        if bot.current_task.is_some() || bot.crew_id.is_some() || active_crew {
+            return Err(format!("bot recipient {bot_id} is already assigned"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn retire_exact_bot_project(save: &mut BotWorldSave, project_id: u64, reason: &str) {
+    let requested_crew_id = save
+        .projects
+        .iter_mut()
+        .find(|project| project.id == project_id)
+        .and_then(|project| {
+            project.status = BotProjectStatus::Blocked;
+            project.blocked_reason = reason.to_owned();
+            project.crew_id
+        });
+
+    let crew_id = requested_crew_id.filter(|crew_id| {
+        save.crews
+            .iter()
+            .any(|crew| crew.id == *crew_id && crew.project_id == project_id)
+    });
+    if let Some(crew_id) = crew_id {
+        if let Some(crew) = save
+            .crews
+            .iter_mut()
+            .find(|crew| crew.id == crew_id && crew.project_id == project_id)
+        {
+            crew.active = false;
+        }
+    }
+    for bot in &mut save.agents {
+        let owns_project = bot
+            .current_task
+            .as_ref()
+            .is_some_and(|task| task.project_id == project_id);
+        let owns_crew = crew_id.is_some_and(|id| bot.crew_id == Some(id));
+        if owns_project && owns_crew {
+            bot.current_task = None;
+            bot.crew_id = None;
+            bot.state = BotState::Inspecting;
+            if bot.companion {
+                bot.companion_mode = BotCompanionMode::AwaitingInstruction;
+            }
+            bot.memory.last_message = format!("Exact project stopped: {reason}");
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9241,7 +9697,7 @@ fn create_project_crew(
     assigned_bot: Option<u64>,
     origin: [i32; 3],
 ) -> Option<u64> {
-    let bot_ids = pick_crew_bots(save, kind.preferred_role(), assigned_bot);
+    let bot_ids = pick_crew_bots(save, project_id, kind, assigned_bot);
     if bot_ids.is_empty() {
         return None;
     }
@@ -9269,27 +9725,97 @@ fn create_project_crew(
     Some(id)
 }
 
-fn pick_crew_bots(save: &BotWorldSave, preferred: BotRole, assigned_bot: Option<u64>) -> Vec<u64> {
+fn regular_crew_size(kind: BotTaskKind) -> usize {
+    match kind {
+        BotTaskKind::BuildResidentialBlock
+        | BotTaskKind::BuildTower
+        | BotTaskKind::BuildGlassTower
+        | BotTaskKind::MakeTaller
+        | BotTaskKind::BuildPlaza
+        | BotTaskKind::ExpandRoadGrid
+        | BotTaskKind::UpgradeDistrict => BOT_REGULAR_CREW_LIMIT,
+        BotTaskKind::BuildRoad
+        | BotTaskKind::RecolorRoad
+        | BotTaskKind::ClearFlatten
+        | BotTaskKind::LandingPad
+        | BotTaskKind::BuildServicePad
+        | BotTaskKind::TargetRange => 2,
+        BotTaskKind::BuildHome
+        | BotTaskKind::BuildPark
+        | BotTaskKind::AddLights
+        | BotTaskKind::DecorateStreet => 1,
+    }
+}
+
+fn bot_can_accept_project(
+    save: &BotWorldSave,
+    bot_id: u64,
+    project_id: u64,
+    crew_id: Option<u64>,
+) -> bool {
+    let Some(bot) = save.agents.iter().find(|bot| bot.id == bot_id) else {
+        return false;
+    };
+    if bot
+        .current_task
+        .as_ref()
+        .is_some_and(|task| task.project_id != project_id)
+    {
+        return false;
+    }
+    if let Some(existing_crew_id) = bot.crew_id {
+        let same_crew = crew_id == Some(existing_crew_id);
+        let same_project = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == existing_crew_id)
+            .is_some_and(|crew| crew.project_id == project_id);
+        if !same_crew && !same_project {
+            return false;
+        }
+    }
+    !save
+        .crews
+        .iter()
+        .any(|crew| crew.active && crew.project_id != project_id && crew.bot_ids.contains(&bot_id))
+}
+
+fn pick_crew_bots(
+    save: &BotWorldSave,
+    project_id: u64,
+    kind: BotTaskKind,
+    assigned_bot: Option<u64>,
+) -> Vec<u64> {
+    let preferred = kind.preferred_role();
+    let limit = regular_crew_size(kind);
     let mut out = Vec::new();
     if let Some(id) = assigned_bot {
-        out.push(id);
+        if bot_can_accept_project(save, id, project_id, None) {
+            out.push(id);
+        }
         let leader_id = save
             .agents
             .iter()
             .find(|bot| bot.id == id)
             .and_then(|bot| bot.swarm_leader_id)
             .unwrap_or(id);
-        if leader_id != id && !out.contains(&leader_id) {
+        if leader_id != id
+            && !out.contains(&leader_id)
+            && bot_can_accept_project(save, leader_id, project_id, None)
+        {
             out.push(leader_id);
         }
         let mut swarm: Vec<&BotAgent> = save
             .agents
             .iter()
-            .filter(|bot| bot.swarm_leader_id == Some(leader_id) && bot.current_task.is_none())
+            .filter(|bot| {
+                bot.swarm_leader_id == Some(leader_id)
+                    && bot_can_accept_project(save, bot.id, project_id, None)
+            })
             .collect();
         swarm.sort_by_key(|bot| (bot.role != preferred, bot.swarm_index));
         for bot in swarm {
-            if out.len() >= MAX_CREW_BOTS_PER_PROJECT {
+            if out.len() >= limit {
                 break;
             }
             if !out.contains(&bot.id) {
@@ -9307,28 +9833,34 @@ fn pick_crew_bots(save: &BotWorldSave, preferred: BotRole, assigned_bot: Option<
         BotRole::ParkKeeper,
         BotRole::RepairTech,
     ] {
-        if let Some(id) = pick_bot(save, role) {
-            if !out.contains(&id) {
-                out.push(id);
+        for bot in save.agents.iter().filter(|bot| bot.role == role) {
+            if out.len() >= limit {
+                break;
+            }
+            if !out.contains(&bot.id) && bot_can_accept_project(save, bot.id, project_id, None) {
+                out.push(bot.id);
             }
         }
     }
     for bot in &save.agents {
-        if out.len() >= MAX_CREW_BOTS_PER_PROJECT {
+        if out.len() >= limit {
             break;
         }
-        if bot.current_task.is_none() && !bot.companion && !out.contains(&bot.id) {
+        if !bot.companion
+            && !out.contains(&bot.id)
+            && bot_can_accept_project(save, bot.id, project_id, None)
+        {
             out.push(bot.id);
         }
     }
-    out.truncate(MAX_CREW_BOTS_PER_PROJECT);
+    out.truncate(limit);
     out
 }
 
 fn assign_crew_task(
     save: &mut BotWorldSave,
     crew_id: Option<u64>,
-    assigned_bot: Option<u64>,
+    _assigned_bot: Option<u64>,
     project_id: u64,
     kind: BotTaskKind,
     label: &str,
@@ -9338,13 +9870,10 @@ fn assign_crew_task(
         .and_then(|id| save.crews.iter().find(|c| c.id == id))
         .map(|c| c.bot_ids.clone())
         .unwrap_or_default();
-    if let Some(bot_id) = assigned_bot {
-        if !bot_ids.contains(&bot_id) {
-            bot_ids.push(bot_id);
-        }
-    }
+    bot_ids.retain(|bot_id| bot_can_accept_project(save, *bot_id, project_id, crew_id));
     for (n, bot_id) in bot_ids.into_iter().enumerate() {
         if let Some(bot) = save.agents.iter_mut().find(|b| b.id == bot_id) {
+            bot.crew_id = crew_id;
             bot.state = BotState::Planning;
             let offset = crew_offset(n);
             bot.target = [
@@ -9352,17 +9881,93 @@ fn assign_crew_task(
                 origin[1] as f32 + 2.0,
                 origin[2] as f32 + offset.z,
             ];
-            bot.current_task = Some(BotTask {
-                task_type: kind,
-                project_id,
-                label: label.into(),
-                progress: 0.0,
-            });
+            if bot.current_task.is_none() {
+                bot.current_task = Some(BotTask {
+                    task_type: kind,
+                    project_id,
+                    label: label.into(),
+                    progress: 0.0,
+                });
+            }
             if bot.companion {
                 bot.companion_mode = BotCompanionMode::AssistingTask;
             }
             bot.memory.last_message = format!("Crew planning {label}.");
         }
+    }
+}
+
+fn ensure_project_crew_for_index(save: &mut BotWorldSave, project_idx: usize) {
+    let Some(project) = save.projects.get(project_idx) else {
+        return;
+    };
+    if project.status.is_done() || project.status == BotProjectStatus::CommandHeld {
+        return;
+    }
+    let project_id = project.id;
+    let kind = project.kind;
+    let assigned_bot = project.assigned_bot;
+    let origin = project.origin;
+    let label = project.label.clone();
+    let mut crew_id = project.crew_id.filter(|crew_id| {
+        save.crews.iter().any(|crew| {
+            crew.id == *crew_id
+                && crew.project_id == project_id
+                && crew.active
+                && !crew.bot_ids.is_empty()
+        })
+    });
+
+    if let Some(id) = crew_id {
+        assign_crew_task(
+            save,
+            Some(id),
+            assigned_bot,
+            project_id,
+            kind,
+            &label,
+            origin,
+        );
+        let usable = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == id)
+            .is_some_and(|crew| {
+                crew.bot_ids.iter().any(|bot_id| {
+                    save.agents
+                        .iter()
+                        .find(|bot| bot.id == *bot_id)
+                        .is_some_and(|bot| {
+                            bot.crew_id == Some(id)
+                                && bot
+                                    .current_task
+                                    .as_ref()
+                                    .is_some_and(|task| task.project_id == project_id)
+                        })
+                })
+            });
+        if !usable {
+            if let Some(crew) = save.crews.iter_mut().find(|crew| crew.id == id) {
+                crew.active = false;
+            }
+            crew_id = None;
+        }
+    }
+
+    if crew_id.is_none() {
+        crew_id = create_project_crew(save, project_id, kind, assigned_bot, origin);
+        assign_crew_task(
+            save,
+            crew_id,
+            assigned_bot,
+            project_id,
+            kind,
+            &label,
+            origin,
+        );
+    }
+    if let Some(project) = save.projects.get_mut(project_idx) {
+        project.crew_id = crew_id;
     }
 }
 
@@ -9387,18 +9992,45 @@ fn complete_project_at(save: &mut BotWorldSave, idx: usize) {
             idea.status = BotIdeaStatus::Built;
         }
     }
-    if let Some(crew_id) = project.crew_id {
-        if let Some(crew) = save.crews.iter_mut().find(|c| c.id == crew_id) {
+    let matching_crew_id = project.crew_id.filter(|crew_id| {
+        save.crews
+            .iter()
+            .any(|crew| crew.id == *crew_id && crew.project_id == project.id)
+    });
+    if let Some(crew_id) = matching_crew_id {
+        if let Some(crew) = save
+            .crews
+            .iter_mut()
+            .find(|crew| crew.id == crew_id && crew.project_id == project.id)
+        {
             crew.active = false;
         }
     }
-    let crew_bot_ids = project
-        .crew_id
+    let crew_bot_ids = matching_crew_id
         .and_then(|id| save.crews.iter().find(|c| c.id == id))
         .map(|c| c.bot_ids.clone())
-        .unwrap_or_else(|| project.assigned_bot.into_iter().collect());
+        .unwrap_or_else(|| {
+            if project.crew_id.is_none() {
+                project.assigned_bot.into_iter().collect()
+            } else {
+                Vec::new()
+            }
+        });
     for bot_id in crew_bot_ids {
         if let Some(bot) = save.agents.iter_mut().find(|b| b.id == bot_id) {
+            let owns_task = bot
+                .current_task
+                .as_ref()
+                .is_some_and(|task| task.project_id == project.id);
+            let owns_crew = matching_crew_id.is_some_and(|crew_id| bot.crew_id == Some(crew_id));
+            let coherent_ownership = if matching_crew_id.is_some() {
+                owns_task && owns_crew
+            } else {
+                owns_task && bot.crew_id.is_none()
+            };
+            if !coherent_ownership {
+                continue;
+            }
             bot.state = BotState::Inspecting;
             bot.crew_id = None;
             bot.memory.completed_tasks = bot.memory.completed_tasks.saturating_add(1);
@@ -9495,10 +10127,124 @@ fn autonomous_project_size(kind: BotTaskKind) -> [i32; 3] {
 #[derive(Default)]
 struct ProjectAdvance {
     changed: usize,
+    touched_chunks: HashSet<ChunkPos>,
     completed: bool,
     blocked: bool,
 }
 
+fn next_project_workfront(
+    project: &BotProject,
+    world: &VoxelWorld,
+    exact_plan: Option<&ExactBotCommandPlan>,
+) -> Option<IVec3> {
+    let scan_end = project
+        .cursor
+        .saturating_add(BOT_WORKFRONT_SCAN_LIMIT)
+        .min(project.total_steps);
+    for cursor in project.cursor..scan_end {
+        let local = cursor_to_local(cursor, project.size);
+        let voxel = match exact_plan {
+            Some(plan) => project_voxel_with_plan(project, local, world, Some(plan)),
+            None => project_voxel(project, local, world),
+        };
+        if let Some((position, _)) = voxel {
+            return Some(position);
+        }
+    }
+    None
+}
+
+fn retarget_project_crew(
+    save: &mut BotWorldSave,
+    project_idx: usize,
+    workfront: IVec3,
+    world: &VoxelWorld,
+) {
+    let Some(project) = save.projects.get(project_idx) else {
+        return;
+    };
+    let Some(crew_id) = project.crew_id else {
+        return;
+    };
+    let project_id = project.id;
+    let bot_ids = save
+        .crews
+        .iter()
+        .find(|crew| crew.id == crew_id && crew.project_id == project_id && crew.active)
+        .map(|crew| crew.bot_ids.clone())
+        .unwrap_or_default();
+    let workfront_center = workfront.as_vec3() + Vec3::splat(0.5);
+
+    for (index, bot_id) in bot_ids.into_iter().enumerate() {
+        let Some(bot) = save.agents.iter_mut().find(|bot| bot.id == bot_id) else {
+            continue;
+        };
+        let owns_project = bot.crew_id == Some(crew_id)
+            && bot
+                .current_task
+                .as_ref()
+                .is_some_and(|task| task.project_id == project_id);
+        if !owns_project {
+            continue;
+        }
+        let offset = crew_offset(index) * 0.55;
+        let target_x = workfront_center.x + offset.x;
+        let target_z = workfront_center.z + offset.z;
+        let terrain_y =
+            world.surface_height_at(target_x.round() as i32, target_z.round() as i32) as f32;
+        let target_y = terrain_y + if bot.companion { 4.0 } else { 2.1 };
+        bot.target = [target_x, target_y, target_z];
+        let position = vec3_from_arr(bot.position);
+        let flat_distance = Vec2::new(
+            position.x - workfront_center.x,
+            position.z - workfront_center.z,
+        )
+        .length();
+        bot.state = if flat_distance <= BOT_WORKFRONT_REACH {
+            BotState::Building
+        } else {
+            BotState::Planning
+        };
+    }
+}
+
+fn arrived_project_builder(
+    save: &BotWorldSave,
+    project_idx: usize,
+    workfront: IVec3,
+) -> Option<Vec3> {
+    let project = save.projects.get(project_idx)?;
+    let crew_id = project.crew_id?;
+    let crew = save
+        .crews
+        .iter()
+        .find(|crew| crew.id == crew_id && crew.project_id == project.id && crew.active)?;
+    let workfront_center = workfront.as_vec3() + Vec3::splat(0.5);
+    crew.bot_ids
+        .iter()
+        .filter_map(|bot_id| {
+            let bot = save.agents.iter().find(|bot| bot.id == *bot_id)?;
+            if bot.crew_id != Some(crew_id)
+                || !bot
+                    .current_task
+                    .as_ref()
+                    .is_some_and(|task| task.project_id == project.id)
+            {
+                return None;
+            }
+            let position = vec3_from_arr(bot.position);
+            let distance = Vec2::new(
+                position.x - workfront_center.x,
+                position.z - workfront_center.z,
+            )
+            .length();
+            (distance <= BOT_WORKFRONT_REACH).then_some((position, distance))
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(position, _)| position)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn advance_project_slice(
     project: &mut BotProject,
     world: &mut VoxelWorld,
@@ -9507,6 +10253,8 @@ fn advance_project_slice(
     ship_positions: &[Vec3],
     bounds: BotCityBounds,
     budget: usize,
+    builder_position: Option<Vec3>,
+    exact_plan: Option<&ExactBotCommandPlan>,
 ) -> ProjectAdvance {
     let mut out = ProjectAdvance::default();
     if budget == 0 {
@@ -9526,7 +10274,11 @@ fn advance_project_slice(
     while project.cursor < project.total_steps && out.changed < budget && attempts < budget * 3 {
         attempts += 1;
         let local = cursor_to_local(project.cursor, project.size);
-        let Some((pos, voxel)) = project_voxel(project, local, world) else {
+        let voxel = match exact_plan {
+            Some(plan) => project_voxel_with_plan(project, local, world, Some(plan)),
+            None => project_voxel(project, local, world),
+        };
+        let Some((pos, voxel)) = voxel else {
             project.cursor += 1;
             continue;
         };
@@ -9541,9 +10293,26 @@ fn advance_project_slice(
             project.blocked_reason = "waiting for the next build column to stream in".into();
             break;
         }
+        let workfront_center = pos.as_vec3() + Vec3::splat(0.5);
+        let builder_in_reach = builder_position.is_some_and(|builder| {
+            Vec2::new(
+                builder.x - workfront_center.x,
+                builder.z - workfront_center.z,
+            )
+            .length()
+                <= BOT_WORKFRONT_REACH
+        });
+        if !builder_in_reach {
+            project.status = BotProjectStatus::WaitingForCrew;
+            project.blocked_reason =
+                "waiting for the assigned builder to reach the current workfront".into();
+            break;
+        }
         if protected_position(pos, player_pos, ship_positions) {
-            project.cursor += 1;
-            continue;
+            project.status = BotProjectStatus::WaitingForPlayer;
+            project.blocked_reason =
+                "waiting until player and shuttle clear the next build voxel".into();
+            break;
         }
         let before = world.voxel_at(pos.x, pos.y, pos.z);
         if before != voxel {
@@ -9553,6 +10322,8 @@ fn advance_project_slice(
             {
                 changes.push((pos, before, voxel));
                 out.changed += 1;
+                out.touched_chunks
+                    .insert(world_to_chunk(pos.x, pos.y, pos.z).0);
             }
         }
         project.cursor += 1;
@@ -9803,7 +10574,25 @@ fn civic_deck_base_y(world: &VoxelWorld, origin: IVec3, x: i32, z: i32) -> i32 {
 }
 
 fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Option<(IVec3, Voxel)> {
+    project_voxel_with_plan(project, local, world, None)
+}
+
+fn project_voxel_with_plan(
+    project: &BotProject,
+    local: IVec3,
+    world: &VoxelWorld,
+    exact_plan: Option<&ExactBotCommandPlan>,
+) -> Option<(IVec3, Voxel)> {
     let origin = IVec3::new(project.origin[0], project.origin[1], project.origin[2]);
+    if let Some(ExactBotCommandPlan::ClearFlatten) = exact_plan {
+        let pos = origin + local;
+        let voxel = if local.y == 0 {
+            project.theme.floor()
+        } else {
+            AIR
+        };
+        return Some((pos, voxel));
+    }
     match project.kind {
         BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad => {
             let x = origin.x + local.x;
@@ -10756,14 +11545,14 @@ fn protected_project_area(
     ships: &[Vec3],
 ) -> bool {
     if player
-        .map(|p| xz_distance_to_project(origin, size, p) < BOT_PLAYER_PROJECT_MARGIN)
+        .map(|p| xz_distance_to_project(origin, size, p) < BOT_PLAYER_ADMISSION_CLEARANCE)
         .unwrap_or(false)
     {
         return true;
     }
     ships
         .iter()
-        .any(|s| xz_distance_to_project(origin, size, *s) < BOT_SHIP_PROJECT_MARGIN)
+        .any(|s| xz_distance_to_project(origin, size, *s) < BOT_SHIP_ADMISSION_CLEARANCE)
 }
 
 fn move_bot_memories(
@@ -11097,7 +11886,7 @@ fn create_companion_preview(
     let mut command = assist.command();
     command.bot_id = author_id.unwrap_or(0);
     let size = command_size(command);
-    let target = companion_preview_target(player_tf, assist);
+    let target = companion_preview_target(player_tf, size);
     let origin = centered_project_origin(world, target, size);
     let validation = validate_project_request(
         save,
@@ -11135,7 +11924,7 @@ fn create_companion_preview(
     }
 }
 
-fn companion_preview_target(player_tf: &Transform, assist: CompanionAssistKind) -> Vec3 {
+fn companion_preview_target(player_tf: &Transform, size: [i32; 3]) -> Vec3 {
     let forward = player_tf.rotation.mul_vec3(Vec3::NEG_Z);
     let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let forward = if flat.length_squared() > 0.0 {
@@ -11143,16 +11932,11 @@ fn companion_preview_target(player_tf: &Transform, assist: CompanionAssistKind) 
     } else {
         Vec3::Z
     };
-    let distance = match assist {
-        CompanionAssistKind::Road | CompanionAssistKind::Lights | CompanionAssistKind::Recolor => {
-            14.0
-        }
-        CompanionAssistKind::LandingPad
-        | CompanionAssistKind::Repair
-        | CompanionAssistKind::Beautify
-        | CompanionAssistKind::TargetRange => 22.0,
-        CompanionAssistKind::ClearFlatten => 12.0,
-    };
+    let half_x = size[0].max(1) as f32 * 0.5;
+    let half_z = size[2].max(1) as f32 * 0.5;
+    let directional_support = forward.x.abs() * half_x + forward.z.abs() * half_z;
+    let clearance = BOT_PLAYER_ADMISSION_CLEARANCE.max(BOT_SHIP_ADMISSION_CLEARANCE);
+    let distance = directional_support + clearance + 2.0;
     player_tf.translation + forward * distance
 }
 
@@ -11250,42 +12034,59 @@ fn process_bot_visit_request(
         brain.hud_message = "Player not ready for bot visit.".into();
         return;
     };
-    let Some((label, target)) = visit_destination(&brain.save, request, transform.translation)
-    else {
+    let Some(destination) = visit_destination(&brain.save, request, transform.translation) else {
         brain.hud_message = "No bot build destination available yet.".into();
         return;
     };
-    let visit_pos = safe_visit_position(&world, transform.translation, target);
+    let visit_pos = safe_visit_position(&world, transform.translation, &destination);
     transform.translation = visit_pos;
     player.velocity = Vec3::ZERO;
     player.flying = true;
     player.placed_on_surface = true;
-    face_player_toward(&mut transform, &mut player, target);
-    brain.hud_message = format!("Visiting {label}. Friendly builders are nearby.");
+    face_player_toward(&mut transform, &mut player, destination.look_at);
+    brain.hud_message = format!(
+        "Visiting {}. Friendly builders are nearby.",
+        destination.label
+    );
+}
+
+struct BotVisitDestination {
+    label: String,
+    look_at: Vec3,
+    footprint: Option<([i32; 3], [i32; 3])>,
 }
 
 fn visit_destination(
     save: &BotWorldSave,
     request: BotVisitTarget,
     current_player_pos: Vec3,
-) -> Option<(String, Vec3)> {
+) -> Option<BotVisitDestination> {
     match request {
-        BotVisitTarget::CityHub => save
-            .settlements
-            .first()
-            .map(|s| (s.name.clone(), vec3_from_arr(s.hub))),
+        BotVisitTarget::CityHub => save.settlements.first().map(|s| BotVisitDestination {
+            label: s.name.clone(),
+            look_at: vec3_from_arr(s.hub),
+            footprint: None,
+        }),
         BotVisitTarget::ActiveBuild => save
             .projects
             .iter()
             .filter(|p| !p.status.is_done())
             .max_by_key(|p| p.priority)
-            .map(|p| (p.label.clone(), project_center(p.origin, p.size)))
+            .map(|p| BotVisitDestination {
+                label: p.label.clone(),
+                look_at: project_center(p.origin, p.size),
+                footprint: Some((p.origin, p.size)),
+            })
             .or_else(|| {
                 save.projects
                     .iter()
                     .rev()
                     .find(|p| p.status == BotProjectStatus::Complete)
-                    .map(|p| (p.label.clone(), project_center(p.origin, p.size)))
+                    .map(|p| BotVisitDestination {
+                        label: p.label.clone(),
+                        look_at: project_center(p.origin, p.size),
+                        footprint: Some((p.origin, p.size)),
+                    })
             }),
         BotVisitTarget::NearestBot => save
             .agents
@@ -11295,36 +12096,96 @@ fn visit_destination(
                 let db = vec3_from_arr(b.position).distance_squared(current_player_pos);
                 da.total_cmp(&db)
             })
-            .map(|b| {
-                (
-                    format!("{} // {}", b.name, b.role.label()),
-                    vec3_from_arr(b.position),
-                )
+            .map(|b| BotVisitDestination {
+                label: format!("{} // {}", b.name, b.role.label()),
+                look_at: vec3_from_arr(b.position),
+                footprint: None,
             }),
-        BotVisitTarget::SelectedBot(id) => save.agents.iter().find(|b| b.id == id).map(|b| {
-            (
-                format!("{} // {}", b.name, b.role.label()),
-                vec3_from_arr(b.position),
-            )
-        }),
-        BotVisitTarget::SelectedDistrict(id) => save
-            .districts
-            .iter()
-            .find(|d| d.id == id)
-            .map(|d| (d.name.clone(), vec3_from_arr(d.center))),
+        BotVisitTarget::SelectedBot(id) => {
+            save.agents
+                .iter()
+                .find(|b| b.id == id)
+                .map(|b| BotVisitDestination {
+                    label: format!("{} // {}", b.name, b.role.label()),
+                    look_at: vec3_from_arr(b.position),
+                    footprint: None,
+                })
+        }
+        BotVisitTarget::SelectedDistrict(id) => {
+            save.districts
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| BotVisitDestination {
+                    label: d.name.clone(),
+                    look_at: vec3_from_arr(d.center),
+                    footprint: None,
+                })
+        }
     }
 }
 
-fn safe_visit_position(world: &VoxelWorld, current: Vec3, target: Vec3) -> Vec3 {
-    let mut flat = Vec2::new(current.x - target.x, current.z - target.z);
-    if flat.length_squared() < 0.01 {
-        flat = Vec2::new(0.0, -1.0);
-    }
-    let dir = flat.normalize_or_zero();
-    let x = (target.x + dir.x * 14.0).round() as i32;
-    let z = (target.z + dir.y * 14.0).round() as i32;
+fn safe_visit_position(
+    world: &VoxelWorld,
+    current: Vec3,
+    destination: &BotVisitDestination,
+) -> Vec3 {
+    let (x, z) = if let Some((origin, size)) = destination.footprint {
+        safe_project_visit_xz(current, origin, size)
+    } else {
+        let target = destination.look_at;
+        let mut flat = Vec2::new(current.x - target.x, current.z - target.z);
+        if flat.length_squared() < 0.01 {
+            flat = Vec2::new(0.0, -1.0);
+        }
+        let dir = flat.normalize_or_zero();
+        (
+            (target.x + dir.x * BOT_OBSERVER_STANDOFF).round() as i32,
+            (target.z + dir.y * BOT_OBSERVER_STANDOFF).round() as i32,
+        )
+    };
     let y = world.surface_height_at(x, z) as f32 + 5.0;
     Vec3::new(x as f32 + 0.5, y, z as f32 + 0.5)
+}
+
+fn safe_project_visit_xz(current: Vec3, origin: [i32; 3], size: [i32; 3]) -> (i32, i32) {
+    let min_x = origin[0] as f32;
+    let max_x = (origin[0] + size[0].max(1)) as f32;
+    let min_z = origin[2] as f32;
+    let max_z = (origin[2] + size[2].max(1)) as f32;
+    let center = project_center(origin, size);
+    let direction = Vec2::new(current.x - center.x, current.z - center.z);
+    let standoff = BOT_OBSERVER_STANDOFF + 1.0;
+
+    let current_xz = Vec2::new(current.x, current.z);
+    let candidate_points = [
+        (min_x - standoff, current.z.clamp(min_z, max_z)),
+        (max_x + standoff, current.z.clamp(min_z, max_z)),
+        (current.x.clamp(min_x, max_x), min_z - standoff),
+        (current.x.clamp(min_x, max_x), max_z + standoff),
+    ];
+    let candidates = candidate_points.map(|point| {
+        (
+            point,
+            current_xz.distance_squared(Vec2::new(point.0, point.1)),
+        )
+    });
+    let preferred = if direction.length_squared() < 0.01 {
+        2
+    } else if direction.x.abs() > direction.y.abs() {
+        usize::from(direction.x >= 0.0)
+    } else {
+        2 + usize::from(direction.y >= 0.0)
+    };
+    let chosen = if xz_distance_to_project(origin, size, current) > 0.0 {
+        candidates
+            .iter()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|candidate| candidate.0)
+            .unwrap_or(candidates[preferred].0)
+    } else {
+        candidates[preferred].0
+    };
+    (chosen.0.round() as i32, chosen.1.round() as i32)
 }
 
 fn face_player_toward(transform: &mut Transform, player: &mut Player, target: Vec3) {
@@ -12023,15 +12884,35 @@ fn autosave_bot_world(
     }
 }
 
+fn save_bot_world_on_world_unload(
+    active: Option<Res<ActiveWorld>>,
+    brain: Res<FriendlyWorldBrain>,
+    world: Res<VoxelWorld>,
+) {
+    let Some(active) = active else {
+        return;
+    };
+    save_bot_world_files(&active.meta.name, &brain.save);
+    save_edited_overrides_for_world(&active.meta.name, &world);
+}
+
 fn save_bot_world_on_exit(
     mut exit: EventReader<AppExit>,
     active: Option<Res<ActiveWorld>>,
-    brain: Res<FriendlyWorldBrain>,
+    mut commands: ResMut<BotCommandStateMachine>,
+    mut executor: ResMut<BotCommandExecutor>,
+    mut brain: ResMut<FriendlyWorldBrain>,
     world: Res<VoxelWorld>,
 ) {
     if exit.read().next().is_none() {
         return;
     }
+    retire_all_bot_command_jobs(
+        &mut commands,
+        &mut executor,
+        &mut brain,
+        "application exited before exact execution completed",
+    );
     let Some(active) = active else {
         return;
     };
@@ -13099,6 +13980,9 @@ fn queue_area_masterplan(
         if size.iter().any(|v| *v <= 0) || !bounds.contains_box(origin, size) {
             return;
         }
+        if open_exact_project_overlaps(save, origin, size) {
+            return;
+        }
         let assigned = pick_bot(save, kind.preferred_role());
         if add_project_unchecked(
             save,
@@ -13141,9 +14025,14 @@ fn queue_area_masterplan(
 }
 
 fn cancel_open_projects_for_area_command(save: &mut BotWorldSave) -> usize {
+    let exact_project_ids = save
+        .exact_command_project_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
     let mut cancelled_ids = HashSet::new();
     for project in &mut save.projects {
-        if project.status.is_done() {
+        if project.status.is_done() || exact_project_ids.contains(&project.id) {
             continue;
         }
         project.status = BotProjectStatus::Blocked;
@@ -13154,19 +14043,41 @@ fn cancel_open_projects_for_area_command(save: &mut BotWorldSave) -> usize {
         return 0;
     }
 
+    let cancelled_crew_ids: HashSet<u64> = save
+        .crews
+        .iter()
+        .filter(|crew| cancelled_ids.contains(&crew.project_id))
+        .map(|crew| crew.id)
+        .collect();
     save.crews
         .retain(|crew| !cancelled_ids.contains(&crew.project_id));
     for bot in &mut save.agents {
-        if bot
+        let owns_cancelled_task = bot
             .current_task
             .as_ref()
-            .is_some_and(|task| cancelled_ids.contains(&task.project_id))
-        {
+            .is_some_and(|task| cancelled_ids.contains(&task.project_id));
+        let owns_cancelled_crew = bot
+            .crew_id
+            .is_some_and(|crew_id| cancelled_crew_ids.contains(&crew_id));
+        if owns_cancelled_task {
             bot.current_task = None;
+        }
+        if owns_cancelled_crew {
+            bot.crew_id = None;
+        }
+        if owns_cancelled_task || owns_cancelled_crew {
             bot.state = BotState::Idle;
         }
     }
     cancelled_ids.len()
+}
+
+fn open_exact_project_overlaps(save: &BotWorldSave, origin: [i32; 3], size: [i32; 3]) -> bool {
+    save.projects.iter().any(|project| {
+        save.exact_command_project_ids.contains(&project.id)
+            && !project.status.is_done()
+            && project_footprints_overlap(project.origin, project.size, origin, size, 0)
+    })
 }
 
 fn set_companions_to_area_command(save: &mut BotWorldSave) {
@@ -14409,7 +15320,6 @@ fn pick_bot(save: &BotWorldSave, preferred: BotRole) -> Option<u64> {
         .iter()
         .find(|b| b.role == preferred && b.current_task.is_none())
         .or_else(|| save.agents.iter().find(|b| b.current_task.is_none()))
-        .or_else(|| save.agents.first())
         .map(|b| b.id)
 }
 
@@ -14522,6 +15432,58 @@ mod tests {
     }
 
     #[test]
+    fn held_exact_project_fails_closed_when_a_save_is_normalized() {
+        let mut save = BotWorldSave::default();
+        save.projects
+            .push(history_test_project(1, BotProjectStatus::CommandHeld));
+
+        save.normalize();
+
+        assert_eq!(save.projects[0].status, BotProjectStatus::Blocked);
+        assert!(save.projects[0]
+            .blocked_reason
+            .contains("session ended before"));
+    }
+
+    #[test]
+    fn persisted_exact_project_without_a_permit_fails_closed_on_reload() {
+        let mut save = BotWorldSave::default();
+        let mut project = history_test_project(77, BotProjectStatus::Active);
+        project.kind = BotTaskKind::ClearFlatten;
+        project.assigned_bot = Some(3);
+        project.crew_id = Some(9);
+        save.projects.push(project);
+        save.exact_command_project_ids.extend([77, 77, 999]);
+        save.crews.push(BotCrew {
+            id: 9,
+            role_focus: BotRole::Builder,
+            bot_ids: vec![3],
+            project_id: 77,
+            active: true,
+        });
+        let mut bot = test_bot(3, "Exact", BotRole::Builder);
+        bot.crew_id = Some(9);
+        bot.current_task = Some(BotTask {
+            task_type: BotTaskKind::ClearFlatten,
+            project_id: 77,
+            label: "Exact command".into(),
+            progress: 0.5,
+        });
+        save.agents.push(bot);
+
+        save.normalize();
+
+        assert_eq!(save.projects[0].status, BotProjectStatus::Blocked);
+        assert!(save.projects[0]
+            .blocked_reason
+            .contains("authorization is unavailable after reload"));
+        assert_eq!(save.exact_command_project_ids, vec![77]);
+        assert!(save.crews.is_empty());
+        assert_eq!(save.agents[0].crew_id, None);
+        assert!(save.agents[0].current_task.is_none());
+    }
+
+    #[test]
     fn bot_world_save_round_trips() {
         let mut save = BotWorldSave::default();
         save.next_bot_id = 8;
@@ -14564,6 +15526,7 @@ mod tests {
         save.next_idea_id = 5;
         save.next_conversation_id = 6;
         save.next_crew_id = 7;
+        save.exact_command_project_ids.push(41);
         let text = ron::ser::to_string(&save).unwrap();
         let back: BotWorldSave = ron::from_str(&text).unwrap();
         assert_eq!(back.next_bot_id, 8);
@@ -14571,6 +15534,7 @@ mod tests {
         assert_eq!(back.next_idea_id, 5);
         assert_eq!(back.next_conversation_id, 6);
         assert_eq!(back.next_crew_id, 7);
+        assert_eq!(back.exact_command_project_ids, vec![41]);
         assert_eq!(back.agents[0].id, 7);
         assert_eq!(back.agents[0].memory.completed_tasks, 2);
         assert_eq!(back.agents[0].crew_id, Some(3));
@@ -14652,6 +15616,33 @@ mod tests {
             .iter()
             .filter(|bot| bot.companion)
             .all(|bot| bot.companion_mode == BotCompanionMode::AwaitingInstruction));
+    }
+
+    #[test]
+    fn fresh_bot_hub_uses_the_active_world_seed_not_a_stale_world_resource() {
+        // This river QA seed exposes the original race clearly: its channel at
+        // this focus is below water level, while VoxelWorld::new() still owns
+        // the unrelated bootstrap seed until world reinitialisation runs.
+        let active_seed = 0x48D2_09A1;
+        let focus = IVec2::new(-15, -31);
+        let active_generator = TerrainGenerator::new(active_seed);
+        let active_surface = active_generator.surface_height_at(focus.x, focus.y);
+        let stale_world = VoxelWorld::new();
+        let stale_surface = stale_world.surface_height_at(focus.x, focus.y);
+        assert!(active_surface <= crate::terrain::WATER_LEVEL - 2);
+        assert_ne!(active_surface, stale_surface);
+
+        let save = BotWorldSave::seed_for_active_world(
+            "active-seed-regression",
+            Vec3::new(focus.x as f32 + 0.5, 82.0, focus.y as f32 + 0.5),
+            active_seed,
+            crate::settings::WorldProfile::Natural,
+        );
+        let hub = save.settlements[0].hub;
+        assert_eq!(hub[0], focus.x as f32 + 0.5);
+        assert_eq!(hub[1], (active_surface + 2) as f32);
+        assert_eq!(hub[2], focus.y as f32 + 0.5);
+        assert_ne!(hub[1], (stale_surface + 2) as f32);
     }
 
     #[test]
@@ -15181,6 +16172,7 @@ mod tests {
         )
         .unwrap();
         brain.save.projects[0].status = BotProjectStatus::Active;
+        let stale_crew = brain.save.projects[0].crew_id;
         brain.queued_commands.push(BotTaskCommand::default());
 
         queue_city_area_masterplan(&mut brain, IVec3::new(-48, 90, -48), IVec3::new(48, 90, 48));
@@ -15193,6 +16185,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(stale_project.status, BotProjectStatus::Blocked);
+        assert!(brain
+            .save
+            .agents
+            .iter()
+            .all(|bot| stale_crew.is_none() || bot.crew_id != stale_crew));
         assert!(brain.queued_commands.is_empty());
         assert!(brain
             .save
@@ -15206,6 +16203,86 @@ mod tests {
             .iter()
             .filter(|bot| bot.companion)
             .all(|bot| bot.companion_mode == BotCompanionMode::AssistingTask));
+    }
+
+    #[test]
+    fn marked_area_command_preserves_running_exact_command_lease_and_footprint() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -4, 4);
+        let mut brain = FriendlyWorldBrain::default();
+        brain.save = BotWorldSave::seed("Exact Area", Vec3::new(0.0, 80.0, 0.0), &world);
+        let recipients = brain
+            .save
+            .agents
+            .iter()
+            .take(2)
+            .map(|bot| bot.id)
+            .collect::<Vec<_>>();
+        let exact_origin = [0, 80, 0];
+        let exact_size = [8, 2, 8];
+        let exact_project_id = add_project_for_exact_bots(
+            &mut brain.save,
+            &world,
+            91,
+            BotTaskKind::ClearFlatten,
+            exact_origin,
+            exact_size,
+            BotTheme::CyanAlloy,
+            &recipients,
+            10,
+            None,
+            &[],
+        )
+        .unwrap();
+        let exact_crew_id = brain
+            .save
+            .projects
+            .iter()
+            .find(|project| project.id == exact_project_id)
+            .and_then(|project| project.crew_id)
+            .unwrap();
+
+        queue_city_area_masterplan(&mut brain, IVec3::new(-48, 78, -48), IVec3::new(48, 96, 48));
+
+        let exact_project = brain
+            .save
+            .projects
+            .iter()
+            .find(|project| project.id == exact_project_id)
+            .unwrap();
+        assert!(!exact_project.status.is_done());
+        assert_eq!(exact_project.crew_id, Some(exact_crew_id));
+        assert!(brain
+            .save
+            .crews
+            .iter()
+            .find(|crew| crew.id == exact_crew_id && crew.project_id == exact_project_id)
+            .is_some_and(|crew| crew.active));
+        for bot_id in recipients {
+            let bot = brain
+                .save
+                .agents
+                .iter()
+                .find(|bot| bot.id == bot_id)
+                .unwrap();
+            assert_eq!(bot.crew_id, Some(exact_crew_id));
+            assert_eq!(
+                bot.current_task.as_ref().map(|task| task.project_id),
+                Some(exact_project_id)
+            );
+        }
+        assert!(brain
+            .save
+            .projects
+            .iter()
+            .filter(|project| project.id != exact_project_id && !project.status.is_done())
+            .all(|project| !project_footprints_overlap(
+                exact_origin,
+                exact_size,
+                project.origin,
+                project.size,
+                0
+            )));
     }
 
     #[test]
@@ -18688,6 +19765,59 @@ mod tests {
     }
 
     #[test]
+    fn completion_never_mutates_a_partially_mismatched_newer_lease() {
+        let make_save = |crew_project_id: u64, task_project_id: u64, bot_crew_id: u64| {
+            let mut save = BotWorldSave::default();
+            let mut project = history_test_project(1, BotProjectStatus::Complete);
+            project.crew_id = Some(10);
+            project.assigned_bot = Some(1);
+            save.projects.push(project);
+            save.crews.push(BotCrew {
+                id: 10,
+                role_focus: BotRole::Builder,
+                bot_ids: vec![1],
+                project_id: crew_project_id,
+                active: true,
+            });
+            let mut bot = test_bot(1, "Lease Guard", BotRole::Builder);
+            bot.crew_id = Some(bot_crew_id);
+            bot.current_task = Some(BotTask {
+                task_type: BotTaskKind::BuildTower,
+                project_id: task_project_id,
+                label: "Newer lease".into(),
+                progress: 0.77,
+            });
+            bot.memory.last_message = "Do not overwrite".into();
+            save.agents.push(bot);
+            save
+        };
+
+        for mut save in [
+            make_save(1, 2, 10),
+            make_save(1, 1, 20),
+            make_save(99, 1, 10),
+        ] {
+            complete_project_at(&mut save, 0);
+            let bot = &save.agents[0];
+            assert_eq!(bot.current_task.as_ref().map(|task| task.project_id), {
+                if bot.crew_id == Some(20) {
+                    Some(1)
+                } else if save.crews[0].project_id == 99 {
+                    Some(1)
+                } else {
+                    Some(2)
+                }
+            });
+            assert_eq!(bot.memory.completed_tasks, 0);
+            assert_eq!(bot.memory.last_message, "Do not overwrite");
+            assert_eq!(bot.state, BotState::Idle);
+            if save.crews[0].project_id == 99 {
+                assert!(save.crews[0].active);
+            }
+        }
+    }
+
+    #[test]
     fn waiting_projects_still_count_against_planner_capacity() {
         let mut save = BotWorldSave::default();
         save.projects.push(BotProject {
@@ -18709,6 +19839,8 @@ mod tests {
             concept: BotProjectConcept::default(),
         });
         assert_eq!(planner_project_count(&save), 1);
+        save.projects[0].status = BotProjectStatus::WaitingForCrew;
+        assert_eq!(planner_project_count(&save), 1);
         save.projects[0].status = BotProjectStatus::WaitingForPlayer;
         assert_eq!(planner_project_count(&save), 1);
         save.projects[0].status = BotProjectStatus::Complete;
@@ -18726,15 +19858,356 @@ mod tests {
         assert!(protected_project_area(
             [0, 90, 0],
             [40, 8, 40],
-            Some(Vec3::new(70.0, 100.0, 70.0)),
+            Some(Vec3::new(50.0, 100.0, 50.0)),
             &[]
         ));
         assert!(!protected_project_area(
             [0, 90, 0],
             [40, 8, 40],
-            Some(Vec3::new(180.0, 100.0, 180.0)),
+            Some(Vec3::new(70.0, 100.0, 70.0)),
             &[]
         ));
+    }
+
+    #[test]
+    fn companion_preview_standoff_scales_with_its_footprint_and_is_admissible() {
+        let world = VoxelWorld::new();
+        let player = Transform::from_xyz(0.0, 90.0, 0.0);
+        let small = [10, 4, 10];
+        let large = [64, 7, 12];
+        let small_target = companion_preview_target(&player, small);
+        let large_target = companion_preview_target(&player, large);
+
+        assert!(
+            large_target.distance(player.translation) > small_target.distance(player.translation)
+        );
+        for (target, size) in [(small_target, small), (large_target, large)] {
+            let origin = centered_project_origin(&world, target, size);
+            assert!(
+                xz_distance_to_project(origin, size, player.translation)
+                    >= BOT_SHIP_ADMISSION_CLEARANCE,
+                "preview footprint must remain outside the strictest admission clearance"
+            );
+            assert!(!protected_project_area(
+                origin,
+                size,
+                Some(player.translation),
+                &[]
+            ));
+        }
+    }
+
+    #[test]
+    fn active_build_visit_stays_outside_large_project_footprint() {
+        let world = VoxelWorld::new();
+        let origin = [0, 80, 0];
+        let size = [96, 8, 96];
+        let destination = BotVisitDestination {
+            label: "Large worksite".into(),
+            look_at: project_center(origin, size),
+            footprint: Some((origin, size)),
+        };
+        let visit = safe_visit_position(&world, Vec3::new(48.0, 90.0, 48.0), &destination);
+
+        assert!(xz_distance_to_project(origin, size, visit) >= BOT_OBSERVER_STANDOFF);
+        assert!(!protected_project_area(origin, size, Some(visit), &[]));
+
+        for (current, expected_axis, positive) in [
+            (Vec3::new(1_000.0, 90.0, 48.0), 0, true),
+            (Vec3::new(-1_000.0, 90.0, 48.0), 0, false),
+            (Vec3::new(48.0, 90.0, 1_000.0), 1, true),
+            (Vec3::new(48.0, 90.0, -1_000.0), 1, false),
+        ] {
+            let point = safe_visit_position(&world, current, &destination);
+            let outside_expected_face = match (expected_axis, positive) {
+                (0, true) => point.x > (origin[0] + size[0]) as f32,
+                (0, false) => point.x < origin[0] as f32,
+                (1, true) => point.z > (origin[2] + size[2]) as f32,
+                _ => point.z < origin[2] as f32,
+            };
+            assert!(outside_expected_face);
+        }
+    }
+
+    #[test]
+    fn regular_project_crews_are_small_exclusive_and_do_not_steal_busy_bots() {
+        let world = VoxelWorld::new();
+        let mut save = BotWorldSave::seed("Crew Test", Vec3::new(0.0, 80.0, 0.0), &world);
+        for id in 10..18 {
+            save.agents
+                .push(test_bot(id, &format!("Worker {id}"), BotRole::Builder));
+        }
+        save.agents[0].current_task = Some(BotTask {
+            task_type: BotTaskKind::BuildTower,
+            project_id: 999,
+            label: "Existing work".into(),
+            progress: 0.6,
+        });
+        let busy_id = save.agents[0].id;
+
+        let first = create_project_crew(
+            &mut save,
+            1,
+            BotTaskKind::BuildResidentialBlock,
+            Some(busy_id),
+            [0, 80, 0],
+        )
+        .unwrap();
+        assign_crew_task(
+            &mut save,
+            Some(first),
+            Some(busy_id),
+            1,
+            BotTaskKind::BuildResidentialBlock,
+            "First",
+            [0, 80, 0],
+        );
+        let second = create_project_crew(
+            &mut save,
+            2,
+            BotTaskKind::BuildResidentialBlock,
+            None,
+            [40, 80, 0],
+        )
+        .unwrap();
+        assign_crew_task(
+            &mut save,
+            Some(second),
+            None,
+            2,
+            BotTaskKind::BuildResidentialBlock,
+            "Second",
+            [40, 80, 0],
+        );
+
+        let first_ids = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == first)
+            .unwrap()
+            .bot_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let second_ids = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == second)
+            .unwrap()
+            .bot_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert!(first_ids.len() <= BOT_REGULAR_CREW_LIMIT);
+        assert!(second_ids.len() <= BOT_REGULAR_CREW_LIMIT);
+        assert!(first_ids.is_disjoint(&second_ids));
+        assert!(!first_ids.contains(&busy_id));
+        assert!(!second_ids.contains(&busy_id));
+        assert_eq!(
+            save.agents[0].current_task.as_ref().unwrap().project_id,
+            999,
+            "an existing lease must never be overwritten"
+        );
+        let manual = add_project_with_site_search(
+            &mut save,
+            &world,
+            BotTaskKind::BuildHome,
+            [13, 10, 13],
+            BotTheme::WhiteAlloy,
+            Some(busy_id),
+            8,
+            true,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            None,
+            &[],
+        );
+        assert!(manual.unwrap_err().contains("already assigned"));
+    }
+
+    #[test]
+    fn normalization_and_restore_preserve_core_companion_project_progress() {
+        let mut save = BotWorldSave::default();
+        save.settlements.push(BotSettlement {
+            id: 1,
+            name: "Restore City".into(),
+            hub: [0.0, 80.0, 0.0],
+            radius: MEGA_CITY_RADIUS,
+            bounds: BotCityBounds::default(),
+            theme: BotTheme::CyanAlloy,
+            road_count: 0,
+            building_count: 0,
+            park_count: 0,
+        });
+        for (id, name, project_id, crew_id, progress) in
+            [(1, "Emma", 11, 21, 0.42), (2, "David", 12, 22, 0.73)]
+        {
+            let mut bot = test_bot(id, name, BotRole::Builder);
+            bot.companion = true;
+            bot.crew_id = Some(crew_id);
+            bot.current_task = Some(BotTask {
+                task_type: BotTaskKind::ClearFlatten,
+                project_id,
+                label: format!("Project {project_id}"),
+                progress,
+            });
+            save.agents.push(bot);
+            let mut project = history_test_project(project_id, BotProjectStatus::Active);
+            project.kind = BotTaskKind::ClearFlatten;
+            project.crew_id = Some(crew_id);
+            project.assigned_bot = Some(id);
+            project.priority = 20_u8.saturating_sub(project_id as u8);
+            save.projects.push(project);
+            save.crews.push(BotCrew {
+                id: crew_id,
+                role_focus: BotRole::Builder,
+                bot_ids: vec![id],
+                project_id,
+                active: true,
+            });
+        }
+        let mut helper = test_bot(3, "Emma Swarm 1", BotRole::Surveyor);
+        helper.swarm_leader_id = Some(1);
+        helper.swarm_index = 1;
+        helper.crew_id = Some(23);
+        helper.current_task = Some(BotTask {
+            task_type: BotTaskKind::ClearFlatten,
+            project_id: 13,
+            label: "Project 13".into(),
+            progress: 0.31,
+        });
+        save.agents.push(helper);
+        let mut helper_project = history_test_project(13, BotProjectStatus::Active);
+        helper_project.kind = BotTaskKind::ClearFlatten;
+        helper_project.crew_id = Some(23);
+        helper_project.assigned_bot = Some(3);
+        helper_project.priority = 6;
+        save.projects.push(helper_project);
+        save.crews.push(BotCrew {
+            id: 23,
+            role_focus: BotRole::Surveyor,
+            bot_ids: vec![3],
+            project_id: 13,
+            active: true,
+        });
+
+        save.normalize();
+
+        assert!(save.next_crew_id > 22);
+        for (name, project_id, progress) in [
+            ("Emma", 11, 0.42),
+            ("David", 12, 0.73),
+            ("Emma Swarm 1", 13, 0.31),
+        ] {
+            let task = save
+                .agents
+                .iter()
+                .find(|bot| bot.name == name)
+                .and_then(|bot| bot.current_task.as_ref())
+                .expect("core companion task should survive normalization and repair");
+            assert_eq!(task.project_id, project_id);
+            assert!((task.progress - progress).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn only_the_owned_arrived_builder_unlocks_a_workfront() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let mut save = BotWorldSave::default();
+        save.agents.push(test_bot(1, "Assigned", BotRole::Builder));
+        save.agents.push(test_bot(2, "Bystander", BotRole::Builder));
+        let origin = [4, 80, 4];
+        let mut project = history_test_project(1, BotProjectStatus::Queued);
+        project.kind = BotTaskKind::ClearFlatten;
+        project.origin = origin;
+        project.size = [2, 2, 2];
+        project.total_steps = 8;
+        project.assigned_bot = Some(1);
+        project.crew_id = Some(1);
+        save.projects.push(project);
+        save.crews.push(BotCrew {
+            id: 1,
+            role_focus: BotRole::Builder,
+            bot_ids: vec![1],
+            project_id: 1,
+            active: true,
+        });
+        assign_crew_task(
+            &mut save,
+            Some(1),
+            Some(1),
+            1,
+            BotTaskKind::ClearFlatten,
+            "Exact workfront",
+            origin,
+        );
+        let workfront = IVec3::new(origin[0], origin[1], origin[2]);
+        save.agents[0].position = [200.0, 80.0, 200.0];
+        save.agents[1].position = workfront.as_vec3().to_array();
+
+        assert!(arrived_project_builder(&save, 0, workfront).is_none());
+        let mut history = BuilderHistory::default();
+        let waiting = advance_project_slice(
+            &mut save.projects[0],
+            &mut world,
+            &mut history,
+            None,
+            &[],
+            BotCityBounds::default(),
+            4,
+            None,
+            Some(&ExactBotCommandPlan::ClearFlatten),
+        );
+        assert_eq!(waiting.changed, 0);
+        assert_eq!(save.projects[0].cursor, 0);
+        assert_eq!(save.projects[0].status, BotProjectStatus::WaitingForCrew);
+
+        save.agents[0].position = (workfront.as_vec3() + Vec3::splat(0.5)).to_array();
+        let builder = arrived_project_builder(&save, 0, workfront);
+        assert!(builder.is_some());
+        let advanced = advance_project_slice(
+            &mut save.projects[0],
+            &mut world,
+            &mut history,
+            None,
+            &[],
+            BotCityBounds::default(),
+            4,
+            builder,
+            Some(&ExactBotCommandPlan::ClearFlatten),
+        );
+        assert!(advanced.changed > 0);
+        assert!(save.projects[0].cursor > 0);
+    }
+
+    #[test]
+    fn protected_workfront_holds_cursor_without_leaving_a_hole() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let origin = [4, 80, 4];
+        let mut project = history_test_project(1, BotProjectStatus::Active);
+        project.kind = BotTaskKind::ClearFlatten;
+        project.origin = origin;
+        project.size = [2, 2, 2];
+        project.total_steps = 8;
+        let builder = Vec3::new(4.5, 82.0, 4.5);
+        let mut history = BuilderHistory::default();
+
+        let result = advance_project_slice(
+            &mut project,
+            &mut world,
+            &mut history,
+            Some(builder),
+            &[],
+            BotCityBounds::default(),
+            4,
+            Some(builder),
+            Some(&ExactBotCommandPlan::ClearFlatten),
+        );
+        assert_eq!(result.changed, 0);
+        assert_eq!(project.cursor, 0);
+        assert_eq!(project.status, BotProjectStatus::WaitingForPlayer);
     }
 
     #[test]
@@ -18780,6 +20253,435 @@ mod tests {
         assert_eq!(cp.x, 0);
         assert_eq!(cp.y, 0);
         assert_eq!(cp.z, 0);
+    }
+
+    #[test]
+    fn exact_project_preserves_recipient_order_and_adds_no_bots() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let mut save = BotWorldSave::default();
+        save.agents.extend([
+            test_bot(7, "Seven", BotRole::Builder),
+            test_bot(3, "Three", BotRole::Surveyor),
+            test_bot(9, "Nine", BotRole::Architect),
+        ]);
+
+        let project_id = add_project_for_exact_bots(
+            &mut save,
+            &world,
+            42,
+            BotTaskKind::ClearFlatten,
+            [0, 80, 0],
+            [4, 2, 4],
+            BotTheme::CyanAlloy,
+            &[9, 7],
+            10,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let project = save
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .unwrap();
+        let crew = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == project.crew_id.unwrap())
+            .unwrap();
+        assert_eq!(crew.bot_ids, vec![9, 7]);
+        assert_eq!(project.assigned_bot, Some(9));
+        assert_eq!(project.origin, [0, 80, 0]);
+        assert_eq!(project.size, [4, 2, 4]);
+        assert_eq!(project.total_steps, 32);
+        assert_eq!(save.exact_command_project_ids, vec![project_id]);
+        assert!(save
+            .agents
+            .iter()
+            .find(|bot| bot.id == 3)
+            .unwrap()
+            .current_task
+            .is_none());
+        for bot_id in [9, 7] {
+            let bot = save.agents.iter().find(|bot| bot.id == bot_id).unwrap();
+            assert_eq!(bot.crew_id, Some(crew.id));
+            assert_eq!(
+                bot.current_task.as_ref().map(|task| task.project_id),
+                Some(project_id)
+            );
+        }
+    }
+
+    #[test]
+    fn exact_project_rejection_is_atomic_for_duplicate_unknown_and_busy_bots() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let mut save = BotWorldSave::default();
+        save.agents.extend([
+            test_bot(1, "One", BotRole::Builder),
+            test_bot(2, "Two", BotRole::Builder),
+        ]);
+        save.agents[1].current_task = Some(BotTask {
+            task_type: BotTaskKind::BuildRoad,
+            project_id: 99,
+            label: "existing".into(),
+            progress: 0.5,
+        });
+
+        for recipients in [vec![1, 1], vec![1, 404], vec![1, 2]] {
+            let next_project_id = save.next_project_id;
+            let next_crew_id = save.next_crew_id;
+            let project_count = save.projects.len();
+            let crew_count = save.crews.len();
+            let first_task_project = save.agents[0]
+                .current_task
+                .as_ref()
+                .map(|task| task.project_id);
+
+            assert!(add_project_for_exact_bots(
+                &mut save,
+                &world,
+                55,
+                BotTaskKind::ClearFlatten,
+                [0, 80, 0],
+                [2, 2, 2],
+                BotTheme::CyanAlloy,
+                &recipients,
+                10,
+                None,
+                &[],
+            )
+            .is_err());
+
+            assert_eq!(save.next_project_id, next_project_id);
+            assert_eq!(save.next_crew_id, next_crew_id);
+            assert_eq!(save.projects.len(), project_count);
+            assert_eq!(save.crews.len(), crew_count);
+            assert_eq!(
+                save.agents[0]
+                    .current_task
+                    .as_ref()
+                    .map(|task| task.project_id),
+                first_task_project
+            );
+            assert_eq!(save.agents[0].crew_id, None);
+        }
+    }
+
+    #[test]
+    fn exact_clear_flatten_never_moves_edits_outside_the_approved_box() {
+        let world = VoxelWorld::new();
+        let project = BotProject {
+            id: 1,
+            kind: BotTaskKind::ClearFlatten,
+            label: "Exact".into(),
+            origin: [-3, 70, 5],
+            size: [4, 3, 2],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 24,
+            assigned_bot: Some(1),
+            district_id: None,
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 10,
+            concept: BotProjectConcept::default(),
+        };
+
+        for y in 0..project.size[1] {
+            for z in 0..project.size[2] {
+                for x in 0..project.size[0] {
+                    let local = IVec3::new(x, y, z);
+                    let (pos, voxel) = project_voxel_with_plan(
+                        &project,
+                        local,
+                        &world,
+                        Some(&ExactBotCommandPlan::ClearFlatten),
+                    )
+                    .unwrap();
+                    assert_eq!(pos, IVec3::new(-3 + x, 70 + y, 5 + z));
+                    if y == 0 {
+                        assert_ne!(voxel, AIR);
+                    } else {
+                        assert_eq!(voxel, AIR);
+                    }
+                }
+            }
+        }
+    }
+
+    fn exact_executor_test_app(size: IVec3) -> (App, crate::bot_command::CommandId, IVec3, IVec3) {
+        use crate::bot_command::{
+            BotCommandStateMachine, CommandOperation, CommandRecipients, CommandTarget,
+        };
+
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let mut save = BotWorldSave::seed("Executor Test", Vec3::new(0.0, 80.0, 0.0), &world);
+        save.autonomy.bots_active = true;
+        save.autonomy.enabled = false;
+        let recipients = save
+            .agents
+            .iter()
+            .take(2)
+            .map(|bot| bot.id)
+            .collect::<Vec<_>>();
+        let min = IVec3::new(4, 80, 4);
+        let max = min + size - IVec3::ONE;
+
+        let mut command_state = BotCommandStateMachine::default();
+        let command_id = command_state
+            .create(
+                CommandOperation::ClearFlatten,
+                CommandTarget::Area { min, max },
+                CommandRecipients::Selected(recipients),
+            )
+            .unwrap();
+        command_state.prepare_preview(command_id).unwrap();
+        command_state.approve(command_id).unwrap();
+        command_state.request_execution(command_id).unwrap();
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(command_state)
+            .insert_resource(BotCommandExecutor::default())
+            .insert_resource(FriendlyWorldBrain {
+                save,
+                ..Default::default()
+            })
+            .insert_resource(world)
+            .insert_resource(BuilderHistory::default())
+            .insert_resource(RuntimeBudget::default())
+            .insert_resource(BotRuntimeControl::default())
+            .add_systems(
+                Update,
+                (
+                    dispatch_authorized_bot_commands,
+                    tick_friendly_world,
+                    finalize_authorized_bot_commands,
+                )
+                    .chain(),
+            );
+        (app, command_id, min, max)
+    }
+
+    fn settle_exact_test_crews(app: &mut App) {
+        let mut brain = app.world_mut().resource_mut::<FriendlyWorldBrain>();
+        for bot in &mut brain.save.agents {
+            if bot.current_task.is_some() {
+                bot.position = bot.target;
+            }
+        }
+    }
+
+    #[test]
+    fn approved_command_executes_real_voxels_and_completes_end_to_end() {
+        use crate::bot_command::{BotCommandStateMachine, CommandState};
+
+        let (mut app, command_id, min, max) = exact_executor_test_app(IVec3::new(2, 2, 2));
+
+        app.update();
+        {
+            let commands = app.world().resource::<BotCommandStateMachine>();
+            assert_eq!(
+                commands.command(command_id).unwrap().state(),
+                CommandState::Running
+            );
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            assert_eq!(brain.save.projects[0].cursor, 0);
+            assert_eq!(
+                brain.save.projects[0].status,
+                BotProjectStatus::WaitingForCrew
+            );
+        }
+        settle_exact_test_crews(&mut app);
+        app.update();
+
+        let commands = app.world().resource::<BotCommandStateMachine>();
+        let command = commands.command(command_id).unwrap();
+        assert_eq!(command.state(), CommandState::Completed);
+        let completion = command.completion().unwrap();
+        assert_eq!(completion.applied_voxel_edits, 4);
+        assert_eq!(completion.touched_chunks, 1);
+        assert_eq!(completion.spawned_projects, 1);
+
+        let world = app.world().resource::<VoxelWorld>();
+        for z in min.z..=max.z {
+            for x in min.x..=max.x {
+                assert_ne!(world.voxel_at(x, min.y, z), AIR);
+                assert_eq!(world.voxel_at(x, max.y, z), AIR);
+            }
+        }
+        let brain = app.world().resource::<FriendlyWorldBrain>();
+        assert_eq!(brain.save.projects.len(), 1);
+        assert_eq!(brain.save.projects[0].origin, [min.x, min.y, min.z]);
+        assert_eq!(brain.save.projects[0].size, [2, 2, 2]);
+        assert_eq!(brain.save.projects[0].status, BotProjectStatus::Complete);
+        assert!(brain.save.crews[0].bot_ids.iter().all(|bot_id| {
+            brain
+                .save
+                .agents
+                .iter()
+                .find(|bot| bot.id == *bot_id)
+                .is_some_and(|bot| bot.current_task.is_none() && bot.crew_id.is_none())
+        }));
+    }
+
+    #[test]
+    fn paused_exact_command_holds_cursor_and_resume_reuses_the_same_project() {
+        use crate::bot_command::{BotCommandStateMachine, CommandState};
+
+        let (mut app, command_id, _, _) = exact_executor_test_app(IVec3::new(8, 4, 8));
+        app.update();
+        {
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            assert_eq!(brain.save.projects[0].cursor, 0);
+            assert_eq!(
+                brain.save.projects[0].status,
+                BotProjectStatus::WaitingForCrew
+            );
+        }
+        settle_exact_test_crews(&mut app);
+        app.update();
+        let (project_id, crew_id, cursor, dispatch_key) = {
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            let commands = app.world().resource::<BotCommandStateMachine>();
+            assert_eq!(
+                commands.command(command_id).unwrap().state(),
+                CommandState::Running
+            );
+            let project = &brain.save.projects[0];
+            assert!(project.cursor > 0 && project.cursor < project.total_steps);
+            (
+                project.id,
+                project.crew_id,
+                project.cursor,
+                commands.command(command_id).unwrap().dispatch_key(),
+            )
+        };
+
+        app.world_mut()
+            .resource_mut::<BotCommandStateMachine>()
+            .pause(command_id)
+            .unwrap();
+        app.update();
+        {
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            let project = brain
+                .save
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .unwrap();
+            assert_eq!(project.status, BotProjectStatus::CommandHeld);
+            assert_eq!(project.cursor, cursor);
+            assert_eq!(brain.save.projects.len(), 1);
+            assert_eq!(project.crew_id, crew_id);
+        }
+
+        app.world_mut()
+            .resource_mut::<BotCommandStateMachine>()
+            .resume(command_id)
+            .unwrap();
+        for _ in 0..64 {
+            settle_exact_test_crews(&mut app);
+            app.update();
+            if app
+                .world()
+                .resource::<BotCommandStateMachine>()
+                .command(command_id)
+                .unwrap()
+                .state()
+                == CommandState::Completed
+            {
+                break;
+            }
+        }
+
+        let commands = app.world().resource::<BotCommandStateMachine>();
+        assert_eq!(
+            commands.command(command_id).unwrap().state(),
+            CommandState::Completed
+        );
+        assert_eq!(
+            commands.command(command_id).unwrap().dispatch_key(),
+            dispatch_key
+        );
+        let brain = app.world().resource::<FriendlyWorldBrain>();
+        assert_eq!(brain.save.projects.len(), 1);
+        assert_eq!(brain.save.projects[0].id, project_id);
+        assert_eq!(brain.save.projects[0].crew_id, crew_id);
+    }
+
+    #[test]
+    fn cancelled_exact_command_stops_slices_and_releases_its_exact_crew() {
+        use crate::bot_command::{BotCommandStateMachine, CommandState};
+
+        let (mut app, command_id, _, _) = exact_executor_test_app(IVec3::new(8, 4, 8));
+        app.update();
+        settle_exact_test_crews(&mut app);
+        app.update();
+        let (project_id, cursor, crew_id, bot_ids) = {
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            let project = &brain.save.projects[0];
+            let crew_id = project.crew_id.unwrap();
+            let bot_ids = brain
+                .save
+                .crews
+                .iter()
+                .find(|crew| crew.id == crew_id)
+                .unwrap()
+                .bot_ids
+                .clone();
+            assert!(project.cursor > 0);
+            (project.id, project.cursor, crew_id, bot_ids)
+        };
+
+        app.world_mut()
+            .resource_mut::<BotCommandStateMachine>()
+            .cancel(command_id)
+            .unwrap();
+        app.update();
+        app.update();
+
+        let commands = app.world().resource::<BotCommandStateMachine>();
+        assert_eq!(
+            commands.command(command_id).unwrap().state(),
+            CommandState::Cancelled
+        );
+        let brain = app.world().resource::<FriendlyWorldBrain>();
+        let project = brain
+            .save
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .unwrap();
+        assert_eq!(project.status, BotProjectStatus::Blocked);
+        assert_eq!(project.cursor, cursor);
+        assert!(project.blocked_reason.contains("cancelled"));
+        assert!(
+            !brain
+                .save
+                .crews
+                .iter()
+                .find(|crew| crew.id == crew_id)
+                .unwrap()
+                .active
+        );
+        for bot_id in bot_ids {
+            let bot = brain
+                .save
+                .agents
+                .iter()
+                .find(|bot| bot.id == bot_id)
+                .unwrap();
+            assert_eq!(bot.crew_id, None);
+            assert!(bot.current_task.is_none());
+        }
     }
 
     fn test_bot(id: u64, name: &str, role: BotRole) -> BotAgent {

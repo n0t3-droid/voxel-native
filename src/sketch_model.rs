@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
@@ -1086,6 +1086,85 @@ impl SketchVoxelLinkIndex {
             .collect()
     }
 
+    /// Resolves the complete piece of ungrouped voxel geometry that contains
+    /// `seed`. Adjacent linked cells in the same sketch context behave like
+    /// SketchUp's "sticky" raw geometry, while component/object attributes can
+    /// still provide a stronger boundary at the document layer.
+    pub fn connected_entities_for_entity(&self, seed: SketchId, max_cells: usize) -> Vec<SketchId> {
+        if max_cells == 0 {
+            return Vec::new();
+        }
+
+        let seed_contexts: BTreeSet<_> = self
+            .cell_links
+            .values()
+            .flat_map(|links| links.iter())
+            .filter(|link| link.entity == seed)
+            .map(|link| link.context)
+            .collect();
+        if seed_contexts.is_empty() {
+            return vec![seed];
+        }
+
+        let mut frontier = VecDeque::new();
+        let mut visited = HashSet::new();
+        for (cell, links) in &self.cell_links {
+            if links
+                .iter()
+                .any(|link| link.entity == seed && seed_contexts.contains(&link.context))
+            {
+                let cell = cell.as_ivec3();
+                visited.insert(cell);
+                frontier.push_back(cell);
+            }
+        }
+
+        let mut entities = BTreeSet::from([seed]);
+        const NEIGHBORS: [IVec3; 6] = [
+            IVec3::X,
+            IVec3::NEG_X,
+            IVec3::Y,
+            IVec3::NEG_Y,
+            IVec3::Z,
+            IVec3::NEG_Z,
+        ];
+        while let Some(cell) = frontier.pop_front() {
+            if visited.len() > max_cells {
+                // Failing closed is important here: returning only `seed`
+                // would make an oversized object look safe to transform while
+                // silently leaving the rest of its connected geometry behind.
+                return Vec::new();
+            }
+            if let Some(links) = self.cell_links.get(&SketchVoxelCellKey::from_ivec3(cell)) {
+                entities.extend(
+                    links
+                        .iter()
+                        .filter(|link| seed_contexts.contains(&link.context))
+                        .map(|link| link.entity),
+                );
+            }
+            for delta in NEIGHBORS {
+                let neighbor = cell + delta;
+                if visited.contains(&neighbor) {
+                    continue;
+                }
+                let linked_in_context = self
+                    .cell_links
+                    .get(&SketchVoxelCellKey::from_ivec3(neighbor))
+                    .is_some_and(|links| {
+                        links
+                            .iter()
+                            .any(|link| seed_contexts.contains(&link.context))
+                    });
+                if linked_in_context {
+                    visited.insert(neighbor);
+                    frontier.push_back(neighbor);
+                }
+            }
+        }
+        entities.into_iter().collect()
+    }
+
     pub fn snapshot_entities(
         &self,
         entities: impl IntoIterator<Item = SketchId>,
@@ -1995,6 +2074,31 @@ impl SketchDocument {
             .map(String::as_str))
     }
 
+    pub fn object_members_for_entity(&self, entity: SketchId) -> Vec<SketchId> {
+        if !self.entity_effective_visible(entity).unwrap_or(false) {
+            return Vec::new();
+        }
+        let Some(object_id) = self
+            .entity_attribute(entity, "voxel_native", "object_id")
+            .ok()
+            .flatten()
+        else {
+            return vec![entity];
+        };
+        self.entities
+            .values()
+            .filter(|candidate| {
+                self.entity_effective_visible(candidate.id).unwrap_or(false)
+                    && candidate
+                        .attributes
+                        .get("voxel_native")
+                        .and_then(|attrs| attrs.get("object_id"))
+                        .is_some_and(|candidate_id| candidate_id == object_id)
+            })
+            .map(|candidate| candidate.id)
+            .collect()
+    }
+
     pub fn material_by_name(&self, name: &str) -> Option<SketchId> {
         self.materials
             .iter()
@@ -2312,6 +2416,10 @@ impl SketchDocument {
             ));
         }
 
+        self.assign_entities_to_object(
+            created.iter().map(|(_, entity)| *entity),
+            command.target_id(),
+        )?;
         self.record_created_entities(label.clone(), created.iter().copied())?;
         Ok(SketchCadCommandResult {
             label,
@@ -2560,7 +2668,7 @@ impl SketchDocument {
             min: Vec3::ZERO,
             max: Vec3::ZERO,
         });
-        self.add_entity_with_history(
+        let extrusion = self.add_entity(
             self.active_context,
             SketchEntityKind::PushPullExtrusion {
                 source_face: face,
@@ -2570,8 +2678,10 @@ impl SketchDocument {
                 depth,
                 bounds,
             },
-            "Push/Pull",
-        )
+        )?;
+        self.assign_entities_to_object([extrusion], Some(face))?;
+        self.record_created_entities("Push/Pull", [(self.active_context, extrusion)])?;
+        Ok(extrusion)
     }
 
     pub fn record_push_pull_face(
@@ -2626,6 +2736,7 @@ impl SketchDocument {
                 bounds,
             },
         )?;
+        self.assign_entities_to_object([face, extrusion], None)?;
         self.record_created_entities(label, [(context, face), (context, extrusion)])?;
         Ok((face, extrusion))
     }
@@ -2639,7 +2750,7 @@ impl SketchDocument {
     ) -> Result<SketchId, SketchModelError> {
         let (_, normal) = self.face_geometry(host)?;
         let bounds = SketchBounds::from_center_size(center, size).extruded(normal, through_depth);
-        self.add_entity_with_history(
+        let opening = self.add_entity(
             self.active_context,
             SketchEntityKind::Opening {
                 host,
@@ -2649,8 +2760,10 @@ impl SketchDocument {
                 through_depth,
                 bounds,
             },
-            "Opening cut",
-        )
+        )?;
+        self.assign_entities_to_object([opening], Some(host))?;
+        self.record_created_entities("Opening cut", [(self.active_context, opening)])?;
+        Ok(opening)
     }
 
     pub fn create_hollow_room(
@@ -2666,7 +2779,7 @@ impl SketchDocument {
         });
         let shell_bounds = face_bounds.extruded(normal, room_depth);
         let interior_bounds = shell_bounds.inset(wall_thickness);
-        self.add_entity_with_history(
+        let room = self.add_entity(
             self.active_context,
             SketchEntityKind::Room {
                 shell,
@@ -2674,8 +2787,10 @@ impl SketchDocument {
                 interior_bounds,
                 wall_thickness,
             },
-            "Room hollow",
-        )
+        )?;
+        self.assign_entities_to_object([room], Some(shell))?;
+        self.record_created_entities("Room hollow", [(self.active_context, room)])?;
+        Ok(room)
     }
 
     pub fn brep_kernel_for_face(
@@ -2856,6 +2971,49 @@ impl SketchDocument {
         Ok(summary)
     }
 
+    pub fn set_selection_visible(
+        &mut self,
+        selection: &SelectionSet,
+        visible: bool,
+        label: impl Into<String>,
+    ) -> Result<SketchEditSummary, SketchModelError> {
+        let label = label.into();
+        let mut changes = Vec::with_capacity(selection.len());
+        for entity_id in selection.ordered() {
+            let context = self.context_for_entity(*entity_id)?;
+            let before = self
+                .entities
+                .get(entity_id)
+                .cloned()
+                .ok_or(SketchModelError::UnknownEntity(*entity_id))?;
+            if before.visible == visible {
+                continue;
+            }
+            let mut after = before.clone();
+            after.visible = visible;
+            changes.push(SketchEditChange::Modified {
+                context,
+                before,
+                after,
+            });
+        }
+
+        let batch = SketchEditBatch::new(label, changes);
+        let summary = batch.summary();
+        if summary.entity_count == 0 {
+            return Ok(summary);
+        }
+        for change in &batch.changes {
+            if let SketchEditChange::Modified { context, after, .. } = change {
+                self.restore_entity_in_context(*context, after);
+            }
+        }
+        self.undo_stack.push(batch);
+        self.redo_stack.clear();
+        self.undo_generation = self.undo_generation.wrapping_add(1);
+        Ok(summary)
+    }
+
     pub fn scale_selection_about_pivot(
         &mut self,
         selection: &SelectionSet,
@@ -2955,10 +3113,39 @@ impl SketchDocument {
                 id_map.insert(record.entity.id, self.allocate_id());
             }
 
+            // An array step is a new object, not another handle into the
+            // original. Preserve internal face/extrusion grouping by remapping
+            // each old object boundary once per step, while keeping different
+            // steps independently selectable like SketchUp copies.
+            let mut object_id_map = BTreeMap::<String, String>::new();
+            for record in &originals {
+                let original_key = record
+                    .entity
+                    .attributes
+                    .get("voxel_native")
+                    .and_then(|attributes| attributes.get("object_id"))
+                    .cloned()
+                    .unwrap_or_else(|| format!("legacy-entity/{}", record.entity.id.raw()));
+                object_id_map.entry(original_key).or_insert_with(|| {
+                    format!("sketch-object/{}", id_map[&record.entity.id].raw())
+                });
+            }
+
             for record in &originals {
                 let mut entity = record.entity.clone();
                 let new_id = id_map[&entity.id];
+                let original_key = entity
+                    .attributes
+                    .get("voxel_native")
+                    .and_then(|attributes| attributes.get("object_id"))
+                    .cloned()
+                    .unwrap_or_else(|| format!("legacy-entity/{}", entity.id.raw()));
                 entity.id = new_id;
+                entity
+                    .attributes
+                    .entry("voxel_native".to_owned())
+                    .or_default()
+                    .insert("object_id".to_owned(), object_id_map[&original_key].clone());
                 translate_entity_kind(&mut entity.kind, delta * step as f32);
                 remap_entity_references(&mut entity.kind, &id_map);
                 created_ids.push(new_id);
@@ -3006,8 +3193,32 @@ impl SketchDocument {
         label: impl Into<String>,
     ) -> Result<SketchId, SketchModelError> {
         let id = self.add_entity(context, kind)?;
+        self.assign_entities_to_object([id], None)?;
         self.record_created_entities(label, [(context, id)])?;
         Ok(id)
+    }
+
+    fn assign_entities_to_object(
+        &mut self,
+        entities: impl IntoIterator<Item = SketchId>,
+        inherit_from: Option<SketchId>,
+    ) -> Result<(), SketchModelError> {
+        let entities: Vec<_> = entities.into_iter().collect();
+        let Some(first) = entities.first().copied() else {
+            return Ok(());
+        };
+        let object_id = inherit_from
+            .and_then(|source| {
+                self.entity_attribute(source, "voxel_native", "object_id")
+                    .ok()
+                    .flatten()
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| format!("sketch-object/{}", first.raw()));
+        for entity in entities {
+            self.set_entity_attribute(entity, "voxel_native", "object_id", object_id.clone())?;
+        }
+        Ok(())
     }
 
     fn record_created_entities(
@@ -4389,6 +4600,22 @@ impl SelectionSet {
         self.ordered.clear();
     }
 
+    pub fn select_all(&mut self, ids: impl IntoIterator<Item = SketchId>) {
+        for id in ids {
+            self.select(id);
+        }
+    }
+
+    pub fn remove(&mut self, id: SketchId) -> bool {
+        let before = self.ordered.len();
+        self.ordered.retain(|selected| *selected != id);
+        self.ordered.len() != before
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(SketchId) -> bool) {
+        self.ordered.retain(|id| keep(*id));
+    }
+
     pub fn contains(&self, id: SketchId) -> bool {
         self.ordered.contains(&id)
     }
@@ -5719,6 +5946,7 @@ pub struct ToolController {
     active_tool: EditorToolId,
     tool_phase: EditorToolPhase,
     selection: SelectionSet,
+    edit_object_members: Option<SelectionSet>,
     inference_lock: Option<InferenceLock>,
     tool_generation: u64,
     preview_generation: u64,
@@ -5737,6 +5965,7 @@ impl Default for ToolController {
             active_tool: EditorToolId::Rectangle,
             tool_phase: EditorToolPhase::Idle,
             selection: SelectionSet::default(),
+            edit_object_members: None,
             inference_lock: None,
             tool_generation: 0,
             preview_generation: 0,
@@ -5769,6 +5998,9 @@ impl ToolController {
 
     pub fn activate(&mut self, tool: EditorToolId) {
         if self.active_tool != tool {
+            if tool != EditorToolId::Select && self.edit_object_members.is_some() {
+                self.exit_edit_object();
+            }
             self.cancel_open_transaction_for_lifecycle();
             self.active_tool = tool;
             self.inference_lock = None;
@@ -5787,6 +6019,9 @@ impl ToolController {
     /// identity. Toolbox clicks use this to invalidate local previews that are
     /// not represented by a document transaction yet.
     pub fn restart_active_tool(&mut self) {
+        if self.edit_object_members.is_some() {
+            self.exit_edit_object();
+        }
         self.cancel_open_transaction_for_lifecycle();
         self.inference_lock = None;
         self.open_transaction = None;
@@ -5823,6 +6058,128 @@ impl ToolController {
 
     pub fn selection_mut(&mut self) -> &mut SelectionSet {
         &mut self.selection
+    }
+
+    pub fn edit_object_active(&self) -> bool {
+        self.edit_object_members.is_some()
+    }
+
+    pub fn edit_object_members(&self) -> Option<&SelectionSet> {
+        self.edit_object_members.as_ref()
+    }
+
+    pub fn enter_edit_object(&mut self) -> SelectionUpdate {
+        if self.selection.is_empty() || self.edit_object_members.is_some() {
+            return SelectionUpdate::Ignored;
+        }
+        let members = self.selection.clone();
+        let first = members.ordered().first().copied();
+        self.selection.clear();
+        self.edit_object_members = Some(members);
+        self.active_tool_hint =
+            "EDIT OBJECT: click an individual part. Delete removes only selected parts; Escape exits."
+                .to_owned();
+        self.tool_phase = EditorToolPhase::Committed;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        first
+            .map(SelectionUpdate::Selected)
+            .unwrap_or(SelectionUpdate::Ignored)
+    }
+
+    pub fn exit_edit_object(&mut self) -> SelectionUpdate {
+        let Some(members) = self.edit_object_members.take() else {
+            return SelectionUpdate::Ignored;
+        };
+        let first = members.ordered().first().copied();
+        self.selection = members;
+        self.active_tool_hint =
+            "Object selected. Move, Rotate, and Scale affect the complete object; Enter edits parts."
+                .to_owned();
+        self.tool_phase = EditorToolPhase::Committed;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        first
+            .map(SelectionUpdate::Selected)
+            .unwrap_or(SelectionUpdate::Cleared)
+    }
+
+    pub fn remove_selection_from_edit_object(&mut self) {
+        let removed: BTreeSet<_> = self.selection.ordered().iter().copied().collect();
+        if let Some(members) = self.edit_object_members.as_mut() {
+            members.retain(|id| !removed.contains(&id));
+        }
+        self.selection.clear();
+        if self
+            .edit_object_members
+            .as_ref()
+            .is_some_and(SelectionSet::is_empty)
+        {
+            self.edit_object_members = None;
+            self.active_tool_hint =
+                "Object removed. Select another object to continue editing.".to_owned();
+            self.tool_phase = EditorToolPhase::Idle;
+        }
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+    }
+
+    /// Clears both the current part selection and its enclosing Edit Object
+    /// scope. History navigation uses this so restored/tombstoned entities can
+    /// never leave stale member IDs inside the controller.
+    pub fn clear_selection_context(&mut self) -> SelectionUpdate {
+        let changed = !self.selection.is_empty() || self.edit_object_members.is_some();
+        self.selection.clear();
+        self.edit_object_members = None;
+        if !changed {
+            return SelectionUpdate::Ignored;
+        }
+        self.active_tool_hint =
+            "Selection cleared after history changed the object model. Pick an object to continue."
+                .to_owned();
+        self.tool_phase = EditorToolPhase::Idle;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        SelectionUpdate::Cleared
+    }
+
+    pub fn select_object_members(
+        &mut self,
+        members: impl IntoIterator<Item = SketchId>,
+        additive: bool,
+    ) -> SelectionUpdate {
+        let members: Vec<_> = members.into_iter().collect();
+        let Some(first) = members.first().copied() else {
+            return SelectionUpdate::Ignored;
+        };
+        if !additive {
+            self.selection.clear();
+        }
+        self.selection.select_all(members.iter().copied());
+        self.active_tool_hint = format!(
+            "Object selected: {} linked part{}. Move, Rotate, and Scale affect it as one object; Enter edits parts.",
+            members.len(),
+            if members.len() == 1 { "" } else { "s" }
+        );
+        self.tool_phase = EditorToolPhase::Committed;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        SelectionUpdate::Selected(first)
+    }
+
+    pub fn select_edit_part(&mut self, hit: &HitRecord, additive: bool) -> SelectionUpdate {
+        let Some(members) = self.edit_object_members.as_ref() else {
+            return SelectionUpdate::Ignored;
+        };
+        if !members.contains(hit.entity) {
+            return SelectionUpdate::Ignored;
+        }
+        if !additive {
+            self.selection.clear();
+        }
+        self.selection.select(hit.entity);
+        self.active_tool_hint = format!(
+            "EDIT OBJECT: part {} selected. Shift-click adds parts; Delete removes them; Escape exits.",
+            hit.entity.raw()
+        );
+        self.tool_phase = EditorToolPhase::Committed;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        SelectionUpdate::Selected(hit.entity)
     }
 
     pub fn select_hit(&mut self, hit: &HitRecord, additive: bool) -> SelectionUpdate {
@@ -6292,6 +6649,57 @@ mod tests {
         assert_eq!(hit.entity, entity);
         assert_eq!(hit.kind, HitKind::Edge);
         assert_eq!(hit.world_point, Vec3::new(5.5, 5.5, 6.5));
+    }
+
+    #[test]
+    fn connected_voxel_entities_stay_inside_the_seed_context_and_component() {
+        let mut links = SketchVoxelLinkIndex::default();
+        let context = SketchId::new_for_test(1);
+        let other_context = SketchId::new_for_test(2);
+        let seed = SketchId::new_for_test(10);
+        let connected = SketchId::new_for_test(20);
+        let other_context_entity = SketchId::new_for_test(30);
+        let disconnected = SketchId::new_for_test(40);
+
+        links.link_cell(
+            IVec3::ZERO,
+            SketchVoxelLink::new(seed, context, SketchVoxelLinkRole::Stroke),
+        );
+        links.link_cell(
+            IVec3::X,
+            SketchVoxelLink::new(connected, context, SketchVoxelLinkRole::Face),
+        );
+        links.link_cell(
+            IVec3::X,
+            SketchVoxelLink::new(
+                other_context_entity,
+                other_context,
+                SketchVoxelLinkRole::Face,
+            ),
+        );
+        links.link_cell(
+            IVec3::X * 2,
+            SketchVoxelLink::new(
+                other_context_entity,
+                other_context,
+                SketchVoxelLinkRole::Extrusion,
+            ),
+        );
+        links.link_cell(
+            IVec3::X * 20,
+            SketchVoxelLink::new(disconnected, context, SketchVoxelLinkRole::Stroke),
+        );
+
+        assert_eq!(
+            links.connected_entities_for_entity(seed, 64),
+            vec![seed, connected]
+        );
+        assert_eq!(links.connected_entities_for_entity(seed, 0), Vec::new());
+        assert_eq!(
+            links.connected_entities_for_entity(seed, 1),
+            Vec::new(),
+            "exceeding the traversal budget must fail closed instead of returning a partial object"
+        );
     }
 
     #[test]
@@ -6873,6 +7281,81 @@ mod tests {
     }
 
     #[test]
+    fn linear_array_steps_are_distinct_objects_but_keep_each_steps_internal_grouping() {
+        let mut doc = SketchDocument::new();
+        let face = doc
+            .draw_rectangle_face(
+                doc.active_context(),
+                Vec3::ZERO,
+                Vec3::X * 4.0,
+                Vec3::Y * 3.0,
+                "Array source",
+            )
+            .unwrap();
+        let extrusion = doc.push_pull_face(face, 3.0).unwrap();
+        let mut selection = SelectionSet::default();
+        selection.select_all([face, extrusion]);
+
+        let copies = doc
+            .copy_selection_linear_array(&selection, Vec3::X * 10.0, 2, "Object array")
+            .unwrap();
+        let [first_face, first_extrusion, second_face, second_extrusion] = copies.as_slice() else {
+            panic!("two copies of a two-part object should create four entities");
+        };
+        let object_id = |doc: &SketchDocument, entity| {
+            doc.entity_attribute(entity, "voxel_native", "object_id")
+                .unwrap()
+                .expect("array entities should retain an object boundary")
+                .to_owned()
+        };
+
+        let original_object = object_id(&doc, face);
+        let first_object = object_id(&doc, *first_face);
+        let second_object = object_id(&doc, *second_face);
+        assert_eq!(first_object, object_id(&doc, *first_extrusion));
+        assert_eq!(second_object, object_id(&doc, *second_extrusion));
+        assert_ne!(first_object, original_object);
+        assert_ne!(second_object, original_object);
+        assert_ne!(first_object, second_object);
+        assert_eq!(
+            doc.object_members_for_entity(*first_face),
+            vec![*first_face, *first_extrusion]
+        );
+        assert_eq!(
+            doc.object_members_for_entity(*second_face),
+            vec![*second_face, *second_extrusion]
+        );
+    }
+
+    #[test]
+    fn object_members_fail_closed_for_unknown_or_hidden_seeds_and_skip_hidden_siblings() {
+        let mut doc = SketchDocument::new();
+        let first = doc
+            .add_entity_to_active(SketchEntityKind::Vertex { point: Vec3::ZERO })
+            .unwrap();
+        let second = doc
+            .add_entity_to_active(SketchEntityKind::Vertex { point: Vec3::X })
+            .unwrap();
+        let hidden = doc
+            .add_entity_to_active(SketchEntityKind::Vertex { point: Vec3::Y })
+            .unwrap();
+        for entity in [first, second, hidden] {
+            doc.set_entity_attribute(entity, "voxel_native", "object_id", "tree/one")
+                .unwrap();
+        }
+        let mut hidden_selection = SelectionSet::default();
+        hidden_selection.select(hidden);
+        doc.set_selection_visible(&hidden_selection, false, "Hide tree part")
+            .unwrap();
+
+        assert_eq!(doc.object_members_for_entity(first), vec![first, second]);
+        assert!(doc.object_members_for_entity(hidden).is_empty());
+        assert!(doc
+            .object_members_for_entity(SketchId::new_for_test(u64::MAX))
+            .is_empty());
+    }
+
+    #[test]
     fn selection_set_preserves_order_and_avoids_duplicates() {
         let a = SketchId::new_for_test(10);
         let b = SketchId::new_for_test(20);
@@ -6931,6 +7414,78 @@ mod tests {
         assert!(controller.selection().is_empty());
         assert!(controller.preview_generation() > generation_after_select);
         assert_eq!(controller.clear_selection(), SelectionUpdate::Ignored);
+    }
+
+    #[test]
+    fn restarting_select_exits_edit_object_and_restores_the_complete_object_selection() {
+        let members = [
+            SketchId::new_for_test(10),
+            SketchId::new_for_test(20),
+            SketchId::new_for_test(30),
+        ];
+        let mut controller = ToolController::default();
+        controller.activate(EditorToolId::Select);
+        controller.select_object_members(members, false);
+        assert!(matches!(
+            controller.enter_edit_object(),
+            SelectionUpdate::Selected(id) if id == members[0]
+        ));
+        let part_hit = HitRecord::new(members[1], [], HitKind::Face, Vec3::ZERO, 1.0);
+        controller.select_edit_part(&part_hit, false);
+
+        controller.restart_active_tool();
+
+        assert_eq!(controller.active_tool(), EditorToolId::Select);
+        assert!(!controller.edit_object_active());
+        assert_eq!(controller.selection().ordered(), &members);
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Idle);
+    }
+
+    #[test]
+    fn switching_from_select_exits_edit_object_and_restores_the_complete_object_selection() {
+        let members = [
+            SketchId::new_for_test(11),
+            SketchId::new_for_test(21),
+            SketchId::new_for_test(31),
+        ];
+        let mut controller = ToolController::default();
+        controller.activate(EditorToolId::Select);
+        controller.select_object_members(members, false);
+        controller.enter_edit_object();
+        let part_hit = HitRecord::new(members[2], [], HitKind::Face, Vec3::ZERO, 1.0);
+        controller.select_edit_part(&part_hit, false);
+
+        controller.activate(EditorToolId::Move);
+
+        assert_eq!(controller.active_tool(), EditorToolId::Move);
+        assert!(!controller.edit_object_active());
+        assert_eq!(controller.selection().ordered(), &members);
+    }
+
+    #[test]
+    fn clearing_selection_context_removes_part_selection_and_stale_edit_scope() {
+        let members = [SketchId::new_for_test(12), SketchId::new_for_test(22)];
+        let mut controller = ToolController::default();
+        controller.activate(EditorToolId::Select);
+        controller.select_object_members(members, false);
+        controller.enter_edit_object();
+        let part_hit = HitRecord::new(members[0], [], HitKind::Face, Vec3::ZERO, 1.0);
+        controller.select_edit_part(&part_hit, false);
+        assert!(controller.edit_object_active());
+        assert_eq!(controller.selection().ordered(), &[members[0]]);
+
+        assert_eq!(
+            controller.clear_selection_context(),
+            SelectionUpdate::Cleared
+        );
+        assert!(controller.selection().is_empty());
+        assert!(!controller.edit_object_active());
+        assert_eq!(controller.edit_object_members(), None);
+        assert_eq!(controller.tool_phase(), EditorToolPhase::Idle);
+        assert_eq!(
+            controller.clear_selection_context(),
+            SelectionUpdate::Ignored
+        );
     }
 
     #[test]

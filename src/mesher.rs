@@ -19,10 +19,12 @@ use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
 
 use crate::blocks::{
-    effective_material_for_voxel, material_is_custom, voxel_color, voxel_is_emissive,
-    voxel_is_opaque, BlockType, MaterialId, Voxel, AIR, DEFAULT_MATERIAL,
+    effective_material_for_voxel, material_is_custom, voxel_color_with_emission_budget,
+    voxel_is_emissive, voxel_is_opaque, BlockType, MaterialId, Voxel, AIR, DEFAULT_MATERIAL,
 };
 use crate::chunk::{ChunkPos, CHUNK_SIZE, CHUNK_SIZE_I};
+use crate::horizon::VirtualHorizonField;
+use crate::voxel_budget::EmissionBudget;
 
 /// Greedy-mesh a chunk into a Bevy `Mesh`. Positions are in world-space
 /// offset so the owning entity can sit at the origin.
@@ -225,6 +227,8 @@ pub fn build_mesh_ex<F: Fn(i32, i32, i32) -> Voxel>(
                             DEFAULT_MATERIAL,
                             current.positive,
                             current.ao,
+                            EmissionBudget::Balanced,
+                            None,
                         );
 
                         // Clear the consumed rectangle.
@@ -282,13 +286,27 @@ impl MeshBuffers {
     }
 }
 
-/// Greedy-mesh a chunk into one mesh per effective material id. This lets
-/// blocks in the same chunk use different repeating textures while preserving
-/// greedy merging inside each material bucket.
-pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
+/// Greedy-mesh a chunk into one mesh per effective material id. The budget
+/// changes shading work and HDR energy, never voxel topology.
+pub fn build_mesh_buckets_budgeted<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
     pos: ChunkPos,
     sample: F,
     compute_ao: bool,
+    emission_budget: EmissionBudget,
+) -> Vec<(MaterialId, Mesh)> {
+    build_mesh_buckets_budgeted_with_horizon(pos, sample, compute_ao, emission_budget, None)
+}
+
+/// Material-bucketed meshing with an optional macro-scale terrain horizon.
+///
+/// The horizon only modulates linear vertex colour. It does not change voxel
+/// topology, collision, material buckets, UVs, or the local AO contract.
+pub fn build_mesh_buckets_budgeted_with_horizon<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
+    pos: ChunkPos,
+    sample: F,
+    compute_ao: bool,
+    emission_budget: EmissionBudget,
+    horizon: Option<&VirtualHorizonField>,
 ) -> Vec<(MaterialId, Mesh)> {
     let (ox, oy, oz) = pos.origin();
 
@@ -437,6 +455,8 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
                             current.material,
                             current.positive,
                             current.ao,
+                            emission_budget,
+                            horizon,
                         );
 
                         for dv in 0..h {
@@ -485,6 +505,8 @@ fn emit_quad(
     material: MaterialId,
     positive: bool,
     ao: [u8; 4],
+    emission_budget: EmissionBudget,
+    horizon: Option<&VirtualHorizonField>,
 ) {
     // Four corners of the quad in chunk-local coordinates.
     let mut p00 = [0i32; 3];
@@ -529,62 +551,99 @@ fn emit_quad(
     // This changes only vertex data: topology, material buckets and draw-call
     // count remain identical. Custom and authored object materials retain
     // their original one-tile-per-block scale.
-    let [uv00, uv10, uv11, uv01] = world_uv_rect(
-        world_origin,
-        u,
-        v,
-        u0,
-        v0,
-        w,
-        h,
-        texture_world_scale(voxel, material),
-    );
+    let [uv00, uv10, uv11, uv01] =
+        material_world_uv_rect(world_origin, axis, u, v, u0, v0, w, h, voxel, material);
     if positive {
         uvs.extend_from_slice(&[uv00, uv10, uv11, uv01]);
     } else {
         uvs.extend_from_slice(&[uv00, uv01, uv11, uv10]);
     }
 
-    // AO -> brightness multiplier. 0 (deeply occluded) → dim; 3 (open
-    // air) → full colour. Combined with a face-light term below so
-    // chunky voxel silhouettes read like shaped objects, not flat tiles.
-    const AO_MUL: [f32; 4] = [0.48, 0.68, 0.86, 1.02];
-    let base_color = if material_is_custom(material) {
-        [1.0, 1.0, 1.0, 1.0]
-    } else {
-        voxel_color(voxel)
-    };
+    // AO -> brightness multiplier. The floor models indirect bounce instead
+    // of crushing creases to black. Foliage receives a softer curve because
+    // thin leaves transmit and scatter daylight through the crown.
+    // Voxel cliffs expose hundreds of alternating top/side strips. A deep AO
+    // floor may look dramatic on one cube, but at landscape scale it turns
+    // every one-block terrace into a black contour line. Keep contact depth
+    // readable while modelling the strong blue-sky bounce of an outdoor
+    // scene. Material texture and the virtual horizon still supply macro
+    // depth; this table only prevents creases from collapsing to ink.
+    const SOLID_AO_MUL: [f32; 4] = [0.76, 0.84, 0.93, 1.0];
+    const FOLIAGE_AO_MUL: [f32; 4] = [0.80, 0.87, 0.94, 1.0];
+    let base_color = terrain_vertex_base_color(voxel, material, emission_budget);
     // Emissive blocks (lava, crystal, alien moss, glow-sand, ice) are
     // treated as self-lit and ignore ambient occlusion — darkening them
-    // at crevices would kill the glow. The HDR values in `base_color`
-    // (> 1.0) bloom through the world camera's bloom pass.
+    // at crevices would kill the glow. Non-emissive built-ins stay neutral at
+    // vertex level because their baked texture already contains the designer
+    // albedo. Applying the block colour here as well squared that albedo in
+    // linear light, crushing forest floors and trunks into saturated shadow.
     let emissive = voxel_is_emissive(voxel);
-    let face_light = match (axis, positive) {
-        (1, true) => 1.12,  // top faces catch the sky
-        (1, false) => 0.58, // undersides stay grounded
-        (0, true) => 0.92,
-        (0, false) => 0.78,
-        (2, true) => 0.86,
-        _ => 0.74,
+    let foliage = matches!(
+        BlockType::from_voxel(voxel),
+        BlockType::Leaves
+            | BlockType::JungleLeaves
+            | BlockType::BlossomLeaves
+            | BlockType::SakuraPetals
+    );
+    let directional_face_light = match (axis, positive) {
+        (1, true) => 1.02,  // top faces catch sky without clipping pale terrain
+        (1, false) => 0.78, // undersides retain reflected ground light
+        (0, true) => 0.96,
+        (0, false) => 0.90,
+        (2, true) => 0.94,
+        _ => 0.88,
     };
-    let tint = |a: u8| -> [f32; 4] {
+    let face_light = if foliage {
+        // Wrapped diffuse is a cheap, temporally stable approximation of
+        // leaf transmission. Wind and collision remain independent.
+        0.35 + directional_face_light * 0.65
+    } else {
+        directional_face_light
+    };
+    let ao_mul = if foliage {
+        &FOLIAGE_AO_MUL
+    } else {
+        &SOLID_AO_MUL
+    };
+    let tint = |a: u8, local_position: [i32; 3]| -> [f32; 4] {
+        let world_position = [
+            world_origin[0] + local_position[0],
+            world_origin[1] + local_position[1],
+            world_origin[2] + local_position[2],
+        ];
+        let macro_light = if emissive || material_is_custom(material) {
+            1.0
+        } else {
+            horizon.map_or(1.0, |field| field.macro_light_multiplier(world_position))
+        };
         let m = if emissive {
             1.0
         } else {
-            AO_MUL[a as usize] * face_light
+            ao_mul[a as usize] * face_light * macro_light
         };
+        let chroma = natural_vertex_chromatic_tint(voxel, material, world_position);
         [
-            base_color[0] * m,
-            base_color[1] * m,
-            base_color[2] * m,
+            base_color[0] * m * chroma[0],
+            base_color[1] * m * chroma[1],
+            base_color[2] * m * chroma[2],
             base_color[3],
         ]
     };
     // Color order must match the position order chosen above.
     let (c_a, c_b, c_c, c_d) = if positive {
-        (tint(ao[0]), tint(ao[1]), tint(ao[2]), tint(ao[3]))
+        (
+            tint(ao[0], p00),
+            tint(ao[1], p10),
+            tint(ao[2], p11),
+            tint(ao[3], p01),
+        )
     } else {
-        (tint(ao[0]), tint(ao[3]), tint(ao[2]), tint(ao[1]))
+        (
+            tint(ao[0], p00),
+            tint(ao[3], p01),
+            tint(ao[2], p11),
+            tint(ao[1], p10),
+        )
     };
 
     let mut n = [0.0f32; 3];
@@ -604,6 +663,109 @@ fn emit_quad(
     ]);
 }
 
+/// Base vertex tint for a textured terrain material.
+///
+/// Procedural built-in swatches already encode the block's sRGB albedo. A
+/// neutral RGB tint prevents accidental double pigmentation, while keeping
+/// transparent voxel opacity in the vertex stream. Emissive vertices retain
+/// their bounded HDR gain so the existing bloom budget remains authoritative.
+#[inline]
+fn terrain_vertex_base_color(
+    voxel: Voxel,
+    material: MaterialId,
+    emission_budget: EmissionBudget,
+) -> [f32; 4] {
+    if material_is_custom(material) {
+        return [1.0, 1.0, 1.0, 1.0];
+    }
+    if voxel_is_emissive(voxel) {
+        return voxel_color_with_emission_budget(voxel, emission_budget);
+    }
+
+    // `BlockType::color` is an art-palette display colour, not a measured
+    // diffuse reflectance. Mapping it to 55% linear energy keeps pale stone
+    // below daylight clipping while preserving hue (unlike multiplying the
+    // RGB palette twice, which disproportionately crushed dark channels).
+    const BUILTIN_DIFFUSE_REFLECTANCE_GAIN: f32 = 0.55;
+    let alpha = BlockType::from_voxel(voxel).color().to_srgba().alpha;
+    [
+        BUILTIN_DIFFUSE_REFLECTANCE_GAIN,
+        BUILTIN_DIFFUSE_REFLECTANCE_GAIN,
+        BUILTIN_DIFFUSE_REFLECTANCE_GAIN,
+        alpha,
+    ]
+}
+
+/// Continuous world-space colour variation for natural canopy vertices.
+///
+/// Sampling the global vertex position (rather than a per-chunk hash) keeps
+/// adjoining chunks seam-free. Two broad bands describe stand/crown colour,
+/// while one lighter band nudges leaves between warm and cool greens. This is
+/// vertex data only: it adds no materials, draw calls, geometry, or simulation
+/// state and therefore stays independent from flight and collision physics.
+#[inline]
+fn natural_vertex_chromatic_tint(
+    voxel: Voxel,
+    material: MaterialId,
+    world_position: [i32; 3],
+) -> [f32; 3] {
+    if material_is_custom(material)
+        || !matches!(
+            BlockType::from_voxel(voxel),
+            BlockType::Leaves
+                | BlockType::JungleLeaves
+                | BlockType::BlossomLeaves
+                | BlockType::SakuraPetals
+        )
+    {
+        return [1.0; 3];
+    }
+
+    let x = world_position[0] as f32;
+    let y = world_position[1] as f32;
+    let z = world_position[2] as f32;
+    let stand = (x * 0.027 + z * 0.041).sin() + (x * 0.019 - z * 0.033).cos();
+    let crown = (x * 0.19 + y * 0.13 - z * 0.17).sin();
+    let warmth = (x * 0.011 - z * 0.015 + y * 0.007).sin();
+    let value = (1.01 + stand * 0.030 + crown * 0.018).clamp(0.91, 1.10);
+
+    [
+        value * (1.0 + warmth * 0.060),
+        value * (1.0 - warmth * 0.018),
+        value * (1.0 - warmth * 0.075),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn material_world_uv_rect(
+    world_origin: [i32; 3],
+    face_axis: usize,
+    u_axis: usize,
+    v_axis: usize,
+    u0: i32,
+    v0: i32,
+    width: i32,
+    height: i32,
+    voxel: Voxel,
+    material: MaterialId,
+) -> [[f32; 2]; 4] {
+    let scale = texture_world_scale(voxel, material);
+    let vertical_bark = !material_is_custom(material)
+        && face_axis == 0
+        && matches!(
+            BlockType::from_voxel(voxel),
+            BlockType::Wood | BlockType::Bamboo
+        );
+    if vertical_bark {
+        // X-facing quads normally map world Y to U. Swap their axes so the
+        // same bark texture maps world Y to V on both X- and Z-facing sides.
+        world_uv_rect(world_origin, v_axis, u_axis, v0, u0, height, width, scale)
+    } else {
+        world_uv_rect(world_origin, u_axis, v_axis, u0, v0, width, height, scale)
+    }
+}
+
 #[inline]
 fn texture_world_scale(voxel: Voxel, material: MaterialId) -> f32 {
     if material_is_custom(material) {
@@ -612,13 +774,18 @@ fn texture_world_scale(voxel: Voxel, material: MaterialId) -> f32 {
 
     match BlockType::from_voxel(voxel) {
         BlockType::Water => 0.125,
-        BlockType::Stone
-        | BlockType::Dirt
-        | BlockType::Grass
-        | BlockType::Sand
-        | BlockType::Snow
+        BlockType::Leaves
+        | BlockType::JungleLeaves
+        | BlockType::BlossomLeaves
+        | BlockType::SakuraPetals => 0.75,
+        BlockType::Grass
         | BlockType::TundraGrass
         | BlockType::SavannaGrass
+        | BlockType::AlienMoss => 0.375,
+        BlockType::Stone
+        | BlockType::Dirt
+        | BlockType::Sand
+        | BlockType::Snow
         | BlockType::Gravel
         | BlockType::Bedrock
         | BlockType::RedSand
@@ -627,7 +794,6 @@ fn texture_world_scale(voxel: Voxel, material: MaterialId) -> f32 {
         | BlockType::MossStone
         | BlockType::Limestone
         | BlockType::Basalt
-        | BlockType::AlienMoss
         | BlockType::BoneRock
         | BlockType::GlowSand => 0.25,
         _ => 1.0,
@@ -663,20 +829,212 @@ mod tests {
     use super::*;
     use crate::blocks::CUSTOM_MATERIAL_BASE;
 
+    fn quad_colors_with_horizon(
+        voxel: Voxel,
+        material: MaterialId,
+        horizon: Option<&VirtualHorizonField>,
+    ) -> Vec<[f32; 4]> {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut colors = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+        emit_quad(
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut uvs,
+            &mut indices,
+            [0, 0, 0],
+            1,
+            2,
+            0,
+            1,
+            4,
+            4,
+            4,
+            4,
+            voxel,
+            material,
+            true,
+            [3; 4],
+            EmissionBudget::Balanced,
+            horizon,
+        );
+        colors
+    }
+
+    fn quad_colors_for_face(axis: usize, positive: bool) -> Vec<[f32; 4]> {
+        let (u, v) = match axis {
+            0 => (1, 2),
+            1 => (2, 0),
+            _ => (0, 1),
+        };
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let mut colors = Vec::new();
+        let mut uvs = Vec::new();
+        let mut indices = Vec::new();
+        emit_quad(
+            &mut positions,
+            &mut normals,
+            &mut colors,
+            &mut uvs,
+            &mut indices,
+            [0, 0, 0],
+            axis,
+            u,
+            v,
+            1,
+            4,
+            4,
+            4,
+            4,
+            BlockType::Limestone as Voxel,
+            BlockType::Limestone as MaterialId,
+            positive,
+            [3; 4],
+            EmissionBudget::Balanced,
+            None,
+        );
+        colors
+    }
+
+    #[test]
+    fn outdoor_face_fill_prevents_voxel_cliffs_from_becoming_black_contours() {
+        let luminance = |colors: &[[f32; 4]]| {
+            let color = colors[0];
+            color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722
+        };
+        let top = luminance(&quad_colors_for_face(1, true));
+        let darkest_side = (0..3)
+            .flat_map(|axis| [false, true].map(move |positive| (axis, positive)))
+            .filter(|&(axis, positive)| axis != 1 || !positive)
+            .map(|(axis, positive)| luminance(&quad_colors_for_face(axis, positive)))
+            .fold(f32::INFINITY, f32::min);
+
+        assert!(darkest_side < top, "directional form must remain visible");
+        assert!(
+            darkest_side >= top * 0.75,
+            "one-block terraces must retain enough sky fill: side={darkest_side:.3}, top={top:.3}"
+        );
+    }
+
+    #[test]
+    fn virtual_horizon_adds_restrained_linear_macro_depth_without_mutating_overrides() {
+        let flat = VirtualHorizonField::build(ChunkPos::new(0, 0, 0), |_, _| 0);
+        let enclosed = VirtualHorizonField::build(ChunkPos::new(0, 0, 0), |x, z| {
+            if matches!((x, z), (0, 0) | (16, 0) | (0, 16) | (16, 16)) {
+                0
+            } else {
+                64
+            }
+        });
+        let stone = BlockType::Stone as Voxel;
+        let stone_material = BlockType::Stone as MaterialId;
+        let flat_colors = quad_colors_with_horizon(stone, stone_material, Some(&flat));
+        let enclosed_colors = quad_colors_with_horizon(stone, stone_material, Some(&enclosed));
+        let luminance = |colors: &[[f32; 4]]| {
+            colors
+                .iter()
+                .map(|color| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722)
+                .sum::<f32>()
+        };
+        assert!(luminance(&enclosed_colors) < luminance(&flat_colors));
+        assert!(luminance(&enclosed_colors) > luminance(&flat_colors) * 0.80);
+
+        let custom_without = quad_colors_with_horizon(stone, CUSTOM_MATERIAL_BASE, None);
+        let custom_with = quad_colors_with_horizon(stone, CUSTOM_MATERIAL_BASE, Some(&enclosed));
+        assert_eq!(custom_without, custom_with, "designer overrides stay exact");
+
+        let lava = BlockType::Lava as Voxel;
+        let lava_material = BlockType::Lava as MaterialId;
+        let emissive_without = quad_colors_with_horizon(lava, lava_material, None);
+        let emissive_with = quad_colors_with_horizon(lava, lava_material, Some(&enclosed));
+        assert_eq!(
+            emissive_without, emissive_with,
+            "self-lit voxels stay self-lit"
+        );
+    }
+
     #[test]
     fn natural_terrain_uvs_are_coarser_than_authored_materials() {
         let grass = texture_world_scale(BlockType::Grass as Voxel, BlockType::Grass as MaterialId);
         let water = texture_world_scale(BlockType::Water as Voxel, BlockType::Water as MaterialId);
+        let leaves =
+            texture_world_scale(BlockType::Leaves as Voxel, BlockType::Leaves as MaterialId);
         let roof = texture_world_scale(
             BlockType::RoofTile as Voxel,
             BlockType::RoofTile as MaterialId,
         );
         let custom = texture_world_scale(BlockType::Grass as Voxel, CUSTOM_MATERIAL_BASE);
 
-        assert_eq!(grass, 0.25);
+        assert_eq!(grass, 0.375);
         assert_eq!(water, 0.125);
+        assert_eq!(leaves, 0.75);
         assert_eq!(roof, 1.0);
         assert_eq!(custom, 1.0);
+    }
+
+    #[test]
+    fn textured_non_emissive_materials_use_neutral_reflectance_not_squared_albedo() {
+        let grass = terrain_vertex_base_color(
+            BlockType::Grass as Voxel,
+            BlockType::Grass as MaterialId,
+            EmissionBudget::Balanced,
+        );
+        assert_eq!(grass, [0.55, 0.55, 0.55, 1.0]);
+
+        let water = terrain_vertex_base_color(
+            BlockType::Water as Voxel,
+            BlockType::Water as MaterialId,
+            EmissionBudget::Balanced,
+        );
+        assert_eq!(&water[..3], &[0.55, 0.55, 0.55]);
+        assert!((water[3] - 0.72).abs() < 1e-6);
+
+        assert_eq!(
+            terrain_vertex_base_color(
+                BlockType::Grass as Voxel,
+                CUSTOM_MATERIAL_BASE,
+                EmissionBudget::Balanced,
+            ),
+            [1.0, 1.0, 1.0, 1.0],
+        );
+
+        let lava = terrain_vertex_base_color(
+            BlockType::Lava as Voxel,
+            BlockType::Lava as MaterialId,
+            EmissionBudget::Balanced,
+        );
+        assert_ne!(&lava[..3], &[1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn canopy_chromatic_variation_is_seam_free_bounded_and_override_safe() {
+        let leaf = BlockType::Leaves as Voxel;
+        let material = BlockType::Leaves as MaterialId;
+        let shared_vertex = [CHUNK_SIZE_I, 17, -9];
+        let first = natural_vertex_chromatic_tint(leaf, material, shared_vertex);
+        let repeated = natural_vertex_chromatic_tint(leaf, material, shared_vertex);
+        assert_eq!(first, repeated, "global vertex samples must replay exactly");
+        assert!(first.iter().all(|channel| (0.80..=1.15).contains(channel)));
+
+        let distant = natural_vertex_chromatic_tint(leaf, material, [73, 29, 41]);
+        assert_ne!(first, distant, "separate crowns should not share one tint");
+        assert_eq!(
+            natural_vertex_chromatic_tint(leaf, CUSTOM_MATERIAL_BASE, shared_vertex),
+            [1.0; 3],
+            "authored material overrides keep their exact designer colour"
+        );
+        assert_eq!(
+            natural_vertex_chromatic_tint(
+                BlockType::Stone as Voxel,
+                BlockType::Stone as MaterialId,
+                shared_vertex,
+            ),
+            [1.0; 3],
+        );
     }
 
     #[test]
@@ -695,5 +1053,24 @@ mod tests {
 
         assert_eq!(left[1], right[0]);
         assert_eq!(left[2], right[3]);
+    }
+
+    #[test]
+    fn natural_bark_keeps_world_height_on_the_same_texture_axis() {
+        let wood = BlockType::Wood as Voxel;
+        let material = BlockType::Wood as MaterialId;
+        let x_facing = material_world_uv_rect([0, 0, 0], 0, 1, 2, 4, 6, 3, 2, wood, material);
+        let z_facing = material_world_uv_rect([0, 0, 0], 2, 0, 1, 6, 4, 2, 3, wood, material);
+
+        assert_eq!(x_facing, z_facing);
+        assert_eq!(x_facing, [[6.0, 4.0], [8.0, 4.0], [8.0, 7.0], [6.0, 7.0]]);
+
+        let authored =
+            material_world_uv_rect([0, 0, 0], 0, 1, 2, 4, 6, 3, 2, wood, CUSTOM_MATERIAL_BASE);
+        assert_eq!(
+            authored,
+            [[4.0, 6.0], [7.0, 6.0], [7.0, 8.0], [4.0, 8.0]],
+            "custom designer materials keep their original UV contract"
+        );
     }
 }

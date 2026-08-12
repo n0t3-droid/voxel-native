@@ -163,7 +163,7 @@ pub struct LayoutTokens {
     pub tab_height: f32,
     pub icon_square_size: f32,
     pub loading_indicator_size: f32,
-    pub orbit_pulse_size: f32,
+    pub signal_reactor_size: f32,
     pub press_depth: f32,
 }
 
@@ -175,7 +175,7 @@ pub const KANSO_LAYOUT: LayoutTokens = LayoutTokens {
     tab_height: 34.0,
     icon_square_size: 36.0,
     loading_indicator_size: 24.0,
-    orbit_pulse_size: 32.0,
+    signal_reactor_size: 32.0,
     press_depth: 0.75,
 };
 
@@ -218,10 +218,11 @@ impl MotionRole {
 
 const REDUCED_MOTION_ID: &str = "r93g_kanso_reduced_motion";
 const LOW_SPEC_MOTION_ID: &str = "r93g_kanso_low_spec_motion";
+const LOW_SPEC_MOTION_SCALE: f32 = 0.58;
 
 /// Effective UI motion budget. Full motion uses finite transitions and may run
-/// explicitly scheduled ambient indicators. Low-spec and reduced motion both
-/// snap every transition; reduced motion still takes preference semantically.
+/// explicitly scheduled ambient indicators. Low-spec keeps shorter finite
+/// transitions but never runs ambient loops. Reduced motion snaps everything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MotionProfile {
     Full,
@@ -233,7 +234,8 @@ impl MotionProfile {
     pub const fn seconds(self, role: MotionRole) -> f32 {
         match self {
             Self::Full => role.seconds(),
-            Self::LowSpec | Self::Reduced => 0.0,
+            Self::LowSpec => role.seconds() * LOW_SPEC_MOTION_SCALE,
+            Self::Reduced => 0.0,
         }
     }
 
@@ -269,7 +271,7 @@ pub fn set_motion_preferences(ctx: &egui::Context, reduced: bool, low_spec: bool
     ctx.style_mut(|style| {
         style.animation_time = profile.seconds(MotionRole::Feedback);
     });
-    if !matches!(profile, MotionProfile::Full) {
+    if matches!(profile, MotionProfile::Reduced) {
         ctx.clear_animations();
     }
 }
@@ -280,8 +282,8 @@ pub fn set_reduced_motion(ctx: &egui::Context, reduced: bool) {
     set_motion_preferences(ctx, reduced, prefers_low_spec(ctx));
 }
 
-/// Freeze all UI motion for low-spec rendering. Runtime-profile owners can
-/// call this alongside [`set_reduced_motion`].
+/// Apply the low-spec motion budget: short finite transitions without any
+/// continuously repainted ambient effects.
 pub fn set_low_spec_motion(ctx: &egui::Context, low_spec: bool) {
     set_motion_preferences(ctx, prefers_reduced_motion(ctx), low_spec);
 }
@@ -319,8 +321,8 @@ pub fn motion_seconds(ctx: &egui::Context, role: MotionRole) -> f32 {
     motion_profile(ctx).seconds(role)
 }
 
-/// Animate a boolean only until it reaches its target. Static profiles snap
-/// immediately and do not enqueue repaint requests.
+/// Animate a boolean only until it reaches its target. Reduced motion snaps
+/// immediately; low-spec uses a shorter finite transition.
 pub fn animate_bool_finite(
     ctx: &egui::Context,
     id: egui::Id,
@@ -328,7 +330,7 @@ pub fn animate_bool_finite(
     role: MotionRole,
 ) -> f32 {
     let duration = motion_seconds(ctx, role);
-    if duration <= f32::EPSILON {
+    let amount = if duration <= f32::EPSILON {
         if target {
             1.0
         } else {
@@ -336,6 +338,14 @@ pub fn animate_bool_finite(
         }
     } else {
         ctx.animate_bool_with_time_and_easing(id, target, duration, kanso_ease_out)
+    };
+
+    if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else if target {
+        1.0
+    } else {
+        0.0
     }
 }
 
@@ -680,7 +690,6 @@ pub fn draw_theme_preview_card(
     ui: &mut egui::Ui,
     preset: &ThemePreset,
     selected: bool,
-    _time: f32,
 ) -> egui::Response {
     let desired = egui::vec2(188.0, 108.0);
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
@@ -806,28 +815,58 @@ pub fn draw_theme_preview_card(
         egui::Stroke::new(1.4, accent),
     );
 
-    let orb_center = egui::pos2(card.right() - 38.0, card.top() + 34.0);
-    painter.circle_filled(
-        orb_center,
-        20.0 + hover,
-        colors.selected.linear_multiply(0.75),
-    );
-    painter.circle_stroke(
-        orb_center,
-        24.0 + hover * 2.0,
-        egui::Stroke::new(1.0, accent),
-    );
+    let sigil_center = egui::pos2(card.right() - 38.0, card.top() + 34.0);
+    let sigil_scale = 1.0 + hover * 0.025;
+    for (layer, radius) in [22.0_f32, 15.0, 8.0].into_iter().enumerate() {
+        let rotation = std::f32::consts::FRAC_PI_4 + layer as f32 * 0.18;
+        let points = (0..4)
+            .map(|corner| {
+                let angle = rotation + corner as f32 * std::f32::consts::FRAC_PI_2;
+                sigil_center + egui::vec2(angle.cos(), angle.sin()) * radius * sigil_scale
+            })
+            .collect();
+        painter.add(egui::Shape::closed_line(
+            points,
+            egui::Stroke::new(
+                0.8 + layer as f32 * 0.25,
+                mix_rgb(accent, colors.focus, layer as f32 * 0.24),
+            ),
+        ));
+    }
+    for tick in 0..8 {
+        let angle = tick as f32 * std::f32::consts::TAU / 8.0;
+        let direction = egui::vec2(angle.cos(), angle.sin());
+        painter.line_segment(
+            [
+                sigil_center + direction * 24.0,
+                sigil_center + direction * (27.0 + hover),
+            ],
+            egui::Stroke::new(0.8, colors.outline_hover),
+        );
+    }
 
-    // Fixed signal points keep the preview distinctive without ambient motion.
+    // Fixed cross marks keep the preview distinctive without ambient motion.
     for i in 0..9 {
         let x_step = ((i * 37 + 11) % 97) as f32 / 96.0;
         let y_step = ((i * 53 + 17) % 89) as f32 / 88.0;
         let x = card.left() + 12.0 + x_step * (card.width() - 24.0);
         let y = card.top() + 10.0 + y_step * (card.height() - 28.0);
-        painter.circle_filled(
-            egui::pos2(x, y),
-            1.25 + (i % 3) as f32 * 0.25,
-            preset.color.primary().linear_multiply(0.58),
+        let center = egui::pos2(x, y);
+        let extent = 1.5 + (i % 3) as f32 * 0.35;
+        let stroke = egui::Stroke::new(0.8, preset.color.primary().linear_multiply(0.58));
+        painter.line_segment(
+            [
+                center - egui::vec2(extent, 0.0),
+                center + egui::vec2(extent, 0.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                center - egui::vec2(0.0, extent),
+                center + egui::vec2(0.0, extent),
+            ],
+            stroke,
         );
     }
 
@@ -1369,6 +1408,40 @@ mod tests {
     }
 
     #[test]
+    fn shared_boolean_animation_always_returns_a_finite_unit_amount() {
+        let ctx = egui::Context::default();
+        for (reduced_motion, low_spec_motion) in [(false, false), (false, true), (true, false)] {
+            set_motion_preferences(&ctx, reduced_motion, low_spec_motion);
+            for (role_index, role) in [
+                MotionRole::Press,
+                MotionRole::Feedback,
+                MotionRole::State,
+                MotionRole::Panel,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for target in [false, true] {
+                    let amount = animate_bool_finite(
+                        &ctx,
+                        egui::Id::new((
+                            "finite_motion",
+                            reduced_motion,
+                            low_spec_motion,
+                            role_index,
+                            target,
+                        )),
+                        target,
+                        role,
+                    );
+                    assert!(amount.is_finite());
+                    assert!((0.0..=1.0).contains(&amount));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn reduced_motion_snaps_shared_transitions() {
         let ctx = egui::Context::default();
         set_reduced_motion(&ctx, true);
@@ -1393,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn low_spec_and_reduced_motion_are_deterministically_static() {
+    fn low_spec_uses_short_finite_transitions_while_reduced_is_static() {
         let ctx = egui::Context::default();
         set_motion_preferences(&ctx, false, false);
         set_low_spec_motion(&ctx, true);
@@ -1407,22 +1480,25 @@ mod tests {
             MotionRole::State,
             MotionRole::Panel,
         ] {
-            assert_eq!(motion_seconds(&ctx, role), 0.0);
+            let seconds = motion_seconds(&ctx, role);
+            assert!(seconds > 0.0);
+            assert!(seconds < role.seconds());
+            assert!((seconds - role.seconds() * LOW_SPEC_MOTION_SCALE).abs() <= f32::EPSILON);
         }
-        assert_eq!(ctx.style().animation_time, 0.0);
-        assert_eq!(
-            animate_bool_finite(&ctx, egui::Id::new("low_spec_on"), true, MotionRole::State),
-            1.0
+        assert!(
+            (ctx.style().animation_time - KANSO_MOTION.feedback_seconds * LOW_SPEC_MOTION_SCALE)
+                .abs()
+                <= f32::EPSILON
         );
-        assert_eq!(
-            animate_bool_finite(
-                &ctx,
-                egui::Id::new("low_spec_off"),
-                false,
-                MotionRole::State,
-            ),
-            0.0
+        let on = animate_bool_finite(&ctx, egui::Id::new("low_spec_on"), true, MotionRole::State);
+        let off = animate_bool_finite(
+            &ctx,
+            egui::Id::new("low_spec_off"),
+            false,
+            MotionRole::State,
         );
+        assert!((0.0..=1.0).contains(&on));
+        assert!((0.0..=1.0).contains(&off));
         assert!(!allows_continuous_motion(&ctx));
 
         set_reduced_motion(&ctx, true);
@@ -1479,7 +1555,7 @@ mod tests {
         assert!(KANSO_LAYOUT.tab_min_width < KANSO_LAYOUT.tab_max_width);
         assert!(KANSO_LAYOUT.tab_height > 0.0);
         assert!(KANSO_LAYOUT.loading_indicator_size > 0.0);
-        assert!(KANSO_LAYOUT.orbit_pulse_size >= KANSO_LAYOUT.loading_indicator_size);
+        assert!(KANSO_LAYOUT.signal_reactor_size >= KANSO_LAYOUT.loading_indicator_size);
         assert!(KANSO_LAYOUT.press_depth < KANSO_VISUALS.hover_lift);
         assert!(KANSO_VISUALS.neon_glow_width > KANSO_VISUALS.focus_width);
         assert!(KANSO_VISUALS.neon_glow_gap > 0.0);

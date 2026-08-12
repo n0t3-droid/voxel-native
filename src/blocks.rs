@@ -7,6 +7,8 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::voxel_budget::EmissionBudget;
+
 /// Packed voxel value. `0` = air; everything else is a block id.
 /// `u16` gives plenty of room for future blocks without another migration.
 pub type Voxel = u16;
@@ -167,6 +169,7 @@ impl BlockType {
                 | BlockType::Leaves
                 | BlockType::JungleLeaves
                 | BlockType::BlossomLeaves
+                | BlockType::SakuraPetals
                 | BlockType::Ice
                 | BlockType::CockpitGlass
                 | BlockType::ShojiPaper
@@ -184,8 +187,6 @@ impl BlockType {
             self,
             BlockType::Lava
                 | BlockType::Crystal
-                | BlockType::AlienMoss
-                | BlockType::GlowSand
                 | BlockType::NeonCyan
                 | BlockType::NeonMagenta
                 | BlockType::NeonAmber
@@ -204,16 +205,20 @@ impl BlockType {
             BlockType::Air => Color::NONE,
             BlockType::Stone => Color::srgb(0.42, 0.43, 0.42),
             BlockType::Dirt => Color::srgb(0.38, 0.25, 0.16),
-            BlockType::Grass => Color::srgb(0.21, 0.48, 0.22),
-            BlockType::Sand => Color::srgb(0.86, 0.78, 0.56),
-            // Turquoise energy-water read (concept underground river).
-            BlockType::Water => Color::srgba(0.06, 0.78, 0.92, 0.62),
-            BlockType::Wood => Color::srgb(0.48, 0.31, 0.18),
-            BlockType::Leaves => Color::srgb(0.16, 0.43, 0.20),
-            BlockType::Snow => Color::srgb(0.96, 0.97, 0.99),
+            // Warm meadow green keeps the ground distinct from the cooler
+            // tree canopy. The previous almost-pure green collapsed a whole
+            // forest into one saturated plane at flight distance.
+            BlockType::Grass => Color::srgb(0.32, 0.42, 0.24),
+            BlockType::Sand => Color::srgb(0.73, 0.65, 0.46),
+            // Clear mineral water: saturated enough to read from flight, but
+            // no longer clips to electric cyan under the noon key light.
+            BlockType::Water => Color::srgba(0.08, 0.50, 0.62, 0.72),
+            BlockType::Wood => Color::srgb(0.38, 0.26, 0.16),
+            BlockType::Leaves => Color::srgb(0.25, 0.42, 0.27),
+            BlockType::Snow => Color::srgb(0.90, 0.92, 0.95),
             BlockType::Ice => Color::srgba(0.70, 0.88, 0.98, 0.85),
             BlockType::TundraGrass => Color::srgb(0.62, 0.76, 0.55),
-            BlockType::JungleLeaves => Color::srgb(0.12, 0.50, 0.23),
+            BlockType::JungleLeaves => Color::srgb(0.24, 0.40, 0.30),
             BlockType::SavannaGrass => Color::srgb(0.58, 0.54, 0.28),
             BlockType::Gravel => Color::srgb(0.45, 0.44, 0.43),
             BlockType::Bedrock => Color::srgb(0.12, 0.12, 0.14),
@@ -223,10 +228,13 @@ impl BlockType {
             BlockType::RedStone => Color::srgb(0.76, 0.32, 0.20),
             // Pale yellow mesa cap, the bright stripe between reds.
             BlockType::MesaClay => Color::srgb(0.94, 0.76, 0.48),
-            // Dark mossy limestone — wet karst pillar bodies.
-            BlockType::MossStone => Color::srgb(0.30, 0.40, 0.30),
-            // Bright pale limestone — sun-lit karst sides.
-            BlockType::Limestone => Color::srgb(0.76, 0.74, 0.66),
+            // Mossy limestone is still rock: a muted slate/olive midtone
+            // keeps it separate from living foliage at eye level.
+            BlockType::MossStone => Color::srgb(0.35, 0.39, 0.31),
+            // Warm weathered limestone. The former near-white albedo clipped
+            // under the daylight key and turned whole karst valleys into an
+            // empty white plane, erasing their shape.
+            BlockType::Limestone => Color::srgb(0.59, 0.57, 0.51),
             // Alien crystal — saturated cyan-violet, slightly translucent.
             BlockType::Crystal => Color::srgba(0.18, 0.72, 1.00, 0.70),
             // Volcanic basalt — dark, but not unreadable black. Keeping
@@ -252,10 +260,10 @@ impl BlockType {
             BlockType::LuminiteCrystal => Color::srgba(0.12, 0.82, 1.00, 0.68),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
-            BlockType::BlossomLeaves => Color::srgba(1.0, 0.66, 0.82, 0.86),
+            BlockType::BlossomLeaves => Color::srgba(0.88, 0.52, 0.67, 0.90),
             BlockType::ZenStone => Color::srgb(0.68, 0.68, 0.62),
             BlockType::Bamboo => Color::srgb(0.47, 0.68, 0.26),
-            BlockType::SakuraPetals => Color::srgba(1.00, 0.54, 0.72, 0.78),
+            BlockType::SakuraPetals => Color::srgba(0.88, 0.48, 0.62, 0.86),
             BlockType::ShojiPaper => Color::srgba(1.00, 0.88, 0.68, 0.70),
             BlockType::RoofTile => Color::srgb(0.10, 0.13, 0.16),
             BlockType::TatamiMat => Color::srgb(0.72, 0.62, 0.34),
@@ -734,13 +742,14 @@ pub fn voxel_is_weapon_target(v: Voxel) -> bool {
 
 /// Fast voxel → opaque? (used for face-culling).
 /// Air (0), water (5), leaves (7), ice (9), jungle leaves (11),
-/// blossom leaves (36), shoji paper (40), neon glass (43), crystal (20),
-/// lava (22), cockpit (28), luminite/iridium glass are non-opaque.
+/// blossom leaves (36), sakura petals (39), shoji paper (40), neon glass
+/// (43), crystal (20), lava (22), cockpit (28), luminite/iridium glass are
+/// non-opaque.
 #[inline]
 pub fn voxel_is_opaque(v: Voxel) -> bool {
     !matches!(
         v,
-        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 36 | 40 | 43
+        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 36 | 39 | 40 | 43
     )
 }
 
@@ -753,14 +762,21 @@ pub fn voxel_is_emissive(v: Voxel) -> bool {
     // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35,
     // NeonGlass=43, ShojiLamp=44, Ice=9.
     // Ice gets a whisper of glow so glacier biomes shimmer at night.
-    matches!(
-        v,
-        9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 43 | 44
-    )
+    matches!(v, 20 | 22 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 43 | 44)
 }
 
 #[inline]
 pub fn voxel_color(v: Voxel) -> [f32; 4] {
+    voxel_color_with_emission_budget(v, EmissionBudget::Balanced)
+}
+
+/// Resolve a linear vertex color under an explicit HDR budget.
+///
+/// Atmospheric color and scene emission are separate concepts. Actual
+/// emitters receive their material gain, then one hue-preserving scale clamps
+/// both peak channel and Rec.709 luminance.
+#[inline]
+pub fn voxel_color_with_emission_budget(v: Voxel, emission_budget: EmissionBudget) -> [f32; 4] {
     // Convert the block's designer sRGB colour to linear and then, for
     // emissive blocks, multiply the linear RGB by a generous scalar so
     // values exceed 1.0. With the world camera running HDR + bloom,
@@ -768,6 +784,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
     // crystal, alien moss and glow-sand a true neon halo without any
     // custom shader work.
     let mut c = BlockType::from_voxel(v).color().to_linear().to_f32_array();
+    if !voxel_is_emissive(v) {
+        return c;
+    }
     match v {
         5 => {
             // Water — soft turquoise bloom (concept energy river / cavern pool).
@@ -860,6 +879,15 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         }
         _ => {}
     }
+
+    let peak = c[0].max(c[1]).max(c[2]);
+    let luminance = c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;
+    let peak_scale = emission_budget.max_peak_channel() / peak.max(f32::EPSILON);
+    let luminance_scale = emission_budget.max_luminance() / luminance.max(f32::EPSILON);
+    let scale = peak_scale.min(luminance_scale).min(1.0);
+    c[0] *= scale;
+    c[1] *= scale;
+    c[2] *= scale;
     c
 }
 
@@ -901,6 +929,14 @@ mod tests {
                 !voxel_is_solid(block.into()),
                 "{block:?} should be non-solid in the fast collision path"
             );
+            assert!(
+                !block.is_opaque(),
+                "{block:?} should not occlude a neighbouring natural material like stone"
+            );
+            assert!(
+                !voxel_is_opaque(block.into()),
+                "{block:?} should also be non-opaque in the fast meshing path"
+            );
         }
     }
 
@@ -922,6 +958,55 @@ mod tests {
             jungle[1] >= 0.13,
             "jungle/bonsai leaves need a visible midtone under fog and dusk light"
         );
+        let canopy_distance = grass[..3]
+            .iter()
+            .zip(&leaves[..3])
+            .map(|(ground, canopy)| (ground - canopy).powi(2))
+            .sum::<f32>();
+        assert!(
+            canopy_distance > 0.001,
+            "grass and tree crowns need separate colour planes at flight distance"
+        );
+        for (label, color) in [("leaves", leaves), ("jungle", jungle)] {
+            let green_dominance = color[1] / (color[0] + color[2]).max(1e-5);
+            assert!(
+                green_dominance < 2.5,
+                "{label} is too spectrally narrow and will read as neon green"
+            );
+        }
+    }
+
+    #[test]
+    fn atmospheric_terrain_blocks_do_not_emit_light() {
+        for block in [
+            BlockType::Water,
+            BlockType::Ice,
+            BlockType::AlienMoss,
+            BlockType::GlowSand,
+        ] {
+            let voxel = block.into();
+            let color = voxel_color_with_emission_budget(voxel, EmissionBudget::Cinematic);
+            assert!(!voxel_is_emissive(voxel), "{block:?} must receive AO");
+            assert!(
+                color[..3].iter().all(|channel| *channel <= 1.0),
+                "{block:?} unexpectedly contains HDR terrain color: {color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn emissive_color_is_bounded_and_monotonic_across_profiles() {
+        let voxel = BlockType::LuminiteCrystal.into();
+        let low = voxel_color_with_emission_budget(voxel, EmissionBudget::Low);
+        let balanced = voxel_color_with_emission_budget(voxel, EmissionBudget::Balanced);
+        let cinematic = voxel_color_with_emission_budget(voxel, EmissionBudget::Cinematic);
+
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        assert!(luminance(low) <= EmissionBudget::Low.max_luminance() + 1e-5);
+        assert!(luminance(balanced) <= EmissionBudget::Balanced.max_luminance() + 1e-5);
+        assert!(luminance(cinematic) <= EmissionBudget::Cinematic.max_luminance() + 1e-5);
+        assert!(luminance(low) <= luminance(balanced));
+        assert!(luminance(balanced) <= luminance(cinematic));
     }
 
     #[test]

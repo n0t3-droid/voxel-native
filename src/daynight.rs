@@ -8,7 +8,7 @@ use bevy::prelude::*;
 
 use crate::neurocore::RuntimeProfile;
 use crate::player::Player;
-use crate::settings::{GraphicsMode, TimeMode, WorldSettings};
+use crate::settings::{GraphicsMode, TimeMode, WorldProfile, WorldSettings};
 use crate::terrain::Biome;
 use crate::world::VoxelWorld;
 
@@ -360,6 +360,47 @@ struct LightingQuality {
     fog_scatter_exponent: f32,
 }
 
+/// Profile-level lighting separation, expressed as display-referred sRGB and
+/// converted exactly once before linear-light mixing. Natural preserves the
+/// established palette; Astral uses a warmer key and cooler fill so voxel
+/// faces gain shape without depending on expensive dynamic shadow maps.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WorldLightingPalette {
+    moon_key_srgb: Vec3,
+    twilight_key_srgb: Vec3,
+    daylight_key_srgb: Vec3,
+    night_fill_srgb: Vec3,
+    twilight_fill_srgb: Vec3,
+    daylight_fill_srgb: Vec3,
+    ambient_brightness_scale: f32,
+}
+
+fn world_lighting_palette(profile: WorldProfile) -> WorldLightingPalette {
+    match profile {
+        WorldProfile::Natural => WorldLightingPalette {
+            moon_key_srgb: Vec3::new(0.58, 0.68, 0.92),
+            twilight_key_srgb: Vec3::new(1.0, 0.58, 0.34),
+            daylight_key_srgb: Vec3::new(1.0, 0.93, 0.82),
+            night_fill_srgb: Vec3::new(0.31, 0.36, 0.52),
+            twilight_fill_srgb: Vec3::new(0.70, 0.47, 0.42),
+            daylight_fill_srgb: Vec3::new(0.72, 0.85, 1.0),
+            ambient_brightness_scale: 1.0,
+        },
+        WorldProfile::AstralFrontier => WorldLightingPalette {
+            moon_key_srgb: Vec3::new(0.46, 0.62, 1.0),
+            twilight_key_srgb: Vec3::new(1.0, 0.48, 0.30),
+            daylight_key_srgb: Vec3::new(1.0, 0.85, 0.70),
+            night_fill_srgb: Vec3::new(0.22, 0.26, 0.50),
+            twilight_fill_srgb: Vec3::new(0.58, 0.35, 0.52),
+            daylight_fill_srgb: Vec3::new(0.48, 0.68, 1.0),
+            // QA showed bright but nearly directionless terrain. Keeping the
+            // fill at 96% of the Natural exposure restores a warm-key/cool-
+            // fill ratio while remaining above the readability floor.
+            ambient_brightness_scale: 0.96,
+        },
+    }
+}
+
 fn lighting_quality(profile: RuntimeProfile, graphics: GraphicsMode) -> LightingQuality {
     let tier = match profile {
         RuntimeProfile::LowSpec => GraphicsMode::Fast,
@@ -377,8 +418,8 @@ fn lighting_quality(profile: RuntimeProfile, graphics: GraphicsMode) -> Lighting
             twilight_illuminance: 9_200.0,
             noon_illuminance: 22_000.0,
             night_ambient: 1_020.0,
-            twilight_ambient: 1_380.0,
-            noon_ambient: 1_680.0,
+            twilight_ambient: 1_820.0,
+            noon_ambient: 2_620.0,
             fog_scatter_exponent: 56.0,
         },
         GraphicsMode::Balanced => LightingQuality {
@@ -386,8 +427,8 @@ fn lighting_quality(profile: RuntimeProfile, graphics: GraphicsMode) -> Lighting
             twilight_illuminance: 10_600.0,
             noon_illuminance: 25_500.0,
             night_ambient: 1_160.0,
-            twilight_ambient: 1_540.0,
-            noon_ambient: 1_900.0,
+            twilight_ambient: 2_060.0,
+            noon_ambient: 3_020.0,
             fog_scatter_exponent: 40.0,
         },
         GraphicsMode::High => LightingQuality {
@@ -395,8 +436,8 @@ fn lighting_quality(profile: RuntimeProfile, graphics: GraphicsMode) -> Lighting
             twilight_illuminance: 12_000.0,
             noon_illuminance: 29_000.0,
             night_ambient: 1_260.0,
-            twilight_ambient: 1_680.0,
-            noon_ambient: 2_080.0,
+            twilight_ambient: 2_280.0,
+            noon_ambient: 3_420.0,
             fog_scatter_exponent: 30.0,
         },
     }
@@ -431,29 +472,67 @@ fn update_sun(
     // Day factor 0..1 where 1 = high noon, 0 = deep night.
     let solar = SolarBlend::for_elevation_sine(sun_dir.y);
     let quality = lighting_quality(settings.runtime_profile, settings.graphics);
+    let world_profile = settings.effective_world_profile();
+    let palette = world_lighting_palette(world_profile);
     sun_light.illuminance = sun_illuminance_for_conditions(sun_dir.y, solar, quality);
     moon_light.illuminance = moon_illuminance_for_conditions(solar, quality);
     // Warm sun, cool moon — the cinematic directional tint that
     // gives grass its golden rim at dusk and a silvery wash at night.
-    let moon_key = Color::srgb(0.58, 0.68, 0.92).to_linear();
-    let twilight_key = Color::srgb(1.0, 0.58, 0.34).to_linear();
-    let daylight_key = Color::srgb(1.0, 0.93, 0.82).to_linear();
+    let moon_key = Color::srgb(
+        palette.moon_key_srgb.x,
+        palette.moon_key_srgb.y,
+        palette.moon_key_srgb.z,
+    )
+    .to_linear();
+    let twilight_key = Color::srgb(
+        palette.twilight_key_srgb.x,
+        palette.twilight_key_srgb.y,
+        palette.twilight_key_srgb.z,
+    )
+    .to_linear();
+    let daylight_key = Color::srgb(
+        palette.daylight_key_srgb.x,
+        palette.daylight_key_srgb.y,
+        palette.daylight_key_srgb.z,
+    )
+    .to_linear();
     let sun_color = twilight_key.mix(&daylight_key, smoothstep(0.0, 0.45, sun_dir.y.max(0.0)));
     sun_light.color = Color::LinearRgba(sun_color);
     moon_light.color = Color::LinearRgba(moon_key);
 
     // Ambient gets a cool tint at night, warm at sunrise/sunset.
-    let day_color = Color::srgb(0.72, 0.85, 1.0).to_linear();
-    let night_color = Color::srgb(0.31, 0.36, 0.52).to_linear();
-    let twilight_color = Color::srgb(0.70, 0.47, 0.42).to_linear();
+    let day_color = Color::srgb(
+        palette.daylight_fill_srgb.x,
+        palette.daylight_fill_srgb.y,
+        palette.daylight_fill_srgb.z,
+    )
+    .to_linear();
+    let night_color = Color::srgb(
+        palette.night_fill_srgb.x,
+        palette.night_fill_srgb.y,
+        palette.night_fill_srgb.z,
+    )
+    .to_linear();
+    let twilight_color = Color::srgb(
+        palette.twilight_fill_srgb.x,
+        palette.twilight_fill_srgb.y,
+        palette.twilight_fill_srgb.z,
+    )
+    .to_linear();
     let amb_lin = weighted_linear_color(night_color, twilight_color, day_color, solar);
     ambient.color = Color::LinearRgba(amb_lin);
     ambient.brightness =
-        ambient_brightness_for_conditions(sun_dir.y, solar, quality, intel.profile.ambient_mul);
+        ambient_brightness_for_conditions(sun_dir.y, solar, quality, intel.profile.ambient_mul)
+            * palette.ambient_brightness_scale;
 
     // Sky (clear colour) interpolates similarly — grounded blue day,
     // readable twilight, and deep indigo night without a milky clear fog.
-    let sky_srgb = sky_srgb_for_conditions(solar, intel.profile.sky_saturation, intel.biome);
+    let sky_srgb = sky_srgb_for_profile_conditions(
+        solar,
+        intel.profile.sky_saturation,
+        intel.biome,
+        world_profile,
+    );
     let sky = Color::srgb(sky_srgb.x, sky_srgb.y, sky_srgb.z).to_linear();
     clear_color.0 = Color::LinearRgba(sky);
 
@@ -462,10 +541,15 @@ fn update_sun(
     // the chunk-streaming edge for free. Uses a slightly brighter tint
     // near the horizon for atmospheric scattering feel.
     if let Ok(mut fog_settings) = fog.get_single_mut() {
+        let (profile_haze, haze_mix) = if world_profile == WorldProfile::AstralFrontier {
+            (Color::srgb(0.46, 0.58, 0.82).to_linear(), 0.08)
+        } else {
+            (Color::srgb(0.78, 0.82, 0.86).to_linear(), 0.02)
+        };
         let horizon = sky
-            .mix(&Color::srgb(0.78, 0.82, 0.86).to_linear(), 0.02)
+            .mix(&profile_haze, haze_mix)
             .mix(&twilight_key, solar.twilight * 0.12);
-        fog_settings.color = Color::LinearRgba(sky);
+        fog_settings.color = Color::LinearRgba(sky.mix(&profile_haze, haze_mix * 0.55));
         // Directional light scattering — makes god-ray / atmospheric
         // tints at sunset and during the night. Much stronger sunset
         // inscatter so the horizon glows fiery orange.
@@ -546,6 +630,29 @@ fn sky_srgb_for_conditions(solar: SolarBlend, sky_saturation: f32, biome: Biome)
     }
 }
 
+fn sky_srgb_for_profile_conditions(
+    solar: SolarBlend,
+    sky_saturation: f32,
+    biome: Biome,
+    world_profile: WorldProfile,
+) -> Vec3 {
+    let natural = sky_srgb_for_conditions(solar, sky_saturation, biome);
+    if world_profile == WorldProfile::Natural {
+        return natural;
+    }
+
+    // This is the low-frequency atmosphere underneath the textured nebula,
+    // not the nebula itself. A darker indigo/cobalt foundation gives its
+    // cyan and rose filaments room to read while retaining a bright daytime
+    // horizon and smooth day/night exposure.
+    let astral_day = Vec3::new(0.24, 0.47, 0.80);
+    let astral_twilight = Vec3::new(0.37, 0.19, 0.45);
+    let astral_night = Vec3::new(0.045, 0.055, 0.16);
+    let astral =
+        astral_night * solar.night + astral_twilight * solar.twilight + astral_day * solar.daylight;
+    lerp_vec3(natural, astral, 0.52)
+}
+
 fn update_world_intel_runtime(
     world: Res<VoxelWorld>,
     player_q: Query<&Transform, With<Player>>,
@@ -620,6 +727,36 @@ mod tests {
     }
 
     #[test]
+    fn astral_palette_adds_warm_key_cool_fill_without_changing_natural() {
+        let natural = world_lighting_palette(WorldProfile::Natural);
+        assert_eq!(natural.daylight_key_srgb, Vec3::new(1.0, 0.93, 0.82));
+        assert_eq!(natural.daylight_fill_srgb, Vec3::new(0.72, 0.85, 1.0));
+        assert_eq!(natural.ambient_brightness_scale, 1.0);
+
+        let astral = world_lighting_palette(WorldProfile::AstralFrontier);
+        assert!(astral.daylight_key_srgb.x > astral.daylight_key_srgb.z);
+        assert!(astral.daylight_fill_srgb.z > astral.daylight_fill_srgb.x);
+        assert!((0.90..1.0).contains(&astral.ambient_brightness_scale));
+    }
+
+    #[test]
+    fn astral_clear_sky_is_profile_scoped_and_leaves_room_for_nebulae() {
+        let solar = SolarBlend::for_elevation_sine(1.0);
+        let legacy = sky_srgb_for_conditions(solar, 1.0, Biome::Plains);
+        let natural =
+            sky_srgb_for_profile_conditions(solar, 1.0, Biome::Plains, WorldProfile::Natural);
+        let astral = sky_srgb_for_profile_conditions(
+            solar,
+            1.0,
+            Biome::Plains,
+            WorldProfile::AstralFrontier,
+        );
+        assert_eq!(natural, legacy);
+        assert!(astral.z > astral.y && astral.y > astral.x);
+        assert!(astral.max_element() < natural.max_element());
+    }
+
+    #[test]
     fn evening_sky_keeps_readable_brightness_floor() {
         let sky = sky_srgb_for_conditions(SolarBlend::for_elevation_sine(0.0), 1.0, Biome::Plains);
         let luminance = sky.dot(Vec3::new(0.2126, 0.7152, 0.0722));
@@ -660,6 +797,27 @@ mod tests {
                 < sun_illuminance_for_conditions(1.0, noon, cinematic)
         );
         assert!(low.fog_scatter_exponent > cinematic.fog_scatter_exponent);
+    }
+
+    #[test]
+    fn noon_skylight_fill_is_strong_enough_for_voxel_cliff_readability() {
+        let solar = SolarBlend::for_elevation_sine(1.0);
+        for quality in [
+            lighting_quality(RuntimeProfile::LowSpec, GraphicsMode::Fast),
+            lighting_quality(RuntimeProfile::Balanced, GraphicsMode::Balanced),
+            lighting_quality(RuntimeProfile::Cinematic, GraphicsMode::High),
+        ] {
+            let key = sun_illuminance_for_conditions(1.0, solar, quality);
+            let fill = ambient_brightness_for_conditions(1.0, solar, quality, 1.0);
+            assert!(
+                fill >= key * 0.10,
+                "sky fill {fill:.0} must keep unlit voxel faces above ink-black against key {key:.0}"
+            );
+            assert!(
+                fill < key * 0.20,
+                "key direction must still shape the scene"
+            );
+        }
     }
 
     #[test]

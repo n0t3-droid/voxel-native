@@ -568,28 +568,6 @@ impl ToolbeltState {
             && self.active_workflow == Some(BuildWorkflowPreset::Pencil)
     }
 
-    pub(crate) fn drafting_shape_workflow(&self) -> Option<BuildWorkflowPreset> {
-        (self.live && !self.palette_open && self.tool == ToolbeltTool::DrawRect)
-            .then_some(self.active_workflow)
-            .flatten()
-            .filter(|workflow| {
-                matches!(
-                    workflow,
-                    BuildWorkflowPreset::Circle
-                        | BuildWorkflowPreset::Polygon
-                        | BuildWorkflowPreset::Arc
-                        | BuildWorkflowPreset::Freehand
-                )
-            })
-    }
-
-    pub fn opening_workflow_active(&self) -> bool {
-        self.live
-            && !self.palette_open
-            && self.tool == ToolbeltTool::DrawRect
-            && self.active_workflow == Some(BuildWorkflowPreset::Opening)
-    }
-
     #[cfg(test)]
     pub(crate) fn active_workflow(&self) -> Option<BuildWorkflowPreset> {
         self.active_workflow
@@ -606,7 +584,7 @@ impl ToolbeltState {
         }
     }
 
-    fn select_tool(&mut self, tool: ToolbeltTool) {
+    pub(crate) fn select_tool(&mut self, tool: ToolbeltTool) {
         let next_workflow = if tool == ToolbeltTool::DrawRect {
             Some(BuildWorkflowPreset::Sketch)
         } else {
@@ -620,7 +598,7 @@ impl ToolbeltState {
         self.selection_generation = self.selection_generation.wrapping_add(1);
     }
 
-    fn select_workflow(&mut self, preset: BuildWorkflowPreset) {
+    pub(crate) fn select_workflow(&mut self, preset: BuildWorkflowPreset) {
         if self.tool == preset.tool() && self.active_workflow == Some(preset) {
             return;
         }
@@ -883,7 +861,7 @@ fn clear_editor_selection_after_toolbelt_history_step(
     tool_controller: &mut crate::sketch_model::ToolController,
     semantic_hover: &mut crate::sketch_model::SemanticHoverHit,
 ) {
-    let _ = tool_controller.clear_selection();
+    let _ = tool_controller.clear_selection_context();
     semantic_hover.0 = None;
 }
 
@@ -1083,8 +1061,11 @@ fn hover_drawer_bridge_hovered(
     hover_drawer_bridge_rect(toolbox, drawer).contains(pointer)
 }
 
+/// One semantic editor choice, shared by the visible toolbox and deterministic
+/// automation/QA inputs. Keeping both paths on the same type prevents a tool
+/// from looking selected while a different controller owns the world cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolboxSelection {
+pub(crate) enum ToolboxSelection {
     Tool(ToolbeltTool),
     Workflow(BuildWorkflowPreset),
 }
@@ -1113,6 +1094,24 @@ impl ToolboxSelection {
         Self::Workflow(BuildWorkflowPreset::Skyline),
         Self::Workflow(BuildWorkflowPreset::Spacecraft),
     ];
+
+    pub(crate) fn tool(self) -> ToolbeltTool {
+        match self {
+            Self::Tool(tool) => tool,
+            Self::Workflow(preset) => preset.tool(),
+        }
+    }
+
+    pub(crate) fn editor_tool(self) -> crate::sketch_model::EditorToolId {
+        toolbox_selection_editor_tool(self)
+    }
+
+    pub(crate) fn live_status(self) -> String {
+        match self {
+            Self::Tool(tool) => format!("Sketch Editor: {}. {}", tool.label(), tool.hint()),
+            Self::Workflow(preset) => preset.status(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1466,7 +1465,7 @@ impl BuildWorkflowPreset {
         }
     }
 
-    fn tool(self) -> ToolbeltTool {
+    pub(crate) fn tool(self) -> ToolbeltTool {
         match self {
             Self::Pencil => ToolbeltTool::DrawRect,
             Self::Sketch => ToolbeltTool::DrawRect,
@@ -1526,7 +1525,7 @@ impl BuildWorkflowPreset {
         }
     }
 
-    fn status(self) -> String {
+    pub(crate) fn status(self) -> String {
         match self {
             Self::Pencil => "Pencil workflow: click a snapped start point, move to an endpoint, click again; lines chain from the last endpoint. RMB orbits; Ctrl+Z undo.".into(),
             Self::Sketch => "Rectangle workflow: click a snapped start point, move to the opposite corner, click again. Floors, roofs, and wall faces build; Opening cuts doors/windows. RMB orbits.".into(),
@@ -1698,7 +1697,7 @@ fn toolbox_wheel_selection_from_zone(
     toolbox_wheel_selection(active_tool, active_workflow, wheel_delta)
 }
 
-fn apply_toolbox_selection(
+pub(crate) fn apply_toolbox_selection(
     selection: ToolboxSelection,
     toolbelt: &mut ToolbeltState,
     mode: &mut ModeContext,
@@ -1759,7 +1758,7 @@ fn toolbox_selection_editor_tool(selection: ToolboxSelection) -> crate::sketch_m
     }
 }
 
-fn editor_tool_for_tool(tool: ToolbeltTool) -> crate::sketch_model::EditorToolId {
+pub(crate) fn editor_tool_for_tool(tool: ToolbeltTool) -> crate::sketch_model::EditorToolId {
     match tool {
         ToolbeltTool::Navigate => crate::sketch_model::EditorToolId::Select,
         ToolbeltTool::DrawRect => crate::sketch_model::EditorToolId::Rectangle,
@@ -1774,7 +1773,9 @@ fn editor_tool_for_tool(tool: ToolbeltTool) -> crate::sketch_model::EditorToolId
     }
 }
 
-fn editor_tool_for_workflow(preset: BuildWorkflowPreset) -> crate::sketch_model::EditorToolId {
+pub(crate) fn editor_tool_for_workflow(
+    preset: BuildWorkflowPreset,
+) -> crate::sketch_model::EditorToolId {
     match preset {
         BuildWorkflowPreset::Pencil => crate::sketch_model::EditorToolId::Pencil,
         BuildWorkflowPreset::Sketch => crate::sketch_model::EditorToolId::Rectangle,
@@ -1895,8 +1896,7 @@ fn draw_editor_toolbox(
     theme: crate::theme::ThemeSettings,
     result: &mut BuildDockResult,
 ) {
-    let frame =
-        crate::ui_kit::toolbench_frame(theme).inner_margin(egui::Margin::symmetric(7.0, 8.0));
+    let frame = editor_toolbox_frame(theme);
     let active_group = active_toolbox_group(active_tool, active_workflow);
 
     let area = egui::Area::new(egui::Id::new("voxel_native_sketch_editor_toolbox"))
@@ -2019,6 +2019,54 @@ fn set_toolbox_result_selection(result: &mut BuildDockResult, selection: Toolbox
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorStatusDensity {
+    Compact,
+    Stacked,
+    Wide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EditorStatusBarMetrics {
+    inner_width: f32,
+    density: EditorStatusDensity,
+    clears_left_rail: bool,
+}
+
+fn editor_status_bar_metrics(viewport_width: f32, viewport_height: f32) -> EditorStatusBarMetrics {
+    let width = if viewport_width.is_finite() {
+        viewport_width.max(320.0)
+    } else {
+        1280.0
+    };
+    let height = if viewport_height.is_finite() {
+        viewport_height.max(240.0)
+    } else {
+        720.0
+    };
+    // A short window makes the vertically-centred toolbox reach the bottom
+    // dock even when horizontal space is plentiful. In that case reserve the
+    // complete left rail and right-align the status surface beside it.
+    let clears_left_rail = width < 420.0 || height < 560.0;
+    let inner_width = if clears_left_rail {
+        (width - TOOLBOX_DRAWER_LEFT - 32.0).clamp(180.0, 930.0)
+    } else {
+        (width - 32.0).clamp(288.0, 930.0)
+    };
+    let density = if inner_width < 300.0 {
+        EditorStatusDensity::Compact
+    } else if inner_width < 860.0 {
+        EditorStatusDensity::Stacked
+    } else {
+        EditorStatusDensity::Wide
+    };
+    EditorStatusBarMetrics {
+        inner_width,
+        density,
+        clears_left_rail,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_editor_status_bar(
     ctx: &egui::Context,
@@ -2034,6 +2082,8 @@ fn draw_editor_status_bar(
     result: &mut BuildDockResult,
 ) {
     let colors = theme.semantic();
+    let viewport = ctx.screen_rect().size();
+    let metrics = editor_status_bar_metrics(viewport.x, viewport.y);
     let frame = egui::Frame::none()
         .fill(egui::Color32::from_rgba_unmultiplied(
             colors.surface_strong.r(),
@@ -2058,40 +2108,141 @@ fn draw_editor_status_bar(
             color: egui::Color32::from_black_alpha(116),
         });
 
+    let (anchor, offset) = if metrics.clears_left_rail {
+        (egui::Align2::RIGHT_BOTTOM, egui::vec2(-8.0, -8.0))
+    } else {
+        (egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -16.0))
+    };
     let area = egui::Area::new(egui::Id::new("voxel_native_sketch_editor_status"))
-        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -16.0))
+        .anchor(anchor, offset)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             frame.show(ui, |ui| {
-                let width = (ctx.screen_rect().width() - 32.0).clamp(560.0, 930.0);
-                ui.set_width(width);
-                ui.spacing_mut().item_spacing = egui::vec2(7.0, 0.0);
-                ui.horizontal(|ui| {
-                    selected_tool_badge(ui, active_tool, active_workflow, tool_phase, theme);
-                    metric_chip(
-                        ui,
-                        Icon::Cube,
-                        block_label(active_block),
-                        active_tool.category_color(),
-                        "Active build material",
-                    );
-                    if active_tool.uses_live_brush() {
-                        metric_chip(
-                            ui,
-                            Icon::Brush,
-                            &format!("{}x{}x{}", brush.x, brush.y, brush.z),
-                            primary,
-                            "Active brush size",
-                        );
-                    } else {
-                        metric_chip(ui, Icon::Snap, "SNAP", primary, "Endpoint snap is active");
+                ui.set_width(metrics.inner_width);
+                ui.spacing_mut().item_spacing = egui::vec2(7.0, 4.0);
+                match metrics.density {
+                    EditorStatusDensity::Wide => {
+                        ui.horizontal(|ui| {
+                            selected_tool_badge(
+                                ui,
+                                active_tool,
+                                active_workflow,
+                                tool_phase,
+                                theme,
+                            );
+                            metric_chip(
+                                ui,
+                                Icon::Cube,
+                                block_label(active_block),
+                                active_tool.category_color(),
+                                "Active build material",
+                            );
+                            if active_tool.uses_live_brush() {
+                                metric_chip(
+                                    ui,
+                                    Icon::Brush,
+                                    &format!("{}x{}x{}", brush.x, brush.y, brush.z),
+                                    primary,
+                                    "Active brush size",
+                                );
+                            } else {
+                                metric_chip(
+                                    ui,
+                                    Icon::Snap,
+                                    "SNAP",
+                                    primary,
+                                    "Endpoint snap is active",
+                                );
+                            }
+                            ui.separator();
+                            if drawer_chip(ui, picker_open, primary) {
+                                result.toggle_picker = true;
+                            }
+                            editor_status_message(ui, status, colors.text_muted);
+                        });
                     }
-                    ui.separator();
-                    if drawer_chip(ui, picker_open, primary) {
-                        result.toggle_picker = true;
+                    EditorStatusDensity::Stacked => {
+                        ui.horizontal(|ui| {
+                            selected_tool_badge(
+                                ui,
+                                active_tool,
+                                active_workflow,
+                                tool_phase,
+                                theme,
+                            );
+                            metric_chip(
+                                ui,
+                                Icon::Cube,
+                                block_label(active_block),
+                                active_tool.category_color(),
+                                "Active build material",
+                            );
+                            if active_tool.uses_live_brush() {
+                                metric_chip(
+                                    ui,
+                                    Icon::Brush,
+                                    &format!("{}x{}x{}", brush.x, brush.y, brush.z),
+                                    primary,
+                                    "Active brush size",
+                                );
+                            } else {
+                                metric_chip(
+                                    ui,
+                                    Icon::Snap,
+                                    "SNAP",
+                                    primary,
+                                    "Endpoint snap is active",
+                                );
+                            }
+                            ui.separator();
+                            if drawer_chip(ui, picker_open, primary) {
+                                result.toggle_picker = true;
+                            }
+                        });
+                        editor_status_message(ui, status, colors.text_muted);
                     }
-                    editor_status_message(ui, status, colors.text_muted);
-                });
+                    EditorStatusDensity::Compact => {
+                        ui.horizontal(|ui| {
+                            selected_tool_badge_compact(
+                                ui,
+                                active_tool,
+                                active_workflow,
+                                tool_phase,
+                                theme,
+                            );
+                            if drawer_chip(ui, picker_open, primary) {
+                                result.toggle_picker = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            metric_chip(
+                                ui,
+                                Icon::Cube,
+                                block_label(active_block),
+                                active_tool.category_color(),
+                                "Active build material",
+                            );
+                            if active_tool.uses_live_brush() {
+                                metric_chip(
+                                    ui,
+                                    Icon::Brush,
+                                    &format!("{}x{}x{}", brush.x, brush.y, brush.z),
+                                    primary,
+                                    "Active brush size",
+                                );
+                            } else {
+                                metric_chip(
+                                    ui,
+                                    Icon::Snap,
+                                    "SNAP",
+                                    primary,
+                                    "Endpoint snap is active",
+                                );
+                            }
+                        });
+                        editor_status_message_compact(ui, status, colors.text_muted);
+                    }
+                }
             });
         });
     result.wheel_navigation_hovered |= area.response.hovered();
@@ -2112,10 +2263,141 @@ fn editor_status_message(ui: &mut egui::Ui, status: &str, color: egui::Color32) 
     response.on_hover_text(status);
 }
 
+fn editor_status_message_compact(ui: &mut egui::Ui, status: &str, color: egui::Color32) {
+    let visible = status_excerpt(status, 29);
+    let width = ui.available_width().max(96.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::hover());
+    ui.painter()
+        .with_clip_rect(rect.shrink2(egui::vec2(4.0, 0.0)))
+        .text(
+            rect.left_center() + egui::vec2(4.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            visible,
+            egui::FontId::monospace(10.5),
+            color,
+        );
+    response.on_hover_text(status);
+}
+
+fn status_excerpt(status: &str, max_characters: usize) -> String {
+    let count = status.chars().count();
+    if count <= max_characters {
+        return status.to_owned();
+    }
+    let visible_characters = max_characters.saturating_sub(3);
+    let mut excerpt = status.chars().take(visible_characters).collect::<String>();
+    if let Some((byte_index, _)) = excerpt
+        .char_indices()
+        .rev()
+        .find(|(_, character)| character.is_whitespace())
+    {
+        let word_boundary_characters = excerpt[..byte_index].chars().count();
+        if word_boundary_characters * 3 >= visible_characters * 2 {
+            excerpt.truncate(byte_index);
+        }
+    }
+    excerpt.truncate(excerpt.trim_end().len());
+    excerpt.push_str("...");
+    excerpt
+}
+
 const TOOLBOX_DRAWER_LEFT: f32 = 76.0;
-const TOOLBOX_FLYOUT_CONTENT_WIDTH: f32 = 300.0;
-const TOOLBOX_FLYOUT_CONTENT_HEIGHT: f32 = 190.0;
+const TOOLBOX_VIEWPORT_MARGIN: f32 = 8.0;
+const TOOLBOX_RAIL_LEFT_MARGIN: f32 = 14.0;
+const TOOLBOX_FLYOUT_GAP: f32 = 12.0;
+const TOOLBOX_FLYOUT_MAX_CONTENT_WIDTH: f32 = 300.0;
+const TOOLBOX_FLYOUT_HEADER_HEIGHT: f32 = 26.0;
+const TOOLBOX_FLYOUT_SEPARATOR_HEIGHT: f32 = 1.0;
+const TOOLBOX_FLYOUT_ITEM_SPACING: f32 = 6.0;
+const TOOLBOX_FLYOUT_TWO_COLUMN_MIN_VIEWPORT_WIDTH: f32 = 600.0;
 const TOOLBOX_FLYOUT_SLOTS: usize = 6;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HoverFlyoutLayout {
+    safe_rect: egui::Rect,
+    outer_rect: egui::Rect,
+    content_width: f32,
+    items_viewport_height: f32,
+    columns: usize,
+}
+
+fn editor_toolbox_frame(theme: crate::theme::ThemeSettings) -> egui::Frame {
+    crate::ui_kit::toolbench_frame(theme).inner_margin(egui::Margin::symmetric(7.0, 8.0))
+}
+
+fn editor_hover_flyout_frame(theme: crate::theme::ThemeSettings) -> egui::Frame {
+    crate::ui_kit::toolbench_frame(theme).inner_margin(egui::Margin::symmetric(9.0, 8.0))
+}
+
+fn hover_flyout_layout(
+    viewport: egui::Rect,
+    toolbox_right: f32,
+    frame_margin: egui::Margin,
+    item_height: f32,
+) -> HoverFlyoutLayout {
+    let viewport = if viewport.is_finite() && viewport.width() > 0.0 && viewport.height() > 0.0 {
+        viewport
+    } else {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0))
+    };
+    let safe_inset = TOOLBOX_VIEWPORT_MARGIN
+        .min(viewport.width() * 0.25)
+        .min(viewport.height() * 0.25);
+    let safe_rect = viewport.shrink(safe_inset);
+    let frame_width = frame_margin.left + frame_margin.right;
+    let frame_height = frame_margin.top + frame_margin.bottom;
+    let minimum_outer_width = crate::theme::KANSO_LAYOUT.icon_action_min_width + frame_width;
+    let toolbox_right = if toolbox_right.is_finite() {
+        toolbox_right
+    } else {
+        safe_rect.left()
+    };
+    let preferred_left = toolbox_right + TOOLBOX_FLYOUT_GAP;
+    let left = preferred_left
+        .min(safe_rect.right() - minimum_outer_width)
+        .max(safe_rect.left());
+    let available_outer_width = (safe_rect.right() - left).max(minimum_outer_width);
+    let content_width = (available_outer_width - frame_width).clamp(
+        crate::theme::KANSO_LAYOUT.icon_action_min_width,
+        TOOLBOX_FLYOUT_MAX_CONTENT_WIDTH,
+    );
+    let outer_width = content_width + frame_width;
+
+    let columns = if viewport.width() >= TOOLBOX_FLYOUT_TWO_COLUMN_MIN_VIEWPORT_WIDTH {
+        2
+    } else {
+        1
+    };
+    let rows = TOOLBOX_FLYOUT_SLOTS.div_ceil(columns);
+    let item_height = if item_height.is_finite() {
+        item_height.max(1.0)
+    } else {
+        36.0
+    };
+    let natural_items_height =
+        rows as f32 * item_height + rows.saturating_sub(1) as f32 * TOOLBOX_FLYOUT_ITEM_SPACING;
+    // Header -> separator -> scroll area each receive the same deterministic
+    // vertical spacing. The scroll viewport consumes only the remainder of
+    // the safe rect, so adding future rows cannot push the frame off-screen.
+    let fixed_content_height = TOOLBOX_FLYOUT_HEADER_HEIGHT
+        + TOOLBOX_FLYOUT_SEPARATOR_HEIGHT
+        + 2.0 * TOOLBOX_FLYOUT_ITEM_SPACING;
+    let max_items_height = (safe_rect.height() - frame_height - fixed_content_height).max(1.0);
+    let items_viewport_height = natural_items_height.min(max_items_height);
+    let outer_height = frame_height + fixed_content_height + items_viewport_height;
+    let outer_rect = egui::Rect::from_center_size(
+        egui::pos2(left + outer_width * 0.5, safe_rect.center().y),
+        egui::vec2(outer_width, outer_height),
+    );
+
+    HoverFlyoutLayout {
+        safe_rect,
+        outer_rect,
+        content_width,
+        items_viewport_height,
+        columns,
+    }
+}
 
 fn draw_editor_drawer(
     ctx: &egui::Context,
@@ -2226,54 +2508,81 @@ fn draw_editor_hover_flyout(
     let colors = theme.semantic();
     let group = toolbox_group(group_id);
     let accent = toolbox_group_color(group_id, theme);
-    let frame =
-        crate::ui_kit::toolbench_frame(theme).inner_margin(egui::Margin::symmetric(9.0, 8.0));
+    let frame = editor_hover_flyout_frame(theme);
+    let fallback_toolbox_frame_width = editor_toolbox_frame(theme).total_margin().sum().x;
+    let toolbox_right = result.toolbox_rect.map_or_else(
+        || {
+            ctx.screen_rect().left()
+                + TOOLBOX_RAIL_LEFT_MARGIN
+                + fallback_toolbox_frame_width
+                + crate::theme::KANSO_LAYOUT.icon_square_size
+        },
+        |rect| rect.right(),
+    );
+    let layout = hover_flyout_layout(
+        ctx.screen_rect(),
+        toolbox_right,
+        frame.total_margin(),
+        theme.density.row_height(),
+    );
+    let item_width = if layout.columns == 1 {
+        layout.content_width
+    } else {
+        (layout.content_width - TOOLBOX_FLYOUT_ITEM_SPACING) * 0.5
+    };
 
     let area = egui::Area::new(egui::Id::new(
         "voxel_native_sketch_editor_context_flyout_area",
     ))
-    .anchor(
-        egui::Align2::LEFT_CENTER,
-        egui::vec2(TOOLBOX_DRAWER_LEFT, 0.0),
-    )
+    .fixed_pos(layout.outer_rect.min)
+    .default_size(layout.outer_rect.size())
+    .constrain_to(layout.safe_rect)
     .order(egui::Order::Foreground)
     .show(ctx, |ui| {
         frame.show(ui, |ui| {
-            ui.set_min_size(egui::vec2(
-                TOOLBOX_FLYOUT_CONTENT_WIDTH,
-                TOOLBOX_FLYOUT_CONTENT_HEIGHT,
-            ));
-            ui.set_max_width(TOOLBOX_FLYOUT_CONTENT_WIDTH);
-            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-            toolbox_group_header(ui, group, accent, colors.text_muted);
+            ui.set_width(layout.content_width);
+            ui.set_max_width(layout.content_width);
+            ui.spacing_mut().item_spacing =
+                egui::vec2(TOOLBOX_FLYOUT_ITEM_SPACING, TOOLBOX_FLYOUT_ITEM_SPACING);
+            toolbox_group_header(ui, group, accent, colors.text_muted, layout.content_width);
             crate::ui_kit::compact_separator(ui, theme);
-            egui::Grid::new(("stable_toolbox_group", group.label))
-                .num_columns(2)
-                .spacing(egui::vec2(6.0, 6.0))
+            egui::ScrollArea::vertical()
+                .id_source(("stable_toolbox_group_scroll", group.label))
+                .max_width(layout.content_width)
+                .max_height(layout.items_viewport_height)
+                .min_scrolled_height(layout.items_viewport_height)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for slot in 0..TOOLBOX_FLYOUT_SLOTS {
-                        if let Some(selection) = group.items.get(slot).copied() {
-                            let selected = toolbox_selection_is_active(
-                                selection,
-                                active_tool,
-                                active_workflow,
-                            );
-                            if toolbox_selection_action(ui, selection, selected, accent, theme) {
-                                set_toolbox_result_selection(result, selection);
+                    egui::Grid::new(("stable_toolbox_group", group.label))
+                        .num_columns(layout.columns)
+                        .spacing(egui::vec2(
+                            TOOLBOX_FLYOUT_ITEM_SPACING,
+                            TOOLBOX_FLYOUT_ITEM_SPACING,
+                        ))
+                        .show(ui, |ui| {
+                            for slot in 0..TOOLBOX_FLYOUT_SLOTS {
+                                if let Some(selection) = group.items.get(slot).copied() {
+                                    let selected = toolbox_selection_is_active(
+                                        selection,
+                                        active_tool,
+                                        active_workflow,
+                                    );
+                                    if toolbox_selection_action(
+                                        ui, selection, selected, accent, theme, item_width,
+                                    ) {
+                                        set_toolbox_result_selection(result, selection);
+                                    }
+                                } else {
+                                    ui.allocate_exact_size(
+                                        egui::vec2(item_width, theme.density.row_height()),
+                                        egui::Sense::hover(),
+                                    );
+                                }
+                                if (slot + 1) % layout.columns == 0 {
+                                    ui.end_row();
+                                }
                             }
-                        } else {
-                            ui.allocate_exact_size(
-                                egui::vec2(
-                                    (TOOLBOX_FLYOUT_CONTENT_WIDTH - 6.0) * 0.5,
-                                    theme.density.row_height(),
-                                ),
-                                egui::Sense::hover(),
-                            );
-                        }
-                        if slot % 2 == 1 {
-                            ui.end_row();
-                        }
-                    }
+                        });
                 });
         });
     });
@@ -2287,9 +2596,10 @@ fn toolbox_group_header(
     group: ToolboxGroup,
     accent: egui::Color32,
     text: egui::Color32,
+    width: f32,
 ) {
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(TOOLBOX_FLYOUT_CONTENT_WIDTH, 26.0),
+        egui::vec2(width, TOOLBOX_FLYOUT_HEADER_HEIGHT),
         egui::Sense::hover(),
     );
     let painter = ui.painter_at(rect);
@@ -2331,8 +2641,8 @@ fn toolbox_selection_action(
     selected: bool,
     accent: egui::Color32,
     theme: crate::theme::ThemeSettings,
+    width: f32,
 ) -> bool {
-    let width = (TOOLBOX_FLYOUT_CONTENT_WIDTH - 6.0) * 0.5;
     let response = crate::ui_kit::icon_action_sized(
         ui,
         toolbox_selection_icon(selection),
@@ -2513,6 +2823,48 @@ fn selected_tool_badge(
         egui::Align2::LEFT_CENTER,
         active_editor_label(tool, active_workflow),
         egui::FontId::monospace(11.5),
+        colors.text,
+    );
+    response.on_hover_text(format!(
+        "{} - {}. {}",
+        active_editor_label(tool, active_workflow),
+        editor_phase_label(phase).to_ascii_lowercase(),
+        active_editor_hint(tool, active_workflow)
+    ));
+}
+
+fn selected_tool_badge_compact(
+    ui: &mut egui::Ui,
+    tool: ToolbeltTool,
+    active_workflow: Option<BuildWorkflowPreset>,
+    phase: crate::sketch_model::EditorToolPhase,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(118.0, 34.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let color = active_editor_color(tool, active_workflow);
+    crate::ui_kit::hud_panel(&painter, rect, theme, 0.84, color);
+    let icon_rect =
+        egui::Rect::from_min_size(rect.min + egui::vec2(7.0, 7.0), egui::vec2(20.0, 20.0));
+    paint_icon(
+        &painter,
+        icon_rect,
+        active_editor_icon(tool, active_workflow),
+        color,
+    );
+    painter.text(
+        rect.min + egui::vec2(34.0, 10.0),
+        egui::Align2::LEFT_CENTER,
+        editor_phase_label(phase),
+        egui::FontId::monospace(8.5),
+        editor_phase_color(phase, theme),
+    );
+    painter.text(
+        rect.min + egui::vec2(34.0, 23.0),
+        egui::Align2::LEFT_CENTER,
+        active_editor_label(tool, active_workflow),
+        egui::FontId::monospace(10.0),
         colors.text,
     );
     response.on_hover_text(format!(
@@ -2719,6 +3071,56 @@ fn format_history_command_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_status_bar_adapts_without_covering_the_toolbox_rail() {
+        let portrait = editor_status_bar_metrics(320.0, 480.0);
+        assert_eq!(portrait.density, EditorStatusDensity::Compact);
+        assert!(portrait.clears_left_rail);
+        assert_eq!(portrait.inner_width, 212.0);
+        // Inner width + 24px frame margins fits to the right of the 76px rail
+        // with an 8px outside margin.
+        assert!(portrait.inner_width + 24.0 <= 320.0 - TOOLBOX_DRAWER_LEFT - 8.0);
+
+        let small_desktop = editor_status_bar_metrics(800.0, 600.0);
+        assert_eq!(small_desktop.density, EditorStatusDensity::Stacked);
+        assert!(!small_desktop.clears_left_rail);
+        assert_eq!(small_desktop.inner_width, 768.0);
+
+        let short_desktop = editor_status_bar_metrics(800.0, 480.0);
+        assert_eq!(short_desktop.density, EditorStatusDensity::Stacked);
+        assert!(short_desktop.clears_left_rail);
+        assert_eq!(short_desktop.inner_width, 692.0);
+
+        let standard = editor_status_bar_metrics(1280.0, 720.0);
+        assert_eq!(standard.density, EditorStatusDensity::Wide);
+        assert_eq!(standard.inner_width, 930.0);
+        assert!(!standard.clears_left_rail);
+
+        let ultrawide = editor_status_bar_metrics(3440.0, 1440.0);
+        assert_eq!(ultrawide.density, EditorStatusDensity::Wide);
+        assert_eq!(ultrawide.inner_width, 930.0);
+        assert!(!ultrawide.clears_left_rail);
+
+        assert_eq!(editor_status_bar_metrics(f32::NAN, f32::INFINITY), standard);
+    }
+
+    #[test]
+    fn compact_status_excerpt_marks_truncation_without_splitting_unicode() {
+        assert_eq!(status_excerpt("Short status", 29), "Short status");
+        assert_eq!(
+            status_excerpt("Sketch Draw ready. Click start, move, click finish", 29),
+            "Sketch Draw ready. Click..."
+        );
+        assert_eq!(
+            status_excerpt("Grunflache schon auswahlen", 12),
+            "Grunflach..."
+        );
+        assert_eq!(
+            status_excerpt("Grünfläche schön auswählen", 12),
+            "Grünfläch..."
+        );
+    }
 
     #[test]
     fn default_toolbelt_enters_sketch_draw_first() {
@@ -3374,14 +3776,142 @@ mod tests {
         }
     }
 
+    fn assert_flyout_layout_is_safe(viewport_size: egui::Vec2, expected_columns: usize) {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, viewport_size);
+        let toolbox = editor_toolbox_frame(crate::theme::ThemeSettings::default());
+        let toolbox_right = viewport.left()
+            + TOOLBOX_RAIL_LEFT_MARGIN
+            + toolbox.total_margin().sum().x
+            + crate::theme::KANSO_LAYOUT.icon_square_size;
+        let frame = editor_hover_flyout_frame(crate::theme::ThemeSettings::default());
+        let layout = hover_flyout_layout(viewport, toolbox_right, frame.total_margin(), 36.0);
+
+        assert_eq!(layout.columns, expected_columns);
+        assert!(layout.safe_rect.is_finite());
+        assert!(layout.outer_rect.is_finite());
+        assert!(layout.content_width.is_finite());
+        assert!(layout.items_viewport_height.is_finite());
+        assert!(layout.safe_rect.contains_rect(layout.outer_rect));
+        assert!(viewport.contains_rect(layout.outer_rect));
+        assert!(layout.content_width >= crate::theme::KANSO_LAYOUT.icon_action_min_width);
+        assert!(layout.content_width <= TOOLBOX_FLYOUT_MAX_CONTENT_WIDTH);
+        assert!(layout.items_viewport_height > 0.0);
+        assert!(layout.outer_rect.left() >= toolbox_right + TOOLBOX_FLYOUT_GAP);
+    }
+
     #[test]
-    fn fixed_flyout_capacity_covers_every_group_without_resizing() {
-        assert!(TOOLBOX_FLYOUT_CONTENT_WIDTH.is_finite());
-        assert!(TOOLBOX_FLYOUT_CONTENT_HEIGHT.is_finite());
-        assert!(TOOLBOX_FLYOUT_CONTENT_WIDTH <= 320.0);
-        assert!(TOOLBOX_FLYOUT_CONTENT_HEIGHT <= 200.0);
+    fn viewport_derived_flyout_capacity_covers_every_group() {
+        assert_flyout_layout_is_safe(egui::vec2(320.0, 480.0), 1);
+        assert_flyout_layout_is_safe(egui::vec2(800.0, 600.0), 2);
+        assert_flyout_layout_is_safe(egui::vec2(3440.0, 1440.0), 2);
         for id in TOOLBOX_GROUP_IDS {
             assert!(toolbox_group(id).items.len() <= TOOLBOX_FLYOUT_SLOTS);
+        }
+    }
+
+    #[test]
+    fn viewport_derived_flyout_fails_safe_for_non_finite_input() {
+        let frame = editor_hover_flyout_frame(crate::theme::ThemeSettings::default());
+        let layout = hover_flyout_layout(
+            egui::Rect::from_min_max(
+                egui::pos2(f32::NAN, f32::NEG_INFINITY),
+                egui::pos2(f32::INFINITY, f32::NAN),
+            ),
+            f32::NAN,
+            frame.total_margin(),
+            f32::NAN,
+        );
+
+        assert!(layout.safe_rect.is_finite());
+        assert!(layout.outer_rect.is_finite());
+        assert!(layout.safe_rect.contains_rect(layout.outer_rect));
+        assert_eq!(layout.columns, 2);
+    }
+
+    #[test]
+    fn rendered_flyout_stays_inside_safe_viewport_across_dpi_matrix() {
+        for viewport_size in [
+            egui::vec2(320.0, 480.0),
+            egui::vec2(800.0, 600.0),
+            egui::vec2(3440.0, 1440.0),
+        ] {
+            for pixels_per_point in [1.0_f32, 1.5, 2.0] {
+                let ctx = egui::Context::default();
+                let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, viewport_size);
+                let mut rendered_rect = None;
+                let mut output = None;
+                // egui Areas intentionally use their first frame for sizing.
+                // Rendering twice verifies the measured, stable outer rect.
+                for frame_index in 0..2 {
+                    let mut raw_input = egui::RawInput {
+                        screen_rect: Some(viewport),
+                        time: Some(frame_index as f64 / 60.0),
+                        ..Default::default()
+                    };
+                    raw_input
+                        .viewports
+                        .entry(egui::ViewportId::ROOT)
+                        .or_default()
+                        .native_pixels_per_point = Some(pixels_per_point);
+                    let frame_output = ctx.run(raw_input, |ctx| {
+                        let mut result = BuildDockResult::default();
+                        result.toolbox_rect = Some(egui::Rect::from_min_max(
+                            egui::pos2(
+                                ctx.screen_rect().left() + TOOLBOX_RAIL_LEFT_MARGIN,
+                                ctx.screen_rect().center().y - 120.0,
+                            ),
+                            egui::pos2(
+                                ctx.screen_rect().left()
+                                    + TOOLBOX_RAIL_LEFT_MARGIN
+                                    + editor_toolbox_frame(crate::theme::ThemeSettings::default())
+                                        .total_margin()
+                                        .sum()
+                                        .x
+                                    + crate::theme::KANSO_LAYOUT.icon_square_size,
+                                ctx.screen_rect().center().y + 120.0,
+                            ),
+                        ));
+                        draw_editor_hover_flyout(
+                            ctx,
+                            ToolboxGroupId::Draw,
+                            ToolbeltTool::DrawRect,
+                            Some(BuildWorkflowPreset::Sketch),
+                            crate::theme::ThemeSettings::default(),
+                            &mut result,
+                        );
+                        rendered_rect = result.drawer_rect;
+                    });
+                    output = Some(frame_output);
+                }
+
+                let rendered_rect = rendered_rect.expect("flyout area rect");
+                let frame = editor_hover_flyout_frame(crate::theme::ThemeSettings::default());
+                let toolbox = editor_toolbox_frame(crate::theme::ThemeSettings::default());
+                let toolbox_right = viewport.left()
+                    + TOOLBOX_RAIL_LEFT_MARGIN
+                    + toolbox.total_margin().sum().x
+                    + crate::theme::KANSO_LAYOUT.icon_square_size;
+                let layout =
+                    hover_flyout_layout(viewport, toolbox_right, frame.total_margin(), 36.0);
+                assert!(rendered_rect.is_finite());
+                assert!(layout.safe_rect.contains_rect(rendered_rect),
+                    "{viewport_size:?} at {pixels_per_point} ppp rendered {rendered_rect:?} outside {:?}",
+                    layout.safe_rect);
+                assert!(rendered_rect.left() >= toolbox_right + TOOLBOX_FLYOUT_GAP);
+                let output = output.expect("egui output");
+                assert_eq!(output.pixels_per_point, pixels_per_point);
+                let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+                assert!(!primitives.is_empty());
+                for primitive in primitives {
+                    assert!(primitive.clip_rect.is_finite());
+                    if let egui::epaint::Primitive::Mesh(mesh) = primitive.primitive {
+                        assert!(mesh
+                            .vertices
+                            .iter()
+                            .all(|vertex| vertex.pos.is_finite() && vertex.uv.is_finite()));
+                    }
+                }
+            }
         }
     }
 

@@ -1,26 +1,39 @@
 //! Voxel-Native - native voxel engine, Rust + Bevy + wgpu.
 //! Successor to R93G (https://github.com/n0t3-droid/N5).
 
+mod agent_capabilities;
 pub mod agent_control;
+pub mod agent_direct_bridge;
 mod ambient;
 mod animation;
 mod blocks;
+mod bot_command;
+mod bot_executor;
 pub mod bots;
 mod builder;
 mod celestial;
 mod chunk;
 mod city;
 mod commands;
+pub mod continuum_morphogenesis;
+mod creator_contract;
 mod creator_library;
 mod daynight;
 mod director;
 mod editor;
+mod feedback_audio;
+mod horizon;
 mod hud;
 mod icons;
+pub mod implicit_voxels;
+mod live_link;
 mod menu;
 mod mesher;
+mod mission_control;
 mod mode;
 mod neurocore;
+mod object_lab;
+pub mod planetary_streaming;
 mod platform;
 mod player;
 mod qa;
@@ -35,9 +48,13 @@ mod textures;
 mod theme;
 mod toolbelt;
 mod ui_kit;
+mod vegetation;
+pub mod virtual_voxel_hierarchy;
+mod voxel_budget;
 mod weapons;
 mod weather;
 mod world;
+pub mod world_continuum;
 
 use bevy::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,11 +67,73 @@ use bevy::winit::{UpdateMode, WinitSettings};
 const MENU_LOW_POWER_INTERVAL: Duration = Duration::from_millis(250);
 const PAUSED_LOW_POWER_INTERVAL: Duration = Duration::from_millis(125);
 const UNFOCUSED_LOW_POWER_INTERVAL: Duration = Duration::from_millis(500);
+const DEFAULT_WINDOW_TITLE: &str = "Voxel-Native (R93G successor)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopPolicy {
     Continuous,
     ReactiveLowPower(Duration),
+}
+
+fn instance_window_title(label: Option<&str>) -> String {
+    let label = label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(|label| {
+            label
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(32)
+                .collect::<String>()
+        })
+        .filter(|label| !label.is_empty());
+    label.map_or_else(
+        || DEFAULT_WINDOW_TITLE.to_owned(),
+        |label| format!("Voxel-Native [{label}] (R93G successor)"),
+    )
+}
+
+fn configured_window_title() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return instance_window_title(std::env::var("VOXEL_NATIVE_INSTANCE_LABEL").ok().as_deref());
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        instance_window_title(None)
+    }
+}
+
+const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
+const DEFAULT_WINDOW_HEIGHT: f32 = 720.0;
+
+fn bounded_window_extent(raw: Option<&str>, fallback: f32, minimum: f32) -> f32 {
+    raw.and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(minimum, 8192.0))
+        .unwrap_or(fallback)
+}
+
+fn configured_window_resolution() -> (f32, f32) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return (
+            bounded_window_extent(
+                std::env::var("VOXEL_NATIVE_WINDOW_WIDTH").ok().as_deref(),
+                DEFAULT_WINDOW_WIDTH,
+                320.0,
+            ),
+            bounded_window_extent(
+                std::env::var("VOXEL_NATIVE_WINDOW_HEIGHT").ok().as_deref(),
+                DEFAULT_WINDOW_HEIGHT,
+                240.0,
+            ),
+        );
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+    }
 }
 
 fn main() {
@@ -84,8 +163,8 @@ fn main() {
         .add_plugins({
             let plugins = DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "Voxel-Native (R93G successor)".into(),
-                    resolution: (1280.0, 720.0).into(),
+                    title: configured_window_title(),
+                    resolution: configured_window_resolution().into(),
                     // AutoVsync caps the frame rate to the monitor
                     // refresh and blocks on the compositor. On
                     // integrated GPUs this is strictly better than
@@ -117,18 +196,26 @@ fn main() {
             plugins
         })
         .insert_resource(ClearColor(Color::srgb(0.53, 0.80, 0.98)))
-        .insert_resource(winit_settings_for_loop_policy(loop_policy_for_game_state(
-            &menu::GameState::MainMenu,
-        )))
+        .insert_resource(winit_settings_for_loop_policy(
+            loop_policy_for_game_state(&menu::GameState::MainMenu),
+            false,
+        ))
         // MSAA off: on integrated GPUs (e.g. Vega 8 in Ryzen 5700G)
         // 4x MSAA on HDR (Rgba16Float) buffers quadruples bandwidth and
         // cuts FPS by 30–50%. With the greedy-mesh block-aligned UVs and
         // aggressive fog, visible aliasing is minimal. Users who want it
         // back can set Msaa::Sample2 in High graphics mode.
         .insert_resource(Msaa::Off)
+        .init_resource::<bot_command::BotCommandStateMachine>()
         .add_plugins(agent_control::AgentControlPlugin)
+        .add_plugins(live_link::LiveLinkPlugin)
+        .add_plugins(mission_control::MissionControlPlugin)
         .add_plugins(sketch_model::SketchModelPlugin)
         .add_plugins(ambient::AmbientPlugin)
+        // Register the render-only foliage material before WorldPlugin builds
+        // its block material library. This wind path never enters gameplay
+        // physics, so shuttle/player handling remains deterministic.
+        .add_plugins(vegetation::VegetationPlugin)
         .add_plugins((
             settings::SettingsPlugin,
             world::WorldPlugin,
@@ -147,9 +234,12 @@ fn main() {
             selection::SelectionPlugin,
         ))
         .add_plugins(city::CityPlugin)
+        .add_plugins(planetary_streaming::PlanetaryStreamingPlugin)
         .add_plugins(bots::BotsPlugin)
+        .add_plugins(feedback_audio::FeedbackAudioPlugin)
         .add_plugins(ships::ShipPlugin)
         .add_plugins(creator_library::CreatorLibraryPlugin)
+        .add_plugins(object_lab::ObjectLabPlugin)
         .add_plugins(mode::ModePlugin)
         .add_plugins(neurocore::NeuroCorePlugin)
         .add_plugins(qa::QaPlugin)
@@ -169,7 +259,14 @@ fn loop_policy_for_game_state(state: &menu::GameState) -> LoopPolicy {
     }
 }
 
-fn winit_settings_for_loop_policy(policy: LoopPolicy) -> WinitSettings {
+fn winit_settings_for_loop_policy(policy: LoopPolicy, live_link_active: bool) -> WinitSettings {
+    if live_link_active {
+        return WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::Continuous,
+        };
+    }
+
     let focused_mode = match policy {
         LoopPolicy::Continuous => UpdateMode::Continuous,
         LoopPolicy::ReactiveLowPower(wait) => UpdateMode::reactive_low_power(wait),
@@ -183,9 +280,13 @@ fn winit_settings_for_loop_policy(policy: LoopPolicy) -> WinitSettings {
 
 fn sync_winit_loop_with_game_state(
     state: Res<State<menu::GameState>>,
+    live_link: Res<live_link::LiveLink>,
     mut settings: ResMut<WinitSettings>,
 ) {
-    let desired = winit_settings_for_loop_policy(loop_policy_for_game_state(state.get()));
+    let desired = winit_settings_for_loop_policy(
+        loop_policy_for_game_state(state.get()),
+        live_link.is_active(),
+    );
     if settings.focused_mode != desired.focused_mode
         || settings.unfocused_mode != desired.unfocused_mode
     {
@@ -295,8 +396,10 @@ mod tests {
 
     #[test]
     fn idle_winit_settings_ignore_raw_device_motion() {
-        let settings =
-            winit_settings_for_loop_policy(LoopPolicy::ReactiveLowPower(MENU_LOW_POWER_INTERVAL));
+        let settings = winit_settings_for_loop_policy(
+            LoopPolicy::ReactiveLowPower(MENU_LOW_POWER_INTERVAL),
+            false,
+        );
 
         assert_eq!(
             settings.focused_mode,
@@ -306,6 +409,60 @@ mod tests {
             settings.unfocused_mode,
             UpdateMode::reactive_low_power(UNFOCUSED_LOW_POWER_INTERVAL)
         );
+    }
+
+    #[test]
+    fn live_link_keeps_both_instances_continuously_updating_when_unfocused() {
+        let settings = winit_settings_for_loop_policy(
+            LoopPolicy::ReactiveLowPower(MENU_LOW_POWER_INTERVAL),
+            true,
+        );
+
+        assert_eq!(settings.focused_mode, UpdateMode::Continuous);
+        assert_eq!(settings.unfocused_mode, UpdateMode::Continuous);
+    }
+
+    #[test]
+    fn instance_window_title_distinguishes_live_link_roles() {
+        assert_eq!(instance_window_title(None), DEFAULT_WINDOW_TITLE);
+        assert_eq!(
+            instance_window_title(Some("CODEX QA")),
+            "Voxel-Native [CODEX QA] (R93G successor)"
+        );
+        assert_eq!(
+            instance_window_title(Some("  LIVE SPECTATOR  ")),
+            "Voxel-Native [LIVE SPECTATOR] (R93G successor)"
+        );
+    }
+
+    #[test]
+    fn instance_window_title_bounds_and_sanitizes_external_labels() {
+        let title = instance_window_title(Some("12345678901234567890123456789012EXTRA\nINVISIBLE"));
+        assert_eq!(
+            title,
+            "Voxel-Native [12345678901234567890123456789012] (R93G successor)"
+        );
+        assert!(!title.contains('\n'));
+    }
+
+    #[test]
+    fn qa_window_extent_accepts_the_responsive_matrix_and_rejects_bad_values() {
+        for (raw, expected) in [
+            ("320", 320.0),
+            ("800", 800.0),
+            ("1280", 1280.0),
+            ("1920", 1920.0),
+            ("3440", 3440.0),
+        ] {
+            assert_eq!(bounded_window_extent(Some(raw), 1280.0, 320.0), expected);
+        }
+        assert_eq!(bounded_window_extent(Some(" 480 "), 720.0, 240.0), 480.0);
+        assert_eq!(bounded_window_extent(Some("100"), 1280.0, 320.0), 320.0);
+        assert_eq!(bounded_window_extent(Some("99999"), 1280.0, 320.0), 8192.0);
+        for raw in ["", "not-a-number", "NaN", "inf", "-inf"] {
+            assert_eq!(bounded_window_extent(Some(raw), 1280.0, 320.0), 1280.0);
+        }
+        assert_eq!(bounded_window_extent(None, 720.0, 240.0), 720.0);
     }
 }
 

@@ -7,11 +7,12 @@ use bevy::core_pipeline::bloom::{BloomCompositeMode, BloomSettings};
 use bevy::input::mouse::MouseMotion;
 use bevy::pbr::{FogFalloff, FogSettings};
 use bevy::prelude::*;
+use bevy::render::view::{ColorGrading, ColorGradingSection};
 use bevy::window::PrimaryWindow;
 use bevy_egui::EguiSet;
 
 use crate::daynight::WorldIntelRuntime;
-use crate::settings::{ActiveWorld, PlayerMiningSave, SuitVitalsSave, WorldSettings};
+use crate::settings::{ActiveWorld, PlayerMiningSave, SuitVitalsSave, WorldProfile, WorldSettings};
 use crate::weapons::DestructionStats;
 use crate::world::{ChunkAnchor, VoxelWorld};
 
@@ -82,6 +83,7 @@ impl Plugin for PlayerPlugin {
                     tick_suit_vitals.run_if(in_state(crate::menu::GameState::InGame)),
                     update_camera_fov,
                     update_bloom_by_graphics,
+                    update_color_grading_by_profile,
                 )
                     .chain()
                     .in_set(PlayerMotionSet),
@@ -165,11 +167,12 @@ fn load_player_from_world(
     let mut translation = Vec3::new(pos[0], pos[1], pos[2]);
     let mut yaw = active.meta.player_yaw;
     let mut pitch = active.meta.player_pitch;
-    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed);
+    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed)
+        .with_world_profile(active.meta.world_profile);
     let bx = crate::chunk::floor_to_i32_safe(translation.x);
     let bz = crate::chunk::floor_to_i32_safe(translation.z);
     let surface = generator.surface_height_at(bx, bz);
-    if settings.visual_preset == crate::settings::VisualPreset::NaturalWorld
+    if settings.effective_world_profile() == crate::settings::WorldProfile::Natural
         && (generator.biome_at(bx, bz).is_showcase_terrain()
             || translation.y > surface as f32 + 90.0)
     {
@@ -290,6 +293,16 @@ const PLAYER_FREE_FLIGHT_MOTION: FreeFlightMotionTuning = FreeFlightMotionTuning
     // readable coast instead of snapping the player to a dead stop.
     braking_response_per_s: 10.0,
 };
+
+/// Remote control commands commonly remain held for substantially longer than
+/// a local key press because an observer or coding agent has to inspect a
+/// rendered frame before issuing the next command.  Giving that channel the
+/// player's 60-block/s sprint speed made small inspection moves overshoot by
+/// hundreds of blocks.  Keep local flight fast, but give the live agent a
+/// cinematic, precision-first velocity envelope.
+const AGENT_FLIGHT_CRUISE_SPEED_SCALE: f32 = 0.42;
+const AGENT_FLIGHT_SPRINT_SPEED_SCALE: f32 = 1.0;
+const AGENT_FLIGHT_VERTICAL_SCALE: f32 = 0.55;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct FreeFlightInputPolicy {
@@ -455,6 +468,55 @@ fn update_bloom_by_graphics(
     } * intel.profile.bloom_mul;
     if let Ok(mut b) = q.get_single_mut() {
         b.intensity = target.clamp(0.0, 0.35);
+    }
+}
+
+fn color_grading_for_world_profile(profile: WorldProfile) -> ColorGrading {
+    if profile == WorldProfile::Natural {
+        return ColorGrading::default();
+    }
+
+    // The world camera owns terrain and emissive voxels, while the sky camera
+    // is composed independently behind it. Compress only the world highlights
+    // so cyan transit rails retain a coloured core instead of clipping to a
+    // solid white stripe. Midtone contrast recovers material relief; the tiny
+    // shadow lift avoids crushing the opposite cliff face.
+    ColorGrading {
+        global: bevy::render::view::ColorGradingGlobal {
+            post_saturation: 1.03,
+            ..default()
+        },
+        shadows: ColorGradingSection {
+            contrast: 1.02,
+            lift: 0.006,
+            ..default()
+        },
+        midtones: ColorGradingSection {
+            contrast: 1.05,
+            gain: 0.98,
+            ..default()
+        },
+        highlights: ColorGradingSection {
+            saturation: 0.94,
+            contrast: 0.96,
+            gain: 0.86,
+            ..default()
+        },
+    }
+}
+
+fn update_color_grading_by_profile(
+    settings: Res<WorldSettings>,
+    mut camera: Query<&mut ColorGrading, With<Player>>,
+    mut last_profile: Local<Option<WorldProfile>>,
+) {
+    let profile = settings.effective_world_profile();
+    if *last_profile == Some(profile) {
+        return;
+    }
+    *last_profile = Some(profile);
+    if let Ok(mut grading) = camera.get_single_mut() {
+        *grading = color_grading_for_world_profile(profile);
     }
 }
 
@@ -708,6 +770,26 @@ fn direct_flight_velocity(wish: Vec3, speed: f32, follows_attitude: bool) -> Vec
     } else {
         Vec3::new(wish.x * speed, 0.0, wish.z * speed)
     }
+}
+
+#[inline]
+fn shaped_agent_axis(axis: f32) -> f32 {
+    let axis = if axis.is_finite() {
+        axis.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    axis * axis.abs()
+}
+
+#[inline]
+fn agent_flight_speed(player_fly_speed: f32, sprint: bool) -> f32 {
+    player_fly_speed.max(0.0)
+        * if sprint {
+            AGENT_FLIGHT_SPRINT_SPEED_SCALE
+        } else {
+            AGENT_FLIGHT_CRUISE_SPEED_SCALE
+        }
 }
 
 fn step_free_flight_velocity(
@@ -982,8 +1064,11 @@ fn update_movement(
         wish += right;
     }
     if let Some(agent) = agent {
-        wish += forward * agent.forward;
-        wish += right * agent.right;
+        // A signed-square response preserves the full command range while
+        // making the middle of the stick precise enough for inspecting a
+        // single tree, river bank, or editor object remotely.
+        wish += forward * shaped_agent_axis(agent.forward);
+        wish += right * shaped_agent_axis(agent.right);
     }
     if wish.length_squared() > 1.0 {
         wish = wish.normalize();
@@ -998,7 +1083,9 @@ fn update_movement(
     let sneak = manual_input_allowed && keys.pressed(KeyCode::ShiftLeft) && !player.flying;
 
     let speed = if player.flying {
-        if sprint {
+        if agent.is_some() {
+            agent_flight_speed(player.fly_speed, sprint)
+        } else if sprint {
             player.fly_speed * 2.5
         } else {
             player.fly_speed
@@ -1093,9 +1180,9 @@ fn update_movement(
             target_velocity.y -= speed;
         }
         if let Some(agent) = agent {
-            target_velocity.y += agent.up * speed;
+            target_velocity.y += shaped_agent_axis(agent.up) * speed * AGENT_FLIGHT_VERTICAL_SCALE;
         }
-        player.velocity = if player.flying && player_free_flight {
+        player.velocity = if player.flying && (player_free_flight || agent.is_some()) {
             step_free_flight_velocity(
                 player.velocity,
                 target_velocity,
@@ -1525,6 +1612,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn astral_highlight_rolloff_is_profile_scoped() {
+        let natural = color_grading_for_world_profile(WorldProfile::Natural);
+        assert_eq!(natural.highlights, ColorGradingSection::default());
+        assert_eq!(natural.midtones, ColorGradingSection::default());
+
+        let astral = color_grading_for_world_profile(WorldProfile::AstralFrontier);
+        assert!(astral.highlights.gain < 0.90);
+        assert!(astral.highlights.contrast < 1.0);
+        assert!(astral.midtones.contrast > 1.0);
+        assert!(astral.shadows.lift > 0.0);
+    }
+
+    #[test]
     fn f8_is_reserved_for_mode_switch_not_showcase_warp() {
         let mut keys = ButtonInput::<KeyCode>::default();
         keys.press(KeyCode::F8);
@@ -1776,6 +1876,28 @@ mod tests {
         assert!(braking.length() > 0.0);
         assert!(braking.length() < accelerating.length());
         assert!(braking.dot(accelerating) > 0.0);
+    }
+
+    #[test]
+    fn agent_flight_has_a_precision_curve_and_bounded_remote_speed() {
+        assert_eq!(shaped_agent_axis(0.0), 0.0);
+        assert!((shaped_agent_axis(0.5) - 0.25).abs() < 1e-6);
+        assert!((shaped_agent_axis(-0.5) + 0.25).abs() < 1e-6);
+        assert_eq!(shaped_agent_axis(5.0), 1.0);
+        assert_eq!(shaped_agent_axis(f32::NAN), 0.0);
+
+        let cruise = agent_flight_speed(24.0, false);
+        let sprint = agent_flight_speed(24.0, true);
+        assert!((cruise - 10.08).abs() < 1e-4);
+        assert!((sprint - 24.0).abs() < 1e-4);
+
+        // This is the command used by the visual flight audit. It previously
+        // resolved to roughly 39 horizontal and 48 vertical blocks/s. The
+        // remote profile keeps the next observed frame in the same landscape.
+        let horizontal = shaped_agent_axis(0.65) * sprint;
+        let vertical = shaped_agent_axis(0.8) * sprint * AGENT_FLIGHT_VERTICAL_SCALE;
+        assert!(horizontal > 10.0 && horizontal < 10.2);
+        assert!(vertical > 8.4 && vertical < 8.5);
     }
 
     fn simulate_free_flight_acceleration(dt: f32, steps: usize) -> Vec3 {

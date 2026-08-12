@@ -151,7 +151,7 @@ impl RuntimeTelemetry {
     }
 }
 
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, PartialEq)]
 pub struct RuntimeBudget {
     pub enabled: bool,
     pub profile: RuntimeProfile,
@@ -807,7 +807,7 @@ fn update_neurocore(
         queue_pressure,
         frame_pressure,
     };
-    *budget = core.update_budget(&settings, telemetry, time.delta_seconds());
+    budget.set_if_neq(core.update_budget(&settings, telemetry, time.delta_seconds()));
 }
 
 fn runtime_intent(
@@ -878,6 +878,31 @@ mod tests {
             },
             ..RuntimeTelemetry::default()
         }
+    }
+
+    #[test]
+    fn identical_runtime_budget_does_not_trigger_change_detection() {
+        let mut world = World::new();
+        world.init_resource::<RuntimeBudget>();
+        world.clear_trackers();
+
+        let current = world.resource::<RuntimeBudget>().clone();
+        let mut budget = world.resource_mut::<RuntimeBudget>();
+        assert!(!budget.is_changed());
+
+        assert!(!budget.set_if_neq(current));
+        assert!(
+            !budget.is_changed(),
+            "an identical effective budget must remain unchanged"
+        );
+
+        let mut changed = budget.clone();
+        changed.render_distance += 1;
+        assert!(budget.set_if_neq(changed));
+        assert!(
+            budget.is_changed(),
+            "a different effective budget must still be marked changed"
+        );
     }
 
     #[test]

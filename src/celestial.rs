@@ -7,6 +7,7 @@
 
 use bevy::pbr::NotShadowCaster;
 use bevy::prelude::*;
+use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::texture::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
@@ -16,7 +17,7 @@ use noise::{NoiseFn, Perlin};
 use crate::menu::GameState;
 use crate::mode::{ActiveMode, ModeContext};
 use crate::player::Player;
-use crate::settings::{GraphicsMode, WorldSettings};
+use crate::settings::{GraphicsMode, WorldProfile, WorldSettings};
 use crate::ships::{PilotState, ShipInstance};
 
 /// Gameplay-space distances are deliberately compressed while body radii and
@@ -100,6 +101,14 @@ struct CelestialAtmosphere {
 
 #[derive(Component)]
 struct CelestialCloudLayer {
+    index: usize,
+}
+
+/// Visual equatorial ring belonging to the reachable Sakura planet. It is
+/// profile-gated but always backed by the same world-space body, so ground and
+/// flight views cannot disagree about which planet owns the rings.
+#[derive(Component)]
+struct CelestialRing {
     index: usize,
 }
 
@@ -190,6 +199,7 @@ struct CelestialAssetPolicy {
     atmosphere_subdivisions: usize,
     cloud_subdivisions: usize,
     cloud_layer: bool,
+    ring_segments: usize,
 }
 
 fn celestial_asset_policy(graphics: GraphicsMode) -> CelestialAssetPolicy {
@@ -202,6 +212,7 @@ fn celestial_asset_policy(graphics: GraphicsMode) -> CelestialAssetPolicy {
             // Fast keeps the atmosphere silhouette but folds cloud detail
             // into the surface texture, saving one transparent draw per frame.
             cloud_layer: false,
+            ring_segments: 64,
         },
         GraphicsMode::Balanced => CelestialAssetPolicy {
             texture_size: (320, 160),
@@ -209,6 +220,7 @@ fn celestial_asset_policy(graphics: GraphicsMode) -> CelestialAssetPolicy {
             atmosphere_subdivisions: 3,
             cloud_subdivisions: 4,
             cloud_layer: true,
+            ring_segments: 96,
         },
         GraphicsMode::High => CelestialAssetPolicy {
             texture_size: (640, 320),
@@ -216,6 +228,7 @@ fn celestial_asset_policy(graphics: GraphicsMode) -> CelestialAssetPolicy {
             atmosphere_subdivisions: 4,
             cloud_subdivisions: 5,
             cloud_layer: true,
+            ring_segments: 128,
         },
     }
 }
@@ -323,6 +336,120 @@ fn setup_celestial_bodies(
                 Name::new(format!("Celestial.{}.Clouds", spec.name)),
             ));
         }
+
+        if spec.kind == CelestialKind::SakuraPlanet {
+            let ring_mesh = meshes.add(build_planet_ring_mesh(
+                spec.radius * 1.22,
+                spec.radius * 1.82,
+                asset_policy.ring_segments,
+            ));
+            let ring_material = materials.add(StandardMaterial {
+                // Vertex colours carry the restrained radial pastel bands.
+                base_color: Color::WHITE,
+                emissive: LinearRgba::rgb(0.38, 0.20, 0.52),
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                cull_mode: None,
+                double_sided: true,
+                fog_enabled: false,
+                ..default()
+            });
+            commands.spawn((
+                PbrBundle {
+                    mesh: ring_mesh,
+                    material: ring_material,
+                    transform: Transform::from_translation(center)
+                        .with_rotation(body_axial_tilt(spec.kind)),
+                    visibility: ring_visibility(settings.effective_world_profile()),
+                    ..default()
+                },
+                NotShadowCaster,
+                CelestialRing { index },
+                Name::new(format!("Celestial.{}.Rings", spec.name)),
+            ));
+        }
+    }
+}
+
+const PLANET_RING_RADIAL_BANDS: usize = 18;
+
+fn planet_ring_mesh_budget(segments: usize) -> (usize, usize) {
+    (
+        (segments + 1) * (PLANET_RING_RADIAL_BANDS + 1),
+        segments * PLANET_RING_RADIAL_BANDS * 6,
+    )
+}
+
+fn ring_smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// One bounded annulus with radial density bands and a real low-opacity gap.
+/// The rings are geometry rather than a camera-facing decal, so their ellipse
+/// naturally changes with the observer's flight path.
+fn build_planet_ring_mesh(inner: f32, outer: f32, segments: usize) -> Mesh {
+    let segments = segments.max(24);
+    let (vertex_budget, index_budget) = planet_ring_mesh_budget(segments);
+    let mut positions = Vec::with_capacity(vertex_budget);
+    let mut normals = Vec::with_capacity(vertex_budget);
+    let mut uvs = Vec::with_capacity(vertex_budget);
+    let mut colors = Vec::with_capacity(vertex_budget);
+    let mut indices = Vec::with_capacity(index_budget);
+
+    for segment in 0..=segments {
+        let angle = segment as f32 / segments as f32 * std::f32::consts::TAU;
+        let (sin, cos) = angle.sin_cos();
+        for band in 0..=PLANET_RING_RADIAL_BANDS {
+            let radial = band as f32 / PLANET_RING_RADIAL_BANDS as f32;
+            let radius = inner + (outer - inner) * radial;
+            positions.push([cos * radius, 0.0, sin * radius]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([segment as f32 / segments as f32, radial]);
+
+            let edge_fade =
+                ring_smoothstep(0.0, 0.08, radial) * (1.0 - ring_smoothstep(0.90, 1.0, radial));
+            let cassini_gap = 1.0 - 0.88 * (1.0 - ((radial - 0.58).abs() / 0.055).min(1.0));
+            let fine_bands = 0.72 + 0.28 * (radial * 17.0 + 0.35).sin().abs();
+            let density = (edge_fade * cassini_gap * fine_bands).clamp(0.0, 1.0);
+            let warm_mix = ring_smoothstep(0.18, 0.82, radial);
+            colors.push([
+                (0.58 + 0.32 * warm_mix) * density,
+                (0.74 - 0.16 * warm_mix) * density,
+                (0.96 - 0.08 * warm_mix) * density,
+                0.72 * density,
+            ]);
+        }
+    }
+
+    let stride = (PLANET_RING_RADIAL_BANDS + 1) as u32;
+    for segment in 0..segments as u32 {
+        for band in 0..PLANET_RING_RADIAL_BANDS as u32 {
+            let a = segment * stride + band;
+            let b = a + 1;
+            let c = (segment + 1) * stride + band;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, c, d, a, d, b]);
+        }
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn ring_visibility(profile: WorldProfile) -> Visibility {
+    if profile == WorldProfile::AstralFrontier {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
     }
 }
 
@@ -860,15 +987,35 @@ fn animate_celestial_bodies(
     player_q: Query<&GlobalTransform, With<Player>>,
     mut bodies: Query<
         (&mut CelestialBody, &mut Transform),
-        (Without<CelestialAtmosphere>, Without<CelestialCloudLayer>),
+        (
+            Without<CelestialAtmosphere>,
+            Without<CelestialCloudLayer>,
+            Without<CelestialRing>,
+        ),
     >,
     mut atmospheres: Query<
         (&CelestialAtmosphere, &mut Transform),
-        (Without<CelestialBody>, Without<CelestialCloudLayer>),
+        (
+            Without<CelestialBody>,
+            Without<CelestialCloudLayer>,
+            Without<CelestialRing>,
+        ),
     >,
     mut clouds: Query<
         (&CelestialCloudLayer, &mut Transform),
-        (Without<CelestialBody>, Without<CelestialAtmosphere>),
+        (
+            Without<CelestialBody>,
+            Without<CelestialAtmosphere>,
+            Without<CelestialRing>,
+        ),
+    >,
+    mut rings: Query<
+        (&CelestialRing, &mut Transform, &mut Visibility),
+        (
+            Without<CelestialBody>,
+            Without<CelestialAtmosphere>,
+            Without<CelestialCloudLayer>,
+        ),
     >,
 ) {
     let specs = default_celestial_bodies();
@@ -926,6 +1073,14 @@ fn animate_celestial_bodies(
         let spec = specs[cloud.index];
         transform.translation = celestial_center(spec, settings.time_of_day);
         transform.rotation = cloud_visual_rotation(spec, elapsed_seconds);
+    }
+    for (ring, mut transform, mut visibility) in &mut rings {
+        let spec = specs[ring.index];
+        transform.translation = celestial_center(spec, settings.time_of_day);
+        // A planet's ring plane stays perpendicular to its spin axis; the
+        // surface rotates underneath it instead of dragging the annulus.
+        transform.rotation = body_axial_tilt(spec.kind);
+        *visibility = ring_visibility(settings.effective_world_profile());
     }
 }
 
@@ -1371,6 +1526,37 @@ fn build_cloud_texture(w: u32, h: u32, seed: u32) -> Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reachable_planet_rings_are_profile_scoped_not_a_second_fake_body() {
+        assert_eq!(
+            ring_visibility(WorldProfile::AstralFrontier),
+            Visibility::Visible
+        );
+        assert_eq!(ring_visibility(WorldProfile::Natural), Visibility::Hidden);
+        assert_eq!(
+            default_celestial_bodies()
+                .iter()
+                .filter(|body| body.kind == CelestialKind::SakuraPlanet)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn planet_ring_geometry_scales_by_tier_inside_a_small_fixed_budget() {
+        let fast =
+            planet_ring_mesh_budget(celestial_asset_policy(GraphicsMode::Fast).ring_segments);
+        let balanced =
+            planet_ring_mesh_budget(celestial_asset_policy(GraphicsMode::Balanced).ring_segments);
+        let high =
+            planet_ring_mesh_budget(celestial_asset_policy(GraphicsMode::High).ring_segments);
+
+        assert!(fast.0 < balanced.0 && balanced.0 < high.0);
+        assert!(fast.1 < balanced.1 && balanced.1 < high.1);
+        assert!(high.0 <= 2_500);
+        assert!(high.1 <= 14_000);
+    }
 
     #[test]
     fn land_and_ocean_masks_are_exclusive_at_every_elevation() {

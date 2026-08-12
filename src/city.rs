@@ -4580,7 +4580,7 @@ mod tests {
     }
 
     #[test]
-    fn hint_panel_motion_settles_and_low_spec_never_loops() {
+    fn hint_panel_motion_settles_and_low_spec_stays_finite() {
         let mut resting = HintHudModel::new("CITY / HINWEISE", "STRASSE", "SNAP / AUS", false);
         resting.action("LMB", "Startpunkt setzen");
         let mut active = resting.clone();
@@ -4606,8 +4606,13 @@ mod tests {
         for time in [0.0, 0.10, 0.20] {
             run_hint_hud_frame(&low_spec_ctx, &resting, time);
         }
+        let low_spec_transition_delay = run_hint_hud_frame(&low_spec_ctx, &active, 0.30);
+        assert_eq!(low_spec_transition_delay, std::time::Duration::ZERO);
+        for time in [0.35, 0.42, 0.50] {
+            run_hint_hud_frame(&low_spec_ctx, &active, time);
+        }
         assert_eq!(
-            run_hint_hud_frame(&low_spec_ctx, &active, 0.30),
+            run_hint_hud_frame(&low_spec_ctx, &active, 0.80),
             std::time::Duration::MAX
         );
         assert!(!crate::theme::allows_continuous_motion(&low_spec_ctx));

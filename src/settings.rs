@@ -30,6 +30,13 @@ pub struct WorldSettings {
     /// Deterministic seed for every noise layer in `terrain.rs`.
     pub seed: u32,
 
+    /// Persistent semantic identity of the generated world. This is kept
+    /// separate from `VisualPreset`: a UI/ship presentation must never
+    /// silently rewrite terrain, while an Astral Frontier world must reopen
+    /// with the same provinces on every machine.
+    #[serde(default)]
+    pub world_profile: WorldProfile,
+
     /// Chunks to load on each axis from the player on the X/Z plane.
     pub render_distance: u32,
 
@@ -298,6 +305,38 @@ pub enum SceneryQuality {
     Lush,
 }
 
+/// High-level terrain contract stored in every named world.
+///
+/// `Natural` preserves the established Earth-like generator byte-for-byte.
+/// `AstralFrontier` activates the authored canyon, plateau, alien-reef,
+/// crystal-spire and volcanic provinces as one deliberately composed world.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WorldProfile {
+    #[default]
+    Natural,
+    AstralFrontier,
+}
+
+impl WorldProfile {
+    pub const ALL: [Self; 2] = [Self::AstralFrontier, Self::Natural];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Natural => "NATURAL WORLD",
+            Self::AstralFrontier => "ASTRAL FRONTIER",
+        }
+    }
+
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::Natural => "Grounded rivers, forests, karst and mountains.",
+            Self::AstralFrontier => {
+                "Layered canyons, green plateaus, crystal routes and volcanic rifts."
+            }
+        }
+    }
+}
+
 impl Default for SceneryQuality {
     fn default() -> Self {
         Self::Balanced
@@ -438,6 +477,7 @@ impl Default for WorldSettings {
     fn default() -> Self {
         Self {
             seed: 12345,
+            world_profile: WorldProfile::Natural,
             ship_skirmish_ai: false,
             render_distance: 50,
             vertical_chunks: 8,
@@ -535,6 +575,17 @@ fn num_threads() -> usize {
 }
 
 impl WorldSettings {
+    /// Legacy Neon Shuttle remains a presentation preset, but it now gets the
+    /// terrain it always expected instead of searching a Natural world for
+    /// provinces that can never exist there.
+    pub const fn effective_world_profile(&self) -> WorldProfile {
+        if matches!(self.visual_preset, VisualPreset::NeonShuttle) {
+            WorldProfile::AstralFrontier
+        } else {
+            self.world_profile
+        }
+    }
+
     pub fn apply_world_mode_card(&mut self, mode: WorldModeCard) {
         match mode {
             WorldModeCard::ExploreFar => {
@@ -752,6 +803,10 @@ impl Default for SuitVitalsSave {
 pub struct WorldMeta {
     pub name: String,
     pub seed: u32,
+    /// Added after the original save format. Old worlds deserialize as
+    /// `Natural`, preserving their terrain exactly.
+    #[serde(default)]
+    pub world_profile: WorldProfile,
     pub time_of_day: f32,
     pub time_mode: TimeMode,
     pub cycle_speed: f32,
@@ -785,25 +840,55 @@ pub struct WorldEditManifest {
 
 impl WorldMeta {
     pub fn new(name: String, seed: u32) -> Self {
+        Self::new_with_profile(name, seed, WorldProfile::Natural)
+    }
+
+    pub fn new_with_profile(name: String, seed: u32, world_profile: WorldProfile) -> Self {
         let now = now_epoch();
-        let spawn = crate::terrain::TerrainGenerator::new(seed)
-            .find_natural_spawn(0, 0, 4096)
-            .map(|p| [p.x as f32 + 0.5, p.y as f32, p.z as f32 + 0.5])
-            .unwrap_or([0.0, 140.0, 0.0]);
+        let generator =
+            crate::terrain::TerrainGenerator::new(seed).with_world_profile(world_profile);
+        let spawn = match world_profile {
+            WorldProfile::Natural => generator
+                .find_natural_spawn(0, 0, 4096)
+                .map(|p| [p.x as f32 + 0.5, p.y as f32, p.z as f32 + 0.5]),
+            WorldProfile::AstralFrontier => generator
+                .find_neon_showcase_spawn(0, 0, 4096)
+                .map(|p| [p.x as f32 + 0.5, p.y as f32, p.z as f32 + 0.5])
+                .or_else(|| {
+                    generator
+                        .find_natural_spawn(0, 0, 4096)
+                        .map(|p| [p.x as f32 + 0.5, p.y as f32, p.z as f32 + 0.5])
+                }),
+        }
+        .unwrap_or([0.0, 140.0, 0.0]);
+        let (time_of_day, player_yaw, player_pitch) = match world_profile {
+            WorldProfile::Natural => (14.15, 0.0, -0.15),
+            WorldProfile::AstralFrontier => {
+                let yaw = generator.astral_frontier_hub().map_or(-0.72, |hub| {
+                    let dx = hub.x as f32 + 0.5 - spawn[0];
+                    let dz = hub.y as f32 + 0.5 - spawn[2];
+                    (-dx).atan2(-dz)
+                });
+                // A high, warm afternoon keeps construction readable while
+                // giving the pastel nebula and terrain enough directional form.
+                (15.65, yaw, -0.12)
+            }
+        };
         let mut weather = WeatherSettings::default();
         weather.apply_preset(WeatherPreset::Clear);
         weather.fog_density = 0.06;
         Self {
             name,
             seed,
-            time_of_day: 14.15,
+            world_profile,
+            time_of_day,
             time_mode: TimeMode::Fixed,
             cycle_speed: 0.01,
             weather,
             scenery_quality: SceneryQuality::Lush,
             player_pos: spawn,
-            player_yaw: 0.0,
-            player_pitch: -0.15,
+            player_yaw,
+            player_pitch,
             ships: Vec::new(),
             ship_inventory: crate::ships::ShipInventory::default(),
             player_mining: PlayerMiningSave::default(),
@@ -1368,12 +1453,57 @@ mod tests {
     fn new_world_meta_starts_as_lush_zen_garden() {
         let meta = WorldMeta::new("garden".to_string(), 930514);
 
+        assert_eq!(meta.world_profile, WorldProfile::Natural);
         assert_eq!(meta.scenery_quality, SceneryQuality::Lush);
         assert_eq!(meta.weather.preset, WeatherPreset::Clear);
         assert!(meta.weather.fog_density <= 0.08);
         assert!(
             (12.5..=15.25).contains(&meta.time_of_day),
             "new worlds should open in bright Zen editing light, not dark low-angle shadows"
+        );
+    }
+
+    #[test]
+    fn astral_world_meta_spawns_in_its_persisted_showcase_profile() {
+        let meta = WorldMeta::new_with_profile(
+            "frontier".to_string(),
+            12345,
+            WorldProfile::AstralFrontier,
+        );
+        let generator =
+            crate::terrain::TerrainGenerator::new(meta.seed).with_world_profile(meta.world_profile);
+        let x = meta.player_pos[0].floor() as i32;
+        let z = meta.player_pos[2].floor() as i32;
+
+        assert_eq!(meta.world_profile, WorldProfile::AstralFrontier);
+        assert!(generator.biome_at(x, z).is_neon_showcase());
+        assert!(meta.player_pos[1] > crate::terrain::WATER_LEVEL as f32 + 20.0);
+    }
+
+    #[test]
+    fn legacy_world_without_profile_deserializes_as_natural() {
+        let meta = WorldMeta::new("legacy".to_string(), 44);
+        let encoded = ron::ser::to_string_pretty(&meta, ron::ser::PrettyConfig::default())
+            .expect("world meta should serialize");
+        let legacy = encoded
+            .lines()
+            .filter(|line| !line.contains("world_profile"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let decoded: WorldMeta = ron::from_str(&legacy).expect("legacy save should migrate");
+
+        assert_eq!(decoded.world_profile, WorldProfile::Natural);
+    }
+
+    #[test]
+    fn legacy_neon_presentation_gets_the_astral_terrain_it_searches_for() {
+        let mut settings = WorldSettings::default();
+        settings.world_profile = WorldProfile::Natural;
+        settings.visual_preset = VisualPreset::NeonShuttle;
+
+        assert_eq!(
+            settings.effective_world_profile(),
+            WorldProfile::AstralFrontier
         );
     }
 

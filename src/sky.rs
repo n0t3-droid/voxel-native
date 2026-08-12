@@ -41,7 +41,7 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::daynight::WorldIntelRuntime;
 use crate::player::Player;
-use crate::settings::{GraphicsMode, WorldSettings};
+use crate::settings::{GraphicsMode, WorldProfile, WorldSettings};
 
 /// Render layer used exclusively by the sky pass. The world camera stays
 /// on the default layer 0 and never sees these meshes; the sky camera
@@ -165,7 +165,14 @@ fn setup_sky(
 ) {
     let sky_layer = RenderLayers::layer(SKY_LAYER);
 
-    let asset_policy = sky_asset_policy(settings.graphics, default_sky_showcase_policy());
+    // Allocate the single Astral nebula shell once, then profile-gate its
+    // visibility. World selection happens after Startup, so conditional
+    // allocation here would make a newly opened Astral world inherit the
+    // previous menu/profile state. Duplicate sun/moon/planet assets remain
+    // disabled; the reachable bodies in `celestial.rs` keep ownership.
+    let mut allocated_showcase = default_sky_showcase_policy();
+    allocated_showcase.nebula = true;
+    let asset_policy = sky_asset_policy(settings.graphics, allocated_showcase);
 
     // ----- Sky camera --------------------------------------------------
     // order = -1 → renders BEFORE the world camera in `player.rs` and
@@ -272,7 +279,11 @@ fn setup_sky(
         SKY_DISTANCE * 0.95,
     ));
     let stars_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
+        // Additive source alpha starts at zero so the unlit vertex albedo is
+        // genuinely invisible by day. Animating emissive alone was not
+        // enough: the white base still rendered thousands of square specks
+        // against the noon sky.
+        base_color: Color::srgba(1.0, 1.0, 1.0, 0.0),
         // Starts at zero — the day/night system fades them in at night.
         emissive: LinearRgba::rgb(0.0, 0.0, 0.0),
         unlit: true,
@@ -299,20 +310,24 @@ fn setup_sky(
     ));
 
     let nebula_mat = if let Some(nebula_resolution) = asset_policy.nebula_resolution {
-        let nebula_image = images.add(build_nebula_image(nebula_resolution, settings.seed as u64));
-        let nebula_mesh = meshes.add(
-            Sphere::new(SKY_DISTANCE * 2.6)
-                .mesh()
-                .ico(4)
-                .expect("subdivision 4 is within ico limits"),
-        );
+        let nebula_image = images.add(build_nebula_image(nebula_resolution, 0xA57A_2026_DA7Au64));
+        // Equirectangular cloud maps need duplicated seam vertices. An
+        // icosphere shares its seam vertices and interpolates U from nearly
+        // one back to zero across a triangle, which produced the giant
+        // chevrons visible in Astral QA. A modest UV sphere fixes that at one
+        // draw call and about 2k vertices; the sky silhouette never exposes
+        // its regular pole topology.
+        let nebula_mesh = meshes.add(Sphere::new(SKY_DISTANCE * 2.6).mesh().uv(64, 32));
         let nebula_mat = materials.add(StandardMaterial {
-            base_color: Color::srgba(1.0, 1.0, 1.0, 1.0),
+            base_color: Color::srgba(1.0, 1.0, 1.0, 0.96),
             base_color_texture: Some(nebula_image.clone()),
             emissive_texture: Some(nebula_image),
             emissive: LinearRgba::rgb(2.0, 1.6, 2.6),
             unlit: true,
-            alpha_mode: AlphaMode::Add,
+            // Blend gives the painted shell real large-scale colour mass.
+            // Additive-only rendering disappeared into the bright atmospheric
+            // clear colour and left Astral daylight almost flat blue in QA.
+            alpha_mode: AlphaMode::Blend,
             cull_mode: Some(bevy::render::render_resource::Face::Front),
             double_sided: true,
             ..default()
@@ -321,7 +336,13 @@ fn setup_sky(
             PbrBundle {
                 mesh: nebula_mesh,
                 material: nebula_mat.clone(),
-                transform: Transform::IDENTITY,
+                // Bevy's UV sphere is Z-up. Rotate its texture latitude onto
+                // the world's Y-up sky before the camera-follow system moves
+                // it; this also keeps the authored rose horizon horizontal.
+                transform: Transform::from_rotation(Quat::from_rotation_x(
+                    -std::f32::consts::FRAC_PI_2,
+                )),
+                visibility: nebula_visibility(settings.effective_world_profile()),
                 ..default()
             },
             NotShadowCaster,
@@ -566,7 +587,7 @@ fn follow_and_animate_sky(
         ),
     >,
     mut nebula_q: Query<
-        &mut Transform,
+        (&mut Transform, &mut Visibility),
         (
             With<Nebula>,
             Without<SkyCamera>,
@@ -627,11 +648,12 @@ fn follow_and_animate_sky(
         let dir = Vec3::new(-0.72, 0.28, 0.55).normalize();
         planet_b_tf.translation = trans + dir * SKY_DISTANCE * 0.88;
     }
-    if let Ok(mut nebula_tf) = nebula_q.get_single_mut() {
+    if let Ok((mut nebula_tf, mut visibility)) = nebula_q.get_single_mut() {
         // Stationary nebula backdrop — the painterly clouds should
         // feel like a cosmic painting fixed behind us, not a slow
         // carousel. No rotation.
         nebula_tf.translation = trans;
+        *visibility = nebula_visibility(settings.effective_world_profile());
     }
 
     // ----- Animate emissives by day factor -----------------------------
@@ -695,28 +717,58 @@ fn follow_and_animate_sky(
             }
         }
 
-        // Nebula — vivid magenta/cyan/orange at all times (additive
-        // blend paints clouds on top of the sky gradient). Day values
-        // are pushed HARD so the cosmic backdrop reads clearly even
-        // against the bright blue noon sky, just like in the reference
-        // art where planets and nebulae are visible in broad daylight.
+        // Nebula: additive colour behind the terrain, visible in daylight but
+        // deliberately restrained so it supports rather than flattens depth.
         if let Some(handle) = &sky_mats.nebula {
             if let Some(mat) = materials.get_mut(handle) {
-                let base_day = Vec3::new(9.0, 5.0, 13.0); // rich purple/magenta at noon
-                let base_night = Vec3::new(8.0, 5.5, 10.0); // full nebula glow at night
-                let base_sunset = Vec3::new(12.0, 5.0, 4.5); // warm dusk glow
+                // Daylight stays pastel and subordinate to terrain
+                // silhouettes; night opens the colour range without turning
+                // the whole frame into emissive magenta fog.
+                let base_day = Vec3::new(1.55, 0.92, 2.05);
+                let base_night = Vec3::new(2.5, 1.5, 3.6);
+                let base_sunset = Vec3::new(2.2, 0.9, 1.15);
                 let e = (base_day * day + base_night * night + base_sunset * sunset * 0.9)
                     * intel.profile.sky_saturation.max(0.7);
                 mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
             }
         }
 
-        // Stars: fade in linearly with night.
+        // Stars: suppress the unlit base as well as emissive light during
+        // daylight, then fade both through astronomical twilight.
         if let Some(mat) = materials.get_mut(&sky_mats.stars) {
-            let intensity = 14.0 * night * intel.profile.sky_saturation.max(0.7);
+            let night_visibility = star_visibility_for_sun_elevation(sun_dir.y);
+            let visibility = if settings.effective_world_profile() == WorldProfile::AstralFrontier {
+                // The reference sky keeps a restrained high-altitude star
+                // field in daylight. A small floor preserves that identity
+                // without making the scene read as night or adding entities.
+                0.07 + night_visibility * 0.93
+            } else {
+                night_visibility
+            };
+            mat.base_color = Color::srgba(1.0, 1.0, 1.0, visibility);
+            let intensity = 14.0 * visibility * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(intensity, intensity, intensity * 1.15);
         }
     }
+}
+
+fn nebula_visibility(profile: WorldProfile) -> Visibility {
+    if profile == WorldProfile::AstralFrontier {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    }
+}
+
+/// Smooth astronomical-twilight visibility for the additive star shell.
+///
+/// Sun elevation is represented by the normalized direction Y component.
+/// Stars are fully absent once the sun is comfortably above the horizon and
+/// fully present in deeper twilight, without a one-frame on/off threshold.
+#[inline]
+fn star_visibility_for_sun_elevation(elevation_sine: f32) -> f32 {
+    let t = ((elevation_sine + 0.16) / 0.28).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
 }
 
 fn mirror_sky_camera(
@@ -937,12 +989,15 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
     let n_g = Perlin::new(seed as u32 ^ 0x3333_3333);
     let n_b = Perlin::new(seed as u32 ^ 0xBBBB_BBBB);
     let n_mask = Perlin::new(seed as u32 ^ 0x1234_5678);
+    let n_warp = Perlin::new(seed as u32 ^ 0x51A7_4EED);
     // Equirectangular mapping: x → longitude [0, 2π), y → latitude [-π/2, π/2].
     let w = size;
     let h = size / 2;
     let mut data = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
-        let v = (y as f64 / h as f64) * std::f64::consts::PI - std::f64::consts::FRAC_PI_2;
+        // Top-down latitude makes the top texture row world-up after the UV
+        // sphere's fixed Z-up -> Y-up rotation.
+        let v = std::f64::consts::FRAC_PI_2 - (y as f64 / h as f64) * std::f64::consts::PI;
         let (sv, cv) = v.sin_cos();
         for x in 0..w {
             let u = (x as f64 / w as f64) * std::f64::consts::TAU;
@@ -952,46 +1007,83 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
             let py = sv;
             let pz = cv * su;
 
-            // FBM helper inlined for speed.
-            let fbm = |n: &Perlin, f: f64, oct: u32| -> f64 {
+            // Startup-only FBM. One generated texture and one unlit draw own
+            // the entire runtime sky cost; no procedural noise runs per frame.
+            let fbm_at = |n: &Perlin, q: [f64; 3], f: f64, oct: u32| -> f64 {
                 let mut sum = 0.0;
                 let mut amp = 1.0;
                 let mut freq = f;
                 let mut norm = 0.0;
                 for _ in 0..oct {
-                    sum += amp * n.get([px * freq, py * freq, pz * freq]);
+                    sum += amp * n.get([q[0] * freq, q[1] * freq, q[2] * freq]);
                     norm += amp;
                     amp *= 0.55;
                     freq *= 2.0;
                 }
                 sum / norm.max(1e-6)
             };
-            let r = fbm(&n_r, 1.3, 5);
-            let g = fbm(&n_g, 1.7, 5);
-            let b = fbm(&n_b, 1.1, 5);
-            let mask = fbm(&n_mask, 0.6, 3);
-            // Soft mask so large regions of the sphere are near-black,
-            // and only a few filaments glow strongly — exactly like
-            // real nebulae.
-            let amp = (mask + 0.2).max(0.0).powf(1.6);
-            let rr = ((r * 0.5 + 0.5) * amp).clamp(0.0, 1.0);
-            let gg = ((g * 0.5 + 0.5) * amp * 0.85).clamp(0.0, 1.0);
-            let bb = ((b * 0.5 + 0.5) * amp * 1.05).clamp(0.0, 1.0);
 
-            // Colour palette skewed toward magenta / cyan / warm orange
-            // highlights. Mix the raw channels with fixed biases so the
-            // image looks painterly, not random.
-            let mag = (rr * 1.15 + bb * 0.35).min(1.0);
-            let cyn = (gg * 0.9 + bb * 1.1).min(1.0);
-            let wrm = (rr * 1.05 + gg * 0.7).min(1.0);
-            let r_out = (mag * 0.9 + wrm * 0.6).min(1.0);
-            let g_out = (cyn * 0.6 + wrm * 0.55).min(1.0);
-            let b_out = (mag * 0.5 + cyn * 1.0).min(1.0);
+            let p = [px, py, pz];
+            let warp = [
+                fbm_at(&n_warp, [px + 7.1, py - 3.7, pz + 1.9], 0.78, 3),
+                fbm_at(&n_warp, [px - 5.3, py + 8.9, pz - 2.4], 0.78, 3),
+                fbm_at(&n_warp, [px + 2.8, py + 1.6, pz + 9.2], 0.78, 3),
+            ];
+            let q = [
+                p[0] + warp[0] * 0.42,
+                p[1] + warp[1] * 0.32,
+                p[2] + warp[2] * 0.42,
+            ];
+
+            // Broad density establishes a few calm voids. Ridged turbulence
+            // adds luminous folds only inside those masses. The result keeps
+            // mid-scale structure through daylight ACES tonemapping instead
+            // of collapsing into pastel colour mush.
+            let density_noise = fbm_at(&n_mask, q, 0.88, 5);
+            // The first UV-safe QA pass proved the seam fix but showed only
+            // isolated wisps against the cobalt clear colour. Lift broad mass
+            // occupancy while retaining alpha-controlled voids between it.
+            let density = smooth_unit((density_noise + 0.31) / 0.76);
+            let ridge_signal = fbm_at(&n_r, q, 2.25, 5).abs();
+            let filament = (1.0 - ridge_signal).clamp(0.0, 1.0).powf(5.0) * density;
+            let wisps = smooth_unit((fbm_at(&n_b, q, 1.62, 4) + 0.08) / 0.82) * density;
+            let color_flow = fbm_at(&n_g, q, 1.18, 4) * 0.5 + 0.5;
+
+            // Values are authored in display-referred sRGB. Rgba8UnormSrgb
+            // performs the defined piecewise decode before emissive
+            // multiplication and ACES tonemapping.
+            let horizon = (1.0 - (py.abs() * 2.25).min(1.0)).powf(2.0);
+            let upper = py.max(0.0).powf(1.4);
+            let magenta_mass = density * color_flow;
+            let cyan_mass = density * (1.0 - color_flow);
+            let r_out = (0.018
+                + magenta_mass * 0.78
+                + cyan_mass * 0.10
+                + filament * 0.54
+                + horizon * (0.14 + density * 0.25))
+                .min(1.0);
+            let g_out = (0.025
+                + magenta_mass * 0.12
+                + cyan_mass * 0.66
+                + filament * 0.36
+                + upper * wisps * 0.18
+                + horizon * 0.07)
+                .min(1.0);
+            let b_out = (0.075
+                + magenta_mass * 0.68
+                + cyan_mass * 0.84
+                + filament * 0.58
+                + wisps * 0.12
+                + upper * 0.06
+                + horizon * 0.15)
+                .min(1.0);
+            let alpha =
+                (0.10 + density * 0.60 + filament * 0.24 + horizon * 0.06).clamp(0.08, 0.88);
 
             data.push((r_out * 255.0) as u8);
             data.push((g_out * 255.0) as u8);
             data.push((b_out * 255.0) as u8);
-            data.push(255);
+            data.push((alpha * 255.0) as u8);
         }
     }
 
@@ -1014,6 +1106,12 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
     image
 }
 
+#[inline]
+fn smooth_unit(value: f64) -> f64 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,6 +1125,24 @@ mod tests {
         assert!(!policy.second_moon);
         assert!(!policy.ringed_planet);
         assert!(!policy.second_planet);
+    }
+
+    #[test]
+    fn astral_nebula_is_profile_scoped_without_enabling_duplicate_bodies() {
+        assert_eq!(
+            nebula_visibility(WorldProfile::AstralFrontier),
+            Visibility::Visible
+        );
+        assert_eq!(nebula_visibility(WorldProfile::Natural), Visibility::Hidden);
+
+        let mut policy = default_sky_showcase_policy();
+        policy.nebula = true;
+        let assets = sky_asset_policy(GraphicsMode::High, policy);
+        assert_eq!(assets.nebula_resolution, Some(1024));
+        assert!(!assets.classic_sun_moon);
+        assert!(!assets.second_moon);
+        assert!(!assets.ringed_planet);
+        assert!(!assets.second_planet);
     }
 
     #[test]
@@ -1058,6 +1174,58 @@ mod tests {
         assert!(!fast.bloom);
         assert!(balanced.bloom);
         assert!(high.bloom);
+    }
+
+    #[test]
+    fn stars_are_absent_by_day_and_fade_monotonically_through_twilight() {
+        assert_eq!(star_visibility_for_sun_elevation(1.0), 0.0);
+        assert_eq!(star_visibility_for_sun_elevation(0.12), 0.0);
+        assert_eq!(star_visibility_for_sun_elevation(-0.16), 1.0);
+        assert_eq!(star_visibility_for_sun_elevation(-1.0), 1.0);
+
+        let daylight = star_visibility_for_sun_elevation(0.08);
+        let horizon = star_visibility_for_sun_elevation(0.0);
+        let twilight = star_visibility_for_sun_elevation(-0.08);
+        assert!(daylight < horizon && horizon < twilight);
+        assert!((0.0..=1.0).contains(&horizon));
+    }
+
+    #[test]
+    fn nebula_texture_is_deterministic_seam_safe_and_structured() {
+        let size = 128;
+        let first = build_nebula_image(size, 0xA57A_2026_DA7A);
+        let second = build_nebula_image(size, 0xA57A_2026_DA7A);
+        assert_eq!(first.data, second.data);
+        assert_eq!(first.data.len(), (size * (size / 2) * 4) as usize);
+
+        let mut min_rgb = u8::MAX;
+        let mut max_rgb = u8::MIN;
+        let mut min_alpha = u8::MAX;
+        let mut max_alpha = u8::MIN;
+        for pixel in first.data.chunks_exact(4) {
+            min_rgb = min_rgb.min(pixel[0]).min(pixel[1]).min(pixel[2]);
+            max_rgb = max_rgb.max(pixel[0]).max(pixel[1]).max(pixel[2]);
+            min_alpha = min_alpha.min(pixel[3]);
+            max_alpha = max_alpha.max(pixel[3]);
+        }
+        assert!(max_rgb.saturating_sub(min_rgb) > 90);
+        assert!(min_alpha < 80, "voids need to reveal the clear sky");
+        assert!(max_alpha > 120, "cloud masses need visible opacity");
+
+        // Spherical noise returns to the same 3D neighbourhood at U=0/1.
+        // Keeping the average edge delta small prevents a visible meridian.
+        let row_bytes = size as usize * 4;
+        let mut seam_delta = 0u64;
+        let mut seam_samples = 0u64;
+        for y in 2..(size as usize / 2 - 2) {
+            let left = &first.data[y * row_bytes..y * row_bytes + 3];
+            let right = &first.data[(y + 1) * row_bytes - 4..(y + 1) * row_bytes - 1];
+            for channel in 0..3 {
+                seam_delta += u64::from(left[channel].abs_diff(right[channel]));
+                seam_samples += 1;
+            }
+        }
+        assert!(seam_delta / seam_samples < 26);
     }
 
     #[test]

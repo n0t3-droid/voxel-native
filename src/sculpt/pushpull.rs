@@ -30,16 +30,18 @@
 //! pulled 32 voxels would stamp 131 072 voxels — well within the
 //! existing batch system's working set.
 
+use std::collections::{BTreeMap, VecDeque};
+
 use ahash::{AHashMap, AHashSet};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
-use crate::blocks::{voxel_is_solid, Voxel, AIR};
+use crate::blocks::{voxel_is_solid, BlockType, Voxel, AIR};
 use crate::builder::{BuilderHistory, BuilderHistorySketchMeta};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::player::Player;
 use crate::sculpt::face::{collect_face, FaceRegion};
-use crate::sculpt::raycast::dda_voxel;
+use crate::sculpt::raycast::{dda_object_voxel, dda_voxel};
 use crate::sculpt::state::{HoverHit, SculptMode, SculptState};
 use crate::sketch_model::{EditorToolId, ToolController};
 use crate::toolbelt::{ToolbeltState, ToolbeltTool};
@@ -59,6 +61,21 @@ const REFERENCE_POINT_SIZE: f32 = 0.16;
 const HOVER_POINT_SIZE: f32 = 0.08;
 const TAP_CLEANUP_FACE_CAP: usize = 768;
 const TAP_CLEANUP_MAX_MOTION_PX: f32 = 4.0;
+const OBJECT_SELECTION_CELL_CAP: usize = 64_000;
+const OBJECT_EDIT_DOUBLE_CLICK_SECONDS: f32 = 0.42;
+const NATURAL_TREE_WOOD_CAP: usize = 4_096;
+const NATURAL_TREE_CELL_CAP: usize = 20_000;
+const NATURAL_TREE_CANOPY_REACH: i32 = 7;
+const NATURAL_TREE_CANOPY_PATH_CAP: u16 = 12;
+const NATURAL_TREE_SCAN_VOLUME_CAP: i64 = 120_000;
+const NATURAL_TREE_NEIGHBORS: [IVec3; 6] = [
+    IVec3::X,
+    IVec3::NEG_X,
+    IVec3::Y,
+    IVec3::NEG_Y,
+    IVec3::Z,
+    IVec3::NEG_Z,
+];
 
 /// Floor for the screen-space normal projection magnitude: when the
 /// camera looks edge-on at a face, the projected normal can collapse to
@@ -107,6 +124,21 @@ pub struct PushPullDrag {
     /// Reverting the preview means writing each `before` back; committing
     /// means computing `(pos, before, current_world_value)` triples.
     pub preview: AHashMap<IVec3, Voxel>,
+}
+
+#[derive(Resource, Debug, Clone)]
+pub struct SemanticSelectionInteraction {
+    last_object: Option<crate::sketch_model::SketchId>,
+    last_click_seconds: f32,
+}
+
+impl Default for SemanticSelectionInteraction {
+    fn default() -> Self {
+        Self {
+            last_object: None,
+            last_click_seconds: f32::NEG_INFINITY,
+        }
+    }
 }
 
 impl PushPullDrag {
@@ -299,7 +331,12 @@ pub fn update_hover(
         state.hover = None;
         return;
     };
-    if let Some((hit, prev)) = dda_voxel(&world, origin, dir, SCULPT_RAY_REACH) {
+    let hit = if tool_controller.active_tool() == EditorToolId::Select {
+        dda_object_voxel(&world, origin, dir, SCULPT_RAY_REACH)
+    } else {
+        dda_voxel(&world, origin, dir, SCULPT_RAY_REACH)
+    };
+    if let Some((hit, prev)) = hit {
         state.hover = Some(HoverHit { voxel: hit, prev });
         state.mode = SculptMode::PushPull;
     } else {
@@ -341,6 +378,18 @@ pub fn resolve_hover_face(
         return;
     };
     let normal = hit.normal();
+    let hit_voxel = world.voxel_at(hit.voxel.x, hit.voxel.y, hit.voxel.z);
+    if natural_tree_foliage(hit_voxel) {
+        let region = FaceRegion {
+            cells: vec![hit.voxel],
+            voxel: hit_voxel,
+            normal,
+            clipped: false,
+        };
+        semantic_hover.0 = semantic_hover_hit_from_region(&region, &sketch_links);
+        hover_face.0 = Some(region);
+        return;
+    }
     hover_face.0 = collect_face(&world, hit.voxel, normal);
     semantic_hover.0 = hover_face
         .0
@@ -402,38 +451,494 @@ fn semantic_hover_hit_from_region_cell(
 pub fn semantic_select_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
     mode: Res<ModeContext>,
     ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
     semantic_hover: Res<crate::sketch_model::SemanticHoverHit>,
+    state: Res<SculptState>,
+    world: Res<VoxelWorld>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
+    mut interaction: ResMut<SemanticSelectionInteraction>,
     mut tool_controller: ResMut<crate::sketch_model::ToolController>,
     mut toolbelt: ResMut<ToolbeltState>,
 ) {
-    if !semantic_select_input_active(
-        mode.is_build_live(),
-        tool_controller.active_tool(),
-        mouse.just_pressed(MouseButton::Left),
-        ui_focus
-            .as_deref()
-            .is_some_and(|focus| focus.pointer_over_editor_ui),
-    ) {
+    let pointer_over_ui = ui_focus
+        .as_deref()
+        .is_some_and(|focus| focus.pointer_over_editor_ui);
+    if !mode.is_build_live()
+        || pointer_over_ui
+        || tool_controller.active_tool() != EditorToolId::Select
+    {
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Escape) && tool_controller.edit_object_active() {
+        tool_controller.exit_edit_object();
+        toolbelt.status =
+            "Object selected as one unit. Move, Rotate, or Scale it; Enter edits its parts.".into();
+        interaction.last_object = None;
+        return;
+    }
+    if keys.just_pressed(KeyCode::Enter) && !tool_controller.edit_object_active() {
+        if !matches!(
+            tool_controller.enter_edit_object(),
+            crate::sketch_model::SelectionUpdate::Ignored
+        ) {
+            toolbelt.status =
+                "EDIT OBJECT: click one part, Shift-click adds parts, Delete removes them, Escape returns to the whole object."
+                    .into();
+        }
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
 
     let additive = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let update =
-        apply_semantic_selection_click(&mut tool_controller, semantic_hover.0.as_ref(), additive);
+    let mut hit = semantic_hover.0.clone();
+    if hit.is_none() {
+        if let Some(hover) = state.hover {
+            hit = register_natural_tree_object(
+                &world,
+                &mut sketch_doc,
+                &mut sketch_links,
+                hover.voxel,
+            );
+        }
+    }
+
+    let Some(hit) = hit else {
+        interaction.last_object = None;
+        if !additive {
+            tool_controller.clear_selection();
+            toolbelt.status = if tool_controller.edit_object_active() {
+                "EDIT OBJECT: part selection cleared; Escape returns to the whole object.".into()
+            } else {
+                "Select: object selection cleared.".into()
+            };
+        }
+        return;
+    };
+
+    let update = if tool_controller.edit_object_active() {
+        let part_hit = edit_part_hit_at_cell(
+            &tool_controller,
+            &sketch_links,
+            &hit,
+            state.hover.map(|hover| hover.voxel),
+        );
+        interaction.last_object = None;
+        part_hit
+            .as_ref()
+            .map(|part| tool_controller.select_edit_part(part, additive))
+            .unwrap_or(crate::sketch_model::SelectionUpdate::Ignored)
+    } else {
+        let members = object_members_for_hit(&sketch_doc, &sketch_links, &hit);
+        let object_key = members.first().copied().unwrap_or(hit.entity);
+        let now = time.elapsed_seconds();
+        let double_click = interaction.last_object == Some(object_key)
+            && now - interaction.last_click_seconds <= OBJECT_EDIT_DOUBLE_CLICK_SECONDS;
+        interaction.last_object = Some(object_key);
+        interaction.last_click_seconds = now;
+        let update = tool_controller.select_object_members(members, additive);
+        if double_click && !additive {
+            tool_controller.enter_edit_object();
+            toolbelt.status =
+                "EDIT OBJECT: double-click entered part editing. Select a part and press Delete; Escape selects the whole object again."
+                    .into();
+        }
+        update
+    };
+
     match update {
         crate::sketch_model::SelectionUpdate::Selected(id) => {
-            toolbelt.status = format!(
-                "Select: semantic entity {} selected. Shift-click adds to selection.",
-                id.raw()
-            );
+            if tool_controller.edit_object_active() {
+                if !toolbelt.status.starts_with("EDIT OBJECT: double-click") {
+                    toolbelt.status = format!(
+                        "EDIT OBJECT: part {} selected. Shift-click adds parts; Delete removes them; Escape exits.",
+                        id.raw()
+                    );
+                }
+            } else {
+                toolbelt.status = format!(
+                    "Object selected: {} linked part{}. Move, Rotate, and Scale affect all of it; Enter or double-click edits parts.",
+                    tool_controller.selection().len(),
+                    if tool_controller.selection().len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                );
+            }
         }
         crate::sketch_model::SelectionUpdate::Cleared => {
             toolbelt.status = "Select: semantic selection cleared.".into();
         }
         crate::sketch_model::SelectionUpdate::Ignored => {}
     }
+}
+
+fn object_members_for_hit(
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    hit: &crate::sketch_model::HitRecord,
+) -> Vec<crate::sketch_model::SketchId> {
+    if let Some(instance) = hit.instance_path.first().copied() {
+        return vec![instance];
+    }
+    if sketch_doc
+        .entity_attribute(hit.entity, "voxel_native", "object_id")
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return sketch_doc
+            .object_members_for_entity(hit.entity)
+            .into_iter()
+            .filter(|entity| !sketch_links.cells_for_entity(*entity).is_empty())
+            .collect();
+    }
+    sketch_links.connected_entities_for_entity(hit.entity, OBJECT_SELECTION_CELL_CAP)
+}
+
+fn edit_part_hit_at_cell(
+    tool_controller: &crate::sketch_model::ToolController,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    fallback: &crate::sketch_model::HitRecord,
+    cell: Option<IVec3>,
+) -> Option<crate::sketch_model::HitRecord> {
+    let members = tool_controller.edit_object_members()?;
+    if let Some(cell) = cell {
+        if let Some(link) = sketch_links
+            .links_for_cell(cell)
+            .into_iter()
+            .find(|link| members.contains(link.entity))
+        {
+            return Some(
+                crate::sketch_model::HitRecord::new(
+                    link.entity,
+                    std::iter::empty::<crate::sketch_model::SketchId>(),
+                    crate::sketch_model::HitKind::Face,
+                    cell.as_vec3() + Vec3::splat(0.5),
+                    0.0,
+                )
+                .with_normal(fallback.normal.unwrap_or(Vec3::Y)),
+            );
+        }
+    }
+    members.contains(fallback.entity).then(|| fallback.clone())
+}
+
+fn register_natural_tree_object(
+    world: &VoxelWorld,
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+    hit: IVec3,
+) -> Option<crate::sketch_model::HitRecord> {
+    if let Some(link) = sketch_links.links_for_cell(hit).into_iter().next() {
+        return Some(crate::sketch_model::HitRecord::new(
+            link.entity,
+            std::iter::empty::<crate::sketch_model::SketchId>(),
+            crate::sketch_model::HitKind::Face,
+            hit.as_vec3() + Vec3::splat(0.5),
+            0.0,
+        ));
+    }
+
+    let parts = collect_natural_tree_parts(world, sketch_links, hit)?;
+    let root = parts
+        .values()
+        .flatten()
+        .min_by_key(|cell| (cell.y, cell.x, cell.z))
+        .copied()?;
+    let object_id = format!("natural-tree/{}/{}/{}", root.x, root.y, root.z);
+    let context = sketch_doc.active_context();
+    let hit_voxel = world.voxel_at(hit.x, hit.y, hit.z);
+    let mut hit_entity = None;
+
+    for (voxel, cells) in parts {
+        if cells.is_empty() {
+            continue;
+        }
+        let centroid = cells.iter().fold(Vec3::ZERO, |sum, cell| {
+            sum + cell.as_vec3() + Vec3::splat(0.5)
+        }) / cells.len() as f32;
+        let entity = sketch_doc
+            .add_entity_to_active(crate::sketch_model::SketchEntityKind::Vertex { point: centroid })
+            .ok()?;
+        sketch_doc
+            .set_entity_attribute(entity, "voxel_native", "object_id", object_id.clone())
+            .ok()?;
+        sketch_doc
+            .set_entity_attribute(
+                entity,
+                "voxel_native",
+                "part",
+                format!("{:?}", BlockType::from_voxel(voxel)),
+            )
+            .ok()?;
+        let link = crate::sketch_model::SketchVoxelLink::new(
+            entity,
+            context,
+            crate::sketch_model::SketchVoxelLinkRole::Shape,
+        );
+        sketch_links.link_cells(cells.iter().copied(), link);
+        if voxel == hit_voxel && cells.contains(&hit) {
+            hit_entity = Some(entity);
+        }
+    }
+
+    let entity = hit_entity?;
+    Some(crate::sketch_model::HitRecord::new(
+        entity,
+        std::iter::empty::<crate::sketch_model::SketchId>(),
+        crate::sketch_model::HitKind::Face,
+        hit.as_vec3() + Vec3::splat(0.5),
+        0.0,
+    ))
+}
+
+fn collect_natural_tree_parts(
+    world: &VoxelWorld,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    hit: IVec3,
+) -> Option<BTreeMap<Voxel, Vec<IVec3>>> {
+    let hit_voxel = world.voxel_at(hit.x, hit.y, hit.z);
+    let wood = if natural_tree_wood(hit_voxel) {
+        natural_tree_wood_component(world, sketch_links, hit)?
+    } else if natural_tree_foliage(hit_voxel) {
+        natural_tree_wood_from_foliage(world, sketch_links, hit, hit_voxel)?
+    } else {
+        return None;
+    };
+    if wood.len() < 2 {
+        return None;
+    }
+    let wood_cells: AHashSet<_> = wood.iter().copied().collect();
+    if !wood.iter().copied().any(|cell| {
+        checked_tree_cell_add(cell, IVec3::Y).is_some_and(|above| wood_cells.contains(&above))
+    }) {
+        return None;
+    }
+    let wood_voxel = world.voxel_at(wood[0].x, wood[0].y, wood[0].z);
+
+    let mut min = wood[0];
+    let mut max = wood[0];
+    for cell in wood.iter().copied().skip(1) {
+        min = min.min(cell);
+        max = max.max(cell);
+    }
+    let competition_reach = NATURAL_TREE_CANOPY_REACH * 2;
+    let scan_min = checked_tree_cell_sub(min, IVec3::new(competition_reach, 2, competition_reach))?;
+    let scan_max = checked_tree_cell_add(max, IVec3::new(competition_reach, 6, competition_reach))?;
+    let scan_size = [
+        i64::from(scan_max.x) - i64::from(scan_min.x) + 1,
+        i64::from(scan_max.y) - i64::from(scan_min.y) + 1,
+        i64::from(scan_max.z) - i64::from(scan_min.z) + 1,
+    ];
+    let scan_volume = scan_size[0]
+        .checked_mul(scan_size[1])?
+        .checked_mul(scan_size[2])?;
+    if scan_volume <= 0 || scan_volume > NATURAL_TREE_SCAN_VOLUME_CAP {
+        return None;
+    }
+
+    let target_wood: AHashSet<_> = wood.iter().copied().collect();
+    let mut target_sources = Vec::with_capacity(wood.len());
+    let mut foreign_sources = Vec::new();
+    let mut foliage = AHashMap::<IVec3, Voxel>::new();
+    for y in scan_min.y..=scan_max.y {
+        for z in scan_min.z..=scan_max.z {
+            for x in scan_min.x..=scan_max.x {
+                let cell = IVec3::new(x, y, z);
+                let voxel = world.voxel_at(x, y, z);
+                if target_wood.contains(&cell) {
+                    target_sources.push(cell);
+                } else if natural_tree_wood(voxel) {
+                    // Authored/registered wood is a competitor rather than a
+                    // candidate: semantic ownership is a hard object boundary.
+                    foreign_sources.push(cell);
+                } else if natural_tree_foliage(voxel)
+                    && sketch_links.links_for_cell(cell).is_empty()
+                {
+                    foliage.insert(cell, voxel);
+                }
+            }
+        }
+    }
+
+    let target_distance = foliage_distances(&foliage, &target_sources);
+    let foreign_distance = foliage_distances(&foliage, &foreign_sources);
+    let mut parts = BTreeMap::<Voxel, Vec<IVec3>>::new();
+    parts.insert(wood_voxel, wood.clone());
+
+    for (cell, distance) in target_distance {
+        let foreign_wins_or_ties = foreign_distance
+            .get(&cell)
+            .is_some_and(|foreign| *foreign <= distance);
+        if !foreign_wins_or_ties {
+            parts.entry(foliage[&cell]).or_default().push(cell);
+        }
+    }
+    let foliage_count = parts
+        .iter()
+        .filter(|(voxel, _)| natural_tree_foliage(**voxel))
+        .map(|(_, cells)| cells.len())
+        .sum::<usize>();
+    if parts.values().map(Vec::len).sum::<usize>() > NATURAL_TREE_CELL_CAP
+        || (BlockType::from_voxel(wood_voxel) != BlockType::Bamboo && foliage_count == 0)
+        || (natural_tree_foliage(hit_voxel)
+            && !parts
+                .get(&hit_voxel)
+                .is_some_and(|cells| cells.contains(&hit)))
+    {
+        return None;
+    }
+    for cells in parts.values_mut() {
+        cells.sort_unstable_by_key(|cell| (cell.x, cell.y, cell.z));
+    }
+    Some(parts)
+}
+
+fn natural_tree_wood_component(
+    world: &VoxelWorld,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    seed: IVec3,
+) -> Option<Vec<IVec3>> {
+    let wood_voxel = world.voxel_at(seed.x, seed.y, seed.z);
+    if !natural_tree_wood(wood_voxel) || !sketch_links.links_for_cell(seed).is_empty() {
+        return None;
+    }
+    let mut component = Vec::new();
+    let mut visited = AHashSet::from_iter([seed]);
+    let mut frontier = VecDeque::from([seed]);
+    while let Some(cell) = frontier.pop_front() {
+        if component.len() >= NATURAL_TREE_WOOD_CAP {
+            return None;
+        }
+        component.push(cell);
+        for delta in NATURAL_TREE_NEIGHBORS {
+            let Some(neighbor) = checked_tree_cell_add(cell, delta) else {
+                continue;
+            };
+            if visited.insert(neighbor)
+                && world.voxel_at(neighbor.x, neighbor.y, neighbor.z) == wood_voxel
+                && sketch_links.links_for_cell(neighbor).is_empty()
+            {
+                frontier.push_back(neighbor);
+            }
+        }
+    }
+    component.sort_unstable_by_key(|cell| (cell.x, cell.y, cell.z));
+    Some(component)
+}
+
+fn natural_tree_wood_from_foliage(
+    world: &VoxelWorld,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    hit: IVec3,
+    foliage_voxel: Voxel,
+) -> Option<Vec<IVec3>> {
+    if !natural_tree_foliage(foliage_voxel) || !sketch_links.links_for_cell(hit).is_empty() {
+        return None;
+    }
+    let mut visited = AHashSet::from_iter([hit]);
+    let mut frontier = VecDeque::from([(hit, 0_u16)]);
+    let mut contact_distance = None;
+    let mut wood_contacts = AHashSet::new();
+    while let Some((cell, distance)) = frontier.pop_front() {
+        if contact_distance.is_some_and(|contact| distance >= contact) {
+            continue;
+        }
+        if visited.len() > NATURAL_TREE_CELL_CAP || distance >= NATURAL_TREE_CANOPY_PATH_CAP {
+            continue;
+        }
+        for delta in NATURAL_TREE_NEIGHBORS {
+            let Some(neighbor) = checked_tree_cell_add(cell, delta) else {
+                continue;
+            };
+            let voxel = world.voxel_at(neighbor.x, neighbor.y, neighbor.z);
+            if natural_tree_wood(voxel) && sketch_links.links_for_cell(neighbor).is_empty() {
+                contact_distance = Some(distance + 1);
+                wood_contacts.insert(neighbor);
+            } else if voxel == foliage_voxel
+                && sketch_links.links_for_cell(neighbor).is_empty()
+                && visited.insert(neighbor)
+            {
+                frontier.push_back((neighbor, distance + 1));
+            }
+        }
+    }
+    let first = wood_contacts
+        .iter()
+        .copied()
+        .min_by_key(|cell| (cell.x, cell.y, cell.z))?;
+    let component = natural_tree_wood_component(world, sketch_links, first)?;
+    let component_set: AHashSet<_> = component.iter().copied().collect();
+    wood_contacts
+        .iter()
+        .all(|contact| component_set.contains(contact))
+        .then_some(component)
+}
+
+fn foliage_distances(foliage: &AHashMap<IVec3, Voxel>, sources: &[IVec3]) -> AHashMap<IVec3, u16> {
+    let mut distances = AHashMap::new();
+    let mut frontier = VecDeque::new();
+    for source in sources.iter().copied() {
+        frontier.push_back((source, 0_u16));
+    }
+    while let Some((cell, distance)) = frontier.pop_front() {
+        if distance >= NATURAL_TREE_CANOPY_PATH_CAP {
+            continue;
+        }
+        let next_distance = distance + 1;
+        for delta in NATURAL_TREE_NEIGHBORS {
+            let Some(neighbor) = checked_tree_cell_add(cell, delta) else {
+                continue;
+            };
+            if !foliage.contains_key(&neighbor)
+                || distances
+                    .get(&neighbor)
+                    .is_some_and(|known| *known <= next_distance)
+            {
+                continue;
+            }
+            distances.insert(neighbor, next_distance);
+            frontier.push_back((neighbor, next_distance));
+        }
+    }
+    distances
+}
+
+fn natural_tree_wood(voxel: Voxel) -> bool {
+    matches!(
+        BlockType::from_voxel(voxel),
+        BlockType::Wood | BlockType::Bamboo
+    )
+}
+
+fn checked_tree_cell_add(cell: IVec3, delta: IVec3) -> Option<IVec3> {
+    Some(IVec3::new(
+        cell.x.checked_add(delta.x)?,
+        cell.y.checked_add(delta.y)?,
+        cell.z.checked_add(delta.z)?,
+    ))
+}
+
+fn checked_tree_cell_sub(cell: IVec3, delta: IVec3) -> Option<IVec3> {
+    Some(IVec3::new(
+        cell.x.checked_sub(delta.x)?,
+        cell.y.checked_sub(delta.y)?,
+        cell.z.checked_sub(delta.z)?,
+    ))
+}
+
+fn natural_tree_foliage(voxel: Voxel) -> bool {
+    matches!(
+        BlockType::from_voxel(voxel),
+        BlockType::Leaves | BlockType::JungleLeaves | BlockType::BlossomLeaves
+    )
 }
 
 fn semantic_select_input_active(
@@ -1365,7 +1870,7 @@ fn clear_stale_editor_selection_after_history_step(
     tool_controller: &mut crate::sketch_model::ToolController,
     semantic_hover: &mut crate::sketch_model::SemanticHoverHit,
 ) {
-    let _ = tool_controller.clear_selection();
+    let _ = tool_controller.clear_selection_context();
     semantic_hover.0 = None;
 }
 
@@ -1519,6 +2024,139 @@ pub fn draw_reference_gizmo(
 mod tests {
     use super::*;
     use crate::blocks::BlockType;
+
+    fn world_with_tree_voxels(entries: &[(IVec3, BlockType)]) -> VoxelWorld {
+        let mut world = VoxelWorld::new();
+        let mut batch = WorldEditBatch::default();
+        for (cell, block) in entries.iter().copied() {
+            world.edit_set_voxel_batched(cell.x, cell.y, cell.z, Voxel::from(block), &mut batch);
+        }
+        world.finish_edit_batch(batch);
+        world
+    }
+
+    #[test]
+    fn natural_tree_foliage_path_beats_geometrically_closer_wood_across_air_gap() {
+        let mut entries = Vec::new();
+        for y in 0..=2 {
+            entries.push((IVec3::new(5, y, 0), BlockType::Wood));
+            entries.push((IVec3::new(0, y, 2), BlockType::Wood));
+        }
+        for x in 0..=4 {
+            entries.push((IVec3::new(x, 2, 0), BlockType::Leaves));
+        }
+        let world = world_with_tree_voxels(&entries);
+        let links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        let hit = IVec3::new(0, 2, 0);
+
+        let parts = collect_natural_tree_parts(&world, &links, hit)
+            .expect("the connected canopy path should identify its actual trunk");
+        let wood = parts
+            .get(&Voxel::from(BlockType::Wood))
+            .expect("tree should contain a wood part");
+        let leaves = parts
+            .get(&Voxel::from(BlockType::Leaves))
+            .expect("tree should contain its connected canopy");
+
+        assert!(wood.contains(&IVec3::new(5, 0, 0)));
+        assert!(wood.contains(&IVec3::new(5, 2, 0)));
+        assert!(
+            !wood.contains(&IVec3::new(0, 2, 2)),
+            "closer wood separated by an air gap must not steal the canopy"
+        );
+        assert!(leaves.contains(&hit));
+    }
+
+    #[test]
+    fn touching_canopies_partition_by_path_distance_and_ties_fail_closed() {
+        let mut entries = Vec::new();
+        for y in 0..=1 {
+            entries.push((IVec3::new(-3, y, 0), BlockType::Wood));
+            entries.push((IVec3::new(3, y, 0), BlockType::Wood));
+        }
+        for x in -2..=2 {
+            entries.push((IVec3::new(x, 1, 0), BlockType::Leaves));
+        }
+        let world = world_with_tree_voxels(&entries);
+        let links = crate::sketch_model::SketchVoxelLinkIndex::default();
+
+        let left_parts = collect_natural_tree_parts(&world, &links, IVec3::new(-3, 0, 0))
+            .expect("left trunk should remain a valid tree");
+        let left_leaves = left_parts
+            .get(&Voxel::from(BlockType::Leaves))
+            .expect("left tree should own the nearer canopy cells");
+        assert!(left_leaves.contains(&IVec3::new(-2, 1, 0)));
+        assert!(left_leaves.contains(&IVec3::new(-1, 1, 0)));
+        assert!(
+            !left_leaves.contains(&IVec3::new(0, 1, 0)),
+            "a canopy cell tied between two trunks must remain unowned"
+        );
+        assert!(!left_leaves.contains(&IVec3::new(1, 1, 0)));
+
+        assert!(
+            collect_natural_tree_parts(&world, &links, IVec3::new(0, 1, 0)).is_none(),
+            "selecting the exact touching-canopy tie must fail closed instead of picking a tree arbitrarily"
+        );
+    }
+
+    #[test]
+    fn natural_tree_registration_is_idempotent_and_groups_wood_with_foliage() {
+        let entries = [
+            (IVec3::new(10, 0, 0), BlockType::Wood),
+            (IVec3::new(10, 1, 0), BlockType::Wood),
+            (IVec3::new(10, 2, 0), BlockType::Wood),
+            (IVec3::new(10, 3, 0), BlockType::Leaves),
+            (IVec3::new(9, 3, 0), BlockType::Leaves),
+            (IVec3::new(11, 3, 0), BlockType::Leaves),
+        ];
+        let world = world_with_tree_voxels(&entries);
+        let mut doc = crate::sketch_model::SketchDocument::new();
+        let mut links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        let foliage_hit_cell = IVec3::new(10, 3, 0);
+
+        let foliage_hit =
+            register_natural_tree_object(&world, &mut doc, &mut links, foliage_hit_cell)
+                .expect("first foliage click should register the natural tree");
+        let members = doc.object_members_for_entity(foliage_hit.entity);
+        assert_eq!(
+            members.len(),
+            2,
+            "wood and leaves should be two grouped parts"
+        );
+        assert!(members.iter().all(|entity| {
+            doc.entity_attribute(*entity, "voxel_native", "object_id")
+                .ok()
+                .flatten()
+                .is_some_and(|object_id| object_id == "natural-tree/10/0/0")
+        }));
+        assert!(members
+            .iter()
+            .all(|entity| !links.cells_for_entity(*entity).is_empty()));
+
+        let entity_count = doc
+            .context(doc.active_context())
+            .expect("active context")
+            .entities
+            .len();
+        let repeated_foliage_hit =
+            register_natural_tree_object(&world, &mut doc, &mut links, foliage_hit_cell)
+                .expect("registered foliage should resolve to its existing part");
+        let wood_hit =
+            register_natural_tree_object(&world, &mut doc, &mut links, IVec3::new(10, 0, 0))
+                .expect("registered wood should resolve to its existing part");
+
+        assert_eq!(repeated_foliage_hit.entity, foliage_hit.entity);
+        assert_ne!(wood_hit.entity, foliage_hit.entity);
+        assert_eq!(
+            doc.context(doc.active_context())
+                .expect("active context")
+                .entities
+                .len(),
+            entity_count,
+            "re-registering linked tree cells must not create duplicate semantic entities"
+        );
+        assert_eq!(doc.object_members_for_entity(wood_hit.entity), members);
+    }
 
     #[test]
     fn preview_distance_cap_scales_with_face_size() {

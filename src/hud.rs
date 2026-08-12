@@ -285,8 +285,8 @@ impl Plugin for HudPlugin {
     }
 }
 
-/// Shift+F3 toggles the debug stats overlay. Plain F3 is reserved for
-/// build/edit mode in `toolbelt.rs`.
+/// Shift+F3 toggles the debug stats overlay. Plain F3 is handled by `menu.rs`
+/// for the in-game engine editor.
 fn toggle_debug_overlay(
     keys: Res<ButtonInput<KeyCode>>,
     mut overlay: ResMut<DebugOverlay>,
@@ -816,7 +816,7 @@ fn draw_world_arrival(
                     crate::ui_kit::compact_separator(ui, theme);
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        crate::ui_kit::orbit_pulse(ui, !arrival.phase.is_complete(), theme);
+                        crate::ui_kit::signal_reactor(ui, !arrival.phase.is_complete(), theme);
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
                             ui.set_min_width((panel_rect.width() - 108.0).max(160.0));

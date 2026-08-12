@@ -46,6 +46,7 @@ impl Plugin for SculptPlugin {
             .init_resource::<pushpull::PushPullDrag>()
             .init_resource::<pushpull::PushPullReference>()
             .init_resource::<pushpull::HoverFace>()
+            .init_resource::<pushpull::SemanticSelectionInteraction>()
             .init_resource::<transform::SemanticMoveDrag>()
             .init_resource::<transform::SemanticRotateDrag>()
             .init_resource::<transform::SemanticScaleDrag>()
@@ -59,6 +60,7 @@ impl Plugin for SculptPlugin {
                     pushpull::update_hover,
                     pushpull::resolve_hover_face,
                     pushpull::semantic_select_input,
+                    transform::delete_semantic_selection_input,
                     transform::begin_move_drag,
                     transform::update_move_drag,
                     transform::end_move_drag,
@@ -81,6 +83,7 @@ impl Plugin for SculptPlugin {
                     pushpull::universal_undo_input,
                     pushpull::draw_face_gizmo,
                     pushpull::draw_reference_gizmo,
+                    transform::draw_semantic_selection_gizmo,
                     transform::draw_move_gizmo,
                     transform::draw_rotate_gizmo,
                     transform::draw_scale_gizmo,
