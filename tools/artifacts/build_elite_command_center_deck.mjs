@@ -836,7 +836,7 @@ function buildNextSliceSlide(presentation, evidence, reference, sources) {
     slide,
     "IMPLEMENTED / RENDER-ONLY V1",
     "Hydro v1 evidence boundary",
-    "Implemented render-only v1. Nonvisual gates are green. Hydro-current same-binary visual acceptance is pending.",
+    "Implemented render-only v1. Hydro-current telemetry is recorded. Human same-binary visual acceptance is pending.",
     7,
   );
   addShape(slide, "roundRect", { left: 74, top: 238, width: 1132, height: 282 }, {
@@ -846,9 +846,9 @@ function buildNextSliceSlide(presentation, evidence, reference, sources) {
     name: "next-slice-field",
   });
   const phases = [
-    { left: 104, title: "IMPLEMENTED", detail: "Render-only Hydro v1 now lives in planetary streaming; no gameplay-water claim is made.", accent: COLORS.cyan },
-    { left: 490, title: "NONVISUAL", detail: "Current task evidence records green nonvisual gates; no hashed test transcript or total is claimed here.", accent: COLORS.magenta },
-    { left: 876, title: "PENDING", detail: "Wire Hydro telemetry, then inspect Natural + Astral same-binary evidence in a Hydro-current manifest.", accent: COLORS.orange },
+    { left: 104, title: "IMPLEMENTED", detail: "Render-only Hydro v1 lives in planetary streaming. No gameplay-water claim.", accent: COLORS.cyan },
+    { left: 490, title: "RECORDED", detail: "Hydro-current telemetry records Natural + Astral on/off evidence.", accent: COLORS.magenta },
+    { left: 876, title: "PENDING", detail: "Human review of the same-binary captures and formal visual acceptance.", accent: COLORS.orange },
   ];
   const phaseNodes = phases.map((phase, index) => {
     const node = addShape(slide, "roundRect", { left: phase.left, top: 274, width: 300, height: 202 }, {
@@ -885,18 +885,18 @@ function buildNextSliceSlide(presentation, evidence, reference, sources) {
     color: COLORS.white,
     alignment: "center",
   }, "next-slice-gate-title");
-  addText(slide, "Hydro telemetry / current report / current manifest / same-binary captures / full visual review", { left: 96, top: 606, width: 1088, height: 44 }, {
+  addText(slide, "Current manifest + byte-verified captures are inputs · human visual review is the remaining gate", { left: 96, top: 606, width: 1088, height: 44 }, {
     fontSize: 22,
     color: COLORS.cyanSoft,
     alignment: "center",
   }, "next-slice-gate-detail");
-  addSourceFooter(slide, `Hydro v1 implemented / nonvisual gates green / visual acceptance pending`, 7);
+  addSourceFooter(slide, `Hydro-current manifest recorded / human visual acceptance pending`, 7);
   addNotes(slide, [
     `Implementation source: src/planetary_streaming.rs; render-only Hydro v1 is implemented.`,
     `Nonvisual gate state: current task evidence records green gates. The manifest contains no independently hashed gate transcript, so no automated test total is shown.`,
-    `Visual acceptance boundary: ${sources.manifest}; SHA-256 ${evidence.manifestSha256}. A Hydro-current manifest with QA/report/manifest telemetry and same-binary captures is still required.`,
+    `Hydro-current telemetry and byte-verified same-binary captures: ${sources.manifest}; SHA-256 ${evidence.manifestSha256}. Human visual review and formal visual acceptance remain pending.`,
     `Deck-wide visual direction: ${sources.reference}; SHA-256 ${reference.sha256}.`,
-  ], "Implementation and nonvisual evidence are current. Visual and current-manifest acceptance are not recorded; both remain pending until a Hydro-current manifest is rendered and reviewed.");
+  ], "Implementation, Hydro-current telemetry, and capture byte identity are recorded. Human visual review and formal visual acceptance are not recorded by the manifest and remain pending.");
 }
 
 

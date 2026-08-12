@@ -388,10 +388,10 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
             'title: "Current limits are part of the evidence"',
             'title: "Hydro v1 evidence boundary"',
             '"IMPLEMENTED / RENDER-ONLY V1"',
-            '"Implemented render-only v1. Nonvisual gates are green.',
-            'Hydro-current same-binary visual acceptance is pending.',
+            '"Implemented render-only v1. Hydro-current telemetry is recorded.',
+            'Human same-binary visual acceptance is pending.',
             'Implementation source: src/planetary_streaming.rs',
-            'A Hydro-current manifest with QA/report/manifest telemetry and same-binary captures is still required.',
+            'Human visual review and formal visual acceptance remain pending.',
             'slide.charts.add("bar"',
             'slide.speakerNotes.textFrame.setText',
             '"[Sources]"',
@@ -410,6 +410,8 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
             "Candidate broad-hydrographic-continuity direction",
             "no implementation or result claimed",
             "It must remain disabled",
+            "Wire Hydro telemetry",
+            "A Hydro-current manifest with QA/report/manifest telemetry and same-binary captures is still required.",
         ):
             with self.subTest(stale=stale):
                 self.assertNotIn(stale, text)
