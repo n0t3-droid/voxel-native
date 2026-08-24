@@ -1,11 +1,49 @@
-/target
-/web/pkg
-/qa_runs
-/agent_runs
+/target/
+/web/pkg/
+/qa_runs/
+/agent_runs/
+/saves/
+/output/
+/deliverables/
+/tmp/
+/research_sources/
+/docs/research_sources/
+/build/
+
+# Local runtime state and generated captures.
 /agent_control.ron
+/agent_control_*.ron
+/voxel-native-save.ron
 /screenshot_*.png
 /engine-tour-live-*.mp4
 /voxel-native-web*.png
 /voxel-web-smoke.png
 /engine-current-window.png
-/.playwright-mcp/*.png
+/*.log
+/.playwright-mcp/
+/.playwright-cli/
+/sketchup-*.png
+
+# Tool, package-manager, and language caches.
+**/node_modules/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+*.py[cod]
+
+# Local Codex/editor state is not part of the public engine source.
+/.codex/
+/.codex_tmp/
+/.claude/
+/.cursor/
+/.agents/
+/skills-lock.json
+/.vscode/c_cpp_properties.json
+
+# Internal coordination notes are retained locally, not published as product docs.
+/docs/AI_HANDOFF.md
+
+# One-off local maintenance helpers.
+/fix_role.py
+/replace_bot_mats*.py

@@ -1,0 +1,35 @@
+* text=auto
+
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+# Source, contracts, automation, and authored vector media are canonical LF.
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.ron text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.ps1 text eol=lf
+*.wgsl text eol=lf
+*.svg text eol=lf
+
+# Rendered evidence and downloadable publications are binary artifacts.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
