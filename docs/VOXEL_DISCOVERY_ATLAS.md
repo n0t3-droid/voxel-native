@@ -1,6 +1,6 @@
 # Voxel-Native Discovery Atlas
 
-Status: living study, intake open. The user's sub-link graph is still growing.
+Status: living study; source intake and relationship mapping remain open.
 
 The raised whole-engine acceptance ladder is maintained in
 [`ELITE_WORLD_SYSTEMS_STANDARD.md`](ELITE_WORLD_SYSTEMS_STANDARD.md). Research
@@ -176,7 +176,7 @@ Decision:
 - **prototype** splats for far vegetation, never for collisions;
 - **prototype** short local volume passes with strict step/coverage budgets;
 - **reject** full-resolution whole-world path tracing as a baseline requirement
-  for the user's integrated GPU.
+  for the target integrated-GPU hardware class.
 
 ### 6. Voxel Space, heightfields, clipmaps, GIS, and watersheds
 
@@ -302,7 +302,7 @@ Decision:
 
 ### 11. First-party voxel game studies
 
-Games in the supplied graph are comparative case studies, not blueprints.
+Games in the recorded discovery graph are comparative case studies, not blueprints.
 
 - Teardown's first-party material describes small movable voxel volumes,
   palette-sized material storage, voxel ray traversal and technology-shaped
@@ -375,7 +375,7 @@ remain optional visual caches whose failure reveals a conservative parent.
 |---|---|---|---|---|
 | Conservative implicit quadrics | celestial + local architecture | exact huge shapes with sparse surface work | thin-shell false negatives | pure tests and fixed subcell cap |
 | Fixed near bubble | near authority | edit/collision correctness with bounded RAM/jobs | holes if admission is wrong | resident+pending invariant and teleport tests |
-| Six-ring geometry clipmap | far | 30.72 km horizon with constant entities | visible seams/popping | Natural/Astral km visual route |
+| Six-ring geometry clipmap | far | 15.36 km L-infinity axis half-extent (30.72 km full width) with constant entities | visible seams/popping | Natural/Astral km visual route |
 | Summary-brick cache | mid | silhouette/edit continuity without full chunks | stale epochs or lost edits | separate edit log and replay tests |
 | EWA-style far splats | far vegetation/crystals | richer silhouettes at small geometry cost | transparency/order/shimmer | capped prototype and motion QA |
 | Virtual material pages | all rendered layers | nonrepeating detail with fixed pool | thrash/missing pages | deterministic fallback and request cap |
@@ -399,9 +399,9 @@ selected by scale and importance; budgets remain constant; transitions are
 stable; and the player can approach any distant feature until it resolves into
 interactive detail.
 
-## Shared agent study protocol
+## Reproducible study protocol
 
-Every current and future engine agent should publish:
+Every research contribution should record:
 
 1. source URLs and an evidence classification;
 2. the exact engine baseline it measured;
@@ -410,7 +410,7 @@ Every current and future engine agent should publish:
 5. fixed memory/work/latency limits;
 6. deterministic tests, including extreme coordinates and stale async work;
 7. real-engine screenshots/telemetry only after the nonvisual proof is green;
-8. an integration handoff explaining which world layers change.
+8. an integration note explaining which world layers change.
 
 Mission Control should flag a feed whose capability schema or shared power
 profile differs from the current fleet profile. A later knowledge-manifest
@@ -469,9 +469,9 @@ atlas.
   I3D 2024:
   https://research.nvidia.com/labs/rtr/publication/pharr2024stochtex/
 
-## Supplied-link intake map
+## Discovery-link intake map
 
-The current user-provided Wikipedia graph has been inventoried under these
+The recorded Wikipedia discovery graph has been inventoried under these
 routes. Incoming sublinks should be appended to the matching route rather than
 creating disconnected feature ideas.
 

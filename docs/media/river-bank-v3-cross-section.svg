@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Natural River Bank V3 authored cross-section</title>
+  <desc id="desc">A schematic cross-section of the Natural-profile River Bank V3 terrain grammar. It shows a submerged bed at water level minus two voxel blocks, a sediment shelf at water level plus one, and a living cap beginning at water level plus three. The selected formula uses two ordered smoothstep envelopes and a fourth-root corridor blend. These are authored visual units, not metres and not an erosion or shallow-water simulation.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071217"/>
+      <stop offset="1" stop-color="#0d1d23"/>
+    </linearGradient>
+    <linearGradient id="earth" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#234139"/>
+      <stop offset="1" stop-color="#172a2b"/>
+    </linearGradient>
+    <linearGradient id="water" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#58c8ef" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#245c86" stop-opacity="0.82"/>
+    </linearGradient>
+    <linearGradient id="sand" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#d7b86f"/>
+      <stop offset="0.5" stop-color="#f0d18a"/>
+      <stop offset="1" stop-color="#d7b86f"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#8cb8c6" stroke-opacity="0.04"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#69e7ca"/>
+    </marker>
+    <style>
+      .kicker{font-family:Helvetica;font-size:17px;font-weight:bold;letter-spacing:4px;fill:#73f4d4}
+      .heading{font-family:Helvetica;font-size:38px;font-weight:bold;fill:#f2fbff}
+      .subhead{font-family:Helvetica;font-size:20px;font-weight:normal;fill:#9dbdc9}
+      .panelTitle{font-family:Helvetica;font-size:19px;font-weight:bold;letter-spacing:1.5px;fill:#dceef4}
+      .body{font-family:Helvetica;font-size:16px;font-weight:normal;fill:#a9c3cc}
+      .mono{font-family:Courier;font-size:16px;font-weight:bold;fill:#d7e9ee}
+      .micro{font-family:Courier;font-size:13px;font-weight:bold;fill:#819faa}
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" rx="24" fill="url(#bg)"/>
+  <rect width="1600" height="900" rx="24" fill="url(#grid)"/>
+
+  <g font-family="Helvetica">
+    <text x="64" y="64" class="kicker">NATURAL PROFILE · TERRAIN GRAMMAR V3 · VISUAL UNITS</text>
+    <text x="64" y="116" class="heading">A bed, a sediment shelf, then a living cap.</text>
+    <text x="64" y="153" class="subhead">Three ordered vertical zones replace one continuous bank envelope.</text>
+
+    <g transform="translate(1080 42)">
+      <rect width="456" height="98" rx="15" fill="#0d2026" stroke="#52694e"/>
+      <text x="22" y="32" fill="#d9efaa" font-size="14" font-weight="bold" letter-spacing="1.4">NATURAL V3 · ASTRAL RETAINS V1</text>
+      <text x="22" y="59" fill="#f0c77b" font-size="14" font-weight="bold">NOT EROSION OR SHALLOW-WATER PHYSICS</text>
+      <text x="22" y="82" fill="#8faab4" font-size="13">vertical units are voxel blocks—not metres</text>
+    </g>
+
+    <g transform="translate(64 205)">
+      <rect width="990" height="520" rx="20" fill="#09171c" stroke="#2a4b55"/>
+      <text x="28" y="43" class="panelTitle">SCHEMATIC CROSS-SECTION · MONOTONE BEFORE VOXEL ROUNDING</text>
+      <text x="28" y="71" class="body">Target envelope at full corridor influence (q = 1); q &lt; 1 blends with pre-carve height.</text>
+
+      <g transform="translate(20 88)">
+        <g stroke="#38515a" stroke-width="1" stroke-dasharray="6 7">
+          <path d="M128 92H940"/>
+          <path d="M128 162H940"/>
+          <path d="M128 197H940"/>
+          <path d="M128 267H940"/>
+        </g>
+        <g font-size="14" font-weight="bold" text-anchor="end">
+          <text x="116" y="97" fill="#a7e49b">W + 3</text>
+          <text x="116" y="167" fill="#e9ca82">W + 1</text>
+          <text x="116" y="202" fill="#75cbed">WATER W</text>
+          <text x="116" y="272" fill="#c9ac69">W − 2</text>
+        </g>
+
+        <path d="M128 92C222 87 274 98 338 112C386 123 410 162 468 162H488C503 207 512 252 534 267C556 252 565 207 580 162H600C658 162 682 123 730 112C794 98 846 87 940 92V364H128Z" fill="url(#earth)"/>
+        <path d="M128 92C222 87 274 98 338 112C386 123 410 162 468 162H488C503 207 512 252 534 267C556 252 565 207 580 162H600C658 162 682 123 730 112C794 98 846 87 940 92" fill="none" stroke="#78d59a" stroke-width="5"/>
+        <path d="M406 153C430 160 449 162 468 162H488C493 178 498 193 503 207" fill="none" stroke="url(#sand)" stroke-width="15" stroke-linecap="round"/>
+        <path d="M565 207C570 193 575 178 580 162H600C619 162 638 160 662 153" fill="none" stroke="url(#sand)" stroke-width="15" stroke-linecap="round"/>
+        <path d="M503 207C512 238 521 258 534 267C547 258 556 238 565 207" fill="none" stroke="#b99858" stroke-width="15" stroke-linecap="round"/>
+        <path d="M503 197H565C561 227 552 253 534 267C516 253 507 227 503 197Z" fill="url(#water)" stroke="#72d3f1" stroke-width="2"/>
+
+        <g fill="#e9f6fa" font-size="16" font-weight="bold">
+          <text x="202" y="70">living cap</text>
+          <text x="379" y="142">sediment shelf</text>
+          <text x="534" y="299" text-anchor="middle">submerged bed</text>
+          <text x="866" y="70">living cap</text>
+          <text x="689" y="142" text-anchor="end">sediment shelf</text>
+        </g>
+        <g fill="none" stroke="#69e7ca" stroke-width="2" marker-end="url(#arrow)">
+          <path d="M274 66L314 95"/>
+          <path d="M462 137L452 157"/>
+          <path d="M534 304V276"/>
+          <path d="M794 66L754 95"/>
+          <path d="M606 137L616 157"/>
+        </g>
+
+        <g transform="translate(150 332)">
+          <rect width="768" height="76" rx="13" fill="#0c2025" stroke="#31535c"/>
+          <text x="22" y="29" fill="#dceef3" font-size="16" font-weight="bold">Exact plateau:</text>
+          <text x="146" y="29" fill="#f0d18a" font-size="16" font-weight="bold">0.50 ≤ channel ≤ 0.66 → target = W + 1</text>
+          <text x="22" y="55" fill="#8faab4" font-size="14">The exposed shelf is mapped to the established Beach palette after shoreline authority.</text>
+        </g>
+      </g>
+    </g>
+
+    <g transform="translate(1082 205)">
+      <rect width="454" height="520" rx="20" fill="#09171c" stroke="#2a4b55"/>
+      <text x="25" y="43" class="panelTitle">SELECTED NESTED ENVELOPES</text>
+      <text x="25" y="73" class="micro">c = channel · q = corridor · h = pre-carve height</text>
+
+      <g transform="translate(25 104)">
+        <rect width="404" height="247" rx="15" fill="#0c2026" stroke="#31515a"/>
+        <text x="20" y="35" class="mono" fill="#f0d18a">bed = W − 2</text>
+        <text x="20" y="70" class="mono">a = smoothstep(0.26, 0.50, c)</text>
+        <text x="20" y="101" class="mono">d = smoothstep(0.66, 0.90, c)</text>
+        <path d="M20 121H384" stroke="#31515a"/>
+        <text x="20" y="153" class="mono" fill="#79efd2">target = bed + 3(1 − d) + 2(1 − a)</text>
+        <text x="20" y="186" class="mono">envelope = min(h, target)</text>
+        <text x="20" y="219" class="mono">output = lerp(h, envelope, q^(1/4))</text>
+      </g>
+
+      <g transform="translate(25 380)">
+        <text class="body" fill="#dbeef3" font-weight="bold">Ordered channel thresholds</text>
+        <rect y="25" width="404" height="18" rx="9" fill="#172c32"/>
+        <rect y="25" width="105" height="18" rx="9" fill="#315a50"/>
+        <rect x="105" y="25" width="97" height="18" fill="#68c38f"/>
+        <rect x="202" y="25" width="65" height="18" fill="#e3c476"/>
+        <rect x="267" y="25" width="97" height="18" fill="#b99558"/>
+        <rect x="364" y="25" width="40" height="18" rx="9" fill="#796946"/>
+        <g class="micro" text-anchor="middle">
+          <text x="0" y="67" text-anchor="start">0</text>
+          <text x="105" y="67">0.26</text>
+          <text x="202" y="67">0.50</text>
+          <text x="267" y="67">0.66</text>
+          <text x="364" y="67">0.90</text>
+          <text x="404" y="67" text-anchor="end">1</text>
+        </g>
+        <text y="101" class="micro" fill="#7ccf9a">living → shelf</text>
+        <text x="214" y="101" class="micro" fill="#e8ca82">shelf</text>
+        <text x="282" y="101" class="micro" fill="#c6a563">shelf → bed</text>
+      </g>
+    </g>
+
+    <g transform="translate(64 760)">
+      <rect width="1472" height="90" rx="17" fill="#0a171c" stroke="#2a4852"/>
+      <g transform="translate(24 31)" font-size="15" font-weight="bold">
+        <circle cx="6" cy="-5" r="6" fill="#70ebce"/><text x="20" fill="#abc6cf">0 new terrain/noise queries</text>
+        <circle cx="316" cy="-5" r="6" fill="#70ebce"/><text x="330" fill="#abc6cf">0 allocations · 0 retained state</text>
+        <circle cx="658" cy="-5" r="6" fill="#75bff1"/><text x="672" fill="#abc6cf">V3 total: 2 smoothsteps · 2 sqrt calls</text>
+        <circle cx="1053" cy="-5" r="6" fill="#d9ee99"/><text x="1067" fill="#abc6cf">constant O(1) work</text>
+      </g>
+      <text x="24" y="66" fill="#f0c77b" font-size="14" font-weight="bold">Pure tests do not replace native visual QA.</text>
+      <text x="380" y="66" fill="#718f9a" font-size="14">Sources: src/terrain.rs · docs/NATURAL_RIVER_BANK_V3.md</text>
+    </g>
+  </g>
+</svg>

@@ -1,8 +1,7 @@
 //! Chunk data and world-scale addressing.
 //!
-//! Ported from `lib/voxel/world.ts`. 16×16×16 chunk size (same as R93G and
-//! the de-facto Minecraft standard). A dense flat array beats any fancier
-//! storage for the workload we care about (meshing + neighbour sampling).
+//! Voxel Native uses 16×16×16 chunks. A dense flat array fits the authoritative
+//! near-field workload: meshing, editing, and neighbour sampling.
 
 use std::sync::Arc;
 

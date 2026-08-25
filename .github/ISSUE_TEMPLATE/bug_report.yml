@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a reproducible Voxel Native defect without private data.
+title: "[Bug]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a defect. Do not include secrets, private paths, saves, or vulnerability details. Use the Security policy for sensitive reports.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - World authority and streaming
+        - Terrain, meshing, or rendering
+        - Editing, sculpting, or construction
+        - UI, input, or Live Observer
+        - Saves or settings
+        - Evidence, QA, documentation, or build tooling
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Exact revision
+      description: Commit SHA or branch and the date it was fetched.
+      placeholder: 40-character commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Ubuntu or Debian
+        - macOS
+        - WebAssembly compile target
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include deterministic steps, seed, profile, route, and relevant flags where applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Distinguish direct observation from inference.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Add bounded logs, report fields, or image identities only after removing private paths, tokens, saves, and unrelated data.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed secrets, private paths, saves, and unrelated personal data.
+          required: true
+        - label: This is not a vulnerability report containing sensitive details.
+          required: true
+        - label: I agree to follow the repository Code of Conduct.
+          required: true

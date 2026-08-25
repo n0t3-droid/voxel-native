@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 820" role="img" aria-labelledby="title desc">
+  <title id="title">Planetary clipmap reach and generated mesh budget envelope</title>
+  <desc id="desc">A logarithmic plot shows the axis half-extent, or L-infinity radius, of six square terrain levels doubling from 0.48 to 15.36 kilometres. Three proportional bars compare the exact no-cutout six-ring topology with hard vertex, index, and generated-payload ceilings.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#081217"/>
+      <stop offset="1" stop-color="#0c1c23"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#69f7cf"/>
+      <stop offset="1" stop-color="#4ba8ff"/>
+    </linearGradient>
+    <linearGradient id="lime" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#b8f36c"/>
+      <stop offset="1" stop-color="#66e7b1"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#8cb8c6" stroke-opacity="0.04"/>
+    </pattern>
+  </defs>
+
+  <rect width="1600" height="820" rx="24" fill="url(#bg)"/>
+  <rect width="1600" height="820" rx="24" fill="url(#grid)"/>
+
+  <g font-family="Helvetica">
+    <text x="72" y="70" fill="#77f7d5" font-size="18" font-weight="bold" letter-spacing="4">COMPILE-TIME CONTRACT · NOT A BENCHMARK</text>
+    <text x="72" y="119" fill="#f2fbff" font-size="38" font-weight="bold">Geometric reach. Fixed representation.</text>
+    <text x="72" y="154" fill="#9dbdc9" font-size="20">The horizon doubles per level while population ceilings remain constant.</text>
+
+    <g transform="translate(72 210)">
+      <rect width="710" height="484" rx="18" fill="#09151a" stroke="#28444f"/>
+      <text x="30" y="42" fill="#d8edf4" font-size="18" font-weight="bold" letter-spacing="2">AXIS HALF-EXTENT / L∞ RADIUS · LOG2 SCALE</text>
+
+      <g stroke="#27434e" stroke-width="1">
+        <path d="M90 400H658"/><path d="M90 333H658"/><path d="M90 266H658"/>
+        <path d="M90 199H658"/><path d="M90 132H658"/><path d="M90 65H658"/>
+      </g>
+      <g fill="#8fadb8" font-size="15" text-anchor="end">
+        <text x="78" y="405">0.48 km</text>
+        <text x="78" y="338">0.96</text>
+        <text x="78" y="271">1.92</text>
+        <text x="78" y="204">3.84</text>
+        <text x="78" y="137">7.68</text>
+        <text x="78" y="70">15.36</text>
+      </g>
+      <g fill="#8fadb8" font-size="15" text-anchor="middle">
+        <text x="116" y="436">L0</text><text x="220" y="436">L1</text>
+        <text x="324" y="436">L2</text><text x="428" y="436">L3</text>
+        <text x="532" y="436">L4</text><text x="636" y="436">L5</text>
+      </g>
+      <path d="M116 400L220 333L324 266L428 199L532 132L636 65" fill="none" stroke="url(#cyan)" stroke-width="5"/>
+      <g fill="#09151a" stroke="#63e7d4" stroke-width="4">
+        <circle cx="116" cy="400" r="8"/><circle cx="220" cy="333" r="8"/>
+        <circle cx="324" cy="266" r="8"/><circle cx="428" cy="199" r="8"/>
+        <circle cx="532" cy="132" r="8"/><circle cx="636" cy="65" r="8"/>
+      </g>
+      <text x="355" y="470" fill="#b7d0d9" font-size="16" text-anchor="middle">Delta_l = 16 * 2^l m | ||(x,z)||_inf &lt;= R_l = 30 * Delta_l</text>
+    </g>
+
+    <g transform="translate(818 210)">
+      <rect width="710" height="484" rx="18" fill="#09151a" stroke="#28444f"/>
+      <text x="30" y="42" fill="#d8edf4" font-size="18" font-weight="bold" letter-spacing="2">NO-CUTOUT TOPOLOGY / HARD CEILING</text>
+      <text x="30" y="75" fill="#829fac" font-size="15">Bars are drawn to the exact ratios shown; renderer-owned copies are excluded.</text>
+
+      <g transform="translate(30 118)">
+        <text y="0" fill="#d7eaf0" font-size="18" font-weight="bold">Vertices</text>
+        <text x="640" y="0" fill="#9ebbc5" font-size="16" text-anchor="end">23,286 / 35,000</text>
+        <rect y="18" width="640" height="26" rx="13" fill="#182c34"/>
+        <rect y="18" width="426" height="26" rx="13" fill="url(#lime)"/>
+
+        <text y="92" fill="#d7eaf0" font-size="18" font-weight="bold">Indices</text>
+        <text x="640" y="92" fill="#9ebbc5" font-size="16" text-anchor="end">110,760 / 150,000</text>
+        <rect y="110" width="640" height="26" rx="13" fill="#182c34"/>
+        <rect y="110" width="473" height="26" rx="13" fill="url(#cyan)"/>
+
+        <text y="184" fill="#d7eaf0" font-size="18" font-weight="bold">Generated mesh payload</text>
+        <text x="640" y="184" fill="#9ebbc5" font-size="16" text-anchor="end">1,560,768 / 2,280,000 B</text>
+        <rect y="202" width="640" height="26" rx="13" fill="#182c34"/>
+        <rect y="202" width="438" height="26" rx="13" fill="url(#cyan)"/>
+
+        <rect y="274" width="640" height="92" rx="14" fill="#0d2027" stroke="#284852"/>
+        <text x="24" y="308" fill="#6ff5d2" font-size="19" font-weight="bold">B_mesh(V, I) = 48V + 4I</text>
+        <text x="24" y="340" fill="#a4c2cc" font-size="16">position + normal + colour + UV + u32 indices</text>
+        <text x="616" y="323" fill="#d9ed9f" font-size="17" font-weight="bold" text-anchor="end">6 TERRAIN ENTITIES</text>
+      </g>
+    </g>
+
+    <g transform="translate(72 738)" font-size="16">
+      <circle cx="8" cy="-5" r="6" fill="#67efd2"/>
+      <text x="26" y="0" fill="#a4c1cc">61 × 61 possible top vertices per level</text>
+      <circle cx="413" cy="-5" r="6" fill="#75bfff"/>
+      <text x="431" y="0" fill="#a4c1cc">one asynchronous build in flight</text>
+      <circle cx="790" cy="-5" r="6" fill="#b9ee76"/>
+      <text x="808" y="0" fill="#a4c1cc">terminal skirt only: 960 vertices + 1,440 indices</text>
+    </g>
+    <text x="72" y="784" fill="#718e99" font-size="14">Sources: src/planetary_streaming.rs · docs/PLANETARY_STREAMING_PHASE1.md · docs/FAR_TERMINAL_SKIRTS_V1.md</text>
+  </g>
+</svg>

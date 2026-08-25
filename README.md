@@ -1,268 +1,316 @@
-# Voxel-Native
+# Voxel Native
 
-The project goal is not just a voxel sandbox.
+<p align="center">
+  <img src="docs/media/voxel-native-hero.svg" alt="Voxel Native: a constant-budget voxel world laboratory engineered with Codex" width="100%">
+</p>
 
-## Engine Pillars
+<p align="center">
+  <strong>A native Rust voxel engine where editable worlds, kilometre-scale representation, and reproducible evidence are designed as one system.</strong>
+</p>
 
-- **Native performance:** Rust + Bevy + wgpu for DX12/Vulkan/Metal instead of
-  an Electron or browser shell.
-- **Low-end friendly streaming:** chunk budgets, mesh budgets, and NeuroCore
-  runtime throttling keep the game responsive while the visible horizon loads.
-- **Bot-built cities:** friendly bot crews plan road-first city growth, keep a
-  player-safe build buffer, and store project concepts with phases, owners,
-  materials, structure, architecture, texture, and detail rows.
-- **Cinematic voxel terrain:** procedural coastline, forests, terrain height,
-  water, caves, and sci-fi landmarks are generated as real voxels.
-- **Shuttle and shooter loop:** ships, weapons, drone combat, editor tools, and
-  bot companions live in the same world instead of separate demos.
-- **Liquid-glass engine UI:** HUD, toolbelt, bot panels, and system surfaces are
-  styled as in-game engine controls rather than flat debug windows.
+<p align="center">
+  <a href="https://github.com/n0t3-droid/voxel-native/actions/workflows/ci.yml"><img src="https://github.com/n0t3-droid/voxel-native/actions/workflows/ci.yml/badge.svg?branch=master" alt="Voxel Native continuous integration status"></a>
+</p>
 
-## Current Focus
+<p align="center">
+  <a href="docs/CODEX_ENGINEERING_ATLAS.md">Engineering atlas</a> ·
+  <a href="docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf">Technical atlas PDF</a> ·
+  <a href="docs/PLANETARY_STREAMING_PHASE1.md">Planetary streaming</a> ·
+  <a href="docs/LIVE_OBSERVER_WORKFLOW.md">Live observer</a> ·
+  <a href="docs/VOXEL_DISCOVERY_ATLAS.md">Research atlas</a> ·
+  <a href="docs/ELITE_WORLD_SYSTEMS_STANDARD.md">Acceptance standard</a>
+</p>
 
-The latest engine work turns bot construction into a road-first city planner:
+Voxel Native is an experimental Rust 2021 engine built with Bevy 0.14 and
+wgpu. Its central question is deliberately difficult: how can one world remain
+editable at voxel scale, readable across kilometres, deterministic at signed
+coordinate extremes, and bounded enough to test honestly?
 
-- bot autonomy is command-gated by default: workers stay parked on load until
-  the player places a city area or explicitly queues a bot task;
-- the City Area tool now behaves like a road component workflow: two clicks
-  mark the exact bot city footprint, then bots queue bounded avenue strips,
-  a center junction/roundabout block, flatten passes, frontage parcels, plazas,
-  residential blocks, parks, and towers inside that marked space instead of
-  taking over the whole world;
-- roads are editable components with smooth deck grades for bridges, ramps,
-  corners, plazas, and future roundabout work;
-- manual roads now start at boulevard scale by default, with larger editable
-  roundabouts and a more forgiving straight-line intent lock while dragging;
-- bot projects reserve footprints before building, so roads and buildings do
-  not cut through each other while the city grows;
-- duplicate road corridors are rejected before voxel edits are queued;
-- authored district road anchors now guide final road-site selection instead
-  of being mistaken for already-built duplicate roads;
-- civic, service, tower, prep, and detail pads lift to the nearest raised road
-  deck instead of sinking back to raw terrain;
-- building lots bind to frontage streets and record the street face plus target
-  deck height in the bot plan rows;
-- districts prefer unused project kinds before repeating, giving the skyline
-  residential, civic, utility, plaza, and landmark variety;
-- cursor capture is centralized so live build, navigation, combat, menus, and
-  the picker do not fight each other during mode switches;
-- live Build mode now defaults to Sketch Draw instead of a low-level brush:
-  LMB draws a snapped face/rectangle, RMB cuts openings, and G swaps into
-  Push/Pull without opening a dense panel;
-- the in-game Build Studio exposes one-click workflow icons for Sketch,
-  Push/Pull, Roads, City Shells, and Towers;
-- Sketch-style rectangle drawing keeps its locked floor or wall plane even
-  when the cursor moves over empty space, so extensions, roofs, gardens, and
-  side wings can be sketched without hunting for another voxel target;
-- Smart Cut rectangles drill through continuous wall thickness for fast
-  window, door, and facade openings instead of only shaving the front face;
-- Build Studio now exposes categorized material swatches and architecture
-  presets for modern houses, road/traffic layouts, gardens, towers, and
-  spacecraft hulls directly in the live builder workflow;
-- wide manual road components now stamp curb edges, sidewalk shoulders, and
-  lightweight lamp markers so editable roads read as city infrastructure
-  instead of flat strips;
-- crystal, ice, water, lava, cockpit-glass, and neon-glass terrain materials
-  avoid Bevy's sorted alpha-blend path, reducing close-range lag in dense
-  glowing biomes on low-end PCs;
-- crystal-spire terrain is bounded by a regression test that keeps hero
-  skylines while preserving open flight corridors and safer close-up geometry;
-- max-distance streaming pauses bot edit slices when the visible horizon is
-  still catching up, keeping low-end PCs responsive.
-- terrain installs are frame-capped so a wave of completed async chunks does
-  not all fold back into the world during the same flight frame.
+Codex is the engineering collaborator across this repository: turning research
+questions into explicit contracts, implementing the systems, constructing
+adversarial tests, running the native engine, and retaining or rejecting work
+from evidence. The result is source-first. Claims are tied to code, hard limits,
+or reproducible QA—not to a cinematic promise.
 
-## GitHub Snapshot
+The downloadable [Voxel Native Codex Engineering Atlas](docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf)
+collects the project-authored formulas, diagrams, fixed budgets, failure modes,
+rollback boundaries, and evidence rules in one publication. It is a technical
+atlas, not a runtime release verdict; the manifest-backed runtime gallery remains
+pending its separate visual gate.
 
-This branch is source-first. No old Visual Studio screenshots or stale gallery
-images are tracked here; generated QA screenshots and videos stay local so the
-GitHub front page describes the engine instead of showing outdated captures.
+## What is real today
 
-The public project view should explain what is implemented, how to run it, and
-which math keeps the engine fast. Current bot-planning details live in
-[`docs/CITY_PLANNER_MATH.md`](docs/CITY_PLANNER_MATH.md).
-The current external-AI handoff is in [`docs/AI_HANDOFF.md`](docs/AI_HANDOFF.md),
-and the strict SketchUp-parity status is tracked in
-[`docs/SKETCHUP_EQUIVALENCE_AUDIT.md`](docs/SKETCHUP_EQUIVALENCE_AUDIT.md).
-Those documents intentionally list unresolved issues instead of presenting the
-builder as complete.
+| System | Current boundary | Evidence |
+| --- | --- | --- |
+| Editable voxel authority | Full `16³` chunks drive near terrain, edits, collision, saves, and simulation. Signed world mapping uses Euclidean division. | [`src/chunk.rs`](src/chunk.rs), [`src/world.rs`](src/world.rs) |
+| Planetary far field | One finest parent plus five annuli; spacing doubles from 16 m to 512 m and reaches a 15.36 km axis half-extent (`L∞` radius) with exactly six terrain entities. It is live for Astral Frontier by default; Natural remains explicitly gated pending matched visual acceptance. | [`src/planetary_streaming.rs`](src/planetary_streaming.rs), [Phase 1 contract](docs/PLANETARY_STREAMING_PHASE1.md) |
+| Seam and handoff logic | Shared integer-world samples, parent morphing, a fail-closed Near-coverage stencil, local GPU coordinates, and a terminal-only horizon skirt. | [Terminal-skirt proof](docs/FAR_TERMINAL_SKIRTS_V1.md) |
+| Far hydrography | A gated render-only water/lava layer shares the terrain lattice and retains independent telemetry and hard budgets. It does not claim fluid simulation. | [Hydro v1 contract](docs/FAR_HYDROGRAPHIC_CONTINUITY_V1.md) |
+| Autonomous construction | Road-first bot planning uses bounded candidate scoring, footprint reservations, frontage bindings, and smooth deck grades. | [City planner math](docs/CITY_PLANNER_MATH.md) |
+| Middle-LOD research layer | A fixed-memory virtual voxel hierarchy is implemented and compile-registered as a pure data layer. It is **not** connected to live rendering, physics, or saves yet. | [Virtual hierarchy status](docs/VIRTUAL_VOXEL_HIERARCHY.md) |
+| Evidence tooling | Native routes emit provenance-bound screenshots and RON telemetry. Separately, a typed graph compiler validates explicitly authored JSON evidence candidates; the report/manifest-to-graph adapter is not implemented yet. | [Evidence graph contract](docs/EVIDENCE_GRAPH_CONTRACT.md) |
 
-Verified update for this snapshot:
+### Runtime gallery status
 
-- bot load defaults keep workers parked until the player commands them;
-- placed bot city areas persist as the marked footprint and queue road-skeleton
-  projects before clearing, civic, residential, park, and skyline parcels inside
-  that boundary;
-- road anchors are treated as planning intent, not completed road geometry;
-- road candidates receive a bounded alignment score when their centerline or
-  grid segment follows an authored district street;
-- duplicate checks still protect against actual user roads and completed bot
-  road projects;
-- mode/cursor tests lock the rule that gameplay hides the OS cursor while
-  menus and clickable picker overlays release it;
-- workflow presets collapse common multi-step builder setups into one icon;
-- Sketch-style builder tests cover locked-plane drawing into empty space and
-  through-wall rectangle cuts for reliable windows and doors;
-- the material catalog test keeps every buildable voxel block present exactly
-  once across the SketchUp-style swatch categories;
-- translucent terrain uses alpha-to-coverage instead of sorted alpha blending,
-  and crystal spires are generated as wider hero forms instead of a solid
-  translucent wall;
-- local engine captures remain ignored rather than becoming GitHub gallery
-  clutter.
+The public runtime gallery is intentionally withheld until matched Natural and
+Astral routes pass the same-binary visual gate. A future promoted frame must be
+linked to an explicit manifest entry naming its route, seed, viewport, profile,
+binary SHA-256, evidence status, and known limitation. A completed PNG alone is
+not treated as visual acceptance.
 
-## City Planner Math
+## The mathematical core
 
-The bot planner uses bounded scoring instead of expensive world scans. A site is
-chosen from a small candidate set and scored with weighted, clamped terms:
+The far field grows its reach geometrically without growing its topology. For
+level `ℓ ∈ {0, …, 5}`:
 
 ```text
-site_score =
-    2.50 * flatness
-  + 2.40 * road_access
-  + 1.80 * district_balance
-  + 1.35 * route_fit
-  + 0.55 * block_fit
-  + 4.00 * road_anchor_alignment
-  + 2.50 * semantic_anchor
-  - 0.0005 * center_distance
+sample spacing       Δℓ = 16 · 2^ℓ metres
+square half-extent   ‖(x, z)‖∞ = max(|x|, |z|) ≤ Rℓ = 30 · Δℓ
+shipping L∞ bounds     = 0.48, 0.96, 1.92, 3.84, 7.68, 15.36 km
 ```
 
-Roads prefer routes that can become smooth decks instead of voxel staircases:
+At a level boundary, a three-cell band blends the exact fine height toward a
+bilinear sample of the next coarser global lattice:
 
 ```text
-route_fit =
-    1
-  - 0.55 * avg_step / 5
-  - 0.30 * max_step / 9
-  - 0.15 * max(height_range - 18, 0) / 34
+s(t)       = clamp(t, 0, 1)² · (3 - 2 · clamp(t, 0, 1))
+h_display  = h_fine + s(t) · (bilerp(h_parent) - h_fine)
 ```
 
-Bridge and raised-road heights use smooth interpolation:
+Every generated terrain mesh is admitted through an exact payload equation:
 
 ```text
-smoothstep(t) = t * t * (3 - 2 * t)
-deck_y(t) = lerp(start_y, end_y, smoothstep(t))
+Bmesh(V, I) = 48V + 4I bytes
+V ≤ 35,000     I ≤ 150,000     Bmesh ≤ 2,280,000
 ```
 
-This keeps bot roads readable, lets nearby buildings align to raised decks, and
-avoids turning the low-end target into a brute-force simulation.
+These are compile-time and pre-install ceilings, not benchmark averages. The
+fixed no-cutout topology and the public envelope are visualized below.
 
-## Build And Run
+<p align="center">
+  <a href="docs/media/planetary-budget-envelope.svg"><img src="docs/media/planetary-budget-envelope.svg" alt="Exact six-ring axis half-extent recurrence and generated mesh budget envelope; open the image for full-size labels" width="100%"></a>
+</p>
+
+Measured A/B graphs follow the same boundary: matched routes from one release
+executable, with metric, sample count, viewport, binary hash, dispersion,
+acceptance threshold, and rejected frames stated on the figure. Average FPS is
+never substituted for a distribution or for visual inspection.
+
+The [Codex Engineering Atlas](docs/CODEX_ENGINEERING_ATLAS.md) derives the
+clipmap recurrence, morph, toroidal cache work, negative-coordinate mapping,
+semantic selection ceiling, virtual-brick accounting, city score, and evidence
+identity model directly from the implementation contracts.
+
+### Bounded reuse, not unbounded recomputation
+
+One translated cache cell exposes exactly one entering strip per shifted axis.
+The diagram separates centre-height sample reuse from mesh assembly and GPU
+upload, so the structural count cannot be mistaken for an end-to-end timing
+claim.
+
+<p align="center">
+  <a href="docs/media/toroidal-cache-reuse.svg"><img src="docs/media/toroidal-cache-reuse.svg" alt="Exact per-ring toroidal cache reuse: 65 new and 4,160 reused centre-height samples for an axial shift, 129 new and 4,096 reused for a diagonal shift, and a bounded same-allocation fallback" width="100%"></a>
+</p>
+
+## One world, several representations
+
+<p align="center">
+  <a href="docs/media/world-representation-architecture.svg"><img src="docs/media/world-representation-architecture.svg" alt="Voxel Native architecture: procedural generation feeds the live Near and Far representations; sparse edits feed Near only; the middle hierarchy is implemented but not live-integrated; QA artifacts require manual translation into the separate evidence graph; open for full size" width="100%"></a>
+</p>
+
+The architecture is intentionally asymmetric:
+
+- the Near layer owns interaction, edits, collision, and persistence;
+- the far clipmap is descriptive and fixed-cost—it can never become voxel
+  authority by accident;
+- the virtual hierarchy summarizes occupancy, material, and refinement error,
+  but remains a non-live integration layer today;
+- render distance does not activate global high-frequency simulation;
+- asynchronous work carries epochs: identity-invalid or out-of-authority
+  results are rejected before install, while safe retained jobs may be retagged;
+- pressure reduces detail before it is allowed to invalidate the horizon or
+  exceed a population ceiling.
+
+Natural River Bank V3 is a smaller but equally explicit example: nested smooth
+envelopes shape a bed, sediment shelf, and living cap with constant per-column
+work. Its units are voxel blocks and dimensionless authored weights; it is not
+an erosion or shallow-water simulation, and fresh visual acceptance remains a
+separate gate.
+
+<p align="center">
+  <a href="docs/media/river-bank-v3-cross-section.svg"><img src="docs/media/river-bank-v3-cross-section.svg" alt="Natural River Bank V3 authored cross-section showing bed, sediment shelf, living cap, smooth channel thresholds, and the explicit non-physical-simulation boundary" width="100%"></a>
+</p>
+
+## Codex engineering loop
+
+Every ambitious system follows the same reversible path:
+
+```text
+research question
+  → explicit authority boundary and failure metric
+  → fixed work / memory / population budget
+  → implementation with stale-result identity
+  → deterministic and adversarial tests
+  → one-binary native A/B routes
+  → inspect screenshots + telemetry together
+  → retain, revise, or roll back
+```
+
+This matters because a beautiful frame can conceal unbounded work, while clean
+telemetry can conceal a broken horizon. Voxel Native requires both. Novel
+optimizations document their baseline, alternatives, distribution, failure
+mode, and rollback boundary before they become release claims.
+
+<p align="center">
+  <a href="docs/media/city-site-score.svg"><img src="docs/media/city-site-score.svg" alt="Autonomous construction decision graph: hard spatial filters, a bounded project-authored weighted score, deterministic maximum selection, and the explicit non-physical-model boundary" width="100%"></a>
+</p>
+
+## Research is visible—and separated from proof
+
+The repository records the source links and decision notes that informed engine
+experiments. A source being studied does not mean its technique ships. Each
+research route is translated into an engine question and then accepted,
+deferred, or rejected under an explicit budget.
+
+<p align="center">
+  <a href="docs/media/research-routes.svg"><img src="docs/media/research-routes.svg" alt="Original diagram of terrain visibility, multiscale natural detail, and shader-decomposition research routes passing through measured engineering gates; open for full size" width="100%"></a>
+</p>
+
+Primary research routes: the
+[Virtual Horizon Method](https://publications.ibpsa.org/conference/paper/?id=bs2025_1302),
+[multiscale shaders for realistic pine-tree rendering](https://graphicsinterface.org/proceedings/gi2000/gi2000-19/),
+and [Generative Adversarial Shaders](https://arxiv.org/abs/2306.04629).
+
+The evidence path is just as explicit as the algorithms. Current canonical
+dossiers consume one bounded manifest directly; the typed evidence graph is a
+separate implemented data contract whose report/manifest adapter is still
+missing. The dashed lane below makes that gap visible instead of implying an
+integration that does not exist.
+
+<p align="center">
+  <a href="docs/media/evidence-lineage.svg"><img src="docs/media/evidence-lineage.svg" alt="Current evidence lineage from source and build identity through native QA and a canonical manifest to a dossier, alongside the separate typed-graph lane and its unimplemented adapter" width="100%"></a>
+</p>
+
+Start with the [Voxel Discovery Atlas](docs/VOXEL_DISCOVERY_ATLAS.md) for the
+cross-domain map, then read the
+[far-world architecture decision](docs/FAR_WORLD_RENDERING_RESEARCH.md) for the
+primary-source-to-implementation trail. Links point to the original publishers;
+their papers are research inputs, not a claim that Voxel Native reproduces the
+published results.
+
+## Build and run
+
+The native engine needs a current stable Rust toolchain and a graphics adapter
+supported by wgpu. Python 3.10 or newer is required for evidence and publication
+tooling, not for an ordinary engine build. The WebAssembly target is a
+compile-only verification gate; it is not a browser-runtime acceptance claim.
+
+| Host | Additional prerequisites | Current verification boundary |
+| --- | --- | --- |
+| Windows | Rust's MSVC toolchain, Visual Studio Build Tools with the Desktop development with C++ workload and a Windows SDK | Primary native-development and visual-QA host. CI also builds the release executable and exercises the static launcher contract on `windows-latest`. |
+| Ubuntu / Debian | `libasound2-dev` and `libudev-dev` in addition to the normal compiler and linker toolchain | CI runs formatting, Clippy, the release build, and Rust tests on Ubuntu without opening a GPU window. |
+| macOS | Xcode Command Line Tools | Bevy/wgpu has a Metal path, but this repository currently has no macOS CI or accepted native visual-QA route; treat it as unverified. |
+
+The typed evidence-graph tests use only Python's standard library. The optional
+L0 image diagnostic uses Pillow, NumPy, and SciPy. Regenerating the technical
+atlas uses the separately pinned dependencies in
+`tools/artifacts/requirements-atlas.txt`.
 
 ```powershell
-# Debug build
+git clone https://github.com/n0t3-droid/voxel-native.git
+cd voxel-native
+rustup target add wasm32-unknown-unknown
+python -m pip install -r tools/qa/requirements.txt
+python -m pip install -r tools/artifacts/requirements-atlas.txt
+
+# Incremental development build
 cargo run
 
-# Release build
+# Optimized native engine
 cargo run --release
 ```
 
-The first Bevy build can take a while. Later builds are faster because the dev
-profile optimizes dependencies while keeping the game code incremental.
-
-## Controls
-
-- `WASD` move
-- mouse look
-- `Space` / `Shift` fly up and down
-- `Ctrl` sprint
-- `Esc` release mouse / pause
-- `F3` opens the in-game engine tools
-
-## Autonomous QA
-
-The engine can run deterministic visual/performance QA without manual play. QA
-flies a route, captures screenshots locally, and writes a RON report with frame
-timing, chunk counts, mesh queues, dirty chunks, render distance, and stalls.
+Astral Frontier worlds enable the planetary far field by default. Natural-world
+far terrain is still a visual-acceptance route, so it requires the explicit
+process-local gate:
 
 ```powershell
-$env:VOXEL_NATIVE_QA='1'
-$env:VOXEL_NATIVE_QA_SECONDS='45'
-$env:VOXEL_NATIVE_QA_SCREENSHOT_INTERVAL='7'
-.\target\release\voxel-native.exe --qa
+$env:VOXEL_NATIVE_PLANETARY_STREAMING = 'all'
+cargo run --release
 ```
 
-Generated QA output is local-only:
+### Keep one visible engine open (Windows + PowerShell 7 only)
 
-- `qa_runs\run_<timestamp>\report.ron`
-- `qa_runs\run_<timestamp>\shot_0000.png`
-- saved bot project state under `saves\<world>_bots\`
-
-These captures are intentionally ignored by Git. The repository should stay
-focused on source, design, and reproducible engine behavior.
-
-## Agent Control
-
-`--agent-control` starts a visible session controlled by `agent_control.ron`.
-This is used for external automation, visual checks, movement, screenshots,
-weapon testing, and engine state inspection.
+On Windows, the isolated Live Observer keeps one release engine visible while
+Codex moves the camera to the system being inspected. Its launcher currently
+requires PowerShell 7 and the native `voxel-native.exe`; no Linux or macOS
+observer support is claimed. It creates a unique local session and world, leaves
+the OS cursor released, does not read or write the normal settings file, and
+accepts labelled camera poses and one-shot screenshot requests through its RON
+control file—without OS-level input injection.
 
 ```powershell
-.\target\release\voxel-native.exe --agent-control
+# Verify/build the release, launch a Natural river view, then return this shell after readiness.
+.\scripts\live-observer.ps1 -Profile natural -Focus river
 ```
 
-Example:
+Camera and control-file changes apply during that session. Compiled Rust does
+not hot-reload; batch source changes, then perform one deliberate release
+rebuild and observer restart. The [Live Observer workflow](docs/LIVE_OBSERVER_WORKFLOW.md)
+documents exact launch options, sequenced view steering, screenshots, readiness
+signals, and clean shutdown.
 
-```ron
-(
-    enabled: true,
-    sequence: 1,
-    forward: 1.0,
-    right: 0.0,
-    up: 0.0,
-    sprint: true,
-    fly: true,
-    look_x: 0.35,
-    look_y: -0.05,
-    fire: false,
-    scope: false,
-    screenshot: true,
-    exit: false,
-)
-```
+Core controls:
 
-Status and live screenshots are written under `agent_runs\live_<timestamp>\`.
-
-## Architecture
-
-| Area | Rust Modules |
+| Input | Action |
 | --- | --- |
-| Blocks, chunks, world data | `src/blocks.rs`, `src/chunk.rs`, `src/world.rs` |
-| Terrain and meshing | `src/terrain.rs`, `src/mesher.rs` |
-| Runtime budgets | `src/neurocore.rs`, `src/settings.rs` |
-| Player, weapons, ships | `src/player.rs`, `src/weapons.rs`, `src/ships.rs` |
-| Bots and city autonomy | `src/bots.rs`, `src/city.rs` |
-| UI and engine tools | `src/hud.rs`, `src/editor.rs`, `src/toolbelt.rs`, `src/theme.rs` |
-| QA and automation | `src/qa.rs`, `src/agent_control.rs` |
+| `W` `A` `S` `D` + mouse | Move and look |
+| `Space` / `Shift` | Fly up / down |
+| `Ctrl` | Sprint |
+| `F3` | Open engine tools |
+| `Esc` | Release pointer / pause |
 
-For the city-planning invariants, formulas, and low-end performance boundaries,
-see [`docs/CITY_PLANNER_MATH.md`](docs/CITY_PLANNER_MATH.md).
-
-## Development Standard
-
-Before presenting a change as ready:
+## Verify a change
 
 ```powershell
-cargo fmt --all
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features
 cargo test --workspace --quiet
-cargo build --quiet
+cargo check --target wasm32-unknown-unknown --bin voxel-native
+python -B -m unittest discover -s tools/evidence/tests -p "test_*.py" -v
+python -B -m unittest tools.qa.test_analyze_l0_provenance -v
+python -B tools/artifacts/test_build_codex_engineering_atlas.py
+python -B tools/artifacts/build_codex_engineering_atlas.py --check-only
+.\scripts\elite-release-gates.ps1
 ```
 
-For visual or streaming changes, also run a QA world and inspect the generated
-`report.ron` plus the latest screenshot. Persistent panels and visual simulation
-changes must also follow the viewport, DPI, overlap, input-focus, motion, and
-evidence matrix in
-[`docs/RESPONSIVE_VISUAL_QA.md`](docs/RESPONSIVE_VISUAL_QA.md).
+Visual and streaming changes additionally require a unique native QA world,
+the documented viewport/DPI matrix, and inspection of every screenshot plus
+its `report.ron`. See [Responsive Visual QA](docs/RESPONSIVE_VISUAL_QA.md) and
+the [Elite World Systems Standard](docs/ELITE_WORLD_SYSTEMS_STANDARD.md).
 
-## Roadmap
+## Repository map
 
-1. Make bot city planning increasingly architectural: road hierarchy, terrain
-   following, skyline rules, residential variation, plazas, parks, service pads,
-   and readable human-scale details.
-2. Continue terrain beautification across the whole engine without replacing
-   performance with noisy decoration.
-3. Push ships toward solid, detailed cockpit and hull designs that read as real
-   spacecraft from gameplay distance.
-4. Keep low-end PCs as a first-class target by making every visual upgrade pass
-   through chunk, mesh, and frame-budget verification.
+| Path | Responsibility |
+| --- | --- |
+| `src/world.rs`, `src/chunk.rs` | world authority, coordinates, streaming, edit ownership |
+| `src/terrain.rs`, `src/mesher.rs` | deterministic terrain fields and voxel meshing |
+| `src/planetary_streaming.rs` | fixed-topology far terrain, morphing, hydro, telemetry |
+| `src/virtual_voxel_hierarchy.rs` | pure fixed-memory middle-LOD data layer |
+| `src/sketch_model.rs`, `src/sculpt/` | direct modeling and sculpt transforms |
+| `src/city.rs`, `src/bots.rs` | road graph, bounded planning, bot construction |
+| `src/qa.rs`, `scripts/` | native route capture, reports, release gates |
+| `docs/` | acceptance contracts, research provenance, decisions, known limits |
+
+## License status
+
+No reuse license has been declared yet. Public visibility does not grant a
+license to copy, modify, or redistribute the source or the original diagrams in
+`docs/media/`; they remain under default copyright until the maintainers choose
+and publish an explicit license. Linked research remains governed by its
+original publisher and author terms.
+
+Voxel Native is active pre-release engineering. Default-off diagnostics,
+unaccepted visual candidates, research prototypes, and historical benchmark
+results are labeled as such; they are not silently presented as shipped
+capability.

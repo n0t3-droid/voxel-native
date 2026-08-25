@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="560" viewBox="0 0 1600 560" role="img" aria-labelledby="title desc">
+  <title id="title">Three research routes translated into bounded Voxel Native experiments</title>
+  <desc id="desc">Original diagram showing terrain horizon queries, multiscale vegetation, and shader decomposition flowing through read, translate, bound, test, and accept or reject gates.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111f"/>
+      <stop offset="0.52" stop-color="#0c1d31"/>
+      <stop offset="1" stop-color="#07131f"/>
+    </linearGradient>
+    <linearGradient id="blueGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#43d9ff" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#43d9ff" stop-opacity="0.03"/>
+    </linearGradient>
+    <linearGradient id="greenGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6de3a5" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#6de3a5" stop-opacity="0.03"/>
+    </linearGradient>
+    <linearGradient id="violetGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b795ff" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#b795ff" stop-opacity="0.03"/>
+    </linearGradient>
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#8fb7d8" stroke-opacity="0.055"/>
+    </pattern>
+    <style>
+      .kicker{font-family:Courier;font-size:15px;font-weight:bold;letter-spacing:3px;fill:#7f9bb4}
+      .heading{font-family:Helvetica;font-size:31px;font-weight:bold;fill:#f0f7ff}
+      .panelTitle{font-family:Helvetica;font-size:22px;font-weight:bold;fill:#f3f8ff}
+      .panelText{font-family:Helvetica;font-size:17px;font-weight:normal;fill:#a9bfd2}
+      .micro{font-family:Courier;font-size:14px;font-weight:bold;letter-spacing:1.35px}
+      .flow{font-family:Courier;font-size:15px;font-weight:bold;letter-spacing:1.6px;fill:#d7e7f6}
+      .cardTitle{font-family:Helvetica;font-size:22px;font-weight:bold;fill:#102a3a}
+      .cardText{font-family:Helvetica;font-size:16px;font-weight:normal;fill:#17384a}
+      .cardMicro{font-family:Courier;font-size:14px;font-weight:bold;letter-spacing:1.35px;fill:#102a3a}
+    </style>
+  </defs>
+
+  <rect width="1600" height="560" rx="28" fill="url(#background)"/>
+  <rect width="1600" height="560" rx="28" fill="url(#grid)"/>
+  <path d="M0 0H1600V560H0Z" fill="none" stroke="#5a7893" stroke-opacity="0.34" stroke-width="2"/>
+
+  <text x="64" y="62" class="kicker">RESEARCH ROUTES / ENGINE QUESTIONS</text>
+  <text x="64" y="101" class="heading">Ideas enter as sources. Claims leave only through measured gates.</text>
+
+  <g transform="translate(64 138)">
+    <rect width="464" height="294" rx="20" fill="#dff4fa" stroke="#227b98" stroke-width="2"/>
+    <text x="28" y="38" class="cardMicro">01 / TERRAIN VISIBILITY</text>
+    <text x="28" y="70" class="cardTitle">Directional horizon queries</text>
+    <text x="28" y="96" class="cardText">Question: can height fields bound far-world visibility?</text>
+
+    <g transform="translate(28 124)">
+      <path d="M0 112 L52 76 L96 92 L145 37 L192 70 L238 20 L284 66 L330 45 L384 84 L408 58" fill="none" stroke="#123d50" stroke-width="3" stroke-linejoin="round"/>
+      <path d="M0 112 L52 76 L96 92 L145 37 L192 70 L238 20 L284 66 L330 45 L384 84 L408 58 V132 H0Z" fill="#227b98" fill-opacity="0.14"/>
+      <circle cx="52" cy="76" r="5" fill="#102a3a"/>
+      <path d="M52 76 L238 20" stroke="#102a3a" stroke-width="2" stroke-dasharray="7 6"/>
+      <path d="M52 76 L330 45" stroke="#227b98" stroke-width="2" stroke-dasharray="7 6"/>
+      <text x="0" y="154" class="cardMicro">HEIGHT MAP → HORIZON → ERROR / LATENCY</text>
+    </g>
+  </g>
+
+  <g transform="translate(568 138)">
+    <rect width="464" height="294" rx="20" fill="#e2f5e9" stroke="#2b7d5b" stroke-width="2"/>
+    <text x="28" y="38" class="cardMicro">02 / NATURAL DETAIL</text>
+    <text x="28" y="70" class="cardTitle">Multiscale representation</text>
+    <text x="28" y="96" class="cardText">Question: what survives as dense detail recedes?</text>
+
+    <g transform="translate(32 119)" stroke="#164332" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M74 130V18 M74 42L40 74 M74 58L112 88 M74 78L25 112 M74 91L126 124" stroke-width="5"/>
+      <path d="M42 72L28 50 M42 72L17 76 M110 86L126 64 M110 86L139 91 M27 110L9 91 M27 110L4 121 M124 122L143 104 M124 122L151 134" stroke-width="3"/>
+      <g transform="translate(182 8)">
+        <path d="M0 122H205" stroke="#315f4d" stroke-width="2"/>
+        <path d="M16 122L46 48L76 122Z" fill="#2b7d5b" fill-opacity="0.14" stroke-width="3"/>
+        <path d="M83 122L108 65L133 122Z" fill="#2b7d5b" fill-opacity="0.12" stroke-width="3"/>
+        <path d="M142 122L161 82L180 122Z" fill="#2b7d5b" fill-opacity="0.10" stroke-width="3"/>
+        <path d="M47 48H161" stroke="#164332" stroke-width="2" stroke-dasharray="6 6"/>
+      </g>
+      <text x="0" y="169" class="cardMicro" stroke="none">NEEDLES → CONES → BOUGHS → BUDGET</text>
+    </g>
+  </g>
+
+  <g transform="translate(1072 138)">
+    <rect width="464" height="294" rx="20" fill="#eee7fb" stroke="#7053a0" stroke-width="2"/>
+    <text x="28" y="38" class="cardMicro">03 / IMAGE SYNTHESIS</text>
+    <text x="28" y="70" class="cardTitle">Shader decomposition</text>
+    <text x="28" y="96" class="cardText">Question: which stages help without unstable artifacts?</text>
+
+    <g transform="translate(30 128)">
+      <rect x="0" y="0" width="92" height="92" rx="12" fill="#7053a0" fill-opacity="0.10" stroke="#46315f"/>
+      <path d="M16 69L35 45L50 57L70 28L79 69Z" fill="#7053a0" fill-opacity="0.42"/>
+      <path d="M116 46H150" stroke="#46315f" stroke-width="3"/>
+      <path d="M143 38L152 46L143 54" fill="none" stroke="#46315f" stroke-width="3"/>
+      <rect x="172" y="0" width="92" height="92" rx="12" fill="#7053a0" fill-opacity="0.10" stroke="#46315f"/>
+      <path d="M188 21H248 M188 38H231 M188 55H242 M188 72H220" stroke="#46315f" stroke-width="4" opacity="0.82"/>
+      <path d="M288 46H322" stroke="#46315f" stroke-width="3"/>
+      <path d="M315 38L324 46L315 54" fill="none" stroke="#46315f" stroke-width="3"/>
+      <rect x="344" y="0" width="66" height="92" rx="12" fill="#7053a0" fill-opacity="0.10" stroke="#46315f"/>
+      <circle cx="377" cy="34" r="13" fill="none" stroke="#46315f" stroke-width="4"/>
+      <path d="M360 69L370 79L394 55" fill="none" stroke="#46315f" stroke-width="4"/>
+      <text x="0" y="133" class="cardMicro">INPUT → STAGES → INSPECT / ABLATE</text>
+    </g>
+  </g>
+
+  <g transform="translate(64 470)">
+    <rect width="1472" height="54" rx="15" fill="#081522" stroke="#526f88" stroke-opacity="0.5"/>
+    <text x="24" y="34" class="flow">READ</text>
+    <path d="M91 27H150" stroke="#55758f" stroke-width="2"/><path d="M143 20L152 27L143 34" fill="none" stroke="#55758f" stroke-width="2"/>
+    <text x="174" y="34" class="flow">TRANSLATE</text>
+    <path d="M292 27H351" stroke="#55758f" stroke-width="2"/><path d="M344 20L353 27L344 34" fill="none" stroke="#55758f" stroke-width="2"/>
+    <text x="375" y="34" class="flow">BOUND</text>
+    <path d="M450 27H509" stroke="#55758f" stroke-width="2"/><path d="M502 20L511 27L502 34" fill="none" stroke="#55758f" stroke-width="2"/>
+    <text x="533" y="34" class="flow">TEST</text>
+    <path d="M591 27H650" stroke="#55758f" stroke-width="2"/><path d="M643 20L652 27L643 34" fill="none" stroke="#55758f" stroke-width="2"/>
+    <text x="674" y="34" class="flow" fill="#74e8aa">ACCEPT</text>
+    <text x="753" y="34" class="flow" fill="#7f9bb4">/ REVISE /</text>
+    <text x="858" y="34" class="flow" fill="#ff8a9c">REJECT</text>
+    <text x="1428" y="34" class="micro" fill="#6f8da5" text-anchor="end">RESEARCH INPUT · NOT A SHIPPED CLAIM</text>
+  </g>
+</svg>

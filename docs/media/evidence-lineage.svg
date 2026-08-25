@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 920" role="img" aria-labelledby="title desc">
+  <title id="title">Voxel Native evidence lineage and current adapter boundary</title>
+  <desc id="desc">The implemented evidence path carries source and build identity into a native QA report and screenshots, indexes explicit runs in a canonical evidence manifest, and renders that manifest into a dossier without inventing totals or verdicts. A separate typed Evidence Graph compiler accepts explicit JSON candidates, but the report or manifest to typed-graph adapter is not implemented; translation across that dashed gap is currently manual.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071217"/>
+      <stop offset="1" stop-color="#0d1d24"/>
+    </linearGradient>
+    <linearGradient id="nodeFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123038"/>
+      <stop offset="1" stop-color="#0c2028"/>
+    </linearGradient>
+    <linearGradient id="manifestFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#142f3d"/>
+      <stop offset="1" stop-color="#0d222d"/>
+    </linearGradient>
+    <linearGradient id="artifactFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#253329"/>
+      <stop offset="1" stop-color="#16251f"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#8cb8c6" stroke-opacity="0.04"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#61e8cb"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#65b8ea"/>
+    </marker>
+    <style>
+      .kicker{font-family:Helvetica;font-size:17px;font-weight:bold;letter-spacing:4px;fill:#73f4d4}
+      .heading{font-family:Helvetica;font-size:38px;font-weight:bold;fill:#f2fbff}
+      .subhead{font-family:Helvetica;font-size:20px;font-weight:normal;fill:#9dbdc9}
+      .nodeTitle{font-family:Helvetica;font-size:21px;font-weight:bold;fill:#edf9fd}
+      .body{font-family:Helvetica;font-size:15px;font-weight:normal;fill:#a9c3cc}
+      .mono{font-family:Courier;font-size:14px;font-weight:bold;fill:#d7e9ee}
+      .micro{font-family:Courier;font-size:13px;font-weight:bold;fill:#819faa}
+    </style>
+  </defs>
+
+  <rect width="1600" height="920" rx="24" fill="url(#bg)"/>
+  <rect width="1600" height="920" rx="24" fill="url(#grid)"/>
+
+  <g font-family="Helvetica">
+    <text x="64" y="64" class="kicker">PROVENANCE PIPELINE · CURRENT IMPLEMENTATION BOUNDARY</text>
+    <text x="64" y="116" class="heading">Every published claim keeps its identity chain.</text>
+    <text x="64" y="153" class="subhead">The dossier renders one explicit manifest; a separate typed-graph lane still has a manual adapter gap.</text>
+
+    <g transform="translate(1128 43)">
+      <rect width="408" height="94" rx="15" fill="#0d2026" stroke="#52694e"/>
+      <text x="21" y="33" fill="#d9efaa" font-size="14" font-weight="bold" letter-spacing="1.2">IMPLEMENTED BUILDERS</text>
+      <text x="21" y="60" fill="#f0c77b" font-size="14" font-weight="bold">PUBLICATION REQUIRES REVIEWED EVIDENCE</text>
+      <text x="21" y="81" fill="#8faab4" font-size="13">manifest validity is not release certification</text>
+    </g>
+
+    <g transform="translate(64 218)">
+      <rect width="310" height="276" rx="20" fill="url(#nodeFill)" stroke="#56d8be" stroke-width="2"/>
+      <rect x="20" y="18" width="125" height="26" rx="13" fill="#173e3b" stroke="#55d8bd"/>
+      <text x="82" y="36" fill="#8cf5dd" font-size="12" font-weight="bold" text-anchor="middle" letter-spacing="1">IDENTITY INPUT</text>
+      <text x="22" y="80" class="nodeTitle">Source + build identity</text>
+      <path d="M22 100H288" stroke="#31515a"/>
+      <text x="22" y="132" class="body">World generation</text>
+      <text x="22" y="155" class="mono">seed · profile · scenery · grammar</text>
+      <text x="22" y="193" class="body">Run provenance</text>
+      <text x="22" y="216" class="mono">build profile · source fingerprint</text>
+      <text x="22" y="239" class="mono">executable hash · toolchain/hardware</text>
+      <text x="22" y="264" fill="#7e9ca7" font-size="13">optional fields stay absent—not guessed</text>
+    </g>
+
+    <path d="M374 356H422" fill="none" stroke="#61e8cb" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="398" y="338" text-anchor="middle" fill="#84aab3" font-size="13" font-weight="bold">EMITS</text>
+
+    <g transform="translate(436 218)">
+      <rect width="310" height="276" rx="20" fill="url(#nodeFill)" stroke="#5ba9d9" stroke-width="2"/>
+      <rect x="20" y="18" width="107" height="26" rx="13" fill="#15364a" stroke="#58ace0"/>
+      <text x="73" y="36" fill="#a9ddff" font-size="12" font-weight="bold" text-anchor="middle" letter-spacing="1">NATIVE QA</text>
+      <text x="22" y="80" class="nodeTitle">report.ron + screenshots</text>
+      <path d="M22 100H288" stroke="#31515a"/>
+      <text x="22" y="132" class="body">Current canonical report</text>
+      <text x="22" y="155" class="mono">QA report schema 2.5.0</text>
+      <text x="22" y="193" class="body">Recorded observations</text>
+      <text x="22" y="216" class="mono">route · viewport · frame quantiles</text>
+      <text x="22" y="239" class="mono">budgets · screenshots · identities</text>
+      <text x="22" y="264" fill="#7e9ca7" font-size="13">diagnostic variants remain non-publishable</text>
+    </g>
+
+    <path d="M746 356H794" fill="none" stroke="#61e8cb" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="770" y="338" text-anchor="middle" fill="#84aab3" font-size="13" font-weight="bold">INDEXES</text>
+
+    <g transform="translate(808 218)">
+      <rect width="310" height="276" rx="20" fill="url(#manifestFill)" stroke="#65b9e9" stroke-width="2"/>
+      <rect x="20" y="18" width="147" height="26" rx="13" fill="#17384e" stroke="#60b4e6"/>
+      <text x="93" y="36" fill="#a9ddff" font-size="12" font-weight="bold" text-anchor="middle" letter-spacing="1">CANONICAL INDEX</text>
+      <text x="22" y="80" class="nodeTitle">Evidence Manifest 1.5.0</text>
+      <path d="M22 100H288" stroke="#31515a"/>
+      <text x="22" y="132" class="body">Explicit run directories only</text>
+      <text x="22" y="155" class="mono">never scan “latest” or qa_runs/</text>
+      <text x="22" y="193" class="body">Fail-closed normalization</text>
+      <text x="22" y="216" class="mono">hashes · identities · classifications</text>
+      <text x="22" y="239" class="mono">Passed · Observed · Rejected · …</text>
+      <text x="22" y="264" fill="#7e9ca7" font-size="13">preserves missing and unsafe evidence</text>
+    </g>
+
+    <path d="M1118 356H1166" fill="none" stroke="#61e8cb" stroke-width="3" marker-end="url(#arrow)"/>
+    <text x="1142" y="338" text-anchor="middle" fill="#84aab3" font-size="13" font-weight="bold">RENDERS</text>
+
+    <g transform="translate(1180 218)">
+      <rect width="356" height="276" rx="20" fill="url(#artifactFill)" stroke="#a7d66f" stroke-width="2"/>
+      <rect x="20" y="18" width="155" height="26" rx="13" fill="#2b3b29" stroke="#9ecf68"/>
+      <text x="97" y="36" fill="#d9f2a9" font-size="12" font-weight="bold" text-anchor="middle" letter-spacing="1">ARTIFACT BUILDER</text>
+      <text x="22" y="80" class="nodeTitle">Canonical evidence dossier</text>
+      <path d="M22 100H334" stroke="#405044"/>
+      <text x="22" y="132" class="body">One explicit manifest</text>
+      <text x="22" y="155" class="mono">PDF · workbook · deck · report</text>
+      <text x="22" y="193" class="body">Presentation-only responsibility</text>
+      <text x="22" y="216" class="mono">no invented totals or verdicts</text>
+      <text x="22" y="239" class="mono">verified PNG identities · no clobber</text>
+      <text x="22" y="264" fill="#9eb58b" font-size="13">a builder is not a publication approval</text>
+    </g>
+
+    <g transform="translate(64 548)">
+      <rect width="1472" height="230" rx="20" fill="#09171c" stroke="#2a4b55"/>
+      <text x="24" y="39" fill="#dceef4" font-size="18" font-weight="bold" letter-spacing="1.8">SEPARATE TYPED-EVIDENCE LANE</text>
+      <text x="24" y="66" class="body">The compiler is implemented for explicit authored JSON candidates; existing QA artifacts do not feed it automatically.</text>
+
+      <g transform="translate(32 94)">
+        <rect width="274" height="92" rx="14" fill="#10262c" stroke="#44636b"/>
+        <text x="137" y="35" text-anchor="middle" fill="#dceef3" font-size="17" font-weight="bold">QA report / manifest</text>
+        <text x="137" y="62" text-anchor="middle" class="micro">current artifact evidence</text>
+      </g>
+
+      <path d="M306 140H756" fill="none" stroke="#7896a0" stroke-width="2.5" stroke-dasharray="9 7" marker-end="url(#arrowBlue)"/>
+      <g transform="translate(338 87)">
+        <rect width="386" height="74" rx="12" fill="#241f22" stroke="#8b5c64"/>
+        <text x="193" y="22" text-anchor="middle" fill="#f0c77b" font-size="13" font-weight="bold">MANUAL EXPLICIT CANDIDATE TRANSLATION</text>
+        <text x="193" y="46" text-anchor="middle" fill="#ee9ca8" font-size="13" font-weight="bold">REPORT / MANIFEST → GRAPH</text>
+        <text x="193" y="65" text-anchor="middle" fill="#ee9ca8" font-size="13" font-weight="bold">ADAPTER NOT IMPLEMENTED</text>
+      </g>
+
+      <g transform="translate(768 94)">
+        <rect width="326" height="92" rx="14" fill="#10242e" stroke="#5aaee0"/>
+        <text x="163" y="35" text-anchor="middle" fill="#b7e4ff" font-size="17" font-weight="bold">Candidate 1.0.0 → Graph 1.0.0</text>
+        <text x="163" y="62" text-anchor="middle" class="micro">explicit JSON · deterministic · fixed caps</text>
+      </g>
+
+      <path d="M1094 140H1142" fill="none" stroke="#65b8ea" stroke-width="2.5" marker-end="url(#arrowBlue)"/>
+
+      <g transform="translate(1154 94)">
+        <rect width="278" height="92" rx="14" fill="#141d23" stroke="#6a8791" stroke-dasharray="8 6"/>
+        <text x="139" y="35" text-anchor="middle" fill="#d0e1e6" font-size="17" font-weight="bold">Artifact View 1.0.0</text>
+        <text x="139" y="61" text-anchor="middle" class="micro">schema validated · not generated</text>
+      </g>
+    </g>
+
+    <g transform="translate(64 808)">
+      <rect width="1472" height="70" rx="16" fill="#171b20" stroke="#5a4b4e"/>
+      <text x="24" y="28" fill="#f0c77b" font-size="14" font-weight="bold">TRUTH BOUNDARY</text>
+      <text x="171" y="28" fill="#b4c9d0" font-size="14">A hash proves byte identity—not correctness, authorship, visual quality, or release readiness.</text>
+      <text x="24" y="53" fill="#718f9a" font-size="13">Sources: src/qa.rs · tools/artifacts/build_evidence_manifest.py · tools/artifacts/build_elite_visual_pdf.py · docs/EVIDENCE_MANIFEST_SCHEMA.md · docs/EVIDENCE_GRAPH_CONTRACT.md</text>
+    </g>
+  </g>
+</svg>
