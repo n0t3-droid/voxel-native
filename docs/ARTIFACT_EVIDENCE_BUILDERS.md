@@ -77,7 +77,7 @@ python -B tools/artifacts/test_build_codex_engineering_atlas.py
 
 Once a separately approved release copy exists at the single canonical path
 `docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf`, CI
-can validate those exact bytes against the current 29 inputs and toolchain with:
+can validate those exact bytes against the current 30 inputs and toolchain with:
 
 ```powershell
 python -B tools/artifacts/build_codex_engineering_atlas.py --validate-release

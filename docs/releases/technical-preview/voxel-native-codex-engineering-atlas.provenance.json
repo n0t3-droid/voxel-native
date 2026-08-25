@@ -4,17 +4,17 @@
     "path": "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf",
     "media_type": "application/pdf",
     "pdf_version": "1.4",
-    "sha256": "ff5c2ee81022e009f4bb2c025708a03a73856d7903e97e32ae62da12738aaa38",
-    "bytes": 87483,
+    "sha256": "bfff95e72999456d280b0637001356b7bbe9e44dc891770308f1a561cf4bea3b",
+    "bytes": 87475,
     "pages": 15,
     "page_size": "A4",
-    "document_id": "82DAAC126513C92915B023AF4CCEB451"
+    "document_id": "95519471C8CA18F54FAEEA1E1557C5CF"
   },
   "source_identity": {
-    "immutable_inputs": 29,
+    "immutable_inputs": 30,
     "passive_svg_assets": 8,
-    "aggregate_fingerprint_sha256": "afe0fb87bda7d7a0062cf3df354388b2db462e2b1f7c5a6554199db233f3c0cd",
-    "builder_sha256": "8a107d21379a07250229daa176ef26c0634f360aed9809a5061c83b1a4b84c8c"
+    "aggregate_fingerprint_sha256": "61403b99156294794e433245e3156d4894f87bc1535999bea250b1cf240343ea",
+    "builder_sha256": "c357f17281f96aa65aa758c8a46549f9b16272fc87e3360f04cee892ee733349"
   },
   "toolchain": {
     "python": "3.12.13",
@@ -63,8 +63,8 @@
     "pages_rendered": 15,
     "pages_reviewed_full_size": 15,
     "independent_sensitive_page_review": true,
-    "atlas_stderr_sha256": "40de3c8171a6feba7ec796909ac72886b9ce2d3606ee0ae9382e9389b1f50e0a",
-    "base14_control_stderr_sha256": "40de3c8171a6feba7ec796909ac72886b9ce2d3606ee0ae9382e9389b1f50e0a",
+    "atlas_stderr_sha256": "6b76dedf9fefb6759a7c6ef6ed89ea38f6b993e297a0acdcbd6c6c84b47b8b17",
+    "base14_control_stderr_sha256": "6b76dedf9fefb6759a7c6ef6ed89ea38f6b993e297a0acdcbd6c6c84b47b8b17",
     "stderr_byte_identical": true,
     "shared_renderer_startup_diagnostics": [
       "Syntax Error: No display font for 'Symbol'",

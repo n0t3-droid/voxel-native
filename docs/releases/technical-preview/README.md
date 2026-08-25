@@ -11,12 +11,12 @@ captures complete the repository's visual-acceptance contract.
 
 ## Frozen artifact identity
 
-- PDF SHA-256: `ff5c2ee81022e009f4bb2c025708a03a73856d7903e97e32ae62da12738aaa38`
-- Size: `87,483` bytes
+- PDF SHA-256: `bfff95e72999456d280b0637001356b7bbe9e44dc891770308f1a561cf4bea3b`
+- Size: `87,475` bytes
 - Layout: `15` strict A4 pages, PDF 1.4, zero page rotation
-- Document ID: `82DAAC126513C92915B023AF4CCEB451` in both trailer slots
-- Aggregate 29-input fingerprint: `afe0fb87bda7d7a0062cf3df354388b2db462e2b1f7c5a6554199db233f3c0cd`
-- Builder SHA-256: `8a107d21379a07250229daa176ef26c0634f360aed9809a5061c83b1a4b84c8c`
+- Document ID: `95519471C8CA18F54FAEEA1E1557C5CF` in both trailer slots
+- Aggregate 30-input fingerprint: `61403b99156294794e433245e3156d4894f87bc1535999bea250b1cf240343ea`
+- Builder SHA-256: `c357f17281f96aa65aa758c8a46549f9b16272fc87e3360f04cee892ee733349`
 
 Codex produced two byte-identical deterministic builds, rendered all 15 final
 pages to 1241 × 1754 PNGs at 150 DPI, and completed full-size visual review.

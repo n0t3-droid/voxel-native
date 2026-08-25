@@ -100,17 +100,14 @@ jobs:
           cache-dependency-path: |
             tools/qa/requirements.txt
             tools/qa/constraints-ci.txt
-            tools/artifacts/requirements-atlas.txt
 
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "24"
 
-      - name: Install analyzer and atlas dependencies
-        run: |
-          python -m pip install --requirement tools/qa/requirements.txt --constraint tools/qa/constraints-ci.txt
-          python -m pip install --requirement tools/artifacts/requirements-atlas.txt
+      - name: Install analyzer dependencies
+        run: python -m pip install --requirement tools/qa/requirements.txt --constraint tools/qa/constraints-ci.txt
 
       - name: Test evidence graph contracts
         run: python tools/evidence/tests/test_evidence_model.py
@@ -124,20 +121,97 @@ jobs:
       - name: Test Python and Node artifact consumers
         run: python tools/artifacts/test_artifact_manifest_consumers.py
 
-      - name: Test Codex Engineering Atlas builder contracts
-        run: python -B tools/artifacts/test_build_codex_engineering_atlas.py
-
-      - name: Validate Codex Engineering Atlas inputs without writing output
-        run: python -B tools/artifacts/build_codex_engineering_atlas.py --check-only
-
-      - name: Validate canonical Codex Engineering Atlas release
-        run: python -B tools/artifacts/build_codex_engineering_atlas.py --validate-release
-
       - name: Test public repository presentation guards
         run: python tools/publication/test_validate_repository_presentation.py
 
       - name: Validate public repository artifacts
         run: python tools/publication/validate_repository_presentation.py
+
+  atlas-release:
+    name: Codex atlas (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/artifacts/requirements-atlas.txt
+
+      - name: Install pinned atlas dependencies
+        run: python -m pip install --requirement tools/artifacts/requirements-atlas.txt
+
+      - name: Validate Codex Engineering Atlas inputs without writing output
+        run: python -B tools/artifacts/build_codex_engineering_atlas.py --check-only
+
+      - name: Test Codex Engineering Atlas builder contracts
+        run: python -B tools/artifacts/test_build_codex_engineering_atlas.py
+
+      - name: Bind validation to the checked-in atlas release inputs
+        shell: python
+        run: |
+          import hashlib
+          import os
+          import pathlib
+          import subprocess
+
+          release_inputs = (
+              pathlib.Path(
+                  "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf"
+              ),
+              pathlib.Path(
+                  "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.provenance.json"
+              ),
+          )
+          revision = os.environ["GITHUB_SHA"]
+          checkout_revision = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
+          if checkout_revision != revision:
+              raise SystemExit(
+                  f"checkout revision {checkout_revision} does not match GITHUB_SHA {revision}"
+              )
+          status = subprocess.check_output(
+              ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+              text=True,
+          )
+          if status:
+              raise SystemExit(
+                  "atlas checks mutated the checkout before release validation:\n" + status
+              )
+
+          for release_input in release_inputs:
+              checked_out = release_input.read_bytes()
+              committed = subprocess.check_output(
+                  [
+                      "git",
+                      "cat-file",
+                      "blob",
+                      f"{revision}:{release_input.as_posix()}",
+                  ]
+              )
+              if checked_out != committed:
+                  raise SystemExit(
+                      f"{release_input} differs from its committed blob after tests"
+                  )
+              print(
+                  f"path={release_input.as_posix()} "
+                  f"sha256={hashlib.sha256(checked_out).hexdigest()} "
+                  f"bytes={len(checked_out)} revision={revision}"
+              )
+
+      - name: Validate canonical Codex Engineering Atlas release
+        run: python -B tools/artifacts/build_codex_engineering_atlas.py --validate-release
 
   windows-static-qa:
     name: Windows static QA matrix

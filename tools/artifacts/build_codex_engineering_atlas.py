@@ -127,6 +127,7 @@ import argparse
 import hashlib
 import html
 import io
+import json
 import math
 import os
 import re
@@ -149,10 +150,15 @@ DEFAULT_OUTPUT = Path("output/pdf/voxel-native-codex-engineering-atlas.pdf")
 CANONICAL_RELEASE_PDF = Path(
     "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf"
 )
+CANONICAL_RELEASE_PROVENANCE = Path(
+    "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.provenance.json"
+)
+RELEASE_PROVENANCE_SCHEMA = "voxel-native.codex-engineering-atlas-provenance/1.0.0"
 EXPECTED_PAGE_COUNT = 15
 MAX_SOURCE_BYTES = _ATLAS_BOOT_MAX_SOURCE_BYTES
 MAX_TOTAL_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_PDF_BYTES = 64 * 1024 * 1024
+MAX_RELEASE_PROVENANCE_BYTES = 64 * 1024
 MAX_SVG_NODES = 8_192
 MAX_SVG_DEPTH = 64
 MAX_SVG_ATTRIBUTES = 65_536
@@ -366,6 +372,16 @@ ALLOWED_PDF_BASE_FONT_NAMES = frozenset(
 SVG_NUMBER_PATTERN = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 SVG_LENGTH_PATTERN = rf"{SVG_NUMBER_PATTERN}(?:px|pt|pc|mm|cm|in|em|ex|%)?"
 BUILDER_SOURCE = "tools/artifacts/build_codex_engineering_atlas.py"
+ATLAS_REQUIREMENTS_SOURCE = "tools/artifacts/requirements-atlas.txt"
+PINNED_ATLAS_PACKAGE_VERSIONS = {
+    "cssselect2": "0.9.0",
+    "lxml": "6.1.1",
+    "pypdf": "6.10.0",
+    "reportlab": "4.4.9",
+    "svglib": "2.2.0",
+    "tinycss2": "1.5.1",
+}
+CANONICAL_BUILD_PYTHON_ABI = (3, 12)
 UNICODE_DASHES = "\u2010\u2011\u2012\u2013\u2014\u2212"
 SVG_ASCII_REPLACEMENTS = {
     "\u00b1": "+/-",
@@ -399,6 +415,30 @@ PDF_METADATA = {
     "producer": "Voxel Native deterministic atlas builder",
     "subject": "Source-first technical atlas; no runtime release verdict; runtime gallery pending",
     "keywords": "Voxel Native, Codex, voxel engine, bounded systems, technical atlas",
+}
+CANONICAL_RELEASE_FONT_RESOURCES = (
+    "Courier-Bold / Type1 / WinAnsiEncoding",
+    "Helvetica / Type1 / WinAnsiEncoding",
+    "Helvetica-Bold / Type1 / WinAnsiEncoding",
+    "Times-Roman / Type1 / WinAnsiEncoding",
+)
+CANONICAL_RELEASE_URI_ANNOTATIONS = 10
+CANONICAL_VISUAL_REVIEW_SCALARS = {
+    "renderer": "Poppler pdftoppm 26.05.0",
+    "dpi": 150,
+    "rendered_png_width": 1241,
+    "rendered_png_height": 1754,
+}
+CANONICAL_RENDERER_STARTUP_DIAGNOSTICS = (
+    "Syntax Error: No display font for 'Symbol'",
+    "Syntax Error: No display font for 'ArialUnicode'",
+)
+CANONICAL_RENDERER_STDERR_SHA256 = hashlib.sha256(
+    ("\r\n".join(CANONICAL_RENDERER_STARTUP_DIAGNOSTICS) + "\r\n").encode("ascii")
+).hexdigest()
+CANONICAL_RELEASE_OPERATOR = {
+    "system": "OpenAI Codex",
+    "workflow": "deterministic build, structural validation, full-size rendered-page review",
 }
 EXPECTED_PAGE_HEADINGS: tuple[str, ...] = (
     "CODEX ENGINEERING ATLAS",
@@ -461,6 +501,28 @@ class AtlasDocumentIdentity:
     builder_sha: str
     toolchain_identity: str
     document_id_hex: str
+
+
+@dataclass(frozen=True)
+class ReleaseProvenance:
+    pdf_sha256: str
+    pdf_bytes: int
+    pdf_pages: int
+    document_id_hex: str
+    fingerprint: str
+    builder_sha: str
+    toolchain_identity: str
+    font_resources: tuple[str, ...]
+    uri_annotations: int
+    unique_allowlisted_uris: int
+
+
+@dataclass(frozen=True)
+class PdfValidationReport:
+    pages: int
+    font_resources: tuple[str, ...]
+    uri_annotations: int
+    unique_allowlisted_uris: int
 
 
 REQUIRED_ASSETS: tuple[str, ...] = (
@@ -545,6 +607,10 @@ SOURCE_CONTRACTS: dict[str, tuple[str, ...]] = {
         "Decision in one paragraph",
         "Staged implementation with non-negotiable gates",
         "Candid current limitations and rejection triggers",
+    ),
+    ATLAS_REQUIREMENTS_SOURCE: tuple(
+        f"{package}=={version}"
+        for package, version in sorted(PINNED_ATLAS_PACKAGE_VERSIONS.items())
     ),
     "src/chunk.rs": (
         "pub const CHUNK_SIZE: usize = 16;",
@@ -696,6 +762,19 @@ def assert_no_reparse_components(
             raise AtlasBuildError(f"{label} uses a symlink or reparse point: {current}")
 
 
+def require_canonical_lf_bytes(data: bytes, label: str, path: Path) -> None:
+    """Reject checkout-dependent CRLF and lone-CR source identities."""
+
+    offset = data.find(b"\r")
+    if offset < 0:
+        return
+    ending = "CRLF" if data[offset : offset + 2] == b"\r\n" else "lone CR"
+    raise AtlasBuildError(
+        f"required {label} contains a non-canonical {ending} line ending at byte {offset}; "
+        f"LF-only bytes are required: {path}"
+    )
+
+
 def read_input_snapshot(root: Path, relative: str, label: str) -> InputSnapshot:
     relative_path = Path(relative)
     if relative_path.is_absolute() or ".." in relative_path.parts:
@@ -770,6 +849,7 @@ def read_input_snapshot(root: Path, relative: str, label: str) -> InputSnapshot:
     final_info = lstat_or_none(path)
     if final_info is None or not os.path.samestat(before, final_info):
         raise AtlasBuildError(f"required {label} identity changed while it was being read: {path}")
+    require_canonical_lf_bytes(data, label, path)
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -879,6 +959,588 @@ def read_canonical_release_pdf(root: Path) -> tuple[Path, bytes]:
     return path, data
 
 
+def read_canonical_release_provenance(root: Path) -> tuple[Path, bytes]:
+    path = lexical_absolute(root / CANONICAL_RELEASE_PROVENANCE)
+    data = read_stable_bounded_bytes(
+        path,
+        root,
+        byte_limit=MAX_RELEASE_PROVENANCE_BYTES,
+        label="canonical release provenance",
+    )
+    return path, data
+
+
+def require_exact_json_object(
+    value: object, label: str, expected_keys: frozenset[str]
+) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise AtlasBuildError(f"canonical release provenance {label} must be an object")
+    mapping = value
+    observed = set(mapping)
+    if observed != expected_keys:
+        raise AtlasBuildError(
+            f"canonical release provenance {label} has non-canonical fields; "
+            f"missing={sorted(expected_keys - observed)}, extra={sorted(observed - expected_keys)}"
+        )
+    return mapping
+
+
+def require_json_string(value: object, label: str, *, maximum: int = 1_024) -> str:
+    if type(value) is not str or not value or len(value) > maximum:
+        raise AtlasBuildError(
+            f"canonical release provenance {label} must be a non-empty string "
+            f"of at most {maximum} characters"
+        )
+    guard_public_text(value)
+    return value
+
+
+def require_json_int(
+    value: object, label: str, *, minimum: int = 0, maximum: int
+) -> int:
+    if type(value) is not int or value < minimum or value > maximum:
+        raise AtlasBuildError(
+            f"canonical release provenance {label} must be an integer in "
+            f"[{minimum}, {maximum}]"
+        )
+    return value
+
+
+def require_json_bool(value: object, label: str, expected: bool) -> None:
+    if type(value) is not bool or value is not expected:
+        raise AtlasBuildError(
+            f"canonical release provenance {label} must be {str(expected).lower()}"
+        )
+
+
+def require_exact_json_values(
+    mapping: dict[str, Any], label: str, expected: dict[str, object]
+) -> None:
+    for field, expected_value in expected.items():
+        observed = mapping[field]
+        if type(observed) is not type(expected_value) or observed != expected_value:
+            raise AtlasBuildError(
+                f"canonical release provenance {label}.{field} mismatch: "
+                f"expected={expected_value!r}, observed={observed!r}"
+            )
+
+
+def require_sha256(value: object, label: str) -> str:
+    text = require_json_string(value, label, maximum=64)
+    if re.fullmatch(r"[0-9a-f]{64}", text) is None:
+        raise AtlasBuildError(
+            f"canonical release provenance {label} must be a lowercase SHA-256"
+        )
+    return text
+
+
+def require_document_id(value: object, label: str) -> str:
+    text = require_json_string(value, label, maximum=32)
+    if re.fullmatch(r"[0-9A-F]{32}", text) is None:
+        raise AtlasBuildError(
+            f"canonical release provenance {label} must be a 128-bit uppercase hex ID"
+        )
+    return text
+
+
+def parse_release_provenance(data: bytes) -> ReleaseProvenance:
+    if not data or len(data) > MAX_RELEASE_PROVENANCE_BYTES:
+        raise AtlasBuildError(
+            "canonical release provenance bytes are empty or exceed the fixed input cap"
+        )
+    require_canonical_lf_bytes(data, "canonical release provenance", CANONICAL_RELEASE_PROVENANCE)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AtlasBuildError("canonical release provenance is not UTF-8") from error
+    if not text.isascii():
+        raise AtlasBuildError("canonical release provenance must contain ASCII text only")
+    guard_public_text(text)
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise AtlasBuildError(
+                    f"canonical release provenance contains duplicate JSON key {key!r}"
+                )
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> None:
+        raise AtlasBuildError(
+            f"canonical release provenance contains non-finite JSON number {value}"
+        )
+
+    try:
+        decoded = json.loads(
+            text,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except AtlasBuildError:
+        raise
+    except (json.JSONDecodeError, RecursionError, ValueError) as error:
+        raise AtlasBuildError(
+            f"canonical release provenance is not bounded canonical JSON: {error}"
+        ) from error
+
+    root = require_exact_json_object(
+        decoded,
+        "root",
+        frozenset(
+            {
+                "schema",
+                "artifact",
+                "source_identity",
+                "toolchain",
+                "determinism",
+                "structural_review",
+                "visual_review",
+                "scope",
+                "operator",
+            }
+        ),
+    )
+    if root["schema"] != RELEASE_PROVENANCE_SCHEMA:
+        raise AtlasBuildError(
+            "canonical release provenance schema mismatch: "
+            f"expected={RELEASE_PROVENANCE_SCHEMA!r}, observed={root['schema']!r}"
+        )
+
+    artifact = require_exact_json_object(
+        root["artifact"],
+        "artifact",
+        frozenset(
+            {
+                "path",
+                "media_type",
+                "pdf_version",
+                "sha256",
+                "bytes",
+                "pages",
+                "page_size",
+                "document_id",
+            }
+        ),
+    )
+    expected_artifact_scalars = {
+        "path": CANONICAL_RELEASE_PDF.as_posix(),
+        "media_type": "application/pdf",
+        "pdf_version": "1.4",
+        "page_size": "A4",
+    }
+    for field, expected in expected_artifact_scalars.items():
+        if artifact[field] != expected:
+            raise AtlasBuildError(
+                f"canonical release provenance artifact.{field} mismatch: "
+                f"expected={expected!r}, observed={artifact[field]!r}"
+            )
+    pdf_sha256 = require_sha256(artifact["sha256"], "artifact.sha256")
+    pdf_bytes = require_json_int(
+        artifact["bytes"], "artifact.bytes", minimum=1_025, maximum=MAX_PDF_BYTES
+    )
+    pdf_pages = require_json_int(
+        artifact["pages"], "artifact.pages", minimum=1, maximum=EXPECTED_PAGE_COUNT
+    )
+    if pdf_pages != EXPECTED_PAGE_COUNT:
+        raise AtlasBuildError(
+            f"canonical release provenance artifact.pages must equal {EXPECTED_PAGE_COUNT}"
+        )
+    document_id_hex = require_document_id(
+        artifact["document_id"], "artifact.document_id"
+    )
+
+    source_identity = require_exact_json_object(
+        root["source_identity"],
+        "source_identity",
+        frozenset(
+            {
+                "immutable_inputs",
+                "passive_svg_assets",
+                "aggregate_fingerprint_sha256",
+                "builder_sha256",
+            }
+        ),
+    )
+    immutable_inputs = require_json_int(
+        source_identity["immutable_inputs"],
+        "source_identity.immutable_inputs",
+        minimum=0,
+        maximum=EXPECTED_INPUT_COUNT,
+    )
+    passive_svg_assets = require_json_int(
+        source_identity["passive_svg_assets"],
+        "source_identity.passive_svg_assets",
+        minimum=0,
+        maximum=len(REQUIRED_ASSETS),
+    )
+    if immutable_inputs != EXPECTED_INPUT_COUNT or passive_svg_assets != len(REQUIRED_ASSETS):
+        raise AtlasBuildError(
+            "canonical release provenance source population does not match the builder contract"
+        )
+    fingerprint = require_sha256(
+        source_identity["aggregate_fingerprint_sha256"],
+        "source_identity.aggregate_fingerprint_sha256",
+    )
+    builder_sha = require_sha256(
+        source_identity["builder_sha256"], "source_identity.builder_sha256"
+    )
+
+    toolchain = require_exact_json_object(
+        root["toolchain"],
+        "toolchain",
+        frozenset(
+            {
+                "python",
+                "reportlab",
+                "svglib",
+                "pypdf",
+                "lxml",
+                "cssselect2",
+                "tinycss2",
+                "libxml2_compiled",
+                "libxml2_runtime",
+                "libxslt_compiled",
+                "libxslt_runtime",
+                "zlib_compiled",
+                "zlib_runtime",
+            }
+        ),
+    )
+    toolchain_names = {
+        "cssselect2": "cssselect2",
+        "libxml2-compiled": "libxml2_compiled",
+        "libxml2-runtime": "libxml2_runtime",
+        "libxslt-compiled": "libxslt_compiled",
+        "libxslt-runtime": "libxslt_runtime",
+        "lxml": "lxml",
+        "pypdf": "pypdf",
+        "python": "python",
+        "reportlab": "reportlab",
+        "svglib": "svglib",
+        "tinycss2": "tinycss2",
+        "zlib-compiled": "zlib_compiled",
+        "zlib-runtime": "zlib_runtime",
+    }
+    toolchain_components = {
+        name: canonical_toolchain_version(
+            f"recorded {name}",
+            require_json_string(toolchain[field], f"toolchain.{field}", maximum=64),
+        )
+        for name, field in toolchain_names.items()
+    }
+    for package, expected_version in PINNED_ATLAS_PACKAGE_VERSIONS.items():
+        observed_version = toolchain_components[package]
+        if observed_version != expected_version:
+            raise AtlasBuildError(
+                f"canonical release provenance toolchain.{package} does not match "
+                f"the immutable requirements pin: expected={expected_version!r}, "
+                f"observed={observed_version!r}"
+            )
+    python_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", toolchain_components["python"])
+    if python_match is None or tuple(int(part) for part in python_match.groups()[:2]) != (
+        CANONICAL_BUILD_PYTHON_ABI
+    ):
+        required_abi = ".".join(str(part) for part in CANONICAL_BUILD_PYTHON_ABI)
+        raise AtlasBuildError(
+            "canonical release provenance toolchain.python does not match the portable "
+            f"Python {required_abi} ABI contract"
+        )
+    toolchain_identity = ";".join(
+        f"{name}={toolchain_components[name]}" for name in sorted(toolchain_components)
+    )
+
+    determinism = require_exact_json_object(
+        root["determinism"],
+        "determinism",
+        frozenset({"separate_process_builds", "byte_identical"}),
+    )
+    if (
+        require_json_int(
+            determinism["separate_process_builds"],
+            "determinism.separate_process_builds",
+            minimum=2,
+            maximum=16,
+        )
+        != 2
+    ):
+        raise AtlasBuildError(
+            "canonical release provenance determinism.separate_process_builds must equal 2"
+        )
+    require_json_bool(determinism["byte_identical"], "determinism.byte_identical", True)
+
+    structural = require_exact_json_object(
+        root["structural_review"],
+        "structural_review",
+        frozenset(
+            {
+                "strict_reopen",
+                "a4_pages_with_zero_rotation",
+                "encrypted",
+                "javascript",
+                "forms",
+                "embedded_files",
+                "embedded_font_programs",
+                "font_resources",
+                "uri_annotations",
+                "unique_allowlisted_uris",
+                "replacement_glyphs",
+                "non_ascii_extracted_codepoints",
+                "workstation_path_leaks",
+            }
+        ),
+    )
+    for field in ("strict_reopen",):
+        require_json_bool(structural[field], f"structural_review.{field}", True)
+    for field in (
+        "encrypted",
+        "javascript",
+        "forms",
+        "embedded_files",
+        "embedded_font_programs",
+    ):
+        require_json_bool(structural[field], f"structural_review.{field}", False)
+    if (
+        require_json_int(
+            structural["a4_pages_with_zero_rotation"],
+            "structural_review.a4_pages_with_zero_rotation",
+            minimum=0,
+            maximum=EXPECTED_PAGE_COUNT,
+        )
+        != EXPECTED_PAGE_COUNT
+    ):
+        raise AtlasBuildError(
+            "canonical release provenance structural page count is incomplete"
+        )
+    font_resources = structural["font_resources"]
+    if type(font_resources) is not list or not font_resources or len(font_resources) > 16:
+        raise AtlasBuildError(
+            "canonical release provenance structural_review.font_resources must be a bounded list"
+        )
+    observed_fonts = tuple(
+        require_json_string(value, "structural_review.font_resources[]", maximum=128)
+        for value in font_resources
+    )
+    if observed_fonts != CANONICAL_RELEASE_FONT_RESOURCES:
+        raise AtlasBuildError(
+            "canonical release provenance structural font resources are non-canonical"
+        )
+    uri_annotations = require_json_int(
+        structural["uri_annotations"],
+        "structural_review.uri_annotations",
+        minimum=0,
+        maximum=256,
+    )
+    if uri_annotations != CANONICAL_RELEASE_URI_ANNOTATIONS:
+        raise AtlasBuildError(
+            "canonical release provenance URI annotation population is non-canonical"
+        )
+    unique_allowlisted_uris = require_json_int(
+        structural["unique_allowlisted_uris"],
+        "structural_review.unique_allowlisted_uris",
+        minimum=0,
+        maximum=len(OFFICIAL_URIS),
+    )
+    if unique_allowlisted_uris != len(OFFICIAL_URIS):
+        raise AtlasBuildError(
+            "canonical release provenance allowlisted URI population is incomplete"
+        )
+    for field in (
+        "replacement_glyphs",
+        "non_ascii_extracted_codepoints",
+        "workstation_path_leaks",
+    ):
+        if (
+            require_json_int(
+                structural[field],
+                f"structural_review.{field}",
+                minimum=0,
+                maximum=1_000_000,
+            )
+            != 0
+        ):
+            raise AtlasBuildError(
+                f"canonical release provenance structural_review.{field} must equal 0"
+            )
+
+    visual = require_exact_json_object(
+        root["visual_review"],
+        "visual_review",
+        frozenset(
+            {
+                "renderer",
+                "dpi",
+                "rendered_png_width",
+                "rendered_png_height",
+                "pages_rendered",
+                "pages_reviewed_full_size",
+                "independent_sensitive_page_review",
+                "atlas_stderr_sha256",
+                "base14_control_stderr_sha256",
+                "stderr_byte_identical",
+                "shared_renderer_startup_diagnostics",
+                "atlas_contains_named_font_resources",
+                "visual_defects_found",
+            }
+        ),
+    )
+    require_exact_json_values(
+        visual,
+        "visual_review",
+        CANONICAL_VISUAL_REVIEW_SCALARS,
+    )
+    for field in ("pages_rendered", "pages_reviewed_full_size"):
+        if (
+            require_json_int(
+                visual[field],
+                f"visual_review.{field}",
+                minimum=0,
+                maximum=EXPECTED_PAGE_COUNT,
+            )
+            != EXPECTED_PAGE_COUNT
+        ):
+            raise AtlasBuildError(
+                f"canonical release provenance visual_review.{field} is incomplete"
+            )
+    require_json_bool(
+        visual["independent_sensitive_page_review"],
+        "visual_review.independent_sensitive_page_review",
+        True,
+    )
+    atlas_stderr_sha = require_sha256(
+        visual["atlas_stderr_sha256"], "visual_review.atlas_stderr_sha256"
+    )
+    control_stderr_sha = require_sha256(
+        visual["base14_control_stderr_sha256"],
+        "visual_review.base14_control_stderr_sha256",
+    )
+    require_json_bool(
+        visual["stderr_byte_identical"], "visual_review.stderr_byte_identical", True
+    )
+    if atlas_stderr_sha != control_stderr_sha:
+        raise AtlasBuildError(
+            "canonical release provenance renderer stderr hashes are not identical"
+        )
+    if atlas_stderr_sha != CANONICAL_RENDERER_STDERR_SHA256:
+        raise AtlasBuildError(
+            "canonical release provenance renderer stderr hash does not match the "
+            "recorded raw Windows Poppler diagnostic bytes"
+        )
+    diagnostics = visual["shared_renderer_startup_diagnostics"]
+    if type(diagnostics) is not list or len(diagnostics) > 32:
+        raise AtlasBuildError(
+            "canonical release provenance startup diagnostics must be a bounded list"
+        )
+    observed_diagnostics = tuple(
+        require_json_string(value, "visual_review.shared_renderer_startup_diagnostics[]")
+        for value in diagnostics
+    )
+    if observed_diagnostics != CANONICAL_RENDERER_STARTUP_DIAGNOSTICS:
+        raise AtlasBuildError(
+            "canonical release provenance renderer startup diagnostics are non-canonical"
+        )
+    require_json_bool(
+        visual["atlas_contains_named_font_resources"],
+        "visual_review.atlas_contains_named_font_resources",
+        False,
+    )
+    if (
+        require_json_int(
+            visual["visual_defects_found"],
+            "visual_review.visual_defects_found",
+            minimum=0,
+            maximum=1_000_000,
+        )
+        != 0
+    ):
+        raise AtlasBuildError(
+            "canonical release provenance visual_review.visual_defects_found must equal 0"
+        )
+
+    scope = require_exact_json_object(
+        root["scope"],
+        "scope",
+        frozenset(
+            {
+                "technical_atlas",
+                "runtime_gallery",
+                "runtime_release_verdict",
+                "license",
+            }
+        ),
+    )
+    expected_scope = {
+        "technical_atlas": "reviewed",
+        "runtime_gallery": "pending",
+        "runtime_release_verdict": "not encoded",
+        "license": "no reuse license declared",
+    }
+    if scope != expected_scope:
+        raise AtlasBuildError("canonical release provenance scope boundary is non-canonical")
+
+    operator = require_exact_json_object(
+        root["operator"], "operator", frozenset({"system", "workflow"})
+    )
+    require_exact_json_values(operator, "operator", CANONICAL_RELEASE_OPERATOR)
+
+    return ReleaseProvenance(
+        pdf_sha256=pdf_sha256,
+        pdf_bytes=pdf_bytes,
+        pdf_pages=pdf_pages,
+        document_id_hex=document_id_hex,
+        fingerprint=fingerprint,
+        builder_sha=builder_sha,
+        toolchain_identity=toolchain_identity,
+        font_resources=observed_fonts,
+        uri_annotations=uri_annotations,
+        unique_allowlisted_uris=unique_allowlisted_uris,
+    )
+
+
+def release_identity_from_provenance(
+    files: dict[str, InputSnapshot],
+    fingerprint: str,
+    release_data: bytes,
+    provenance: ReleaseProvenance,
+) -> AtlasDocumentIdentity:
+    builder_snapshot = files.get(BUILDER_SOURCE)
+    if not isinstance(builder_snapshot, InputSnapshot):
+        raise AtlasBuildError("release validation is missing its builder snapshot")
+    if provenance.fingerprint != fingerprint:
+        raise AtlasBuildError(
+            "canonical release provenance aggregate source fingerprint mismatch: "
+            f"recorded={provenance.fingerprint}, current={fingerprint}"
+        )
+    if provenance.builder_sha != builder_snapshot.sha256:
+        raise AtlasBuildError(
+            "canonical release provenance builder SHA-256 mismatch: "
+            f"recorded={provenance.builder_sha}, current={builder_snapshot.sha256}"
+        )
+    release_sha = hashlib.sha256(release_data).hexdigest()
+    if provenance.pdf_sha256 != release_sha:
+        raise AtlasBuildError(
+            "canonical release provenance PDF SHA-256 mismatch: "
+            f"recorded={provenance.pdf_sha256}, actual={release_sha}"
+        )
+    if provenance.pdf_bytes != len(release_data):
+        raise AtlasBuildError(
+            "canonical release provenance PDF byte count mismatch: "
+            f"recorded={provenance.pdf_bytes}, actual={len(release_data)}"
+        )
+    identity = compute_atlas_document_identity(
+        files,
+        fingerprint,
+        provenance.toolchain_identity,
+    )
+    if provenance.document_id_hex != identity.document_id_hex:
+        raise AtlasBuildError(
+            "canonical release provenance document ID does not match its recorded build identity: "
+            f"recorded={provenance.document_id_hex}, expected={identity.document_id_hex}"
+        )
+    return identity
+
+
 def bound_builder_snapshot(root: Path, bound_builder_bytes: bytes | None) -> InputSnapshot:
     """Create the self-source identity from the exact bytes executing the CLI."""
 
@@ -900,6 +1562,7 @@ def bound_builder_snapshot(root: Path, bound_builder_bytes: bytes | None) -> Inp
         raise AtlasBuildError(
             f"byte-bound builder source is outside the {MAX_SOURCE_BYTES}-byte input cap"
         )
+    require_canonical_lf_bytes(bound_builder_bytes, "byte-bound builder source", executed_path)
     try:
         text = bound_builder_bytes.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -3220,12 +3883,13 @@ def pdf_filter_names(stream: Any) -> set[str]:
     return {str(filters)}
 
 
-def validate_no_active_pdf_objects(initial: Any) -> None:
+def validate_no_active_pdf_objects(initial: Any) -> tuple[str, ...]:
     """Walk the bounded generated object graph and reject active PDF features."""
 
     pending = [initial]
     seen_indirect: set[tuple[int, int]] = set()
     seen_direct: set[int] = set()
+    observed_fonts: set[str] = set()
     object_count = 0
     while pending:
         raw = pending.pop()
@@ -3269,6 +3933,9 @@ def validate_no_active_pdf_objects(initial: Any) -> None:
                         f"base={base_font}, subtype={subtype}, encoding={encoding}, "
                         f"forbidden_keys={sorted(forbidden_font_keys)}"
                     )
+                observed_fonts.add(
+                    f"{base_font.removeprefix('/')} / Type1 / WinAnsiEncoding"
+                )
             action_name = str(dereference_pdf_object(resolved.get("/S")))
             if action_name == "/URI":
                 uri_value = dereference_pdf_object(resolved.get("/URI"))
@@ -3299,6 +3966,56 @@ def validate_no_active_pdf_objects(initial: Any) -> None:
                 pending.append(child)
         elif isinstance(resolved, (list, tuple)):
             pending.extend(resolved)
+    return tuple(sorted(observed_fonts))
+
+
+def extracted_labeled_sha256(text: str, label: str) -> tuple[bool, set[str]]:
+    label_pattern = r"\s+".join(re.escape(part) for part in label.split())
+    label_found = re.search(label_pattern, text, flags=re.IGNORECASE) is not None
+    full_pattern = re.compile(
+        rf"{label_pattern}\s*:\s*((?:[0-9a-fA-F]\s*){{64}})(?![0-9a-fA-F])",
+        flags=re.IGNORECASE,
+    )
+    values = {
+        re.sub(r"\s+", "", match.group(1)).lower()
+        for match in full_pattern.finditer(text)
+    }
+    return label_found, values
+
+
+def validate_extracted_contract_text(
+    extracted: str, identity: AtlasDocumentIdentity
+) -> None:
+    required_phrases = (
+        "CODEX ENGINEERING ATLAS",
+        "NO RUNTIME RELEASE VERDICT",
+        "RUNTIME GALLERY PENDING",
+    )
+    absent = [phrase for phrase in required_phrases if phrase not in extracted]
+    observed_identities: list[tuple[str, str, str]] = []
+    for label, expected_identity in (
+        ("aggregate source fingerprint", identity.fingerprint),
+        ("builder SHA-256", identity.builder_sha),
+    ):
+        label_found, values = extracted_labeled_sha256(extracted, label)
+        if not label_found or not values:
+            absent.append(f"full {label}")
+            continue
+        if len(values) != 1:
+            raise AtlasBuildError(
+                f"generated PDF text contains conflicting full {label} values: {sorted(values)}"
+            )
+        observed_identities.append((label, next(iter(values)), expected_identity))
+    compact_extracted = re.sub(r"\s+", "", extracted)
+    if "node_id=kind:sha256(canonical_json(identity))" not in compact_extracted:
+        absent.append("node_id = kind : sha256(canonical_json(identity))")
+    if absent:
+        raise AtlasBuildError(f"generated PDF text is missing required contract phrases: {absent}")
+    for label, observed, expected in observed_identities:
+        if observed != expected:
+            raise AtlasBuildError(
+                f"generated PDF {label} mismatch: observed={observed}, expected={expected}"
+            )
 
 
 def validate_built_pdf(
@@ -3306,7 +4023,7 @@ def validate_built_pdf(
     pdf_reader_type: Any,
     text_string_type: type[str],
     identity: AtlasDocumentIdentity,
-) -> int:
+) -> PdfValidationReport:
     if len(data) <= 1024:
         raise AtlasBuildError("generated PDF is unexpectedly small")
     if len(data) > MAX_PDF_BYTES:
@@ -3326,7 +4043,7 @@ def validate_built_pdf(
         raise AtlasBuildError(f"generated PDF cannot be reopened structurally: {error}") from error
     if reader.is_encrypted:
         raise AtlasBuildError("generated PDF must not be encrypted")
-    validate_no_active_pdf_objects(reader.trailer)
+    font_resources = validate_no_active_pdf_objects(reader.trailer)
     if len(reader.pages) != EXPECTED_PAGE_COUNT:
         raise AtlasBuildError(
             f"atlas layout produced {len(reader.pages)} pages; expected exactly {EXPECTED_PAGE_COUNT}"
@@ -3348,6 +4065,7 @@ def validate_built_pdf(
     expected_height = 841.8897637795277
     page_texts: list[str] = []
     observed_uris: set[str] = set()
+    uri_annotation_count = 0
     for page_index, page in enumerate(reader.pages):
         if page.get("/AA") is not None:
             raise AtlasBuildError(f"generated PDF page {page_index + 1} contains an additional action")
@@ -3394,6 +4112,7 @@ def validate_built_pdf(
 
         annotations = dereference_pdf_object(page.get("/Annots")) or []
         for annotation_reference in annotations:
+            uri_annotation_count += 1
             annotation = dereference_pdf_object(annotation_reference)
             if str(annotation.get("/Subtype")) != "/Link" or annotation.get("/Dest") is not None:
                 raise AtlasBuildError(
@@ -3416,25 +4135,19 @@ def validate_built_pdf(
         raise AtlasBuildError(
             f"generated PDF URI annotations do not match the allowlist; missing={missing}, extra={extra}"
         )
+    if uri_annotation_count != CANONICAL_RELEASE_URI_ANNOTATIONS:
+        raise AtlasBuildError(
+            "generated PDF URI annotation population is non-canonical: "
+            f"observed={uri_annotation_count}, expected={CANONICAL_RELEASE_URI_ANNOTATIONS}"
+        )
+    if font_resources != CANONICAL_RELEASE_FONT_RESOURCES:
+        raise AtlasBuildError(
+            "generated PDF font resource population is non-canonical: "
+            f"observed={font_resources}, expected={CANONICAL_RELEASE_FONT_RESOURCES}"
+        )
 
     extracted = "\n".join(page_texts)
-    required_phrases = (
-        "CODEX ENGINEERING ATLAS",
-        "NO RUNTIME RELEASE VERDICT",
-        "RUNTIME GALLERY PENDING",
-    )
-    absent = [phrase for phrase in required_phrases if phrase not in extracted]
-    compact_extracted = re.sub(r"\s+", "", extracted)
-    for label, expected_identity in (
-        ("aggregate source fingerprint", identity.fingerprint),
-        ("builder SHA-256", identity.builder_sha),
-    ):
-        if expected_identity not in compact_extracted:
-            absent.append(f"full {label}")
-    if "node_id=kind:sha256(canonical_json(identity))" not in compact_extracted:
-        absent.append("node_id = kind : sha256(canonical_json(identity))")
-    if absent:
-        raise AtlasBuildError(f"generated PDF text is missing required contract phrases: {absent}")
+    validate_extracted_contract_text(extracted, identity)
     guard_public_text(extracted)
 
     metadata = reader.metadata or {}
@@ -3472,7 +4185,12 @@ def validate_built_pdf(
         identity.document_id_hex,
     ]:
         raise AtlasBuildError("generated PDF document ID does not match its build identity")
-    return len(reader.pages)
+    return PdfValidationReport(
+        pages=len(reader.pages),
+        font_resources=font_resources,
+        uri_annotations=uri_annotation_count,
+        unique_allowlisted_uris=len(observed_uris),
+    )
 
 
 def prepare_output_parent(root: Path, target: OutputTarget) -> tuple[int, int]:
@@ -3748,24 +4466,53 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.validate_release:
             dependencies = load_pdf_dependencies()
             validate_svg_snapshots(files, dependencies["svg2rlg"])
-            identity = compute_atlas_document_identity(
+            release_path, release_data = read_canonical_release_pdf(root)
+            provenance_path, provenance_data = read_canonical_release_provenance(root)
+            provenance = parse_release_provenance(provenance_data)
+            identity = release_identity_from_provenance(
                 files,
                 fingerprint,
-                dependencies["toolchain_identity"],
+                release_data,
+                provenance,
             )
-            release_path, release_data = read_canonical_release_pdf(root)
-            page_count = validate_built_pdf(
+            structural_report = validate_built_pdf(
                 release_data,
                 dependencies["PdfReader"],
                 dependencies["TextStringObject"],
                 identity,
             )
+            if structural_report.pages != provenance.pdf_pages:
+                raise AtlasBuildError(
+                    "canonical release provenance PDF page count mismatch: "
+                    f"recorded={provenance.pdf_pages}, actual={structural_report.pages}"
+                )
+            if structural_report.font_resources != provenance.font_resources:
+                raise AtlasBuildError(
+                    "canonical release provenance font resources do not match the PDF: "
+                    f"recorded={provenance.font_resources}, "
+                    f"actual={structural_report.font_resources}"
+                )
+            if structural_report.uri_annotations != provenance.uri_annotations:
+                raise AtlasBuildError(
+                    "canonical release provenance URI annotation count does not match the PDF: "
+                    f"recorded={provenance.uri_annotations}, "
+                    f"actual={structural_report.uri_annotations}"
+                )
+            if (
+                structural_report.unique_allowlisted_uris
+                != provenance.unique_allowlisted_uris
+            ):
+                raise AtlasBuildError(
+                    "canonical release provenance unique URI count does not match the PDF: "
+                    f"recorded={provenance.unique_allowlisted_uris}, "
+                    f"actual={structural_report.unique_allowlisted_uris}"
+                )
             release_sha = hashlib.sha256(release_data).hexdigest()
             print(
-                "atlas release valid: "
-                f"path {release_path}; sha256 {release_sha}; "
+                "atlas release structurally valid; commit-bound visual attestation recorded: "
+                f"path {release_path}; provenance {provenance_path}; sha256 {release_sha}; "
                 f"fingerprint {identity.fingerprint}; builder sha256 {identity.builder_sha}; "
-                f"pages {page_count}"
+                f"pages {structural_report.pages}"
             )
             return 0
 

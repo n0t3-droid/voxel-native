@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import importlib.util
 import io
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Callable
@@ -36,6 +39,162 @@ def snapshot(svg: str, relative: str = "fixture.svg") -> object:
 
 def svg_with(content: str) -> str:
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">{content}</svg>'
+
+
+def release_fixture(
+    *,
+    fingerprint: str = "a" * 64,
+    builder_sha: str = "b" * 64,
+    release_data: bytes | None = None,
+) -> tuple[dict[str, object], dict[str, object], bytes, object]:
+    if release_data is None:
+        release_data = b"%PDF-fixture\n" + b"x" * 2_048 + b"\n%%EOF\n"
+    builder_snapshot = ATLAS.InputSnapshot(
+        relative=ATLAS.BUILDER_SOURCE,
+        path=BUILDER_PATH,
+        data=b"fixture builder",
+        text="fixture builder",
+        sha256=builder_sha,
+    )
+    files = {ATLAS.BUILDER_SOURCE: builder_snapshot}
+    toolchain = {
+        "python": "3.12.13",
+        **ATLAS.PINNED_ATLAS_PACKAGE_VERSIONS,
+        "libxml2_compiled": "2.11.9",
+        "libxml2_runtime": "2.11.9",
+        "libxslt_compiled": "1.1.45",
+        "libxslt_runtime": "1.1.45",
+        "zlib_compiled": "1.3.2",
+        "zlib_runtime": "1.3.2",
+    }
+    identity_names = {
+        "cssselect2": "cssselect2",
+        "libxml2-compiled": "libxml2_compiled",
+        "libxml2-runtime": "libxml2_runtime",
+        "libxslt-compiled": "libxslt_compiled",
+        "libxslt-runtime": "libxslt_runtime",
+        "lxml": "lxml",
+        "pypdf": "pypdf",
+        "python": "python",
+        "reportlab": "reportlab",
+        "svglib": "svglib",
+        "tinycss2": "tinycss2",
+        "zlib-compiled": "zlib_compiled",
+        "zlib-runtime": "zlib_runtime",
+    }
+    toolchain_identity = ";".join(
+        f"{name}={toolchain[field]}" for name, field in sorted(identity_names.items())
+    )
+    identity = ATLAS.compute_atlas_document_identity(
+        files, fingerprint, toolchain_identity
+    )
+    provenance: dict[str, object] = {
+        "schema": ATLAS.RELEASE_PROVENANCE_SCHEMA,
+        "artifact": {
+            "path": ATLAS.CANONICAL_RELEASE_PDF.as_posix(),
+            "media_type": "application/pdf",
+            "pdf_version": "1.4",
+            "sha256": hashlib.sha256(release_data).hexdigest(),
+            "bytes": len(release_data),
+            "pages": ATLAS.EXPECTED_PAGE_COUNT,
+            "page_size": "A4",
+            "document_id": identity.document_id_hex,
+        },
+        "source_identity": {
+            "immutable_inputs": ATLAS.EXPECTED_INPUT_COUNT,
+            "passive_svg_assets": len(ATLAS.REQUIRED_ASSETS),
+            "aggregate_fingerprint_sha256": fingerprint,
+            "builder_sha256": builder_sha,
+        },
+        "toolchain": toolchain,
+        "determinism": {
+            "separate_process_builds": 2,
+            "byte_identical": True,
+        },
+        "structural_review": {
+            "strict_reopen": True,
+            "a4_pages_with_zero_rotation": ATLAS.EXPECTED_PAGE_COUNT,
+            "encrypted": False,
+            "javascript": False,
+            "forms": False,
+            "embedded_files": False,
+            "embedded_font_programs": False,
+            "font_resources": list(ATLAS.CANONICAL_RELEASE_FONT_RESOURCES),
+            "uri_annotations": ATLAS.CANONICAL_RELEASE_URI_ANNOTATIONS,
+            "unique_allowlisted_uris": len(ATLAS.OFFICIAL_URIS),
+            "replacement_glyphs": 0,
+            "non_ascii_extracted_codepoints": 0,
+            "workstation_path_leaks": 0,
+        },
+        "visual_review": {
+            **ATLAS.CANONICAL_VISUAL_REVIEW_SCALARS,
+            "pages_rendered": ATLAS.EXPECTED_PAGE_COUNT,
+            "pages_reviewed_full_size": ATLAS.EXPECTED_PAGE_COUNT,
+            "independent_sensitive_page_review": True,
+            "atlas_stderr_sha256": ATLAS.CANONICAL_RENDERER_STDERR_SHA256,
+            "base14_control_stderr_sha256": ATLAS.CANONICAL_RENDERER_STDERR_SHA256,
+            "stderr_byte_identical": True,
+            "shared_renderer_startup_diagnostics": list(
+                ATLAS.CANONICAL_RENDERER_STARTUP_DIAGNOSTICS
+            ),
+            "atlas_contains_named_font_resources": False,
+            "visual_defects_found": 0,
+        },
+        "scope": {
+            "technical_atlas": "reviewed",
+            "runtime_gallery": "pending",
+            "runtime_release_verdict": "not encoded",
+            "license": "no reuse license declared",
+        },
+        "operator": dict(ATLAS.CANONICAL_RELEASE_OPERATOR),
+    }
+    return provenance, files, release_data, identity
+
+
+def provenance_bytes(value: dict[str, object]) -> bytes:
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("ascii")
+
+
+class CanonicalInputBytesTests(unittest.TestCase):
+    def test_pinned_requirements_are_an_immutable_atlas_input(self) -> None:
+        required = ATLAS.SOURCE_CONTRACTS[ATLAS.ATLAS_REQUIREMENTS_SOURCE]
+        self.assertEqual(
+            required,
+            tuple(
+                f"{package}=={version}"
+                for package, version in sorted(
+                    ATLAS.PINNED_ATLAS_PACKAGE_VERSIONS.items()
+                )
+            ),
+        )
+
+    def test_input_snapshot_accepts_lf_only_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            path = root / "fixture.md"
+            path.write_bytes(b"alpha\nbeta\n")
+            observed = ATLAS.read_input_snapshot(root, "fixture.md", "source contract")
+        self.assertEqual(observed.data, b"alpha\nbeta\n")
+
+    def test_input_snapshot_rejects_crlf_and_lone_cr_distinctly(self) -> None:
+        for data, expected in (
+            (b"alpha\r\nbeta\n", "non-canonical CRLF line ending"),
+            (b"alpha\rbeta\n", "non-canonical lone CR line ending"),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                (root / "fixture.md").write_bytes(data)
+                with self.assertRaisesRegex(ATLAS.AtlasBuildError, expected):
+                    ATLAS.read_input_snapshot(root, "fixture.md", "source contract")
+
+    def test_byte_bound_builder_rejects_noncanonical_line_endings(self) -> None:
+        for data, expected in (
+            (b"alpha\r\nbeta\n", "non-canonical CRLF line ending"),
+            (b"alpha\rbeta\n", "non-canonical lone CR line ending"),
+        ):
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(ATLAS.AtlasBuildError, expected):
+                    ATLAS.bound_builder_snapshot(ROOT, data)
 
 
 class SvgFontAndCssSafetyTests(unittest.TestCase):
@@ -632,6 +791,151 @@ class ReleaseValidationCliTests(unittest.TestCase):
         self.assertEqual(identity.toolchain_identity, "fixture=1")
         self.assertEqual(identity.document_id_hex, "7684CBB7658E19AB0CA7EAF70217DF77")
 
+    def test_current_release_provenance_matches_the_strict_schema(self) -> None:
+        path = ROOT / ATLAS.CANONICAL_RELEASE_PROVENANCE
+        provenance = ATLAS.parse_release_provenance(path.read_bytes())
+        self.assertRegex(provenance.pdf_sha256, r"^[0-9a-f]{64}$")
+        self.assertEqual(provenance.pdf_pages, ATLAS.EXPECTED_PAGE_COUNT)
+
+    def test_release_provenance_rejects_unknown_duplicate_and_wrong_schema_fields(self) -> None:
+        valid, _, _, _ = release_fixture()
+
+        with self.subTest(case="unknown field"):
+            changed = json.loads(json.dumps(valid))
+            changed["unexpected"] = True
+            with self.assertRaisesRegex(ATLAS.AtlasBuildError, "non-canonical fields"):
+                ATLAS.parse_release_provenance(provenance_bytes(changed))
+
+        with self.subTest(case="wrong schema"):
+            changed = json.loads(json.dumps(valid))
+            changed["schema"] = "voxel-native.codex-engineering-atlas-provenance/9.0.0"
+            with self.assertRaisesRegex(ATLAS.AtlasBuildError, "schema mismatch"):
+                ATLAS.parse_release_provenance(provenance_bytes(changed))
+
+        with self.subTest(case="duplicate key"):
+            duplicate = b'{"schema":"one","schema":"two"}\n'
+            with self.assertRaisesRegex(ATLAS.AtlasBuildError, "duplicate JSON key"):
+                ATLAS.parse_release_provenance(duplicate)
+
+    def test_release_provenance_rejects_crlf_and_lone_cr(self) -> None:
+        valid, _, _, _ = release_fixture()
+        canonical = provenance_bytes(valid)
+        for data, expected in (
+            (canonical.replace(b"\n", b"\r\n"), "non-canonical CRLF line ending"),
+            (canonical.replace(b"\n", b"\r", 1), "non-canonical lone CR line ending"),
+        ):
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(ATLAS.AtlasBuildError, expected):
+                    ATLAS.parse_release_provenance(data)
+
+    def test_release_provenance_rejects_unpinned_packages_and_python_abi(self) -> None:
+        valid, _, _, _ = release_fixture()
+        for field, value, expected in (
+            ("reportlab", "4.4.8", "immutable requirements pin"),
+            ("pypdf", "6.9.0", "immutable requirements pin"),
+            ("python", "3.13.0", "Python 3.12 ABI contract"),
+            ("python", "9.9.9", "Python 3.12 ABI contract"),
+        ):
+            with self.subTest(field=field, value=value):
+                changed = json.loads(json.dumps(valid))
+                changed["toolchain"][field] = value
+                with self.assertRaisesRegex(ATLAS.AtlasBuildError, expected):
+                    ATLAS.parse_release_provenance(provenance_bytes(changed))
+
+    def test_release_provenance_rejects_noncanonical_review_attestation(self) -> None:
+        valid, _, _, _ = release_fixture()
+        mutations: tuple[tuple[str, Callable[[dict[str, object]], None], str], ...] = (
+            (
+                "URI count",
+                lambda value: value["structural_review"].__setitem__("uri_annotations", 9),
+                "URI annotation population",
+            ),
+            (
+                "renderer",
+                lambda value: value["visual_review"].__setitem__(
+                    "renderer", "unverified fixture"
+                ),
+                "visual_review.renderer mismatch",
+            ),
+            (
+                "diagnostics",
+                lambda value: value["visual_review"].__setitem__(
+                    "shared_renderer_startup_diagnostics", []
+                ),
+                "startup diagnostics are non-canonical",
+            ),
+            (
+                "stderr hashes",
+                lambda value: (
+                    value["visual_review"].__setitem__(
+                        "atlas_stderr_sha256", "d" * 64
+                    ),
+                    value["visual_review"].__setitem__(
+                        "base14_control_stderr_sha256", "d" * 64
+                    ),
+                ),
+                "stderr hash does not match",
+            ),
+            (
+                "operator",
+                lambda value: value["operator"].__setitem__(
+                    "system", "unverified actor"
+                ),
+                "operator.system mismatch",
+            ),
+        )
+        for label, mutate, expected in mutations:
+            with self.subTest(label=label):
+                changed = json.loads(json.dumps(valid))
+                mutate(changed)
+                with self.assertRaisesRegex(ATLAS.AtlasBuildError, expected):
+                    ATLAS.parse_release_provenance(provenance_bytes(changed))
+
+    def test_release_identity_rejects_every_recorded_identity_manipulation(self) -> None:
+        raw, files, release_data, _ = release_fixture()
+        valid = ATLAS.parse_release_provenance(provenance_bytes(raw))
+        manipulations = (
+            (
+                "fingerprint",
+                replace(valid, fingerprint="d" * 64),
+                "aggregate source fingerprint mismatch",
+            ),
+            (
+                "builder",
+                replace(valid, builder_sha="d" * 64),
+                "builder SHA-256 mismatch",
+            ),
+            (
+                "PDF SHA",
+                replace(valid, pdf_sha256="d" * 64),
+                "PDF SHA-256 mismatch",
+            ),
+            (
+                "PDF size",
+                replace(valid, pdf_bytes=valid.pdf_bytes + 1),
+                "PDF byte count mismatch",
+            ),
+            (
+                "document ID",
+                replace(valid, document_id_hex="D" * 32),
+                "document ID does not match",
+            ),
+            (
+                "toolchain",
+                replace(valid, toolchain_identity=valid.toolchain_identity + ";verifier=wrong"),
+                "document ID does not match",
+            ),
+        )
+        for label, changed, message in manipulations:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(ATLAS.AtlasBuildError, message):
+                    ATLAS.release_identity_from_provenance(
+                        files,
+                        "a" * 64,
+                        release_data,
+                        changed,
+                    )
+
     def test_canonical_release_reader_has_one_fixed_path_and_cap(self) -> None:
         expected_path = ATLAS.lexical_absolute(ROOT / ATLAS.CANONICAL_RELEASE_PDF)
         expected_data = b"%PDF-read-only-fixture"
@@ -648,6 +952,24 @@ class ReleaseValidationCliTests(unittest.TestCase):
             ROOT,
             byte_limit=ATLAS.MAX_PDF_BYTES,
             label="canonical release PDF",
+        )
+
+    def test_canonical_release_provenance_reader_has_one_fixed_path_and_cap(self) -> None:
+        expected_path = ATLAS.lexical_absolute(ROOT / ATLAS.CANONICAL_RELEASE_PROVENANCE)
+        expected_data = b'{"schema":"fixture"}\n'
+        with mock.patch.object(
+            ATLAS,
+            "read_stable_bounded_bytes",
+            return_value=expected_data,
+        ) as bounded_reader:
+            observed_path, observed_data = ATLAS.read_canonical_release_provenance(ROOT)
+        self.assertEqual(observed_path, expected_path)
+        self.assertIs(observed_data, expected_data)
+        bounded_reader.assert_called_once_with(
+            expected_path,
+            ROOT,
+            byte_limit=ATLAS.MAX_RELEASE_PROVENANCE_BYTES,
+            label="canonical release provenance",
         )
 
     def test_stable_bounded_reader_is_read_only_and_enforces_cap(self) -> None:
@@ -744,14 +1066,20 @@ class ReleaseValidationCliTests(unittest.TestCase):
             sha256=hashlib.sha256(builder_data).hexdigest(),
         )
         fingerprint = "a" * 64
-        release_data = b"%PDF-captured-release-fixture"
+        raw_provenance, _, release_data, _ = release_fixture(
+            fingerprint=fingerprint,
+            builder_sha=builder_snapshot.sha256,
+        )
+        provenance_data = provenance_bytes(raw_provenance)
+        recorded_provenance = ATLAS.parse_release_provenance(provenance_data)
         release_path = ATLAS.lexical_absolute(ROOT / ATLAS.CANONICAL_RELEASE_PDF)
+        provenance_path = ATLAS.lexical_absolute(ROOT / ATLAS.CANONICAL_RELEASE_PROVENANCE)
         text_string_type = type("ExactTextString", (str,), {})
         dependencies = {
             "PdfReader": object(),
             "TextStringObject": text_string_type,
             "svg2rlg": object(),
-            "toolchain_identity": "python=fixture",
+            "toolchain_identity": "python=active-verifier",
         }
 
         with (
@@ -767,7 +1095,21 @@ class ReleaseValidationCliTests(unittest.TestCase):
                 "read_canonical_release_pdf",
                 return_value=(release_path, release_data),
             ),
-            mock.patch.object(ATLAS, "validate_built_pdf", return_value=15) as validate_pdf,
+            mock.patch.object(
+                ATLAS,
+                "read_canonical_release_provenance",
+                return_value=(provenance_path, provenance_data),
+            ),
+            mock.patch.object(
+                ATLAS,
+                "validate_built_pdf",
+                return_value=ATLAS.PdfValidationReport(
+                    pages=ATLAS.EXPECTED_PAGE_COUNT,
+                    font_resources=ATLAS.CANONICAL_RELEASE_FONT_RESOURCES,
+                    uri_annotations=ATLAS.CANONICAL_RELEASE_URI_ANNOTATIONS,
+                    unique_allowlisted_uris=len(ATLAS.OFFICIAL_URIS),
+                ),
+            ) as validate_pdf,
             mock.patch.object(
                 ATLAS,
                 "validate_output",
@@ -802,16 +1144,90 @@ class ReleaseValidationCliTests(unittest.TestCase):
         validated_identity = validate_pdf.call_args.args[3]
         self.assertEqual(validated_identity.fingerprint, fingerprint)
         self.assertEqual(validated_identity.builder_sha, builder_snapshot.sha256)
-        self.assertEqual(validated_identity.toolchain_identity, "python=fixture")
+        self.assertEqual(
+            validated_identity.toolchain_identity,
+            recorded_provenance.toolchain_identity,
+        )
+        self.assertNotEqual(
+            validated_identity.toolchain_identity,
+            dependencies["toolchain_identity"],
+        )
         printed = " ".join(
             str(argument)
             for call in print_output.call_args_list
             for argument in call.args
         )
         self.assertIn(str(release_path), printed)
+        self.assertIn(str(provenance_path), printed)
         self.assertIn(hashlib.sha256(release_data).hexdigest(), printed)
         self.assertIn(builder_snapshot.sha256, printed)
         self.assertIn("pages 15", printed)
+
+
+class ExtractedIdentityDiagnosticsTests(unittest.TestCase):
+    def identity(self) -> object:
+        builder_snapshot = ATLAS.InputSnapshot(
+            relative=ATLAS.BUILDER_SOURCE,
+            path=BUILDER_PATH,
+            data=b"fixture",
+            text="fixture",
+            sha256="b" * 64,
+        )
+        return ATLAS.compute_atlas_document_identity(
+            {ATLAS.BUILDER_SOURCE: builder_snapshot},
+            "a" * 64,
+            "python=recorded",
+        )
+
+    def complete_text(self, fingerprint: str | None = None) -> str:
+        identity = self.identity()
+        observed_fingerprint = identity.fingerprint if fingerprint is None else fingerprint
+        return (
+            "CODEX ENGINEERING ATLAS\n"
+            "NO RUNTIME RELEASE VERDICT\n"
+            "RUNTIME GALLERY PENDING\n"
+            f"Aggregate source fingerprint: {observed_fingerprint}.\n"
+            f"Builder SHA-256: {identity.builder_sha}.\n"
+            "node_id = kind : sha256(canonical_json(identity))\n"
+        )
+
+    def test_different_full_fingerprint_reports_mismatch_not_missing(self) -> None:
+        with self.assertRaises(ATLAS.AtlasBuildError) as caught:
+            ATLAS.validate_extracted_contract_text(
+                self.complete_text("c" * 64),
+                self.identity(),
+            )
+        message = str(caught.exception)
+        self.assertIn("aggregate source fingerprint mismatch", message)
+        self.assertIn("observed=" + "c" * 64, message)
+        self.assertIn("expected=" + "a" * 64, message)
+        self.assertNotIn("missing required contract phrases", message)
+
+    def test_absent_or_truncated_fingerprint_reports_missing_full_identity(self) -> None:
+        identity = self.identity()
+        for line in (
+            "",
+            "Aggregate source fingerprint: " + "a" * 63 + ".\n",
+        ):
+            text = self.complete_text().replace(
+                f"Aggregate source fingerprint: {identity.fingerprint}.\n",
+                line,
+            )
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(
+                    ATLAS.AtlasBuildError,
+                    "missing required contract phrases.*full aggregate source fingerprint",
+                ):
+                    ATLAS.validate_extracted_contract_text(text, identity)
+
+    def test_layout_whitespace_inside_full_hash_remains_valid(self) -> None:
+        identity = self.identity()
+        wrapped = "\n".join(
+            identity.fingerprint[index : index + 16]
+            for index in range(0, len(identity.fingerprint), 16)
+        )
+        text = self.complete_text().replace(identity.fingerprint, wrapped)
+        ATLAS.validate_extracted_contract_text(text, identity)
 
 
 class AtlasVisibleTextRegressionTests(unittest.TestCase):
@@ -834,14 +1250,28 @@ class BuilderSourceBindingTests(unittest.TestCase):
 
     def test_input_identity_never_reopens_bound_builder_path(self) -> None:
         bound = BUILDER_PATH.read_bytes()
-        original_reader = ATLAS.read_input_snapshot
 
         def guarded_reader(root: Path, relative: str, label: str) -> object:
             if relative == ATLAS.BUILDER_SOURCE:
                 raise AssertionError("bound builder path must never be reopened")
-            return original_reader(root, relative, label)
+            text = (
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>'
+                if relative in ATLAS.REQUIRED_ASSETS
+                else "\n".join(ATLAS.SOURCE_CONTRACTS[relative])
+            )
+            data = text.encode("utf-8")
+            return ATLAS.InputSnapshot(
+                relative=relative,
+                path=root / relative,
+                data=data,
+                text=text,
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
 
-        with mock.patch.object(ATLAS, "read_input_snapshot", side_effect=guarded_reader):
+        with (
+            mock.patch.object(ATLAS, "read_input_snapshot", side_effect=guarded_reader),
+            mock.patch.object(ATLAS, "validate_passive_svg"),
+        ):
             files, fingerprint = ATLAS.validate_inputs(ROOT, bound)
         self.assertIs(files[ATLAS.BUILDER_SOURCE].data, bound)
         self.assertEqual(files[ATLAS.BUILDER_SOURCE].sha256, hashlib.sha256(bound).hexdigest())
