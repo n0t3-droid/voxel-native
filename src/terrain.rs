@@ -1,6 +1,6 @@
 //! Terrain generation.
 //!
-//! Ported from R93G's `lib/voxel/terrain.ts`. The stack is:
+//! Voxel Native's deterministic terrain stack is:
 //!
 //!   1. Continentalness + erosion FBM (low freq) â†’ large-scale landmass shape.
 //!   2. Domain-warped FBM (mid freq) â†’ organic-looking hills.
@@ -8,12 +8,14 @@
 //!   4. 3D narrow-band cave noise â†’ hollows under the surface.
 //!   5. Temperature + Moisture classifier â†’ biome â†’ surface block palette.
 //!
-//! Each noise layer is seeded deterministically off the world seed so two
-//! worlds with the same seed produce byte-identical chunks.
+//! Each noise layer is seeded deterministically off the world seed. Two
+//! generators with the same complete [`WorldGenerationIdentity`] produce
+//! byte-identical chunks; the persisted grammar prevents a newer formula from
+//! silently being mistaken for the same world.
 
 use crate::blocks::{BlockType, Voxel, AIR};
 use crate::chunk::{Chunk, ChunkPos, CHUNK_SIZE, CHUNK_SIZE_I};
-use crate::settings::WorldProfile;
+use crate::settings::{TerrainGrammarVersion, WorldGenerationIdentity, WorldProfile};
 use bevy::math::IVec2;
 use noise::{NoiseFn, Perlin};
 
@@ -50,6 +52,146 @@ pub enum Biome {
     /// Bioluminescent purple moss with bone-white pillar arches.
     /// Mid-range cover-and-move terrain.
     AlienReef,
+}
+
+/// Stable render-only grammar for kilometre-scale semantic silhouettes.
+///
+/// These categories describe authored visual language, not simulation or
+/// voxel authority. The far-field renderer may use them to add landmarks;
+/// terrain generation, saves, collisions, vegetation, and resource logic do
+/// not consume them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FarSemanticCohortKind {
+    NaturalGrove,
+    NaturalKarst,
+    NaturalMesa,
+    AstralCrystal,
+    AstralBasalt,
+    AstralReef,
+}
+
+impl FarSemanticCohortKind {
+    pub(crate) const COUNT: usize = 6;
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::NaturalGrove => 0,
+            Self::NaturalKarst => 1,
+            Self::NaturalMesa => 2,
+            Self::AstralCrystal => 3,
+            Self::AstralBasalt => 4,
+            Self::AstralReef => 5,
+        }
+    }
+}
+
+/// Query-free first phase of Far Semantic Cohorts v1.
+///
+/// `stable_id` is a pure function of grammar version, world seed, profile,
+/// and Euclidean 1,024 m cell coordinates. `admitted` is the absolute 8x8
+/// supertile decision: exactly one local cell is selected per supertile, so a
+/// moving viewport cannot change absolute admission. The renderer's separate
+/// near-authority handoff may still intentionally suppress that cell while it
+/// lies close enough to the exact voxel tier.
+/// `shape_variant` supplies deterministic authored variation without a
+/// random-number generator or retained state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FarSemanticCohortSignature {
+    pub stable_id: u64,
+    pub admitted: bool,
+    pub shape_variant: u8,
+}
+
+const FAR_SEMANTIC_COHORT_GRAMMAR_V1: u64 = 0x5345_4D41_4E54_4943;
+pub(crate) const FAR_SEMANTIC_COHORT_SUPERTILE_CELLS: i64 = 8;
+
+#[inline]
+const fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+/// Deterministic semantic signature for one Euclidean kilometre cell.
+pub(crate) fn far_semantic_cohort_signature(
+    seed: u32,
+    profile: WorldProfile,
+    cell_x: i64,
+    cell_z: i64,
+) -> FarSemanticCohortSignature {
+    let profile_tag = match profile {
+        WorldProfile::Natural => 0x4E41_5455_5241_4C01,
+        WorldProfile::AstralFrontier => 0x4153_5452_414C_0001,
+    };
+    let x = splitmix64(cell_x as u64 ^ 0xA076_1D64_78BD_642F);
+    let z = splitmix64(cell_z as u64 ^ 0xE703_7ED1_A0B4_28DB);
+    let stable_id = splitmix64(
+        FAR_SEMANTIC_COHORT_GRAMMAR_V1
+            ^ u64::from(seed).rotate_left(17)
+            ^ profile_tag
+            ^ x
+            ^ z.rotate_left(29),
+    );
+    let super_x = cell_x.div_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS);
+    let super_z = cell_z.div_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS);
+    let super_id = splitmix64(
+        FAR_SEMANTIC_COHORT_GRAMMAR_V1
+            ^ u64::from(seed).rotate_right(11)
+            ^ profile_tag.rotate_left(7)
+            ^ splitmix64(super_x as u64)
+            ^ splitmix64(super_z as u64).rotate_left(31),
+    );
+    let selected_x = (super_id & 7) as i64;
+    let selected_z = ((super_id >> 3) & 7) as i64;
+    FarSemanticCohortSignature {
+        stable_id,
+        admitted: cell_x.rem_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS) == selected_x
+            && cell_z.rem_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS) == selected_z,
+        shape_variant: (splitmix64(stable_id ^ 0x5899_65CC_7537_4CC3) & 0x0f) as u8,
+    }
+}
+
+/// Second, terrain-aware phase of the semantic grammar. It runs only for the
+/// fixed candidate set chosen by [`far_semantic_cohort_signature`].
+pub(crate) fn far_semantic_cohort_kind(
+    profile: WorldProfile,
+    biome: Biome,
+) -> Option<FarSemanticCohortKind> {
+    match profile {
+        WorldProfile::Natural => match biome {
+            Biome::Ocean | Biome::Beach => None,
+            Biome::Mesa | Biome::Desert => Some(FarSemanticCohortKind::NaturalMesa),
+            Biome::Karst
+            | Biome::Mountains
+            | Biome::SnowyMountains
+            | Biome::Tundra
+            | Biome::GlacierShards => Some(FarSemanticCohortKind::NaturalKarst),
+            Biome::Plains
+            | Biome::Forest
+            | Biome::Jungle
+            | Biome::Savanna
+            | Biome::CrystalSpires
+            | Biome::VolcanicWaste
+            | Biome::AlienReef => Some(FarSemanticCohortKind::NaturalGrove),
+        },
+        WorldProfile::AstralFrontier => match biome {
+            Biome::Ocean | Biome::Beach => None,
+            Biome::CrystalSpires | Biome::GlacierShards | Biome::SnowyMountains => {
+                Some(FarSemanticCohortKind::AstralCrystal)
+            }
+            Biome::VolcanicWaste | Biome::Mesa | Biome::Desert | Biome::Mountains => {
+                Some(FarSemanticCohortKind::AstralBasalt)
+            }
+            Biome::AlienReef
+            | Biome::Karst
+            | Biome::Plains
+            | Biome::Forest
+            | Biome::Jungle
+            | Biome::Savanna
+            | Biome::Tundra => Some(FarSemanticCohortKind::AstralReef),
+        },
+    }
 }
 
 impl Biome {
@@ -144,11 +286,146 @@ struct HydrographicField {
     channel: f64,
 }
 
+// Natural river cross-section v2 works in voxel-height units. `corridor` and
+// `channel` are dimensionless [0, 1] weights; every other term is a vertical
+// block count. This is an authored static-water profile, not a
+// shallow-water-equation or erosion simulation.
+const NATURAL_RIVER_BANK_RELIEF_BLOCKS: f64 = 6.0;
+
+/// Byte-established generic river carve retained for Astral. The caller feeds
+/// finite, generator-bounded heights and dimensionless hydro weights.
+fn hydrographic_cross_section_v1(mut pre_carve_height: f64, hydro: HydrographicField) -> f64 {
+    if pre_carve_height > WATER_LEVEL as f64 - 5.0 && hydro.corridor > 0.0 {
+        let bank_target = WATER_LEVEL as f64 + 4.5;
+        if pre_carve_height > bank_target {
+            let bank_blend = (hydro.corridor * 0.46).clamp(0.0, 0.46);
+            pre_carve_height = pre_carve_height * (1.0 - bank_blend) + bank_target * bank_blend;
+        }
+        let channel_blend = smoothstep(0.18, 0.78, hydro.channel).powf(1.15);
+        if channel_blend > 0.0 {
+            let bed_target = WATER_LEVEL as f64 - 2.0;
+            pre_carve_height =
+                pre_carve_height * (1.0 - channel_blend) + bed_target * channel_blend;
+        }
+    }
+    pre_carve_height
+}
+
+/// Pure, total Natural-profile bank envelope. Non-finite weights fail closed
+/// to no influence; a non-finite height returns the finite water-level bed for
+/// the caller's final bounded integer conversion.
+///
+/// A bounded candidate sweep at seed 12,345 rejected the rational shoulder
+/// (`T=52.5`, `K=3.5`) because it cannot alter the focus's 49 -> 52 edge.
+/// Direct-envelope-only increased the active steep-edge population; stronger
+/// corridor easing alone retained the old route maximum. Their combination was
+/// the only tested class to improve both focus and active-route gates. The
+/// exact production assertions live beside the real cross-section tests. This
+/// formula adds no queries or retained state.
+fn natural_hydrographic_cross_section_v2(pre_carve_height: f64, hydro: HydrographicField) -> f64 {
+    let bed_height = WATER_LEVEL as f64 - 2.0;
+    if !pre_carve_height.is_finite() {
+        return bed_height;
+    }
+    let unit_weight = |value: f64| {
+        if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let corridor = unit_weight(hydro.corridor);
+    if pre_carve_height <= WATER_LEVEL as f64 - 5.0 || corridor <= 0.0 {
+        return pre_carve_height;
+    }
+
+    let channel = unit_weight(hydro.channel);
+    let channel_blend = smoothstep(0.18, 0.78, channel).powf(1.15);
+    let target_height = bed_height + NATURAL_RIVER_BANK_RELIEF_BLOCKS * (1.0 - channel_blend);
+    let envelope_height = pre_carve_height.min(target_height);
+    let corridor_easing = corridor.sqrt();
+    (1.0 - corridor_easing) * pre_carve_height + corridor_easing * envelope_height
+}
+
+// Natural river cross-section v3 remains an authored static-water profile.
+// Heights are vertical voxel-block counts; hydrographic weights are
+// dimensionless. The three relief bands encode bed -> sediment shelf ->
+// living cap without claiming a calibrated metre scale or erosion model.
+const NATURAL_RIVER_V3_SEDIMENT_SHELF_RELIEF_BLOCKS: f64 = 3.0;
+const NATURAL_RIVER_V3_LIVING_CAP_RELIEF_BLOCKS: f64 = 2.0;
+const NATURAL_RIVER_V3_LIVING_TO_SHELF_START_WEIGHT: f64 = 0.26;
+const NATURAL_RIVER_V3_LIVING_TO_SHELF_END_WEIGHT: f64 = 0.50;
+const NATURAL_RIVER_V3_SHELF_TO_BED_START_WEIGHT: f64 = 0.66;
+const NATURAL_RIVER_V3_SHELF_TO_BED_END_WEIGHT: f64 = 0.90;
+
+/// Natural-only v3 bank grammar: a submerged bed, an explicit sediment shelf,
+/// then a low living cap. Both transitions are eased before voxel rounding,
+/// so the shelf is a real horizontal band rather than an incidental sample of
+/// one continuous six-block ramp.
+///
+/// The function is pure, total, O(1), and consumes exactly the pre-existing
+/// [`HydrographicField`]. V1 and V2 remain separate byte-established paths.
+fn natural_hydrographic_cross_section_v3(pre_carve_height: f64, hydro: HydrographicField) -> f64 {
+    let bed_height = WATER_LEVEL as f64 - 2.0;
+    if !pre_carve_height.is_finite() {
+        return bed_height;
+    }
+    let unit_weight = |value: f64| {
+        if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let corridor = unit_weight(hydro.corridor);
+    if pre_carve_height <= WATER_LEVEL as f64 - 5.0 || corridor <= 0.0 {
+        return pre_carve_height;
+    }
+
+    let channel = unit_weight(hydro.channel);
+    let living_to_shelf = smoothstep(
+        NATURAL_RIVER_V3_LIVING_TO_SHELF_START_WEIGHT,
+        NATURAL_RIVER_V3_LIVING_TO_SHELF_END_WEIGHT,
+        channel,
+    );
+    let shelf_to_bed = smoothstep(
+        NATURAL_RIVER_V3_SHELF_TO_BED_START_WEIGHT,
+        NATURAL_RIVER_V3_SHELF_TO_BED_END_WEIGHT,
+        channel,
+    );
+    let target_height = bed_height
+        + NATURAL_RIVER_V3_SEDIMENT_SHELF_RELIEF_BLOCKS * (1.0 - shelf_to_bed)
+        + NATURAL_RIVER_V3_LIVING_CAP_RELIEF_BLOCKS * (1.0 - living_to_shelf);
+    let envelope_height = pre_carve_height.min(target_height);
+
+    // The fourth root reaches the authored envelope earlier across the broad
+    // corridor. It cannot overshoot because both interpolation endpoints are
+    // finite and the factor remains in [0, 1].
+    let corridor_easing = corridor.sqrt().sqrt();
+    (1.0 - corridor_easing) * pre_carve_height + corridor_easing * envelope_height
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HydrographicCrossSection {
     width: i32,
     mean_bank_height: i32,
+    max_bank_height: i32,
+    bank_height_span: i32,
     living_banks: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HydrographicFocusContext {
+    open_water_probes: u8,
+    min_surface_height: i32,
+    max_surface_height: i32,
+}
+
+impl HydrographicFocusContext {
+    fn relief_span(self) -> i32 {
+        self.max_surface_height
+            .saturating_sub(self.min_surface_height)
+    }
 }
 
 /// Macro-region province. Returned by `region()` for any world (x,z).
@@ -193,6 +470,10 @@ pub const HYDROGRAPHIC_SEARCH_MAX_RADIUS: i32 = 4_096;
 const NEON_SPAWN_SEARCH_STEP: i32 = 64;
 const NATURAL_SPAWN_SEARCH_STEP: i32 = 32;
 const HYDROGRAPHIC_SEARCH_STEP: i32 = 16;
+const HYDROGRAPHIC_FOCUS_MAX_BANK_HEIGHT: i32 = WATER_LEVEL + 28;
+const HYDROGRAPHIC_FOCUS_MAX_BANK_SPAN: i32 = 20;
+const HYDROGRAPHIC_FOCUS_MAX_CONTEXT_HEIGHT: i32 = WATER_LEVEL + 48;
+const HYDROGRAPHIC_FOCUS_MAX_CONTEXT_RELIEF: i32 = 52;
 
 const fn square_search_candidate_cap(max_radius: i32, step: i32) -> usize {
     let rings = (max_radius / step) as usize;
@@ -576,6 +857,7 @@ pub struct TerrainGenerator {
     pub seed: u32,
     world_profile: WorldProfile,
     scenery_quality: crate::settings::SceneryQuality,
+    terrain_grammar: TerrainGrammarVersion,
     continent: Perlin,
     erosion: Perlin,
     hills_a: Perlin,
@@ -692,6 +974,7 @@ impl TerrainGenerator {
             seed,
             world_profile: WorldProfile::Natural,
             scenery_quality: crate::settings::SceneryQuality::Balanced,
+            terrain_grammar: TerrainGrammarVersion::CURRENT,
             continent: Perlin::new(seed.wrapping_add(1)),
             erosion: Perlin::new(seed.wrapping_add(2)),
             hills_a: Perlin::new(seed.wrapping_add(3)),
@@ -715,6 +998,16 @@ impl TerrainGenerator {
         }
     }
 
+    /// Reconstruct a generator from the complete persisted identity. This is
+    /// the preferred boundary for worlds, workers, caches, edit stores, and
+    /// QA because it cannot accidentally reset one identity component.
+    pub fn from_identity(identity: WorldGenerationIdentity) -> Self {
+        Self::new(identity.seed)
+            .with_world_profile(identity.world_profile)
+            .with_scenery_quality(identity.scenery_quality)
+            .with_terrain_grammar(identity.terrain_grammar)
+    }
+
     pub fn with_scenery_quality(mut self, quality: crate::settings::SceneryQuality) -> Self {
         self.scenery_quality = quality;
         self
@@ -725,8 +1018,37 @@ impl TerrainGenerator {
         self
     }
 
+    pub fn with_terrain_grammar(mut self, terrain_grammar: TerrainGrammarVersion) -> Self {
+        self.terrain_grammar = terrain_grammar;
+        self
+    }
+
     pub const fn world_profile(&self) -> WorldProfile {
         self.world_profile
+    }
+
+    pub const fn grammar_version(&self) -> TerrainGrammarVersion {
+        self.terrain_grammar
+    }
+
+    pub const fn terrain_grammar(&self) -> TerrainGrammarVersion {
+        self.terrain_grammar
+    }
+
+    /// Exact immutable generator identity used by autonomous QA readiness.
+    /// Surface probes remain a useful implementation checksum, but callers
+    /// must not mistake four coincident samples for proof of seed or scenery.
+    pub const fn scenery_quality(&self) -> crate::settings::SceneryQuality {
+        self.scenery_quality
+    }
+
+    pub const fn generation_identity(&self) -> WorldGenerationIdentity {
+        WorldGenerationIdentity {
+            seed: self.seed,
+            world_profile: self.world_profile,
+            scenery_quality: self.scenery_quality,
+            terrain_grammar: self.terrain_grammar,
+        }
     }
 
     fn astral_layout(&self) -> Option<AstralFrontierLayout> {
@@ -1942,18 +2264,21 @@ impl TerrainGenerator {
         // bed. Existing water filling supplies the visible river surface, so
         // this adds no per-frame simulation or extra render entity.
         let hydro = self.hydrographic_field_for_surface(wx, wz, h);
-        if h > WATER_LEVEL as f64 - 5.0 && hydro.corridor > 0.0 {
-            let bank_target = WATER_LEVEL as f64 + 4.5;
-            if h > bank_target {
-                let bank_blend = (hydro.corridor * 0.46).clamp(0.0, 0.46);
-                h = h * (1.0 - bank_blend) + bank_target * bank_blend;
+        h = match (self.world_profile, self.terrain_grammar) {
+            (WorldProfile::Natural, TerrainGrammarVersion::V1) => {
+                hydrographic_cross_section_v1(h, hydro)
             }
-            let channel_blend = smoothstep(0.18, 0.78, hydro.channel).powf(1.15);
-            if channel_blend > 0.0 {
-                let bed_target = WATER_LEVEL as f64 - 2.0;
-                h = h * (1.0 - channel_blend) + bed_target * channel_blend;
+            (WorldProfile::Natural, TerrainGrammarVersion::V2) => {
+                natural_hydrographic_cross_section_v2(h, hydro)
             }
-        }
+            (WorldProfile::Natural, TerrainGrammarVersion::V3) => {
+                natural_hydrographic_cross_section_v3(h, hydro)
+            }
+            // Astral's subsequent world/first-flight authority intentionally
+            // retains the byte-established v1 input rather than inheriting a
+            // Natural-only bank experiment.
+            (WorldProfile::AstralFrontier, _) => hydrographic_cross_section_v1(h, hydro),
+        };
 
         // Astral's infinite regional grammar is applied after generic river
         // carving, then the first-flight sector receives final authority over
@@ -2111,11 +2436,19 @@ impl TerrainGenerator {
         if height <= WATER_LEVEL - 2 {
             return Biome::Ocean;
         }
+        let hydro = self.hydrographic_field_for_surface(wx, wz, height as f64);
+        let v3_living_river_cap = self.world_profile == WorldProfile::Natural
+            && self.terrain_grammar == TerrainGrammarVersion::V3
+            && height > WATER_LEVEL + 2
+            && hydro.corridor > 0.16;
         // Region overrides (above water): alien & special regions
         // dominate even at weak strength so the player sees them
-        // often. Classic canyons / karst need a bit more authority.
+        // often. Classic canyons / karst need a bit more authority. V3's
+        // explicit river cap is the one Natural-only exception: a regional
+        // rock palette must not turn the new living shoulder back into a
+        // limestone palisade.
         let (region, rs) = self.region(wx, wz);
-        if rs > 0.08 && height > WATER_LEVEL + 2 {
+        if !v3_living_river_cap && rs > 0.08 && height > WATER_LEVEL + 2 {
             match region {
                 Region::Canyon => {
                     if rs > 0.25 {
@@ -2140,7 +2473,6 @@ impl TerrainGenerator {
         // let moisture pull the bank into a climate-appropriate green biome.
         // This yields a thin readable shoreline backed by gallery vegetation
         // instead of a hundred-block desert ribbon around every river.
-        let hydro = self.hydrographic_field_for_surface(wx, wz, height as f64);
         if height > WATER_LEVEL + 2 && hydro.corridor > 0.16 {
             let temperature = self.temperature.get([wx * 0.0015, wz * 0.0015]);
             let atmospheric_moisture = self.moisture.get([wx * 0.0015, wz * 0.0015]);
@@ -2473,13 +2805,18 @@ impl TerrainGenerator {
                     current
                 }
             }
-            Biome::VolcanicWaste => {
-                if grain > 0.67 && slope == 0 {
-                    BlockType::Lava
-                } else {
-                    current
-                }
-            }
+            Biome::VolcanicWaste => match self.terrain_grammar {
+                // Byte-established V1 behavior. Do not "clean up" this branch:
+                // legacy edited chunks were composed against these exact dry
+                // grain-selected Lava top voxels.
+                TerrainGrammarVersion::V1 if grain > 0.67 && slope == 0 => BlockType::Lava,
+                // V2 gives Lava one explicit volume authority: the bounded
+                // VolcanicWaste channel fill in `generate`. This avoids
+                // isolated emissive puddles on unrelated dry ground.
+                TerrainGrammarVersion::V1
+                | TerrainGrammarVersion::V2
+                | TerrainGrammarVersion::V3 => current,
+            },
             Biome::GlacierShards => {
                 if grain > 0.20 {
                     BlockType::Ice
@@ -6130,12 +6467,18 @@ impl TerrainGenerator {
             mean_bank_height: ((i64::from(banks[0].1) + i64::from(banks[1].1)) / 2)
                 .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
                 as i32,
+            max_bank_height: banks[0].1.max(banks[1].1),
+            bank_height_span: banks[0].1.abs_diff(banks[1].1).min(i32::MAX as u32) as i32,
             living_banks: banks.iter().filter(|bank| bank.2).count() as u8,
         })
     }
 
-    fn hydrographic_open_water_exposure(&self, x: i32, z: i32, radius: i32) -> u8 {
-        [
+    fn hydrographic_focus_context(&self, x: i32, z: i32, radius: i32) -> HydrographicFocusContext {
+        let mut open_water_probes = 0u8;
+        let mut min_surface_height = i32::MAX;
+        let mut max_surface_height = i32::MIN;
+
+        for (dx, dz) in [
             (-2, -2),
             (-1, -2),
             (0, -2),
@@ -6152,15 +6495,21 @@ impl TerrainGenerator {
             (0, 2),
             (1, 2),
             (2, 2),
-        ]
-        .into_iter()
-        .filter(|&(dx, dz)| {
-            self.surface_height_at(
+        ] {
+            let surface = self.surface_height_at(
                 x.saturating_add(dx * radius / 2),
                 z.saturating_add(dz * radius / 2),
-            ) <= WATER_LEVEL
-        })
-        .count() as u8
+            );
+            open_water_probes = open_water_probes.saturating_add((surface <= WATER_LEVEL) as u8);
+            min_surface_height = min_surface_height.min(surface);
+            max_surface_height = max_surface_height.max(surface);
+        }
+
+        HydrographicFocusContext {
+            open_water_probes,
+            min_surface_height,
+            max_surface_height,
+        }
     }
 
     pub fn find_hydrographic_focus(
@@ -6170,7 +6519,6 @@ impl TerrainGenerator {
         max_radius: i32,
     ) -> Option<IVec2> {
         let mut best: Option<(i64, IVec2)> = None;
-        let mut fallback: Option<(i64, IVec2)> = None;
         let step = HYDROGRAPHIC_SEARCH_STEP;
         let max_radius = bounded_search_radius(max_radius, step, HYDROGRAPHIC_SEARCH_MAX_RADIUS);
         let mut visited = 0usize;
@@ -6197,35 +6545,57 @@ impl TerrainGenerator {
                         .max((i64::from(z) - i64::from(origin_z)).abs());
                     let strength_penalty =
                         i64::from(((1.0 - environment.river_strength) * 180.0) as i32);
-                    let candidate = IVec2::new(x, z);
-                    let fallback_score = distance * 4 + strength_penalty;
-                    if fallback.map_or(true, |(best_score, _)| fallback_score < best_score) {
-                        fallback = Some((fallback_score, candidate));
-                    }
-
                     let Some(cross_section) = self.hydrographic_focus_cross_section(x, z) else {
                         return;
                     };
-                    if cross_section.living_banks < 2 {
+                    if cross_section.living_banks < 2
+                        || cross_section.max_bank_height > HYDROGRAPHIC_FOCUS_MAX_BANK_HEIGHT
+                        || cross_section.bank_height_span > HYDROGRAPHIC_FOCUS_MAX_BANK_SPAN
+                    {
                         return;
                     }
-                    let open_water = self.hydrographic_open_water_exposure(x, z, 64);
-                    if open_water > 2 {
+                    let context = self.hydrographic_focus_context(x, z, 64);
+                    if context.open_water_probes > 2 {
                         // A winding inland channel normally exposes water in the
                         // two tangent directions, occasionally touching adjacent
                         // perimeter probes. A third ray exposes a coast,
                         // lake centre, or broad confluence rather than a corridor.
                         return;
                     }
+                    if context.max_surface_height > HYDROGRAPHIC_FOCUS_MAX_CONTEXT_HEIGHT
+                        || context.relief_span() > HYDROGRAPHIC_FOCUS_MAX_CONTEXT_RELIEF
+                    {
+                        // An anchor can be a hydrologically valid channel and
+                        // still be a disastrous inspection route when a karst
+                        // tower or canyon wall fills the camera corridor. Keep
+                        // route discovery fail-closed instead of falling back
+                        // to such a point merely because it is wet.
+                        return;
+                    }
+                    let candidate = IVec2::new(x, z);
                     let width_penalty = i64::from((cross_section.width - 18).abs()) * 12;
                     let bank_relief =
                         i64::from(cross_section.mean_bank_height) - i64::from(WATER_LEVEL);
                     let relief_penalty = (bank_relief - 10).abs() * 3;
-                    let exposure_penalty = i64::from(open_water) * 48;
+                    let context_relief_for_score = match self.terrain_grammar {
+                        // V3's explicit bed/shelf rounding can move one context
+                        // probe by one block without changing the scene's
+                        // relief class. Four-block score bands preserve the
+                        // established deterministic route anchor; the exact
+                        // fail-closed height and relief caps above remain
+                        // unquantized.
+                        TerrainGrammarVersion::V3 => context.relief_span().div_euclid(4) * 4,
+                        TerrainGrammarVersion::V1 | TerrainGrammarVersion::V2 => {
+                            context.relief_span()
+                        }
+                    };
+                    let context_relief_penalty = i64::from(context_relief_for_score) * 2;
+                    let exposure_penalty = i64::from(context.open_water_probes) * 48;
                     let score = distance * 4
                         + strength_penalty
                         + width_penalty
                         + relief_penalty
+                        + context_relief_penalty
                         + exposure_penalty;
                     if best.map_or(true, |(best_score, _)| score < best_score) {
                         best = Some((score, candidate));
@@ -6245,7 +6615,7 @@ impl TerrainGenerator {
             }
         }
 
-        best.or(fallback).map(|(_, point)| point)
+        best.map(|(_, point)| point)
     }
 
     pub fn surface_height_at(&self, wx: i32, wz: i32) -> i32 {
@@ -6258,6 +6628,261 @@ mod tests {
     use super::*;
     use bevy::math::IVec3;
     use std::collections::HashSet;
+
+    const NATURAL_BANK_PROFILE_RADIUS: i32 = 48;
+    const NATURAL_STABLE_BANK_RUN: usize = 3;
+
+    fn cardinal_surface_profile(
+        generator: &TerrainGenerator,
+        center: IVec2,
+        axis: IVec2,
+        radius: i32,
+    ) -> Vec<i32> {
+        (-radius..=radius)
+            .map(|offset| {
+                generator.surface_height_at(
+                    center.x.saturating_add(axis.x.saturating_mul(offset)),
+                    center.y.saturating_add(axis.y.saturating_mul(offset)),
+                )
+            })
+            .collect()
+    }
+
+    fn center_connected_wet_span(heights: &[i32]) -> Option<(usize, usize)> {
+        let center = heights.len() / 2;
+        if heights.get(center).copied()? >= WATER_LEVEL {
+            return None;
+        }
+
+        let mut start = center;
+        while start > 0 && heights[start - 1] < WATER_LEVEL {
+            start -= 1;
+        }
+        let mut end = center;
+        while end + 1 < heights.len() && heights[end + 1] < WATER_LEVEL {
+            end += 1;
+        }
+        Some((start, end))
+    }
+
+    fn bank_transition_max_rise(
+        heights: &[i32],
+        wet_span: (usize, usize),
+        direction: isize,
+    ) -> Option<u32> {
+        debug_assert!(direction == -1 || direction == 1);
+        let wet_edge = if direction < 0 {
+            wet_span.0
+        } else {
+            wet_span.1
+        };
+        let mut index = wet_edge as isize + direction;
+        let mut stable_run = 0usize;
+
+        while (0..heights.len() as isize).contains(&index) {
+            let height = heights[index as usize];
+            if height > WATER_LEVEL + 1 {
+                stable_run += 1;
+            } else {
+                stable_run = 0;
+            }
+            if stable_run == NATURAL_STABLE_BANK_RUN {
+                let outer = index as usize;
+                let start = wet_edge.min(outer);
+                let end = wet_edge.max(outer);
+                return heights[start..=end]
+                    .windows(2)
+                    .map(|pair| pair[0].abs_diff(pair[1]))
+                    .max();
+            }
+            index += direction;
+        }
+        None
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct NaturalBankShelfMetrics {
+        shelf_width: usize,
+        max_adjacent_rise: u32,
+        first_outer_height: i32,
+    }
+
+    fn natural_bank_shelf_metrics(
+        heights: &[i32],
+        wet_span: (usize, usize),
+        direction: isize,
+    ) -> Option<NaturalBankShelfMetrics> {
+        debug_assert!(direction == -1 || direction == 1);
+        let wet_edge = if direction < 0 {
+            wet_span.0
+        } else {
+            wet_span.1
+        };
+        let mut index = wet_edge as isize + direction;
+        let mut shelf_width = 0usize;
+        while (0..heights.len() as isize).contains(&index)
+            && heights[index as usize] == WATER_LEVEL + 1
+        {
+            shelf_width += 1;
+            index += direction;
+        }
+        let first_outer_height = *heights.get(index as usize)?;
+        Some(NaturalBankShelfMetrics {
+            shelf_width,
+            max_adjacent_rise: bank_transition_max_rise(heights, wet_span, direction)?,
+            first_outer_height,
+        })
+    }
+
+    fn recentered_default_river_slice(
+        generator: &TerrainGenerator,
+        focus: IVec2,
+        tangent_offset: i32,
+    ) -> Option<(Vec<i32>, (usize, usize))> {
+        let z = focus.y.saturating_add(tangent_offset);
+        let center_x = (-24i32..=24)
+            .filter_map(|dx| {
+                let x = focus.x.saturating_add(dx);
+                let height = generator.surface_height_at(x, z);
+                (height < WATER_LEVEL).then_some((height, dx.abs(), dx, x))
+            })
+            .min_by_key(|&(height, distance, dx, _)| (height, distance, dx))
+            .map(|(_, _, _, x)| x)?;
+        let heights = cardinal_surface_profile(
+            generator,
+            IVec2::new(center_x, z),
+            IVec2::X,
+            NATURAL_BANK_PROFILE_RADIUS,
+        );
+        let wet_span = center_connected_wet_span(&heights)?;
+        Some((heights, wet_span))
+    }
+
+    fn voxel_fnv1a64(voxels: &[Voxel]) -> u64 {
+        voxels
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325u64, |mut state, &voxel| {
+                for byte in voxel.to_le_bytes() {
+                    state ^= u64::from(byte);
+                    state = state.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                state
+            })
+    }
+
+    #[test]
+    fn semantic_selector_admits_exactly_one_per_euclidean_supertile() {
+        let edge_supertiles = [
+            i64::MIN.div_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS),
+            -2,
+            -1,
+            0,
+            1,
+            i64::MAX.div_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS),
+        ];
+        for seed in [0, 1, 2, u32::MAX] {
+            for profile in [WorldProfile::Natural, WorldProfile::AstralFrontier] {
+                for super_x in edge_supertiles {
+                    for super_z in edge_supertiles {
+                        let base_x = super_x
+                            .checked_mul(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS)
+                            .expect("edge supertile x base remains representable");
+                        let base_z = super_z
+                            .checked_mul(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS)
+                            .expect("edge supertile z base remains representable");
+                        let mut admitted = Vec::new();
+                        for local_z in 0..FAR_SEMANTIC_COHORT_SUPERTILE_CELLS {
+                            for local_x in 0..FAR_SEMANTIC_COHORT_SUPERTILE_CELLS {
+                                let cell_x = base_x
+                                    .checked_add(local_x)
+                                    .expect("complete edge supertile x cell");
+                                let cell_z = base_z
+                                    .checked_add(local_z)
+                                    .expect("complete edge supertile z cell");
+                                let first =
+                                    far_semantic_cohort_signature(seed, profile, cell_x, cell_z);
+                                assert_eq!(
+                                    first,
+                                    far_semantic_cohort_signature(seed, profile, cell_x, cell_z),
+                                    "semantic signatures must replay exactly"
+                                );
+                                if first.admitted {
+                                    admitted.push((cell_x, cell_z));
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            admitted.len(),
+                            1,
+                            "one absolute cell must be selected in supertile ({super_x}, {super_z})"
+                        );
+                    }
+                }
+            }
+        }
+
+        for coordinate in [-9, -8, -1, 0, 7, 8, i64::MIN, i64::MAX] {
+            let supertile = coordinate.div_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS);
+            let remainder = coordinate.rem_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS);
+            assert!((0..FAR_SEMANTIC_COHORT_SUPERTILE_CELLS).contains(&remainder));
+            assert_eq!(
+                i128::from(supertile) * i128::from(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS)
+                    + i128::from(remainder),
+                i128::from(coordinate)
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_61x61_window_never_exceeds_81_or_duplicates_a_supertile() {
+        let starts = [
+            -1_037_i64,
+            -64,
+            -63,
+            -9,
+            -8,
+            -1,
+            0,
+            1,
+            7,
+            8,
+            63,
+            64,
+            1_037,
+            i64::MIN,
+            i64::MAX - 60,
+        ];
+        for seed in [0, 2, u32::MAX] {
+            for profile in [WorldProfile::Natural, WorldProfile::AstralFrontier] {
+                for start_x in starts {
+                    for start_z in starts {
+                        let mut admitted_supertiles = HashSet::new();
+                        let mut x_supertiles = HashSet::new();
+                        let mut z_supertiles = HashSet::new();
+                        for dz in 0..61_i64 {
+                            for dx in 0..61_i64 {
+                                let x = start_x.checked_add(dx).expect("bounded x window");
+                                let z = start_z.checked_add(dz).expect("bounded z window");
+                                let sx = x.div_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS);
+                                let sz = z.div_euclid(FAR_SEMANTIC_COHORT_SUPERTILE_CELLS);
+                                x_supertiles.insert(sx);
+                                z_supertiles.insert(sz);
+                                if far_semantic_cohort_signature(seed, profile, x, z).admitted {
+                                    assert!(
+                                        admitted_supertiles.insert((sx, sz)),
+                                        "a window admitted two cells from one supertile"
+                                    );
+                                }
+                            }
+                        }
+                        assert!(x_supertiles.len() <= 9);
+                        assert!(z_supertiles.len() <= 9);
+                        assert!(admitted_supertiles.len() <= 81);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn coarse_surface_family_agrees_with_near_base_and_slope_rules() {
@@ -7087,13 +7712,916 @@ mod tests {
         assert_eq!(cross_section.living_banks, 2);
         assert!((4..=96).contains(&cross_section.width));
         assert!(cross_section.mean_bank_height > WATER_LEVEL + 1);
-        assert!(generator.hydrographic_open_water_exposure(focus.x, focus.y, 64) <= 2);
+        assert!(cross_section.max_bank_height <= HYDROGRAPHIC_FOCUS_MAX_BANK_HEIGHT);
+        assert!(cross_section.bank_height_span <= HYDROGRAPHIC_FOCUS_MAX_BANK_SPAN);
+        let context = generator.hydrographic_focus_context(focus.x, focus.y, 64);
+        assert!(context.open_water_probes <= 2);
+        assert!(context.max_surface_height <= HYDROGRAPHIC_FOCUS_MAX_CONTEXT_HEIGHT);
+        assert!(context.relief_span() <= HYDROGRAPHIC_FOCUS_MAX_CONTEXT_RELIEF);
         assert!(
             generator
                 .environment_sample_at(focus.x, focus.y)
                 .river_strength
                 >= 0.82
         );
+    }
+
+    #[test]
+    fn natural_bank_envelope_is_total_bounded_and_monotone() {
+        let bed_height = WATER_LEVEL as f64 - 2.0;
+        let heights = [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            -f64::MAX,
+            42.0,
+            43.0,
+            43.25,
+            46.0,
+            52.0,
+            80.0,
+            208.0,
+            f64::MAX,
+        ];
+        let weights = [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            -1.0,
+            0.0,
+            0.18,
+            0.5,
+            0.78,
+            1.0,
+            2.0,
+            f64::INFINITY,
+        ];
+
+        for height in heights {
+            for corridor in weights {
+                for channel in weights {
+                    let hydro = HydrographicField { corridor, channel };
+                    let result = natural_hydrographic_cross_section_v2(height, hydro);
+                    let replay = natural_hydrographic_cross_section_v2(height, hydro);
+                    assert!(
+                        result.is_finite(),
+                        "non-finite result for height={height}, corridor={corridor}, channel={channel}"
+                    );
+                    assert_eq!(result.to_bits(), replay.to_bits());
+                    if !height.is_finite() {
+                        assert_eq!(result.to_bits(), bed_height.to_bits());
+                    } else {
+                        assert!(result <= height);
+                        if !corridor.is_finite() || corridor <= 0.0 {
+                            assert_eq!(result.to_bits(), height.to_bits());
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            natural_hydrographic_cross_section_v2(
+                80.0,
+                HydrographicField {
+                    corridor: 1.0,
+                    channel: 1.0,
+                },
+            )
+            .to_bits(),
+            46.0f64.to_bits()
+        );
+        assert_eq!(
+            natural_hydrographic_cross_section_v2(
+                80.0,
+                HydrographicField {
+                    corridor: 1.0,
+                    channel: 0.0,
+                },
+            )
+            .to_bits(),
+            52.0f64.to_bits()
+        );
+
+        for height in [44.0, 46.0, 52.0, 80.0, 208.0] {
+            for channel in [0.0, 0.18, 0.5, 0.78, 1.0] {
+                let mut previous = height;
+                for corridor in [0.0, 0.04, 0.16, 0.36, 0.64, 1.0] {
+                    let current = natural_hydrographic_cross_section_v2(
+                        height,
+                        HydrographicField { corridor, channel },
+                    );
+                    assert!(
+                        current <= previous + 1.0e-12,
+                        "corridor monotonicity failed: height={height}, channel={channel}, corridor={corridor}, {previous} -> {current}"
+                    );
+                    previous = current;
+                }
+            }
+            for corridor in [0.04, 0.16, 0.36, 0.64, 1.0] {
+                let mut previous = height;
+                for channel in [0.0, 0.18, 0.5, 0.78, 1.0] {
+                    let current = natural_hydrographic_cross_section_v2(
+                        height,
+                        HydrographicField { corridor, channel },
+                    );
+                    assert!(
+                        current <= previous + 1.0e-12,
+                        "channel monotonicity failed: height={height}, corridor={corridor}, channel={channel}, {previous} -> {current}"
+                    );
+                    previous = current;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn natural_v3_bank_envelope_is_total_bounded_monotone_and_three_zone() {
+        let bed_height = WATER_LEVEL as f64 - 2.0;
+        let heights = [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            -f64::MAX,
+            42.0,
+            43.0,
+            43.25,
+            46.0,
+            51.0,
+            80.0,
+            208.0,
+            f64::MAX,
+        ];
+        let weights = [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            -1.0,
+            0.0,
+            0.18,
+            0.5,
+            0.78,
+            1.0,
+            2.0,
+            f64::INFINITY,
+        ];
+
+        for height in heights {
+            for corridor in weights {
+                for channel in weights {
+                    let hydro = HydrographicField { corridor, channel };
+                    let result = natural_hydrographic_cross_section_v3(height, hydro);
+                    let replay = natural_hydrographic_cross_section_v3(height, hydro);
+                    assert!(
+                        result.is_finite(),
+                        "non-finite V3 result for height={height}, corridor={corridor}, channel={channel}"
+                    );
+                    assert_eq!(result.to_bits(), replay.to_bits());
+                    if !height.is_finite() {
+                        assert_eq!(result.to_bits(), bed_height.to_bits());
+                    } else {
+                        assert!(result <= height);
+                        if !corridor.is_finite() || corridor <= 0.0 {
+                            assert_eq!(result.to_bits(), height.to_bits());
+                        }
+                    }
+                }
+            }
+        }
+
+        for (channel, expected_height) in [(0.0, 51.0), (0.50, 49.0), (0.66, 49.0), (1.0, 46.0)] {
+            let expected_height: f64 = expected_height;
+            assert_eq!(
+                natural_hydrographic_cross_section_v3(
+                    80.0,
+                    HydrographicField {
+                        corridor: 1.0,
+                        channel,
+                    },
+                )
+                .to_bits(),
+                expected_height.to_bits(),
+                "V3 three-zone anchor drifted for channel={channel}"
+            );
+        }
+
+        for height in [44.0, 46.0, 51.0, 80.0, 208.0] {
+            for channel in [0.0, 0.26, 0.38, 0.50, 0.66, 0.78, 0.90, 1.0] {
+                let mut previous = height;
+                for corridor in [0.0, 0.04, 0.16, 0.36, 0.64, 1.0] {
+                    let current = natural_hydrographic_cross_section_v3(
+                        height,
+                        HydrographicField { corridor, channel },
+                    );
+                    assert!(
+                        current <= previous + 1.0e-12,
+                        "V3 corridor monotonicity failed: height={height}, channel={channel}, corridor={corridor}, {previous} -> {current}"
+                    );
+                    previous = current;
+                }
+            }
+            for corridor in [0.04, 0.16, 0.36, 0.64, 1.0] {
+                let mut previous = height;
+                for channel in [0.0, 0.26, 0.38, 0.50, 0.66, 0.78, 0.90, 1.0] {
+                    let current = natural_hydrographic_cross_section_v3(
+                        height,
+                        HydrographicField { corridor, channel },
+                    );
+                    assert!(
+                        current <= previous + 1.0e-12,
+                        "V3 channel monotonicity failed: height={height}, corridor={corridor}, channel={channel}, {previous} -> {current}"
+                    );
+                    previous = current;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn astral_v1_carve_is_bit_exact_against_the_legacy_formula() {
+        let legacy = |mut height: f64, hydro: HydrographicField| {
+            if height > WATER_LEVEL as f64 - 5.0 && hydro.corridor > 0.0 {
+                let bank_target = WATER_LEVEL as f64 + 4.5;
+                if height > bank_target {
+                    let bank_blend = (hydro.corridor * 0.46).clamp(0.0, 0.46);
+                    height = height * (1.0 - bank_blend) + bank_target * bank_blend;
+                }
+                let channel_blend = smoothstep(0.18, 0.78, hydro.channel).powf(1.15);
+                if channel_blend > 0.0 {
+                    let bed_target = WATER_LEVEL as f64 - 2.0;
+                    height = height * (1.0 - channel_blend) + bed_target * channel_blend;
+                }
+            }
+            height
+        };
+
+        for height in [8.0, 42.0, 43.0, 43.25, 46.0, 52.5, 53.0, 80.0, 208.0] {
+            for corridor in [0.0, 0.04, 0.5, 1.0, 2.0] {
+                for channel in [0.0, 0.18, 0.5, 0.78, 1.0, 2.0] {
+                    let hydro = HydrographicField { corridor, channel };
+                    assert_eq!(
+                        hydrographic_cross_section_v1(height, hydro).to_bits(),
+                        legacy(height, hydro).to_bits(),
+                        "Astral v1 drifted at height={height}, corridor={corridor}, channel={channel}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn natural_v2_carve_is_bit_exact_against_the_established_formula() {
+        let established_v2 = |pre_carve_height: f64, hydro: HydrographicField| {
+            let bed_height = WATER_LEVEL as f64 - 2.0;
+            if !pre_carve_height.is_finite() {
+                return bed_height;
+            }
+            let unit_weight = |value: f64| {
+                if value.is_finite() {
+                    value.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            };
+            let corridor = unit_weight(hydro.corridor);
+            if pre_carve_height <= WATER_LEVEL as f64 - 5.0 || corridor <= 0.0 {
+                return pre_carve_height;
+            }
+            let channel = unit_weight(hydro.channel);
+            let channel_blend = smoothstep(0.18, 0.78, channel).powf(1.15);
+            let target_height =
+                bed_height + NATURAL_RIVER_BANK_RELIEF_BLOCKS * (1.0 - channel_blend);
+            let envelope_height = pre_carve_height.min(target_height);
+            let corridor_easing = corridor.sqrt();
+            (1.0 - corridor_easing) * pre_carve_height + corridor_easing * envelope_height
+        };
+
+        for height in [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            -f64::MAX,
+            8.0,
+            42.0,
+            43.0,
+            43.25,
+            46.0,
+            52.5,
+            53.0,
+            80.0,
+            208.0,
+            f64::MAX,
+            f64::INFINITY,
+        ] {
+            for corridor in [
+                f64::NAN,
+                f64::NEG_INFINITY,
+                -1.0,
+                0.0,
+                0.04,
+                0.5,
+                1.0,
+                2.0,
+                f64::INFINITY,
+            ] {
+                for channel in [
+                    f64::NAN,
+                    f64::NEG_INFINITY,
+                    -1.0,
+                    0.0,
+                    0.18,
+                    0.5,
+                    0.78,
+                    1.0,
+                    2.0,
+                    f64::INFINITY,
+                ] {
+                    let hydro = HydrographicField { corridor, channel };
+                    assert_eq!(
+                        natural_hydrographic_cross_section_v2(height, hydro).to_bits(),
+                        established_v2(height, hydro).to_bits(),
+                        "Natural V2 drifted at height={height}, corridor={corridor}, channel={channel}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn natural_v1_v2_chunk_bytes_replay_the_established_checksums() {
+        let position = ChunkPos::new(-4, 3, 4);
+        for (grammar, expected_checksum) in [
+            (TerrainGrammarVersion::V1, 0xbca7_6b20_990e_392e),
+            (TerrainGrammarVersion::V2, 0x0649_18f3_e974_c9ab),
+        ] {
+            let generator = TerrainGenerator::new(12_345)
+                .with_scenery_quality(crate::settings::SceneryQuality::Off)
+                .with_terrain_grammar(grammar);
+            let mut chunk = Chunk::new(position);
+            generator.generate(&mut chunk);
+            assert_eq!(
+                voxel_fnv1a64(&chunk.voxels_vec()),
+                expected_checksum,
+                "{grammar:?} chunk bytes drifted at {position:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_grammar_selects_distinct_natural_chunk_bytes() {
+        let v1 = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Off)
+            .with_terrain_grammar(TerrainGrammarVersion::V1);
+        let v2 = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Off)
+            .with_terrain_grammar(TerrainGrammarVersion::V2);
+
+        let differing_column = (-192..=192).step_by(4).find_map(|z| {
+            (-192..=192).step_by(4).find_map(|x| {
+                let v1_height = v1.surface_height_at(x, z);
+                let v2_height = v2.surface_height_at(x, z);
+                (v1_height != v2_height).then_some((x, z, v1_height, v2_height))
+            })
+        });
+        let (x, z, v1_height, v2_height) =
+            differing_column.expect("Natural V1 and V2 must expose distinct bank bytes");
+        let pos = ChunkPos::new(
+            x.div_euclid(CHUNK_SIZE_I),
+            v1_height.max(v2_height).div_euclid(CHUNK_SIZE_I),
+            z.div_euclid(CHUNK_SIZE_I),
+        );
+        let mut v1_chunk = Chunk::new(pos);
+        let mut v2_chunk = Chunk::new(pos);
+        v1.generate(&mut v1_chunk);
+        v2.generate(&mut v2_chunk);
+
+        assert_ne!(v1_chunk.voxels_vec(), v2_chunk.voxels_vec());
+        assert_eq!(v1.surface_height_at(x, z), v1_height);
+        assert_eq!(v2.surface_height_at(x, z), v2_height);
+    }
+
+    #[test]
+    fn terrain_grammar_v3_selects_distinct_natural_chunk_bytes() {
+        let v2 = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Off)
+            .with_terrain_grammar(TerrainGrammarVersion::V2);
+        let v3 = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Off)
+            .with_terrain_grammar(TerrainGrammarVersion::V3);
+
+        let differing_column = (-192..=192).step_by(2).find_map(|z| {
+            (-192..=192).step_by(2).find_map(|x| {
+                let v2_height = v2.surface_height_at(x, z);
+                let v3_height = v3.surface_height_at(x, z);
+                (v2_height != v3_height).then_some((x, z, v2_height, v3_height))
+            })
+        });
+        let (x, z, v2_height, v3_height) =
+            differing_column.expect("Natural V2 and V3 must expose distinct bank bytes");
+        let position = ChunkPos::new(
+            x.div_euclid(CHUNK_SIZE_I),
+            v2_height.max(v3_height).div_euclid(CHUNK_SIZE_I),
+            z.div_euclid(CHUNK_SIZE_I),
+        );
+        let mut v2_chunk = Chunk::new(position);
+        let mut v3_chunk = Chunk::new(position);
+        v2.generate(&mut v2_chunk);
+        v3.generate(&mut v3_chunk);
+
+        assert_ne!(v2_chunk.voxels_vec(), v3_chunk.voxels_vec());
+        assert_eq!(v2.surface_height_at(x, z), v2_height);
+        assert_eq!(v3.surface_height_at(x, z), v3_height);
+    }
+
+    #[test]
+    fn terrain_generator_clone_preserves_the_exact_generation_identity() {
+        let identity = WorldGenerationIdentity {
+            seed: u32::MAX,
+            world_profile: WorldProfile::AstralFrontier,
+            scenery_quality: crate::settings::SceneryQuality::Lush,
+            terrain_grammar: TerrainGrammarVersion::V1,
+        };
+        let generator = TerrainGenerator::from_identity(identity);
+        let cloned = generator.clone();
+
+        assert_eq!(generator.generation_identity(), identity);
+        assert_eq!(cloned.generation_identity(), identity);
+        assert_eq!(cloned.grammar_version(), TerrainGrammarVersion::V1);
+        assert_eq!(cloned.terrain_grammar(), TerrainGrammarVersion::V1);
+    }
+
+    #[test]
+    fn default_natural_focus_has_a_bed_two_living_banks_and_gradual_x_z_profiles() {
+        let generator = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush)
+            .with_terrain_grammar(TerrainGrammarVersion::V2);
+        let focus = IVec2::new(-64, 64);
+        assert_eq!(
+            generator.find_hydrographic_focus(0, 0, HYDROGRAPHIC_SEARCH_MAX_RADIUS),
+            Some(focus)
+        );
+        assert_eq!(
+            generator.surface_height_at(focus.x, focus.y),
+            WATER_LEVEL - 2
+        );
+        assert!(
+            generator
+                .environment_sample_at(focus.x, focus.y)
+                .river_strength
+                >= 0.82
+        );
+
+        let cross = generator
+            .hydrographic_focus_cross_section(focus.x, focus.y)
+            .expect("fixed focus should retain two stable banks");
+        assert_eq!(cross.width, 28);
+        assert_eq!(cross.mean_bank_height, 51);
+        assert_eq!(cross.max_bank_height, 51);
+        assert_eq!(cross.bank_height_span, 0);
+        assert_eq!(cross.living_banks, 2);
+
+        for (axis, expected_offsets) in [(IVec2::X, (-11, 12)), (IVec2::Y, (-11, 13))] {
+            let heights =
+                cardinal_surface_profile(&generator, focus, axis, NATURAL_BANK_PROFILE_RADIUS);
+            let mut reverse = (-NATURAL_BANK_PROFILE_RADIUS..=NATURAL_BANK_PROFILE_RADIUS)
+                .rev()
+                .map(|offset| {
+                    generator.surface_height_at(
+                        focus.x.saturating_add(axis.x.saturating_mul(offset)),
+                        focus.y.saturating_add(axis.y.saturating_mul(offset)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            reverse.reverse();
+            assert_eq!(
+                heights, reverse,
+                "cardinal profile changed with query order"
+            );
+
+            let wet_span = center_connected_wet_span(&heights)
+                .expect("fixed focus should contain center-connected water");
+            let offsets = (
+                wet_span.0 as i32 - NATURAL_BANK_PROFILE_RADIUS,
+                wet_span.1 as i32 - NATURAL_BANK_PROFILE_RADIUS,
+            );
+            assert_eq!(offsets, expected_offsets);
+            assert_eq!(
+                heights
+                    .windows(2)
+                    .map(|pair| pair[0].abs_diff(pair[1]))
+                    .max(),
+                Some(2)
+            );
+            for direction in [-1, 1] {
+                assert!(
+                    bank_transition_max_rise(&heights, wet_span, direction)
+                        .is_some_and(|rise| rise <= 2),
+                    "axis={axis:?}, direction={direction} retained a steep bank"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_natural_focus_has_no_long_run_of_steep_recentered_bank_slices() {
+        let generator = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush)
+            .with_terrain_grammar(TerrainGrammarVersion::V2);
+        let focus = IVec2::new(-64, 64);
+        let mut current_steep_run = [0usize; 2];
+        let mut longest_steep_run = [0usize; 2];
+        let mut valid_slices = 0usize;
+
+        // The focus flow is Z-dominant, so X is its established cardinalized
+        // normal. Recenter every bounded Z slice before measuring both banks;
+        // one transverse edge can no longer masquerade as a short wall.
+        for tangent_offset in -16..=16 {
+            let z = focus.y + tangent_offset;
+            let center_x = (-24i32..=24)
+                .filter_map(|dx| {
+                    let x = focus.x + dx;
+                    let height = generator.surface_height_at(x, z);
+                    (height < WATER_LEVEL).then_some((height, dx.abs(), dx, x))
+                })
+                .min_by_key(|&(height, distance, dx, _)| (height, distance, dx))
+                .map(|(_, _, _, x)| x)
+                .expect("every bounded tangent slice should intersect the fixed river");
+            let heights = cardinal_surface_profile(
+                &generator,
+                IVec2::new(center_x, z),
+                IVec2::X,
+                NATURAL_BANK_PROFILE_RADIUS,
+            );
+            let wet_span = center_connected_wet_span(&heights)
+                .expect("recentered slice should remain inside the river bed");
+
+            for (side, direction) in [-1, 1].into_iter().enumerate() {
+                let rise = bank_transition_max_rise(&heights, wet_span, direction)
+                    .expect("bounded slice should reach three stable land samples per bank");
+                if rise >= 3 {
+                    current_steep_run[side] += 1;
+                    longest_steep_run[side] = longest_steep_run[side].max(current_steep_run[side]);
+                } else {
+                    current_steep_run[side] = 0;
+                }
+            }
+            valid_slices += 1;
+        }
+
+        assert_eq!(valid_slices, 33);
+        assert!(
+            longest_steep_run.into_iter().all(|run| run < 4),
+            "river retained a longitudinal palisade: {longest_steep_run:?}"
+        );
+    }
+
+    #[test]
+    fn v3_default_anchor_has_multi_voxel_shelves_and_no_immediate_wall() {
+        let focus = IVec2::new(-64, 64);
+        let v2 = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush)
+            .with_terrain_grammar(TerrainGrammarVersion::V2);
+        let v3 = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush)
+            .with_terrain_grammar(TerrainGrammarVersion::V3);
+
+        assert_eq!(
+            v3.find_hydrographic_focus(0, 0, HYDROGRAPHIC_SEARCH_MAX_RADIUS),
+            Some(focus),
+            "V3 must retain the established bounded visual-comparison anchor"
+        );
+        assert_eq!(v3.surface_height_at(focus.x, focus.y), WATER_LEVEL - 2);
+        assert_eq!(
+            v3.hydrographic_focus_cross_section(focus.x, focus.y),
+            Some(HydrographicCrossSection {
+                width: 32,
+                mean_bank_height: WATER_LEVEL + 3,
+                max_bank_height: WATER_LEVEL + 3,
+                bank_height_span: 0,
+                living_banks: 2,
+            })
+        );
+
+        let mut v2_shelf_range = (usize::MAX, 0usize);
+        let mut v3_shelf_range = (usize::MAX, 0usize);
+        let mut checked_sides = 0usize;
+        for tangent_offset in -16..=16 {
+            let (v2_heights, v2_wet_span) =
+                recentered_default_river_slice(&v2, focus, tangent_offset)
+                    .expect("every V2 tangent slice must intersect the fixed river");
+            let (v3_heights, v3_wet_span) =
+                recentered_default_river_slice(&v3, focus, tangent_offset)
+                    .expect("every V3 tangent slice must intersect the fixed river");
+
+            for direction in [-1isize, 1] {
+                let v2_metrics = natural_bank_shelf_metrics(&v2_heights, v2_wet_span, direction)
+                    .expect("V2 slice must reach stable outer relief");
+                v2_shelf_range.0 = v2_shelf_range.0.min(v2_metrics.shelf_width);
+                v2_shelf_range.1 = v2_shelf_range.1.max(v2_metrics.shelf_width);
+
+                let v3_metrics = natural_bank_shelf_metrics(&v3_heights, v3_wet_span, direction)
+                    .expect("V3 slice must reach stable outer relief");
+                assert!(
+                    (4..=5).contains(&v3_metrics.shelf_width),
+                    "dz={tangent_offset}, direction={direction} shelf width escaped the authored 4..=5 block band: {v3_metrics:?}"
+                );
+                assert!(
+                    v3_metrics.max_adjacent_rise < 3,
+                    "dz={tangent_offset}, direction={direction} retained an immediate >=3-block wall: {v3_metrics:?}"
+                );
+                assert_eq!(
+                    v3_metrics.first_outer_height,
+                    WATER_LEVEL + 3,
+                    "dz={tangent_offset}, direction={direction} skipped the low living cap"
+                );
+                v3_shelf_range.0 = v3_shelf_range.0.min(v3_metrics.shelf_width);
+                v3_shelf_range.1 = v3_shelf_range.1.max(v3_metrics.shelf_width);
+                checked_sides += 1;
+            }
+        }
+
+        assert_eq!(checked_sides, 66);
+        assert_eq!(v2_shelf_range, (1, 2), "the measured V2 baseline drifted");
+        assert_eq!(v3_shelf_range, (4, 5));
+    }
+
+    #[test]
+    fn v3_default_anchor_orders_water_sand_shelf_and_living_cap_materials() {
+        let generator = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Off)
+            .with_terrain_grammar(TerrainGrammarVersion::V3);
+        let focus = IVec2::new(-64, 64);
+
+        let generated_block = |x: i32, y: i32, z: i32| {
+            let position = ChunkPos::new(
+                x.div_euclid(CHUNK_SIZE_I),
+                y.div_euclid(CHUNK_SIZE_I),
+                z.div_euclid(CHUNK_SIZE_I),
+            );
+            let mut chunk = Chunk::new(position);
+            generator.generate(&mut chunk);
+            BlockType::from_voxel(chunk.get(
+                x.rem_euclid(CHUNK_SIZE_I) as usize,
+                y.rem_euclid(CHUNK_SIZE_I) as usize,
+                z.rem_euclid(CHUNK_SIZE_I) as usize,
+            ))
+        };
+
+        assert_eq!(
+            generated_block(focus.x, WATER_LEVEL, focus.y),
+            BlockType::Water
+        );
+        for direction in [-1, 1] {
+            let mut shelves = Vec::new();
+            let mut living_cap = None;
+            for distance in 1..=48 {
+                let x = focus.x.saturating_add(direction * distance);
+                let surface = generator.surface_height_at(x, focus.y);
+                if surface < WATER_LEVEL {
+                    continue;
+                }
+                if surface == WATER_LEVEL + 1 {
+                    shelves.push((x, surface));
+                    continue;
+                }
+                if surface >= WATER_LEVEL + 3 {
+                    living_cap = Some((x, surface));
+                    break;
+                }
+            }
+
+            assert!(
+                (4..=5).contains(&shelves.len()),
+                "direction={direction} did not expose a multi-voxel sediment shelf: {shelves:?}"
+            );
+            for &(x, surface) in &shelves {
+                assert_eq!(generator.biome_at(x, focus.y), Biome::Beach);
+                assert_eq!(
+                    generated_block(x, surface, focus.y),
+                    BlockType::Sand,
+                    "shelf column {x},{surface},{} lost its sediment surface",
+                    focus.y
+                );
+            }
+
+            let (cap_x, cap_surface) = living_cap.expect("shelf must lead to living outer relief");
+            assert_eq!(cap_surface, WATER_LEVEL + 3);
+            let cap_biome = generator.biome_at(cap_x, focus.y);
+            assert!(matches!(
+                cap_biome,
+                Biome::Plains
+                    | Biome::Forest
+                    | Biome::Jungle
+                    | Biome::Savanna
+                    | Biome::Tundra
+                    | Biome::Karst
+            ));
+            let cap_block = generated_block(cap_x, cap_surface, focus.y);
+            assert!(matches!(
+                cap_block,
+                BlockType::Grass
+                    | BlockType::TundraGrass
+                    | BlockType::SavannaGrass
+                    | BlockType::MossStone
+            ), "direction={direction} cap at {cap_x},{cap_surface},{} was {cap_biome:?}/{cap_block:?}", focus.y);
+        }
+    }
+
+    #[test]
+    fn v3_bank_contract_replays_across_seeds_signed_seams_and_extremes() {
+        for seed in [0x48D2_09A1, 12_345] {
+            let generator = TerrainGenerator::new(seed)
+                .with_scenery_quality(crate::settings::SceneryQuality::Lush)
+                .with_terrain_grammar(TerrainGrammarVersion::V3);
+            let focus = generator
+                .find_hydrographic_focus(0, 0, HYDROGRAPHIC_SEARCH_MAX_RADIUS)
+                .expect("V3 seed should retain a bounded river focus");
+            assert!(generator.surface_height_at(focus.x, focus.y) <= WATER_LEVEL - 2);
+            let [flow_x, flow_z] = generator
+                .environment_sample_at(focus.x, focus.y)
+                .flow_direction;
+            let normal = if flow_x.abs() >= flow_z.abs() {
+                IVec2::Y
+            } else {
+                IVec2::X
+            };
+            let heights = cardinal_surface_profile(&generator, focus, normal, 48);
+            let wet_span = center_connected_wet_span(&heights)
+                .expect("V3 multi-seed focus must contain center-connected water");
+            for direction in [-1isize, 1] {
+                let metrics = natural_bank_shelf_metrics(&heights, wet_span, direction)
+                    .expect("V3 multi-seed bank must reach stable outer relief");
+                assert!(
+                    (2..=12).contains(&metrics.shelf_width),
+                    "seed={seed}, direction={direction} shelf escaped its global bound: {metrics:?}"
+                );
+                assert!(
+                    metrics.max_adjacent_rise < 3,
+                    "seed={seed}, direction={direction} retained a >=3-block wall: {metrics:?}"
+                );
+            }
+        }
+
+        let generator =
+            TerrainGenerator::new(12_345).with_terrain_grammar(TerrainGrammarVersion::V3);
+        let mut points = Vec::new();
+        for seam in [-64, -32, -16, 0, 16, 32, 64] {
+            for delta in -1..=1 {
+                points.push((seam + delta, 64));
+                points.push((-64, seam + delta));
+            }
+        }
+        points.extend([
+            (i32::MIN, i32::MIN),
+            (i32::MIN, i32::MAX),
+            (i32::MAX, i32::MIN),
+            (i32::MAX, i32::MAX),
+            (i32::MIN + 1, 0),
+            (i32::MAX - 1, 0),
+        ]);
+
+        let forward = points
+            .iter()
+            .map(|&(x, z)| ((x, z), generator.surface_height_at(x, z)))
+            .collect::<Vec<_>>();
+        let mut reverse = points
+            .iter()
+            .rev()
+            .map(|&(x, z)| ((x, z), generator.surface_height_at(x, z)))
+            .collect::<Vec<_>>();
+        reverse.reverse();
+        assert_eq!(forward, reverse);
+
+        points
+            .sort_by_key(|&(x, z)| (x.div_euclid(CHUNK_SIZE_I), z.div_euclid(CHUNK_SIZE_I), x, z));
+        for (x, z) in points {
+            let expected = forward
+                .iter()
+                .find_map(|&((sample_x, sample_z), height)| {
+                    (sample_x == x && sample_z == z).then_some(height)
+                })
+                .expect("ordered V3 sample should exist in baseline");
+            let actual = generator.surface_height_at(x, z);
+            assert_eq!(actual, expected, "V3 surface changed at {x},{z}");
+            assert!((8..=208).contains(&actual));
+        }
+    }
+
+    #[test]
+    fn natural_bank_contract_replays_across_seeds_signed_seams_and_extreme_coordinates() {
+        for (seed, expected_focus, expected_width) in [
+            (0x48D2_09A1, IVec2::new(-16, -32), 22),
+            (12_345, IVec2::new(-64, 64), 28),
+        ] {
+            let generator = TerrainGenerator::new(seed)
+                .with_scenery_quality(crate::settings::SceneryQuality::Lush)
+                .with_terrain_grammar(TerrainGrammarVersion::V2);
+            let focus = generator
+                .find_hydrographic_focus(0, 0, HYDROGRAPHIC_SEARCH_MAX_RADIUS)
+                .expect("seed should retain a bounded river focus");
+            assert_eq!(focus, expected_focus);
+            assert!(generator.surface_height_at(focus.x, focus.y) <= WATER_LEVEL - 2);
+            let cross = generator
+                .hydrographic_focus_cross_section(focus.x, focus.y)
+                .expect("multi-seed focus should retain both banks");
+            assert_eq!(cross.width, expected_width);
+            assert_eq!(cross.living_banks, 2);
+
+            let [flow_x, flow_z] = generator
+                .environment_sample_at(focus.x, focus.y)
+                .flow_direction;
+            let normal = if flow_x.abs() >= flow_z.abs() {
+                IVec2::Y
+            } else {
+                IVec2::X
+            };
+            let heights = cardinal_surface_profile(&generator, focus, normal, 32);
+            assert!(
+                heights
+                    .windows(2)
+                    .map(|pair| pair[0].abs_diff(pair[1]))
+                    .max()
+                    .is_some_and(|rise| rise <= 2),
+                "seed={seed} retained a steep focus bank"
+            );
+        }
+
+        let generator =
+            TerrainGenerator::new(12_345).with_terrain_grammar(TerrainGrammarVersion::V2);
+        let mut points = Vec::new();
+        for seam in [-64, -32, -16, 0, 16, 32, 64] {
+            for delta in -1..=1 {
+                points.push((seam + delta, 64));
+                points.push((-64, seam + delta));
+            }
+        }
+        points.extend([
+            (i32::MIN, i32::MIN),
+            (i32::MIN, i32::MAX),
+            (i32::MAX, i32::MIN),
+            (i32::MAX, i32::MAX),
+            (i32::MIN + 1, 0),
+            (i32::MAX - 1, 0),
+        ]);
+
+        let forward = points
+            .iter()
+            .map(|&(x, z)| ((x, z), generator.surface_height_at(x, z)))
+            .collect::<Vec<_>>();
+        let mut reverse = points
+            .iter()
+            .rev()
+            .map(|&(x, z)| ((x, z), generator.surface_height_at(x, z)))
+            .collect::<Vec<_>>();
+        reverse.reverse();
+        assert_eq!(forward, reverse);
+
+        let mut chunk_grouped = points;
+        chunk_grouped
+            .sort_by_key(|&(x, z)| (x.div_euclid(CHUNK_SIZE_I), z.div_euclid(CHUNK_SIZE_I), x, z));
+        for (x, z) in chunk_grouped {
+            let expected = forward
+                .iter()
+                .find_map(|&((sample_x, sample_z), height)| {
+                    (sample_x == x && sample_z == z).then_some(height)
+                })
+                .expect("ordered sample should exist in the baseline");
+            let actual = generator.surface_height_at(x, z);
+            assert_eq!(actual, expected, "surface changed at {x},{z}");
+            assert!((8..=208).contains(&actual));
+        }
+    }
+
+    #[test]
+    fn default_lush_river_focus_rejects_the_frame_filling_karst_wall() {
+        let generator = TerrainGenerator::new(12_345)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush)
+            .with_terrain_grammar(TerrainGrammarVersion::V2);
+        let rejected_anchor = IVec2::new(-32, 32);
+        let rejected_cross = generator
+            .hydrographic_focus_cross_section(rejected_anchor.x, rejected_anchor.y)
+            .expect("the former QA anchor should still describe a real channel");
+        let rejected_context =
+            generator.hydrographic_focus_context(rejected_anchor.x, rejected_anchor.y, 64);
+        assert!(
+            rejected_cross.max_bank_height > HYDROGRAPHIC_FOCUS_MAX_BANK_HEIGHT
+                || rejected_cross.bank_height_span > HYDROGRAPHIC_FOCUS_MAX_BANK_SPAN
+                || rejected_context.max_surface_height > HYDROGRAPHIC_FOCUS_MAX_CONTEXT_HEIGHT
+                || rejected_context.relief_span() > HYDROGRAPHIC_FOCUS_MAX_CONTEXT_RELIEF,
+            "the known wall anchor must fail the bounded visual-relief contract: cross={rejected_cross:?}, context={rejected_context:?}"
+        );
+
+        let focus = generator
+            .find_hydrographic_focus(0, 0, HYDROGRAPHIC_SEARCH_MAX_RADIUS)
+            .expect("default lush world should retain a bounded low-relief river focus");
+        assert_ne!(focus, rejected_anchor);
+        let cross = generator
+            .hydrographic_focus_cross_section(focus.x, focus.y)
+            .expect("selected focus must retain two banks");
+        let context = generator.hydrographic_focus_context(focus.x, focus.y, 64);
+        assert_eq!(cross.living_banks, 2);
+        assert!(cross.max_bank_height <= HYDROGRAPHIC_FOCUS_MAX_BANK_HEIGHT);
+        assert!(cross.bank_height_span <= HYDROGRAPHIC_FOCUS_MAX_BANK_SPAN);
+        assert!(context.open_water_probes <= 2);
+        assert!(context.max_surface_height <= HYDROGRAPHIC_FOCUS_MAX_CONTEXT_HEIGHT);
+        assert!(context.relief_span() <= HYDROGRAPHIC_FOCUS_MAX_CONTEXT_RELIEF);
     }
 
     #[test]
@@ -8468,6 +9996,85 @@ mod tests {
     }
 
     #[test]
+    fn volcanic_surface_detail_keeps_dry_ground_non_fluid_while_channel_fill_remains_lava() {
+        let generator = TerrainGenerator::new(12_345)
+            .with_world_profile(WorldProfile::AstralFrontier)
+            .with_scenery_quality(crate::settings::SceneryQuality::Lush);
+
+        for z in (-512..=512).step_by(13) {
+            for x in (-512..=512).step_by(11) {
+                assert_eq!(
+                    generator.surface_detail_block(
+                        Biome::VolcanicWaste,
+                        BlockType::Basalt,
+                        0,
+                        x,
+                        z,
+                    ),
+                    BlockType::Basalt,
+                    "surface grain must not create a disconnected Lava top at {x},{z}"
+                );
+            }
+        }
+
+        let layout = generator.astral_layout().expect("Astral layout");
+        let canyon_local_z = 82;
+        let canyon_local_x =
+            (-58.0 + (((canyon_local_z as f64) + 34.0) * 0.026).sin() * 13.0).round() as i32;
+        let canyon = layout.world_from_local(IVec2::new(canyon_local_x, canyon_local_z));
+        assert_eq!(generator.biome_at(canyon.x, canyon.y), Biome::VolcanicWaste);
+        assert!(generator.surface_height_at(canyon.x, canyon.y) < 52);
+
+        let mut chunk = Chunk::new(ChunkPos::new(
+            canyon.x.div_euclid(CHUNK_SIZE_I),
+            52_i32.div_euclid(CHUNK_SIZE_I),
+            canyon.y.div_euclid(CHUNK_SIZE_I),
+        ));
+        generator.generate(&mut chunk);
+        assert_eq!(
+            BlockType::from_voxel(chunk.get(
+                canyon.x.rem_euclid(CHUNK_SIZE_I) as usize,
+                52_i32.rem_euclid(CHUNK_SIZE_I) as usize,
+                canyon.y.rem_euclid(CHUNK_SIZE_I) as usize,
+            )),
+            BlockType::Lava,
+            "the explicit bounded channel-fill authority must still produce Lava"
+        );
+    }
+
+    #[test]
+    fn volcanic_surface_detail_is_legacy_lava_only_in_v1() {
+        let v1 = TerrainGenerator::new(12_345)
+            .with_world_profile(WorldProfile::AstralFrontier)
+            .with_terrain_grammar(TerrainGrammarVersion::V1);
+        let v2 = TerrainGenerator::new(12_345)
+            .with_world_profile(WorldProfile::AstralFrontier)
+            .with_terrain_grammar(TerrainGrammarVersion::V2);
+        let coordinate = (-512..=512).step_by(7).find_map(|z| {
+            (-512..=512).step_by(7).find_map(|x| {
+                (v1.surface_detail_block(Biome::VolcanicWaste, BlockType::Basalt, 0, x, z)
+                    == BlockType::Lava)
+                    .then_some((x, z))
+            })
+        });
+        let (x, z) = coordinate.expect("bounded sample should include V1 lava grain");
+
+        assert_eq!(
+            v1.surface_detail_block(Biome::VolcanicWaste, BlockType::Basalt, 0, x, z),
+            BlockType::Lava
+        );
+        assert_eq!(
+            v2.surface_detail_block(Biome::VolcanicWaste, BlockType::Basalt, 0, x, z),
+            BlockType::Basalt
+        );
+        assert_eq!(
+            v1.surface_detail_block(Biome::VolcanicWaste, BlockType::Basalt, 1, x, z),
+            BlockType::Basalt,
+            "the exact V1 rule only promoted flat top voxels"
+        );
+    }
+
+    #[test]
     fn off_quality_has_no_blocks_above_the_canonical_surface() {
         let generator =
             TerrainGenerator::new(12345).with_scenery_quality(crate::settings::SceneryQuality::Off);
@@ -8666,7 +10273,7 @@ mod tests {
 // Derive Copy/Clone only for lookup (biome blocks helper is `&self`-free).
 impl Clone for TerrainGenerator {
     fn clone(&self) -> Self {
-        Self::new(self.seed).with_scenery_quality(self.scenery_quality)
+        Self::from_identity(self.generation_identity())
     }
 }
 

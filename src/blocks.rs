@@ -1010,6 +1010,31 @@ mod tests {
     }
 
     #[test]
+    fn lava_vertex_emission_is_finite_hdr_and_within_every_budget() {
+        let lava = BlockType::Lava.into();
+        assert!(voxel_is_emissive(lava));
+
+        for budget in [
+            EmissionBudget::Low,
+            EmissionBudget::Balanced,
+            EmissionBudget::Cinematic,
+        ] {
+            let color = voxel_color_with_emission_budget(lava, budget);
+            assert!(color.iter().all(|channel| channel.is_finite()));
+            let peak = color[0].max(color[1]).max(color[2]);
+            let luminance = color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+            assert!(
+                peak > 1.0,
+                "Lava lost its HDR vertex authority in {budget:?}"
+            );
+            assert!(peak <= budget.max_peak_channel() + 1e-5);
+            assert!(luminance.is_finite());
+            assert!(luminance <= budget.max_luminance() + 1e-5);
+            assert!((0.0..=1.0).contains(&color[3]));
+        }
+    }
+
+    #[test]
     fn shuttle_blocks_map_from_voxel_ids() {
         assert_eq!(BlockType::from_voxel(26), BlockType::ShipHullDark);
         assert_eq!(BlockType::from_voxel(28), BlockType::CockpitGlass);

@@ -2,7 +2,12 @@
 name = "voxel-native"
 version = "0.1.0"
 edition = "2021"
-description = "Native voxel engine (successor to R93G) — Rust + Bevy + WGPU"
+description = "Native Rust/Bevy voxel engine for editable worlds and bounded planetary streaming"
+repository = "https://github.com/n0t3-droid/voxel-native"
+readme = "README.md"
+keywords = ["voxel", "bevy", "wgpu", "procedural-generation", "game-engine"]
+categories = ["game-development", "graphics", "rendering"]
+publish = false
 
 [dependencies]
 # Core engine: Bevy with default features (Vulkan/DX12/Metal via wgpu).
@@ -10,7 +15,7 @@ description = "Native voxel engine (successor to R93G) — Rust + Bevy + WGPU"
 # disable it. Dev builds stay fast because of the opt-level tweaks below.
 bevy = "0.14"
 
-# Noise / terrain generation (same ideas as R93G's terrain.ts).
+# Deterministic noise and terrain generation.
 noise = "0.9"
 
 # Fast hash maps for chunk lookup (chunk coords -> chunk data).
@@ -35,6 +40,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # In-game editor / debug panels (F3).
 bevy_egui = "0.28"
+
+[target.'cfg(windows)'.dependencies]
+# Atomic replacement of existing save metadata; `std::fs::rename` does not
+# replace an existing destination on Windows.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Clipboard support currently depends on unstable web-sys APIs that do not

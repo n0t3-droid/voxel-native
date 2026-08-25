@@ -151,7 +151,6 @@ fn tick_suit_vitals(time: Res<Time>, mut vitals: ResMut<SuitVitals>, player_q: Q
 fn load_player_from_world(
     active: Option<Res<crate::settings::ActiveWorld>>,
     pending: Res<crate::menu::PendingWorldLoad>,
-    settings: Res<WorldSettings>,
     mut query: Query<(&mut Transform, &mut Player)>,
 ) {
     if !pending.0 {
@@ -167,12 +166,12 @@ fn load_player_from_world(
     let mut translation = Vec3::new(pos[0], pos[1], pos[2]);
     let mut yaw = active.meta.player_yaw;
     let mut pitch = active.meta.player_pitch;
-    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed)
-        .with_world_profile(active.meta.world_profile);
+    let generator =
+        crate::terrain::TerrainGenerator::from_identity(active.meta.generation_identity());
     let bx = crate::chunk::floor_to_i32_safe(translation.x);
     let bz = crate::chunk::floor_to_i32_safe(translation.z);
     let surface = generator.surface_height_at(bx, bz);
-    if settings.effective_world_profile() == crate::settings::WorldProfile::Natural
+    if active.meta.world_profile == crate::settings::WorldProfile::Natural
         && (generator.biome_at(bx, bz).is_showcase_terrain()
             || translation.y > surface as f32 + 90.0)
     {

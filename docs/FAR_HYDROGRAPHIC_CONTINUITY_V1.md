@@ -39,7 +39,9 @@ Every existing ring worker already owns a fixed 65 by 65 toroidal height cache. 
 
 The four-corner rule is conservative: one isolated coarse wet sample cannot flood an outer-ring cell. It is deterministic, independent of build order, requires no flood fill, and has no hidden connectivity queue. Water and lava share one vertex-coloured mesh and therefore at most one extra entity per LOD.
 
-The terrain and fluid payloads are produced by the same bounded worker result. Installation checks the request's world, LOD, anchor, near-coverage mask, material detail and hydro mode, then validates both payloads before creating any new asset. A stale or over-budget pair publishes neither half. Existing terrain remains visible while a rejected request is coalesced for retry.
+The terrain and fluid payloads are produced by the same bounded worker result. The worker can now also carry the independently gated Far Semantic Cohorts v1 payload on L5. Installation checks the request's complete world identity, LOD, anchor, near-coverage mask and material detail, then validates every enabled CPU payload before creating any new asset. A stale, malformed or over-budget result publishes none of its new meshes. Existing terrain remains visible while a rejected request is coalesced for retry.
+
+Hydro's historical atomic contract remains explicit: terrain plus fluid is at most 653,008 B. Enabling the optional L5 cohort layer adds at most 104,976 B and raises the fully enabled terrain + fluid + cohort result ceiling to 757,984 B. Hydro evidence must report both fields and must not silently reinterpret the larger combined ceiling as Hydro-only cost.
 
 ## Alternatives evaluated
 
@@ -54,17 +56,22 @@ The terrain and fluid payloads are produced by the same bounded worker result. I
 | Quantity | Per ring | All six rings |
 |---|---:|---:|
 | Fluid entities | 1 | 6 |
-| Total far render entities (terrain + fluid) | 2 | 12 |
+| Hydro-only far render entities (terrain + fluid) | 2 | 12 |
 | Fluid classification queries | 3,721 | 22,326 per full rebuild |
 | Fluid biome queries | <= 3,721 | <= 22,326 per full rebuild |
 | Fluid vertices | <= 3,721 | <= 22,326 |
 | Fluid indices | <= 21,600 | <= 129,600 |
 | Fluid vertex/index payload | <= 265,008 B | <= 1,590,048 B |
-| Atomic terrain + fluid worker payload | <= 653,008 B | one worker only |
+| Hydro-only atomic terrain + fluid worker payload | <= 653,008 B | one worker only |
+| Optional cohort payload on L5 | <= 104,976 B | one combined cohort entity |
+| Fully enabled L5 terrain + fluid + cohort worker payload | <= 757,984 B | one worker only |
+| Maximum far render entities with optional cohorts | 3 on L5 | 13 total |
 | Build jobs in flight | shared | 1 |
 | Sample-cache windows | shared | 6 |
 
 The fluid layer adds no task, cache window, hash map, connectivity graph, collider, material per cell, save record, or authoritative voxel. Dry rings create no fluid entity. The six established terrain entities and their actual-ECS telemetry retain their original meaning; fluid residency has a separate bounded post-deferred observer and separate scheduler-vs-ECS truth fields.
+
+Hydro telemetry preserves water and lava independently at three levels: per-ring actual ECS indices, per-ring scheduler indices, and last-build indices. `resident_fluid_kind_integrity_valid` independently proves that Water + Lava equals total fluid indices globally and per ring, and that both category counts are divisible by the six indices emitted per quad. This reason is separate from population/budget failure and scheduler mismatch, so a category-corrupt payload cannot hide inside otherwise matching totals. The QA report also exports `budget_hydro_atomic_ring_build_bytes = 653008` separately from the optional-layer-inclusive `budget_atomic_ring_build_bytes = 757984`.
 
 ## Measured CPU/query distribution
 
@@ -82,7 +89,7 @@ Every enabled sample issued exactly 3,721 fluid classifications and 835 conditio
 - There are no side walls, waves, transparency, refraction, foam, shoreline wetness, flow direction, depth, buoyancy, or physics. Those require separate evidence and cannot be inferred from this layer.
 - A biome query at a lava-eligible low vertex is deliberate. Because water/lava precedence depends on `VolcanicWaste`, removing it would mislabel lava basins as water.
 - The far layer describes procedural terrain. User edits remain near-world authority and are never copied into this mesh.
-- Disabling the gate is the rollback. Legacy, Bridge-v1, and Bridge-v2 solid-surface modes remain unchanged and can be A/B tested independently.
+- Disabling the Hydro gate is its rollback. Legacy, Bridge-v1, Bridge-v2 and the separate semantic-cohort gate remain independently selectable and can be A/B tested without changing Hydro's 653,008 B contract.
 
 ## Verification contract
 
@@ -95,7 +102,10 @@ Automated tests cover:
 - exact vertex/index/query/entity/byte ceilings;
 - repeated pressure/dirty-mask saturation;
 - hydro mode as cache and stale-result identity;
+- per-ring and total Water/Lava scheduler and actual-ECS counts;
+- exact Water + Lava conservation, six-index quad divisibility, and an independently reported category-integrity failure;
 - post-deferred fluid ECS truth, duplicate-slot and over-budget rejection;
+- separate 653,008 B Hydro-only and 757,984 B fully enabled atomic worker ceilings;
 - preservation of the pre-existing planetary suite.
 
 Before release acceptance, run the same release binary and fixed seed/route with Hydro v1 on and off for Natural and Astral profiles. Inspect screenshots and `report.ron`; do not infer visual success from mean FPS. Acceptance requires no blue plane over land, no visible terrain/fluid half-install, no near/far water-level jump at the transition, no lava-to-water category error, stable horizon depth ordering, exact telemetry agreement, and no budget rejection. Transparent water is explicitly a future experiment, not part of this release claim.

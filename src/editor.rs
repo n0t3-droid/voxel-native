@@ -16,7 +16,7 @@ use crate::icons::Icon;
 use crate::neurocore::{NeuroCore, QualityState, RuntimeProfile};
 use crate::player::Player;
 use crate::settings::{
-    GraphicsMode, HudProfile, SceneryQuality, TimeMode, WeatherPreset, WorldModeCard,
+    ActiveWorld, GraphicsMode, HudProfile, SceneryQuality, TimeMode, WeatherPreset, WorldModeCard,
     WorldSettings, SAFE_MAX_CHUNKS_PER_FRAME, SAFE_MAX_IN_FLIGHT_MESHES,
     SAFE_MAX_IN_FLIGHT_TERRAIN, SAFE_MAX_MESHES_PER_FRAME, SAFE_MAX_MESH_APPLIES_PER_FRAME,
     SAFE_MAX_RENDER_DISTANCE, SAFE_MAX_VERTICAL_CHUNKS, SAFE_MIN_CHUNKS_PER_FRAME,
@@ -2105,7 +2105,7 @@ fn handle_regen(
     mut state: ResMut<EditorState>,
     mut world: ResMut<VoxelWorld>,
     mut streamer: ResMut<ChunkStreamer>,
-    settings: Res<WorldSettings>,
+    active: Option<Res<ActiveWorld>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
@@ -2114,9 +2114,16 @@ fn handle_regen(
     }
     state.regen_requested = false;
 
-    world.generator = crate::terrain::TerrainGenerator::new(settings.seed)
-        .with_world_profile(settings.effective_world_profile())
-        .with_scenery_quality(settings.scenery_quality);
+    // Regeneration may rebuild the active world's chunks, but it must never
+    // reinterpret them through mutable presentation settings. The persisted
+    // generation identity is the sole authority, including its terrain-byte
+    // grammar. If no named world is active, retain the generator's existing
+    // identity instead of silently upgrading to the current grammar.
+    let identity = active
+        .as_deref()
+        .map(|active| active.meta.generation_identity())
+        .unwrap_or_else(|| world.generator.generation_identity());
+    world.generator = crate::terrain::TerrainGenerator::from_identity(identity);
     world.clear_chunks();
     world.column_top_cy.clear();
     world.edit_dirty_chunks.clear();
@@ -2139,7 +2146,10 @@ fn handle_regen(
             let _ = meshes.remove(&entry.handle);
         }
     }
-    info!("World regenerated with seed {}", settings.seed);
+    info!(
+        "World regenerated with seed {} and terrain grammar {:?}",
+        identity.seed, identity.terrain_grammar
+    );
 }
 
 fn handle_screenshot(

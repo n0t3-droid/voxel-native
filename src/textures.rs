@@ -582,6 +582,14 @@ fn decode_custom_png(bytes: Vec<u8>, remaining_payload_bytes: usize) -> Result<I
 }
 
 pub(crate) fn terrain_alpha_mode_for_block(block: BlockType) -> AlphaMode {
+    if block == BlockType::Lava {
+        // The process-wide render policy is `Msaa::Off`. In Bevy 0.14,
+        // AlphaToCoverage without MSAA becomes a binary alpha mask, so Lava's
+        // authored 0.88 alpha was opaque in practice already. State that
+        // depth-stable policy explicitly instead of advertising unsupported
+        // translucency for a surface that can cover much of the screen.
+        return AlphaMode::Opaque;
+    }
     let alpha = block.color().to_srgba().alpha;
     if alpha < 0.99 {
         // Chunk terrain can fill the whole screen. Alpha-to-coverage keeps
@@ -603,6 +611,13 @@ fn terrain_material_profile(block: BlockType) -> TerrainMaterialProfile {
             perceptual_roughness: 0.18,
             reflectance: 0.50,
             alpha_mode: AlphaMode::AlphaToCoverage,
+        }
+    } else if block == BlockType::Lava {
+        TerrainMaterialProfile {
+            base_alpha: 1.0,
+            perceptual_roughness: 1.0,
+            reflectance: 0.05,
+            alpha_mode: AlphaMode::Opaque,
         }
     } else if matches!(
         block,
@@ -638,6 +653,26 @@ fn terrain_material_profile(block: BlockType) -> TerrainMaterialProfile {
             alpha_mode: terrain_alpha_mode_for_block(block),
         }
     }
+}
+
+/// Material-space emission for built-in terrain.
+///
+/// Lava already receives HDR vertex colour through the explicit
+/// [`crate::voxel_budget::EmissionBudget`] path in the mesher. Giving the same
+/// large, connected surface an additional uniform material emissive term made
+/// that budget non-authoritative and erased the procedural swatch under ACES.
+/// Other emissive blocks intentionally retain their established material term.
+fn terrain_material_emissive(block: BlockType) -> LinearRgba {
+    if block == BlockType::Lava || !block.is_emissive() {
+        return LinearRgba::BLACK;
+    }
+
+    let lin = block.color().to_linear();
+    LinearRgba::rgb(
+        lin.red * 3.2 + 0.35,
+        lin.green * 3.2 + 0.35,
+        lin.blue * 3.2 + 0.35,
+    )
 }
 
 impl MaterialLibrary {
@@ -712,16 +747,7 @@ impl MaterialLibrary {
                     | BlockType::BlossomLeaves
                     | BlockType::SakuraPetals
             );
-            let emissive = if swatch.block.is_emissive() {
-                let lin = swatch.block.color().to_linear();
-                LinearRgba::rgb(
-                    lin.red * 3.2 + 0.35,
-                    lin.green * 3.2 + 0.35,
-                    lin.blue * 3.2 + 0.35,
-                )
-            } else {
-                LinearRgba::BLACK
-            };
+            let emissive = terrain_material_emissive(swatch.block);
             let standard_material = StandardMaterial {
                 base_color: Color::WHITE.with_alpha(profile.base_alpha),
                 base_color_texture: Some(image),
@@ -2671,12 +2697,11 @@ mod tests {
     }
 
     #[test]
-    fn translucent_builtin_world_materials_avoid_sorted_alpha_blend() {
+    fn translucent_non_lava_world_materials_avoid_sorted_alpha_blend() {
         for block in [
             BlockType::Water,
             BlockType::Ice,
             BlockType::Crystal,
-            BlockType::Lava,
             BlockType::CockpitGlass,
             BlockType::LuminiteCrystal,
             BlockType::IridiumVein,
@@ -2686,6 +2711,80 @@ mod tests {
                 AlphaMode::AlphaToCoverage,
                 "{block:?} should stay out of Bevy's sorted alpha-blend terrain path"
             );
+        }
+    }
+
+    #[test]
+    fn lava_material_has_one_bounded_vertex_emission_authority() {
+        let mut library = MaterialLibrary::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let mut vegetation_materials = Assets::<crate::vegetation::VegetationMaterial>::default();
+        let mut images = Assets::<Image>::default();
+        rebuild_without_custom(
+            &mut library,
+            &mut materials,
+            &mut vegetation_materials,
+            &mut images,
+        );
+
+        let lava = materials
+            .get(
+                library
+                    .handles
+                    .get(&(BlockType::Lava as MaterialId))
+                    .expect("built-in Lava material handle"),
+            )
+            .expect("built-in Lava material");
+        assert_eq!(lava.emissive, LinearRgba::BLACK);
+        assert_eq!(lava.alpha_mode, AlphaMode::Opaque);
+        assert_eq!(lava.base_color.to_srgba().alpha, 1.0);
+        assert_eq!(
+            terrain_alpha_mode_for_block(BlockType::Lava),
+            AlphaMode::Opaque
+        );
+    }
+
+    #[test]
+    fn lava_material_split_does_not_mutate_procedural_swatch_detail() {
+        let lava = bake_block_swatch(
+            BlockType::Lava,
+            "lava",
+            BlockStyle::Lava,
+            BUILTIN_SWATCH_SIZE,
+        );
+        let signatures_before_material_composition = downsample_signature_count(&lava, 8);
+
+        assert_eq!(lava.rgba.len(), 65_536);
+        assert!(unique_rgb_count(&lava) > 512);
+        assert!(luma_range(&lava) > 54);
+        assert!(
+            signatures_before_material_composition > 14,
+            "Lava swatch detail changed before StandardMaterial composition"
+        );
+    }
+
+    #[test]
+    fn non_lava_emissive_material_terms_remain_exactly_unchanged() {
+        for block in [
+            BlockType::Crystal,
+            BlockType::NeonCyan,
+            BlockType::NeonMagenta,
+            BlockType::NeonAmber,
+            BlockType::EngineCore,
+            BlockType::LuminiteCrystal,
+            BlockType::MagnetiteOre,
+            BlockType::IridiumVein,
+            BlockType::NeonGlass,
+            BlockType::ShojiLamp,
+        ] {
+            assert!(block.is_emissive(), "test list drifted for {block:?}");
+            let lin = block.color().to_linear();
+            let previous = LinearRgba::rgb(
+                lin.red * 3.2 + 0.35,
+                lin.green * 3.2 + 0.35,
+                lin.blue * 3.2 + 0.35,
+            );
+            assert_eq!(terrain_material_emissive(block), previous, "{block:?}");
         }
     }
 

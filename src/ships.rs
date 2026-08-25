@@ -13,14 +13,14 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::blocks::BlockType;
+use crate::blocks::{BlockType, AIR};
 use crate::director::{SimulationDirector, UnifiedTelemetry};
 use crate::menu::{GameState, PendingWorldLoad};
 use crate::mode::{ActiveMode, ModeContext};
 use crate::neurocore::RuntimeProfile;
 use crate::player::Player;
 use crate::settings::{ActiveWorld, WorldSettings};
-use crate::world::VoxelWorld;
+use crate::world::{ChunkStreamer, VoxelWorld, WorldSet};
 
 pub struct ShipPlugin;
 
@@ -33,12 +33,19 @@ impl Plugin for ShipPlugin {
             .insert_resource(CockpitTransition::default())
             .insert_resource(ShipFxCache::default())
             .insert_resource(ShipInputCapture::default())
+            .insert_resource(PendingDefaultScoutSpawn::default())
             .add_systems(OnEnter(GameState::MainMenu), cleanup_ship_runtime)
             .add_systems(OnEnter(GameState::InGame), spawn_saved_ships_once)
             .add_systems(
                 PreUpdate,
                 capture_ship_input
                     .after(EguiSet::BeginFrame)
+                    .run_if(in_state(GameState::InGame)),
+            )
+            .add_systems(
+                Update,
+                resolve_pending_default_scout_spawn
+                    .after(WorldSet::Mesh)
                     .run_if(in_state(GameState::InGame)),
             )
             .add_systems(
@@ -3054,11 +3061,445 @@ fn cockpit_material(
     mat
 }
 
+// Default-ship spawn plan, v1.
+//
+// Three bounded alternatives were evaluated:
+// 1. Keep the historical (+14,+18) offset and sample only its centre. This is
+//    cheap, but a 16+ block-wide Scout can still intersect a cliff or canopy.
+// 2. Trust only the heightfield-derived hover plan. This cannot see restored
+//    edits, authored structures, fluids, or still-streaming chunks.
+// 3. Selected: use the bounded heightfield plan only as a candidate, then keep
+//    a bounded pending request until the current exact streaming set resolves
+//    the complete orientation-independent hull/clearance envelope. Only that
+//    authoritative second gate may create the default ship.
+//
+// The selected plan is pure, deterministic and rollback-local to
+// `default_scout_spawn_plan`. It performs at most 8 * 2,809 = 22,472 terrain
+// queries once per world entry. Its result never directly spawns. An invalid
+// blueprint, arithmetic overflow, unresolved request-set slot, occupied voxel,
+// or fixed wait/query cap fails closed without mutating saves. A
+// steep-but-representable world may still propose its least-relief site, but
+// must pass exactly the same authoritative gate.
+const DEFAULT_SCOUT_CANDIDATE_OFFSETS: [IVec2; 8] = [
+    IVec2::new(14, 18),
+    IVec2::new(-14, 18),
+    IVec2::new(18, -14),
+    IVec2::new(-18, -14),
+    IVec2::new(28, 0),
+    IVec2::new(-28, 0),
+    IVec2::new(0, 28),
+    IVec2::new(0, -28),
+];
+const DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS: i32 = 18;
+// Terrain's current Lush tree grammar declares max_extent <= 7 blocks. The
+// extra block is a conservative seam/rounding halo around the rotated hull.
+const PROCEDURAL_VEGETATION_HORIZONTAL_CLEARANCE_BLOCKS: i32 = 8;
+// Current maximum is a 17-block Lush Jungle trunk + 5-block crown lift + a
+// 3-block terminal crown radius = 25 blocks above the surface. Thirty-two
+// deliberately leaves seven blocks of version headroom. This is a
+// procedural-vegetation bound, not
+// a false claim about arbitrary saved edits or authored structures.
+const PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS: i32 = 32;
+const DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS: i32 = 2;
+const DEFAULT_SCOUT_PREFERRED_RELIEF_BLOCKS: i32 = 4;
+const DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP: usize = 2_809;
+const DEFAULT_SCOUT_TOTAL_SURFACE_QUERY_CAP: usize =
+    DEFAULT_SCOUT_CANDIDATE_OFFSETS.len() * DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP;
+const DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS: i32 = 2;
+const DEFAULT_SCOUT_AUTHORITY_VERTICAL_SPAN_CAP: usize = 32;
+const DEFAULT_SCOUT_AUTHORITY_CHUNK_CHECK_CAP: usize = 64;
+const DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP: usize = 53_792;
+const DEFAULT_SCOUT_AUTHORITY_WAIT_FRAME_CAP: u16 = 900;
+// Bevy's world transform is f32. Inside this inclusive range every integer
+// coordinate is representable; the authored half-block root offset may round
+// by at most half a block, which remains inside the explicit two-block
+// authority clearance. Outside it, a rounded ECS transform could leave the
+// integer voxel volume that was actually checked, so default spawning fails
+// closed until the engine has a floating-origin or double-precision contract.
+const DEFAULT_SCOUT_RENDER_EXACT_INTEGER_LIMIT: i64 = 1_i64 << 24;
+const _: () = assert!(
+    (DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS as usize
+        + DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS as usize)
+        .saturating_mul(2)
+        .saturating_add(1)
+        .saturating_mul(
+            (DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS as usize
+                + DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS as usize)
+                .saturating_mul(2)
+                .saturating_add(1),
+        )
+        .saturating_mul(DEFAULT_SCOUT_AUTHORITY_VERTICAL_SPAN_CAP)
+        == DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScoutSpawnEnvelope {
+    footprint_radius_blocks: i32,
+    vegetation_scan_radius_blocks: i32,
+    min_voxel_y: i32,
+    max_voxel_y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DefaultScoutSpawnPlan {
+    center: IVec2,
+    root_y: i32,
+    candidate_index: usize,
+    footprint_radius_blocks: i32,
+    vegetation_scan_radius_blocks: i32,
+    footprint_min_surface: i32,
+    footprint_max_surface: i32,
+    vegetation_max_surface: i32,
+    terrain_relief_blocks: i32,
+    surface_queries: usize,
+    preferred_site: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingDefaultScoutSpawnRequest {
+    plan: DefaultScoutSpawnPlan,
+    yaw: f32,
+    visual_detail: ShipVisualDetail,
+    waited_frames: u16,
+}
+
+#[derive(Resource, Debug, Default)]
+struct PendingDefaultScoutSpawn {
+    request: Option<PendingDefaultScoutSpawnRequest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefaultScoutAuthorityResult {
+    Clear {
+        chunk_checks: usize,
+        voxel_queries: usize,
+    },
+    Pending,
+    Occupied(IVec3),
+    Invalid,
+}
+
+fn scout_spawn_envelope(bp: &ShipBlueprint) -> Option<ScoutSpawnEnvelope> {
+    let max_abs_x = bp
+        .voxels
+        .iter()
+        .map(|voxel| i64::from(voxel.pos.x).abs())
+        .max()?;
+    let max_abs_z = bp
+        .voxels
+        .iter()
+        .map(|voxel| i64::from(voxel.pos.z).abs())
+        .max()?;
+    let min_voxel_y = bp.voxels.iter().map(|voxel| voxel.pos.y).min()?;
+    let max_voxel_y = bp.voxels.iter().map(|voxel| voxel.pos.y).max()?;
+
+    // Voxel centres are integral; +1 in doubled coordinates includes each
+    // outer half-block. The circumscribed radius contains the full rectangular
+    // footprint under every yaw, avoiding float/trig decisions at world scale.
+    let twice_x = max_abs_x.checked_mul(2)?.checked_add(1)?;
+    let twice_z = max_abs_z.checked_mul(2)?.checked_add(1)?;
+    let required_diameter_squared = twice_x
+        .checked_mul(twice_x)?
+        .checked_add(twice_z.checked_mul(twice_z)?)?;
+    let footprint_radius_blocks =
+        (0..=DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS).find(|radius| {
+            let diameter = i64::from(*radius) * 2;
+            diameter * diameter >= required_diameter_squared
+        })?;
+    let vegetation_scan_radius_blocks =
+        footprint_radius_blocks.checked_add(PROCEDURAL_VEGETATION_HORIZONTAL_CLEARANCE_BLOCKS)?;
+    let side = usize::try_from(
+        vegetation_scan_radius_blocks
+            .checked_mul(2)?
+            .checked_add(1)?,
+    )
+    .ok()?;
+    if side.checked_mul(side)? > DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP {
+        return None;
+    }
+
+    Some(ScoutSpawnEnvelope {
+        footprint_radius_blocks,
+        vegetation_scan_radius_blocks,
+        min_voxel_y,
+        max_voxel_y,
+    })
+}
+
+fn bounded_scout_candidate_center(anchor: IVec2, offset: IVec2, scan_radius_blocks: i32) -> IVec2 {
+    let radius = i64::from(scan_radius_blocks.max(0));
+    let min_center = i64::from(i32::MIN) + radius;
+    let max_center = i64::from(i32::MAX) - radius;
+    let bounded = |anchor: i32, offset: i32| {
+        (i64::from(anchor) + i64::from(offset)).clamp(min_center, max_center) as i32
+    };
+    IVec2::new(bounded(anchor.x, offset.x), bounded(anchor.y, offset.y))
+}
+
+fn sample_scout_spawn_candidate(
+    center: IVec2,
+    candidate_index: usize,
+    envelope: ScoutSpawnEnvelope,
+    surface_height_at: &mut impl FnMut(i32, i32) -> i32,
+) -> Option<DefaultScoutSpawnPlan> {
+    let mut footprint_min_surface = i32::MAX;
+    let mut footprint_max_surface = i32::MIN;
+    let mut vegetation_max_surface = i32::MIN;
+    let mut surface_queries = 0usize;
+
+    for dz in -envelope.vegetation_scan_radius_blocks..=envelope.vegetation_scan_radius_blocks {
+        for dx in -envelope.vegetation_scan_radius_blocks..=envelope.vegetation_scan_radius_blocks {
+            if surface_queries >= DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP {
+                return None;
+            }
+            let wx = center.x.checked_add(dx)?;
+            let wz = center.y.checked_add(dz)?;
+            let surface = surface_height_at(wx, wz);
+            surface_queries = surface_queries.checked_add(1)?;
+            vegetation_max_surface = vegetation_max_surface.max(surface);
+            if dx.abs() <= envelope.footprint_radius_blocks
+                && dz.abs() <= envelope.footprint_radius_blocks
+            {
+                footprint_min_surface = footprint_min_surface.min(surface);
+                footprint_max_surface = footprint_max_surface.max(surface);
+            }
+        }
+    }
+
+    let terrain_relief_blocks = footprint_max_surface.checked_sub(footprint_min_surface)?;
+    let root_y = i64::from(vegetation_max_surface)
+        .checked_add(i64::from(PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS))?
+        .checked_add(i64::from(DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS))?
+        .checked_sub(i64::from(envelope.min_voxel_y))?;
+    let root_y = i32::try_from(root_y).ok()?;
+
+    Some(DefaultScoutSpawnPlan {
+        center,
+        root_y,
+        candidate_index,
+        footprint_radius_blocks: envelope.footprint_radius_blocks,
+        vegetation_scan_radius_blocks: envelope.vegetation_scan_radius_blocks,
+        footprint_min_surface,
+        footprint_max_surface,
+        vegetation_max_surface,
+        terrain_relief_blocks,
+        surface_queries,
+        preferred_site: terrain_relief_blocks <= DEFAULT_SCOUT_PREFERRED_RELIEF_BLOCKS,
+    })
+}
+
+fn scout_spawn_candidate_is_better(
+    candidate: DefaultScoutSpawnPlan,
+    current: DefaultScoutSpawnPlan,
+) -> bool {
+    (
+        candidate.terrain_relief_blocks,
+        candidate.vegetation_max_surface,
+        candidate.candidate_index,
+    ) < (
+        current.terrain_relief_blocks,
+        current.vegetation_max_surface,
+        current.candidate_index,
+    )
+}
+
+fn default_scout_spawn_plan(
+    anchor: IVec2,
+    bp: &ShipBlueprint,
+    mut surface_height_at: impl FnMut(i32, i32) -> i32,
+) -> Option<DefaultScoutSpawnPlan> {
+    let envelope = scout_spawn_envelope(bp)?;
+    let mut visited_centers = Vec::with_capacity(DEFAULT_SCOUT_CANDIDATE_OFFSETS.len());
+    let mut best_preferred = None;
+    let mut best_fallback = None;
+    let mut total_surface_queries = 0usize;
+
+    for (candidate_index, offset) in DEFAULT_SCOUT_CANDIDATE_OFFSETS.iter().copied().enumerate() {
+        let center =
+            bounded_scout_candidate_center(anchor, offset, envelope.vegetation_scan_radius_blocks);
+        if visited_centers.contains(&center) {
+            continue;
+        }
+        visited_centers.push(center);
+
+        let Some(candidate) =
+            sample_scout_spawn_candidate(center, candidate_index, envelope, &mut surface_height_at)
+        else {
+            continue;
+        };
+        total_surface_queries = total_surface_queries.checked_add(candidate.surface_queries)?;
+        if total_surface_queries > DEFAULT_SCOUT_TOTAL_SURFACE_QUERY_CAP {
+            return None;
+        }
+
+        let slot = if candidate.preferred_site {
+            &mut best_preferred
+        } else {
+            &mut best_fallback
+        };
+        if slot.is_none_or(|current| scout_spawn_candidate_is_better(candidate, current)) {
+            *slot = Some(candidate);
+        }
+    }
+
+    let mut selected = best_preferred.or(best_fallback)?;
+    selected.surface_queries = total_surface_queries;
+    Some(selected)
+}
+
+fn default_scout_authority_bounds(
+    plan: DefaultScoutSpawnPlan,
+    blueprint: &ShipBlueprint,
+) -> Option<(IVec3, IVec3)> {
+    let envelope = scout_spawn_envelope(blueprint)?;
+    let radius = envelope
+        .footprint_radius_blocks
+        .checked_add(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)?;
+    let min = IVec3::new(
+        plan.center.x.checked_sub(radius)?,
+        plan.root_y
+            .checked_add(envelope.min_voxel_y)?
+            .checked_sub(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)?,
+        plan.center.y.checked_sub(radius)?,
+    );
+    let max = IVec3::new(
+        plan.center.x.checked_add(radius)?,
+        plan.root_y
+            .checked_add(envelope.max_voxel_y)?
+            .checked_add(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)?,
+        plan.center.y.checked_add(radius)?,
+    );
+    let side = usize::try_from(max.x.checked_sub(min.x)?.checked_add(1)?).ok()?;
+    let depth = usize::try_from(max.z.checked_sub(min.z)?.checked_add(1)?).ok()?;
+    let height = usize::try_from(max.y.checked_sub(min.y)?.checked_add(1)?).ok()?;
+    if height > DEFAULT_SCOUT_AUTHORITY_VERTICAL_SPAN_CAP
+        || side.checked_mul(depth)?.checked_mul(height)? > DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP
+    {
+        return None;
+    }
+    Some((min, max))
+}
+
+fn default_scout_spawn_translation(
+    plan: DefaultScoutSpawnPlan,
+    blueprint: &ShipBlueprint,
+) -> Option<Vec3> {
+    let (min, max) = default_scout_authority_bounds(plan, blueprint)?;
+    if [min.x, min.y, min.z, max.x, max.y, max.z]
+        .into_iter()
+        .any(|coordinate| i64::from(coordinate).abs() > DEFAULT_SCOUT_RENDER_EXACT_INTEGER_LIMIT)
+    {
+        return None;
+    }
+
+    // This is the exact representation later passed to Bevy. Binding the
+    // safety decision to these same f32 operations prevents an extreme i32
+    // centre from rounding to a different, unchecked part of the world.
+    let translation = Vec3::new(
+        plan.center.x as f32 + 0.5,
+        plan.root_y as f32,
+        plan.center.y as f32 + 0.5,
+    );
+    if !translation.is_finite() {
+        return None;
+    }
+    let clearance = f64::from(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS);
+    let root_delta = [
+        (f64::from(translation.x) - f64::from(plan.center.x)).abs(),
+        (f64::from(translation.y) - f64::from(plan.root_y)).abs(),
+        (f64::from(translation.z) - f64::from(plan.center.y)).abs(),
+    ];
+    if root_delta.into_iter().any(|delta| delta > clearance) {
+        return None;
+    }
+    Some(translation)
+}
+
+fn default_scout_authority_check(
+    world: &VoxelWorld,
+    streamer: &ChunkStreamer,
+    plan: DefaultScoutSpawnPlan,
+    blueprint: &ShipBlueprint,
+) -> DefaultScoutAuthorityResult {
+    if default_scout_spawn_translation(plan, blueprint).is_none() {
+        return DefaultScoutAuthorityResult::Invalid;
+    }
+    let Some((min, max)) = default_scout_authority_bounds(plan, blueprint) else {
+        return DefaultScoutAuthorityResult::Invalid;
+    };
+    let chunk_size = crate::chunk::CHUNK_SIZE_I;
+    let min_chunk = IVec3::new(
+        min.x.div_euclid(chunk_size),
+        min.y.div_euclid(chunk_size),
+        min.z.div_euclid(chunk_size),
+    );
+    let max_chunk = IVec3::new(
+        max.x.div_euclid(chunk_size),
+        max.y.div_euclid(chunk_size),
+        max.z.div_euclid(chunk_size),
+    );
+    let mut chunk_checks = 0usize;
+    for cy in min_chunk.y..=max_chunk.y {
+        for cz in min_chunk.z..=max_chunk.z {
+            for cx in min_chunk.x..=max_chunk.x {
+                chunk_checks = chunk_checks.saturating_add(1);
+                if chunk_checks > DEFAULT_SCOUT_AUTHORITY_CHUNK_CHECK_CAP {
+                    return DefaultScoutAuthorityResult::Invalid;
+                }
+                let pos = crate::chunk::ChunkPos::new(cx, cy, cz);
+                if !streamer.requested_chunks.contains(&pos) {
+                    return DefaultScoutAuthorityResult::Pending;
+                }
+                if world.chunks.contains_key(&pos) {
+                    continue;
+                }
+                if world.edited_overrides.contains_key(&pos) {
+                    return DefaultScoutAuthorityResult::Pending;
+                }
+                let Some(probe_x) = cx.checked_mul(chunk_size) else {
+                    return DefaultScoutAuthorityResult::Invalid;
+                };
+                let Some(probe_y) = cy.checked_mul(chunk_size) else {
+                    return DefaultScoutAuthorityResult::Invalid;
+                };
+                let Some(probe_z) = cz.checked_mul(chunk_size) else {
+                    return DefaultScoutAuthorityResult::Invalid;
+                };
+                if world.voxel_at_if_resolved(probe_x, probe_y, probe_z) != Some(AIR) {
+                    return DefaultScoutAuthorityResult::Pending;
+                }
+            }
+        }
+    }
+
+    let mut voxel_queries = 0usize;
+    for y in min.y..=max.y {
+        for z in min.z..=max.z {
+            for x in min.x..=max.x {
+                voxel_queries = voxel_queries.saturating_add(1);
+                if voxel_queries > DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP {
+                    return DefaultScoutAuthorityResult::Invalid;
+                }
+                match world.voxel_at_if_resolved(x, y, z) {
+                    Some(voxel) if voxel == AIR => {}
+                    Some(_) => return DefaultScoutAuthorityResult::Occupied(IVec3::new(x, y, z)),
+                    None => return DefaultScoutAuthorityResult::Pending,
+                }
+            }
+        }
+    }
+    DefaultScoutAuthorityResult::Clear {
+        chunk_checks,
+        voxel_queries,
+    }
+}
+
 fn spawn_saved_ships_once(
     pending: Res<PendingWorldLoad>,
     active: Option<Res<ActiveWorld>>,
     settings: Res<WorldSettings>,
     mut inventory: ResMut<ShipInventory>,
+    mut pending_default: ResMut<PendingDefaultScoutSpawn>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -3069,6 +3510,7 @@ fn spawn_saved_ships_once(
     if !pending.0 {
         return;
     }
+    pending_default.request = None;
     for e in existing.iter() {
         if let Some(entity_commands) = commands.get_entity(e) {
             entity_commands.despawn_recursive();
@@ -3078,9 +3520,9 @@ fn spawn_saved_ships_once(
         return;
     };
     *inventory = active.meta.ship_inventory.clone();
-    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed)
-        .with_world_profile(settings.effective_world_profile());
-    let (player_anchor, player_yaw) = resolved_world_entry_anchor(&active, &settings, &generator);
+    let generator =
+        crate::terrain::TerrainGenerator::from_identity(active.meta.generation_identity());
+    let (player_anchor, player_yaw) = resolved_world_entry_anchor(&active, &generator);
     let visual_detail = ShipVisualDetail::for_profile(settings.runtime_profile);
 
     for saved in &active.meta.ships {
@@ -3104,34 +3546,125 @@ fn spawn_saved_ships_once(
             < 260.0
     });
     if active.meta.ships.is_empty() || !has_nearby_ship {
-        let px = player_anchor.x.round() as i32 + 14;
-        let pz = player_anchor.z.round() as i32 + 18;
-        let py = generator.surface_height_at(px, pz) as f32 + 4.0;
-        spawn_ship_entity(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &mut fx,
-            ShipKind::ScoutShuttle,
-            Vec3::new(px as f32 + 0.5, py, pz as f32 + 0.5),
-            player_yaw + std::f32::consts::PI,
-            false,
-            visual_detail,
-            None,
+        let anchor = IVec2::new(
+            crate::chunk::floor_to_i32_safe(player_anchor.x.round()),
+            crate::chunk::floor_to_i32_safe(player_anchor.z.round()),
         );
+        let scout = blueprint(ShipKind::ScoutShuttle);
+        if let Some(plan) =
+            default_scout_spawn_plan(anchor, &scout, |x, z| generator.surface_height_at(x, z))
+        {
+            pending_default.request = Some(PendingDefaultScoutSpawnRequest {
+                plan,
+                yaw: player_yaw + std::f32::consts::PI,
+                visual_detail,
+                waited_frames: 0,
+            });
+            info!(
+                "Default Scout candidate {} queued for bounded authoritative voxel clearance",
+                plan.candidate_index,
+            );
+        } else {
+            warn!("Default Scout spawn rejected: bounded terrain clearance could not be proven");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_pending_default_scout_spawn(
+    world: Res<VoxelWorld>,
+    streamer: Res<ChunkStreamer>,
+    mut pending: ResMut<PendingDefaultScoutSpawn>,
+    existing: Query<&GlobalTransform, With<ShipInstance>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut fx: ResMut<ShipFxCache>,
+) {
+    let Some(mut request) = pending.request else {
+        return;
+    };
+    let scout = blueprint(ShipKind::ScoutShuttle);
+    let Some(spawn_translation) = default_scout_spawn_translation(request.plan, &scout) else {
+        warn!("Default Scout spawn rejected: checked voxel bounds cannot represent the ECS transform exactly enough");
+        pending.request = None;
+        return;
+    };
+    let candidate_xz = Vec2::new(spawn_translation.x, spawn_translation.z);
+    if existing.iter().any(|transform| {
+        let translation = transform.translation();
+        Vec2::new(translation.x, translation.z).distance_squared(candidate_xz) < 260.0 * 260.0
+    }) {
+        info!("Default Scout request cancelled because a nearby ship already exists");
+        pending.request = None;
+        return;
+    }
+
+    if request.waited_frames >= DEFAULT_SCOUT_AUTHORITY_WAIT_FRAME_CAP {
+        warn!(
+            "Default Scout spawn rejected after {} frames: authoritative clearance never resolved",
+            DEFAULT_SCOUT_AUTHORITY_WAIT_FRAME_CAP,
+        );
+        pending.request = None;
+        return;
+    }
+    if !streamer.frontier_complete || !streamer.pending_terrain.is_empty() {
+        request.waited_frames = request.waited_frames.saturating_add(1);
+        pending.request = Some(request);
+        return;
+    }
+
+    match default_scout_authority_check(&world, &streamer, request.plan, &scout) {
+        DefaultScoutAuthorityResult::Clear {
+            chunk_checks,
+            voxel_queries,
+        } => {
+            spawn_ship_entity(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut fx,
+                ShipKind::ScoutShuttle,
+                spawn_translation,
+                request.yaw,
+                false,
+                request.visual_detail,
+                None,
+            );
+            info!(
+                "Default Scout spawned after {} authoritative chunk checks and {} voxel queries",
+                chunk_checks, voxel_queries,
+            );
+            pending.request = None;
+        }
+        DefaultScoutAuthorityResult::Pending => {
+            request.waited_frames = request.waited_frames.saturating_add(1);
+            pending.request = Some(request);
+        }
+        DefaultScoutAuthorityResult::Occupied(position) => {
+            warn!(
+                "Default Scout spawn rejected: authoritative voxel at [{}, {}, {}] occupies its clearance envelope",
+                position.x, position.y, position.z,
+            );
+            pending.request = None;
+        }
+        DefaultScoutAuthorityResult::Invalid => {
+            warn!("Default Scout spawn rejected: authoritative envelope exceeded a fixed bound");
+            pending.request = None;
+        }
     }
 }
 
 fn resolved_world_entry_anchor(
     active: &ActiveWorld,
-    settings: &WorldSettings,
     generator: &crate::terrain::TerrainGenerator,
 ) -> (Vec3, f32) {
     let pos = active.meta.player_pos;
     let mut anchor = Vec3::new(pos[0], pos[1], pos[2]);
     let mut yaw = active.meta.player_yaw;
-    if settings.effective_world_profile() == crate::settings::WorldProfile::Natural {
+    if active.meta.world_profile == crate::settings::WorldProfile::Natural {
         let bx = crate::chunk::floor_to_i32_safe(anchor.x);
         let bz = crate::chunk::floor_to_i32_safe(anchor.z);
         let surface = generator.surface_height_at(bx, bz);
@@ -3141,7 +3674,7 @@ fn resolved_world_entry_anchor(
                 yaw = 0.0;
             }
         }
-    } else if settings.effective_world_profile() == crate::settings::WorldProfile::AstralFrontier {
+    } else if active.meta.world_profile == crate::settings::WorldProfile::AstralFrontier {
         let bx = crate::chunk::floor_to_i32_safe(anchor.x);
         let bz = crate::chunk::floor_to_i32_safe(anchor.z);
         if !generator.biome_at(bx, bz).is_neon_showcase() {
@@ -3156,6 +3689,7 @@ fn resolved_world_entry_anchor(
 
 fn cleanup_ship_runtime(
     mut commands: Commands,
+    mut pending_default: ResMut<PendingDefaultScoutSpawn>,
     mut pilot: ResMut<PilotState>,
     mut placement: ResMut<ShipPlacementState>,
     mut boarding: ResMut<ShipBoardingState>,
@@ -3177,6 +3711,7 @@ fn cleanup_ship_runtime(
     *pilot = PilotState::default();
     *placement = ShipPlacementState::default();
     *boarding = ShipBoardingState::default();
+    pending_default.request = None;
     transition.clear();
 }
 
@@ -5213,6 +5748,339 @@ mod tests {
             assert!(bp.cockpit_offset.length() < 18.0);
             assert!(bp.exit_offset.length() < 20.0);
         }
+    }
+
+    #[test]
+    fn default_scout_envelope_contains_the_complete_blueprint_under_any_yaw() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let envelope = scout_spawn_envelope(&bp).expect("Scout blueprint must have a bounded hull");
+        let doubled_radius = i64::from(envelope.footprint_radius_blocks) * 2;
+        let radius_squared = doubled_radius * doubled_radius;
+
+        for voxel in &bp.voxels {
+            // Test the far outer corner of every one-block cell. Rotation
+            // preserves this distance, so the same envelope is valid at every
+            // default-player yaw without trigonometric rounding.
+            let x = i64::from(voxel.pos.x).abs() * 2 + 1;
+            let z = i64::from(voxel.pos.z).abs() * 2 + 1;
+            assert!(
+                x * x + z * z <= radius_squared,
+                "Scout voxel {:?} escaped radius {}",
+                voxel.pos,
+                envelope.footprint_radius_blocks
+            );
+        }
+        assert!(envelope.footprint_radius_blocks <= DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS);
+        assert_eq!(
+            envelope.vegetation_scan_radius_blocks,
+            envelope.footprint_radius_blocks + PROCEDURAL_VEGETATION_HORIZONTAL_CLEARANCE_BLOCKS
+        );
+        let side = (envelope.vegetation_scan_radius_blocks * 2 + 1) as usize;
+        assert!(side * side <= DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP);
+    }
+
+    #[test]
+    fn default_scout_authority_gate_requires_current_resolved_empty_voxels() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let plan = default_scout_spawn_plan(IVec2::ZERO, &bp, |_, _| 0).unwrap();
+        let (min, max) = default_scout_authority_bounds(plan, &bp).unwrap();
+        let chunk_size = crate::chunk::CHUNK_SIZE_I;
+        let min_chunk = IVec3::new(
+            min.x.div_euclid(chunk_size),
+            min.y.div_euclid(chunk_size),
+            min.z.div_euclid(chunk_size),
+        );
+        let max_chunk = IVec3::new(
+            max.x.div_euclid(chunk_size),
+            max.y.div_euclid(chunk_size),
+            max.z.div_euclid(chunk_size),
+        );
+        let mut world = VoxelWorld::new();
+        let mut streamer = ChunkStreamer::default();
+        let mut positions = Vec::new();
+        for cy in min_chunk.y..=max_chunk.y {
+            for cz in min_chunk.z..=max_chunk.z {
+                for cx in min_chunk.x..=max_chunk.x {
+                    let pos = crate::chunk::ChunkPos::new(cx, cy, cz);
+                    positions.push(pos);
+                    streamer.requested_chunks.insert(pos);
+                    world
+                        .column_top_cy
+                        .entry((cx, cz))
+                        .and_modify(|top| *top = (*top).min(min_chunk.y - 1))
+                        .or_insert(min_chunk.y - 1);
+                }
+            }
+        }
+
+        let clear = default_scout_authority_check(&world, &streamer, plan, &bp);
+        let DefaultScoutAuthorityResult::Clear {
+            chunk_checks,
+            voxel_queries,
+        } = clear
+        else {
+            panic!("expected a resolved-air clearance, got {clear:?}");
+        };
+        assert!(chunk_checks <= DEFAULT_SCOUT_AUTHORITY_CHUNK_CHECK_CAP);
+        assert!(voxel_queries <= DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP);
+
+        let first = positions[0];
+        streamer.requested_chunks.remove(&first);
+        assert_eq!(
+            default_scout_authority_check(&world, &streamer, plan, &bp),
+            DefaultScoutAuthorityResult::Pending
+        );
+        streamer.requested_chunks.insert(first);
+
+        world.edited_overrides.insert(
+            first,
+            crate::world::EditedChunkOverride {
+                voxels: vec![AIR; crate::chunk::CHUNK_VOLUME],
+                materials: Vec::new(),
+            },
+        );
+        assert_eq!(
+            default_scout_authority_check(&world, &streamer, plan, &bp),
+            DefaultScoutAuthorityResult::Pending
+        );
+        world.edited_overrides.remove(&first);
+
+        let (occupied_pos, lx, ly, lz) = crate::chunk::world_to_chunk(min.x, min.y, min.z);
+        let mut occupied = crate::chunk::Chunk::new(occupied_pos);
+        occupied.set(lx, ly, lz, crate::blocks::Voxel::from(BlockType::Water));
+        world.insert_chunk(occupied_pos, occupied);
+        assert_eq!(
+            default_scout_authority_check(&world, &streamer, plan, &bp),
+            DefaultScoutAuthorityResult::Occupied(min)
+        );
+    }
+
+    #[test]
+    fn default_scout_canopy_clearance_dominates_current_tree_height_contract() {
+        use crate::settings::SceneryQuality;
+        use crate::terrain::{Biome, TerrainGenerator};
+
+        let biomes = [
+            Biome::Ocean,
+            Biome::Beach,
+            Biome::Plains,
+            Biome::Forest,
+            Biome::Jungle,
+            Biome::Desert,
+            Biome::Savanna,
+            Biome::Tundra,
+            Biome::SnowyMountains,
+            Biome::Mountains,
+            Biome::Mesa,
+            Biome::Karst,
+            Biome::CrystalSpires,
+            Biome::VolcanicWaste,
+            Biome::GlacierShards,
+            Biome::AlienReef,
+        ];
+        let qualities = [
+            SceneryQuality::Off,
+            SceneryQuality::Lean,
+            SceneryQuality::Balanced,
+            SceneryQuality::Lush,
+        ];
+        let mut observed_max_trunk = 0;
+        for quality in qualities {
+            let generator = TerrainGenerator::new(0x5C07_5AFE).with_scenery_quality(quality);
+            for biome in biomes {
+                // 997 samples cover every integer variance band used by the
+                // public tree-height contract, including juvenile reductions.
+                for sample in 0..997 {
+                    let roll = (sample as f64 + 0.5) / 997.0;
+                    let (trunk_height, _) = generator.tree_height_for_biome(biome, roll);
+                    observed_max_trunk = observed_max_trunk.max(trunk_height);
+                    let current_max_crown_lift = 5;
+                    let current_max_terminal_cloud_radius = 3;
+                    assert!(
+                        trunk_height + current_max_crown_lift + current_max_terminal_cloud_radius
+                            <= PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS
+                    );
+                }
+            }
+        }
+        assert_eq!(observed_max_trunk, 17);
+
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let min_voxel_y = bp.voxels.iter().map(|voxel| voxel.pos.y).min().unwrap();
+        let plan = default_scout_spawn_plan(IVec2::ZERO, &bp, |_, _| 100).unwrap();
+        let ship_bottom_y = plan.root_y.checked_add(min_voxel_y).unwrap();
+        assert_eq!(
+            ship_bottom_y,
+            100 + PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS
+                + DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS
+        );
+    }
+
+    #[test]
+    fn default_scout_samples_canopy_roots_beyond_the_hull_footprint() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let envelope = scout_spawn_envelope(&bp).unwrap();
+        let canopy_root_x = envelope.footprint_radius_blocks + 7;
+        assert!(canopy_root_x <= envelope.vegetation_scan_radius_blocks);
+        let mut surface = |x: i32, z: i32| {
+            if x == canopy_root_x && z == 0 {
+                50
+            } else {
+                0
+            }
+        };
+
+        let plan = sample_scout_spawn_candidate(IVec2::ZERO, 0, envelope, &mut surface).unwrap();
+        assert_eq!(plan.footprint_max_surface, 0);
+        assert_eq!(plan.vegetation_max_surface, 50);
+        assert_eq!(
+            plan.root_y + envelope.min_voxel_y,
+            50 + PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS + DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS
+        );
+    }
+
+    #[test]
+    fn default_scout_rejects_the_historical_cliff_site_for_a_flat_candidate() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let plan = default_scout_spawn_plan(IVec2::ZERO, &bp, |x, _| if x >= 14 { 40 } else { 0 })
+            .unwrap();
+
+        assert_eq!(plan.candidate_index, 1);
+        assert_eq!(plan.center, IVec2::new(-14, 18));
+        assert_eq!(plan.terrain_relief_blocks, 0);
+        assert!(plan.preferred_site);
+    }
+
+    #[test]
+    fn default_scout_steep_world_uses_the_least_relief_hover_fallback() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let plan = default_scout_spawn_plan(IVec2::ZERO, &bp, |x, _| x.rem_euclid(10)).unwrap();
+        let envelope = scout_spawn_envelope(&bp).unwrap();
+
+        assert!(!plan.preferred_site);
+        assert!(plan.terrain_relief_blocks > DEFAULT_SCOUT_PREFERRED_RELIEF_BLOCKS);
+        assert_eq!(plan.candidate_index, 0);
+        assert!(
+            plan.root_y + envelope.min_voxel_y
+                >= plan.vegetation_max_surface
+                    + PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS
+                    + DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS
+        );
+    }
+
+    #[test]
+    fn default_scout_plan_is_deterministic_ordered_and_hard_capped() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let anchor = IVec2::new(-2_048, 4_096);
+        let mut first_queries = 0usize;
+        let first = default_scout_spawn_plan(anchor, &bp, |x, z| {
+            first_queries += 1;
+            x.rem_euclid(11) - z.rem_euclid(7)
+        })
+        .unwrap();
+        let mut replay_queries = 0usize;
+        let replay = default_scout_spawn_plan(anchor, &bp, |x, z| {
+            replay_queries += 1;
+            x.rem_euclid(11) - z.rem_euclid(7)
+        })
+        .unwrap();
+
+        assert_eq!(first, replay);
+        assert_eq!(first_queries, replay_queries);
+        assert_eq!(first.surface_queries, first_queries);
+        assert!(first_queries <= DEFAULT_SCOUT_TOTAL_SURFACE_QUERY_CAP);
+
+        let flat = default_scout_spawn_plan(anchor, &bp, |_, _| 12).unwrap();
+        assert_eq!(flat.candidate_index, 0);
+        assert_eq!(flat.center, anchor + DEFAULT_SCOUT_CANDIDATE_OFFSETS[0]);
+    }
+
+    #[test]
+    fn default_scout_integer_planning_is_total_but_render_gate_rejects_extreme_rounding() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let negative_anchor = IVec2::new(-900_000, -700_000);
+        let negative = default_scout_spawn_plan(negative_anchor, &bp, |_, _| -64).unwrap();
+        assert_eq!(
+            negative.center,
+            negative_anchor + DEFAULT_SCOUT_CANDIDATE_OFFSETS[0]
+        );
+        let negative_translation =
+            default_scout_spawn_translation(negative, &bp).expect("bounded f32 transform");
+        let (negative_min, negative_max) = default_scout_authority_bounds(negative, &bp).unwrap();
+        let envelope = scout_spawn_envelope(&bp).unwrap();
+        let hull_radius = envelope.footprint_radius_blocks as f64;
+        assert!(f64::from(negative_translation.x) - hull_radius >= f64::from(negative_min.x));
+        assert!(f64::from(negative_translation.x) + hull_radius <= f64::from(negative_max.x));
+        assert!(f64::from(negative_translation.z) - hull_radius >= f64::from(negative_min.z));
+        assert!(f64::from(negative_translation.z) + hull_radius <= f64::from(negative_max.z));
+        assert!(
+            f64::from(negative_translation.y + envelope.min_voxel_y as f32)
+                >= f64::from(negative_min.y)
+        );
+        assert!(
+            f64::from(negative_translation.y + envelope.max_voxel_y as f32)
+                <= f64::from(negative_max.y)
+        );
+
+        let safe_edge_anchor =
+            IVec2::splat(i32::try_from(DEFAULT_SCOUT_RENDER_EXACT_INTEGER_LIMIT).unwrap() - 128);
+        let safe_edge = default_scout_spawn_plan(safe_edge_anchor, &bp, |_, _| -64).unwrap();
+        assert!(default_scout_spawn_translation(safe_edge, &bp).is_some());
+
+        for anchor in [
+            IVec2::new(i32::MIN, i32::MIN),
+            IVec2::new(i32::MAX, i32::MAX),
+            IVec2::new(i32::MIN, i32::MAX),
+            IVec2::new(i32::MAX, i32::MIN),
+        ] {
+            let plan = default_scout_spawn_plan(anchor, &bp, |_, _| -64).unwrap();
+            let radius = plan.vegetation_scan_radius_blocks;
+            assert!(plan.center.x >= i32::MIN + radius);
+            assert!(plan.center.x <= i32::MAX - radius);
+            assert!(plan.center.y >= i32::MIN + radius);
+            assert!(plan.center.y <= i32::MAX - radius);
+            assert!(plan.surface_queries <= DEFAULT_SCOUT_TOTAL_SURFACE_QUERY_CAP);
+            let unchecked_translation = Vec3::new(
+                plan.center.x as f32 + 0.5,
+                plan.root_y as f32,
+                plan.center.y as f32 + 0.5,
+            );
+            assert!(
+                (f64::from(unchecked_translation.x) - f64::from(plan.center.x)).abs()
+                    > f64::from(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)
+                    || (f64::from(unchecked_translation.z) - f64::from(plan.center.y)).abs()
+                        > f64::from(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)
+            );
+            assert!(default_scout_spawn_translation(plan, &bp).is_none());
+            assert_eq!(
+                default_scout_authority_check(
+                    &VoxelWorld::new(),
+                    &ChunkStreamer::default(),
+                    plan,
+                    &bp,
+                ),
+                DefaultScoutAuthorityResult::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn default_scout_plan_fails_closed_for_unbounded_or_unrepresentable_inputs() {
+        let mut empty = blueprint(ShipKind::ScoutShuttle);
+        empty.voxels.clear();
+        assert!(default_scout_spawn_plan(IVec2::ZERO, &empty, |_, _| 0).is_none());
+
+        let mut unbounded = blueprint(ShipKind::ScoutShuttle);
+        unbounded.voxels.push(ShipVoxel {
+            pos: IVec3::new(100, 0, 0),
+            block: BlockType::ShipHullAlloy,
+        });
+        assert!(default_scout_spawn_plan(IVec2::ZERO, &unbounded, |_, _| 0).is_none());
+
+        // No saturated Y coordinate is emitted when the required procedural
+        // canopy clearance cannot be represented exactly.
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        assert!(default_scout_spawn_plan(IVec2::ZERO, &bp, |_, _| i32::MAX).is_none());
     }
 
     #[test]

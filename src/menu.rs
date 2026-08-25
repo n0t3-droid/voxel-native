@@ -29,10 +29,14 @@ use crate::player::PlayerProgressScratch;
 use crate::settings::{self, ActiveWorld, SceneryQuality, WorldMeta, WorldProfile, WorldSettings};
 use crate::theme::{metric_pill, MotionRole};
 use crate::ui_kit::{paint_interactive_surface, ActionTone, LoadingState};
-use crate::world::{ChunkStreamer, VoxelWorld};
+use crate::world::{
+    ChunkStreamer, EditedOverrideSaveOutcome, PendingEditedOverrideStore, VoxelWorld,
+};
 
-const START_TITLE: &str = "R93G SAKURA ZEN";
-const START_SUBTITLE: &str = "mouse-first sketch dojo // blossom worlds // fast low-end streaming";
+const OPERATING_LAYER_LABEL: &str = "CODEX ENGINEERING // ZEN OPERATING LAYER";
+const START_TITLE: &str = "VOXEL NATIVE";
+const START_SUBTITLE: &str =
+    "mouse-first sketch studio // blossom worlds // bounded planetary streaming";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum InventoryPage {
@@ -158,6 +162,7 @@ struct StartMenuState {
     selected_world: Option<String>,
     text_field_focused: bool,
     show_blueprints: bool,
+    launch_error: Option<String>,
 }
 
 #[derive(Resource, Default)]
@@ -244,6 +249,7 @@ impl Plugin for MenuPlugin {
             .insert_resource(StartMenuState::default())
             .insert_resource(PendingWorldDelete::default())
             .insert_resource(PendingWorldLoad::default())
+            .insert_resource(PendingEditedOverrideStore::default())
             .add_systems(Update, handle_keys)
             .add_systems(
                 Update,
@@ -668,7 +674,7 @@ fn draw_menu_overlay_header(
     ui.horizontal_wrapped(|ui| {
         ui.vertical(|ui| {
             ui.label(
-                egui::RichText::new("R93G // ZEN OPERATING LAYER")
+                egui::RichText::new(OPERATING_LAYER_LABEL)
                     .size(9.5)
                     .strong()
                     .monospace()
@@ -961,6 +967,7 @@ fn draw_main_menu(
     mut editor: ResMut<EditorState>,
     mut command_palette: ResMut<CommandPaletteState>,
     mut pending: ResMut<PendingWorldLoad>,
+    mut pending_edits: ResMut<PendingEditedOverrideStore>,
     mut arrival: ResMut<WorldArrival>,
     mut pending_delete: ResMut<PendingWorldDelete>,
     mut exit: EventWriter<AppExit>,
@@ -1021,7 +1028,7 @@ fn draw_main_menu(
 
     let mut open_requested = None::<WorldMeta>;
     let mut create_requested = false;
-    let mut delete_requested = None::<String>;
+    let mut delete_requested = None::<WorldMeta>;
     let mut open_toolbench = false;
     let mut open_commands = false;
     let mut quit_requested = false;
@@ -1050,7 +1057,7 @@ fn draw_main_menu(
                             ui.horizontal_wrapped(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        egui::RichText::new("R93G // ZEN OPERATING LAYER")
+                                        egui::RichText::new(OPERATING_LAYER_LABEL)
                                             .size(10.0)
                                             .strong()
                                             .monospace()
@@ -1119,7 +1126,7 @@ fn draw_main_menu(
                                             .clicked()
                                             && pending_delete.arm_or_confirm(&meta.name)
                                         {
-                                            delete_requested = Some(meta.name.clone());
+                                            delete_requested = Some(meta.clone());
                                         }
                                     }
                                 };
@@ -1398,6 +1405,15 @@ fn draw_main_menu(
                                     "Opening selected world...",
                                     theme,
                                 );
+                            } else if let Some(reason) = start_state.launch_error.as_deref() {
+                                ui.add_space(8.0);
+                                crate::ui_kit::activity_status(
+                                    ui,
+                                    LoadingState::Idle,
+                                    "WORLD BLOCKED",
+                                    reason,
+                                    theme,
+                                );
                             }
 
                             ui.add_space(8.0);
@@ -1432,22 +1448,42 @@ fn draw_main_menu(
 
     start_state.text_field_focused = text_field_focused;
 
-    if let Some(name) = delete_requested {
-        settings::delete_world(&name);
-        pending_delete.0 = None;
-        if start_state.selected_world.as_deref() == Some(name.as_str()) {
-            start_state.selected_world = None;
+    if let Some(meta) = delete_requested {
+        match settings::delete_world(&meta) {
+            Ok(()) => {
+                pending_delete.0 = None;
+                start_state.launch_error = None;
+                if start_state.selected_world.as_deref() == Some(meta.name.as_str()) {
+                    start_state.selected_world = None;
+                }
+            }
+            Err(reason) => {
+                start_state.launch_error = Some(bounded_world_store_error(&reason));
+                warn!("world delete failed closed: {reason}");
+            }
         }
     }
 
     if let Some(meta) = open_requested {
-        let world_name = meta.name.clone();
-        apply_world_to_settings(&meta, &mut settings);
-        commands.insert_resource(ActiveWorld { meta });
-        editor.open = false;
-        pending.0 = true;
-        arrival.begin(world_name);
-        next.set(GameState::InGame);
+        let identity = meta.generation_identity();
+        let load = crate::world::load_edited_overrides_for_world(&meta.name, identity);
+        match pending_edits.prepare(&meta.name, identity, load) {
+            Ok(()) => {
+                let world_name = meta.name.clone();
+                apply_world_to_settings(&meta, &mut settings);
+                commands.insert_resource(ActiveWorld { meta });
+                editor.open = false;
+                pending.0 = true;
+                start_state.launch_error = None;
+                arrival.begin(world_name);
+                next.set(GameState::InGame);
+            }
+            Err(reason) => {
+                pending.0 = false;
+                start_state.launch_error = Some(bounded_world_store_error(&reason));
+                warn!("world edits: refused menu open: {reason}");
+            }
+        }
     } else if create_requested {
         let seed = form
             .seed_text
@@ -1455,16 +1491,49 @@ fn draw_main_menu(
             .unwrap_or_else(|_| rand_seed());
         let name = clean_new_world_name(&form.name, &worlds);
         let meta = WorldMeta::new_with_profile(name, seed, form.world_profile);
-        let world_name = meta.name.clone();
-        settings::save_world(&meta);
-        apply_world_to_settings(&meta, &mut settings);
-        commands.insert_resource(ActiveWorld { meta });
-        editor.open = false;
-        pending.0 = true;
-        arrival.begin(world_name);
-        form.name.clear();
-        form.seed_text.clear();
-        next.set(GameState::InGame);
+        let identity = meta.generation_identity();
+        if let Err(reason) = settings::save_world(&meta) {
+            pending.0 = false;
+            pending_edits.clear();
+            start_state.launch_error = Some(bounded_world_store_error(&reason));
+            warn!("world metadata: could not initialize new world: {reason}");
+        } else {
+            let initialized = crate::world::save_edited_overrides_snapshot(
+                &meta.name,
+                identity,
+                ahash::AHashMap::new(),
+            );
+            match initialized {
+                EditedOverrideSaveOutcome::Saved(_) => {
+                    let load = crate::world::load_edited_overrides_for_world(&meta.name, identity);
+                    match pending_edits.prepare(&meta.name, identity, load) {
+                        Ok(()) => {
+                            let world_name = meta.name.clone();
+                            apply_world_to_settings(&meta, &mut settings);
+                            commands.insert_resource(ActiveWorld { meta });
+                            editor.open = false;
+                            pending.0 = true;
+                            start_state.launch_error = None;
+                            arrival.begin(world_name);
+                            form.name.clear();
+                            form.seed_text.clear();
+                            next.set(GameState::InGame);
+                        }
+                        Err(reason) => {
+                            pending.0 = false;
+                            start_state.launch_error = Some(bounded_world_store_error(&reason));
+                            warn!("world edits: refused newly initialized world: {reason}");
+                        }
+                    }
+                }
+                EditedOverrideSaveOutcome::Blocked { reason } => {
+                    pending.0 = false;
+                    pending_edits.clear();
+                    start_state.launch_error = Some(bounded_world_store_error(&reason));
+                    warn!("world edits: could not initialize new world authority: {reason}");
+                }
+            }
+        }
     }
 
     if open_toolbench {
@@ -1651,7 +1720,7 @@ fn draw_pause_menu(
     settings: Res<WorldSettings>,
     mut editor: ResMut<EditorState>,
     ship_inventory: Res<crate::ships::ShipInventory>,
-    brain: Res<crate::bots::FriendlyWorldBrain>,
+    mut brain: ResMut<crate::bots::FriendlyWorldBrain>,
     active: Option<Res<ActiveWorld>>,
     scratch: Res<PlayerProgressScratch>,
     player_q: Query<(&Transform, &Player)>,
@@ -1687,7 +1756,7 @@ fn draw_pause_menu(
         &player_q,
         &ship_q,
         &ship_inventory,
-        &brain,
+        &mut brain,
         &mut commands,
         &mut world,
         &mut streamer,
@@ -1820,12 +1889,13 @@ mod tests {
     }
 
     #[test]
-    fn start_screen_uses_zen_neon_identity() {
-        assert!(START_TITLE.contains("ZEN"));
-        assert!(START_TITLE.contains("SAKURA"));
-        assert!(START_SUBTITLE.contains("sketch dojo"));
+    fn start_screen_uses_voxel_native_codex_identity() {
+        assert_eq!(START_TITLE, "VOXEL NATIVE");
+        assert!(OPERATING_LAYER_LABEL.contains("CODEX ENGINEERING"));
+        assert!(OPERATING_LAYER_LABEL.contains("ZEN OPERATING LAYER"));
+        assert!(START_SUBTITLE.contains("sketch studio"));
         assert!(START_SUBTITLE.contains("blossom worlds"));
-        assert!(START_SUBTITLE.contains("low-end"));
+        assert!(START_SUBTITLE.contains("bounded planetary streaming"));
     }
 
     #[test]
@@ -2095,6 +2165,21 @@ mod tests {
     }
 
     #[test]
+    fn typed_new_world_name_rejects_case_only_storage_aliases() {
+        let worlds = vec![WorldMeta::new("ExistingWorld".to_string(), 7)];
+        let reserved = HashSet::from(["dream_city".to_string()]);
+
+        assert_eq!(
+            clean_new_world_name_with_reserved("DREAM_CITY", &[], &reserved),
+            "DREAM_CITY_02"
+        );
+        assert_eq!(
+            clean_new_world_name_with_reserved("existingworld", &worlds, &HashSet::new()),
+            "existingworld_02"
+        );
+    }
+
+    #[test]
     fn world_delete_requires_two_matching_clicks() {
         let mut pending = PendingWorldDelete::default();
 
@@ -2111,14 +2196,48 @@ mod tests {
     fn loading_world_applies_saved_scenery_quality() {
         let mut settings = WorldSettings::default();
         settings.scenery_quality = SceneryQuality::Lean;
+        settings.terrain_grammar = crate::settings::TerrainGrammarVersion::V1;
         let mut meta = WorldMeta::new("garden".to_string(), 930514);
         meta.scenery_quality = SceneryQuality::Lush;
         meta.world_profile = WorldProfile::AstralFrontier;
+        meta.terrain_grammar = crate::settings::TerrainGrammarVersion::V2;
 
         apply_world_to_settings(&meta, &mut settings);
 
         assert_eq!(settings.scenery_quality, SceneryQuality::Lush);
         assert_eq!(settings.world_profile, WorldProfile::AstralFrontier);
+        assert_eq!(
+            settings.terrain_grammar,
+            crate::settings::TerrainGrammarVersion::V2
+        );
+    }
+
+    #[test]
+    fn loading_v3_world_applies_its_exact_generation_identity() {
+        let mut settings = WorldSettings::default();
+        settings.seed = 1;
+        settings.terrain_grammar = crate::settings::TerrainGrammarVersion::V1;
+        let mut meta = WorldMeta::new("v3-world".to_string(), 0xCAFE_BABE);
+        meta.world_profile = WorldProfile::Natural;
+        meta.scenery_quality = SceneryQuality::Lean;
+        meta.terrain_grammar = crate::settings::TerrainGrammarVersion::V3;
+
+        apply_world_to_settings(&meta, &mut settings);
+
+        assert_eq!(settings.generation_identity(), meta.generation_identity());
+        assert_eq!(
+            settings.terrain_grammar,
+            crate::settings::TerrainGrammarVersion::V3
+        );
+    }
+
+    #[test]
+    fn blocked_world_store_diagnostic_is_bounded_for_menu_rendering() {
+        let long = "x".repeat(512);
+        let bounded = bounded_world_store_error(&long);
+
+        assert_eq!(bounded.chars().count(), 183);
+        assert!(bounded.ends_with("..."));
     }
 
     #[test]
@@ -2333,7 +2452,7 @@ fn draw_pause_main(
     player_q: &Query<(&Transform, &Player)>,
     ship_q: &Query<(Entity, &Transform, &crate::ships::ShipInstance)>,
     ship_inventory: &crate::ships::ShipInventory,
-    brain: &crate::bots::FriendlyWorldBrain,
+    brain: &mut crate::bots::FriendlyWorldBrain,
     commands: &mut Commands,
     world: &mut VoxelWorld,
     streamer: &mut ChunkStreamer,
@@ -2462,7 +2581,7 @@ fn draw_pause_main(
     match requested_action {
         Some(PauseAction::Resume) => next.set(GameState::InGame),
         Some(PauseAction::Save) => {
-            save_current_world(
+            match save_current_world(
                 settings,
                 active,
                 scratch,
@@ -2471,8 +2590,12 @@ fn draw_pause_main(
                 ship_inventory,
                 brain,
                 world,
-            );
-            set_pause_notice(ctx, "WORLD SAVE", "Snapshot written");
+            ) {
+                Ok(()) => set_pause_notice(ctx, "WORLD SAVE", "Snapshot written"),
+                Err(reason) => {
+                    set_pause_notice(ctx, "SAVE BLOCKED", bounded_world_store_error(&reason))
+                }
+            }
         }
         Some(PauseAction::Inventory) => **pause_screen = PauseScreen::Inventory,
         Some(PauseAction::RepairTerrain) => {
@@ -2480,7 +2603,7 @@ fn draw_pause_main(
             if report.removed_chunks > 0 {
                 streamer.frontier_complete = false;
                 streamer.needs_orphan_scan = true;
-                save_current_world(
+                if let Err(reason) = save_current_world(
                     settings,
                     active,
                     scratch,
@@ -2489,7 +2612,10 @@ fn draw_pause_main(
                     ship_inventory,
                     brain,
                     world,
-                );
+                ) {
+                    set_pause_notice(ctx, "SAVE BLOCKED", bounded_world_store_error(&reason));
+                    return;
+                }
             }
             info!(
                 "Scanned {} edit chunks, repaired {}, refreshed {} loaded chunks.",
@@ -2508,7 +2634,7 @@ fn draw_pause_main(
         Some(PauseAction::Toolbench) => editor.open = true,
         Some(PauseAction::CommandDeck) => command_palette.open(),
         Some(PauseAction::MainMenu) => {
-            save_current_world(
+            if let Err(reason) = save_current_world(
                 settings,
                 active,
                 scratch,
@@ -2517,7 +2643,10 @@ fn draw_pause_main(
                 ship_inventory,
                 brain,
                 world,
-            );
+            ) {
+                set_pause_notice(ctx, "SAVE BLOCKED", bounded_world_store_error(&reason));
+                return;
+            }
             world.clear_chunks();
             for (ship, _, _) in ship_q.iter() {
                 if let Some(entity_commands) = commands.get_entity(ship) {
@@ -2534,7 +2663,7 @@ fn draw_pause_main(
             next.set(GameState::MainMenu);
         }
         Some(PauseAction::Quit) => {
-            save_current_world(
+            if let Err(reason) = save_current_world(
                 settings,
                 active,
                 scratch,
@@ -2543,8 +2672,11 @@ fn draw_pause_main(
                 ship_inventory,
                 brain,
                 world,
-            );
-            exit.send(AppExit::Success);
+            ) {
+                set_pause_notice(ctx, "SAVE BLOCKED", bounded_world_store_error(&reason));
+            } else {
+                exit.send(AppExit::Success);
+            }
         }
         None => {}
     }
@@ -3192,16 +3324,17 @@ fn world_storage_stem_taken(
     worlds: &[WorldMeta],
     reserved: &std::collections::HashSet<String>,
 ) -> bool {
-    let stem = settings::world_storage_stem(name);
-    reserved.contains(&stem)
+    let claim_key = settings::world_storage_claim_key(name);
+    reserved.contains(&claim_key)
         || worlds
             .iter()
-            .any(|world| settings::world_storage_stem(&world.name) == stem)
+            .any(|world| settings::world_storage_claim_key(&world.name) == claim_key)
 }
 
 fn apply_world_to_settings(meta: &WorldMeta, settings: &mut WorldSettings) {
     settings.seed = meta.seed;
     settings.world_profile = meta.world_profile;
+    settings.terrain_grammar = meta.terrain_grammar;
     settings.time_of_day = meta.time_of_day;
     settings.time_mode = meta.time_mode;
     settings.cycle_speed = meta.cycle_speed;
@@ -3224,24 +3357,30 @@ fn save_current_world(
     player_q: &Query<(&Transform, &Player)>,
     ship_q: &Query<(Entity, &Transform, &crate::ships::ShipInstance)>,
     ship_inventory: &crate::ships::ShipInventory,
-    brain: &crate::bots::FriendlyWorldBrain,
-    world: &VoxelWorld,
-) {
+    brain: &mut crate::bots::FriendlyWorldBrain,
+    world: &mut VoxelWorld,
+) -> Result<(), String> {
     let Some(active) = active else {
-        return;
+        return Err("no active world authority".to_owned());
     };
+    let generation_identity = active.meta.generation_identity();
+    settings::validate_world_storage_for_save(&active.meta)?;
+    if !world
+        .edit_store_status
+        .is_compatible_with(generation_identity)
+    {
+        return Err(format!(
+            "edit authority is {} for the active generation identity",
+            world.edit_store_status.label()
+        ));
+    }
     let mut meta = active.meta.clone();
-    meta.seed = settings.seed;
-    meta.world_profile = settings.world_profile;
     meta.time_of_day = settings.time_of_day;
     meta.time_mode = settings.time_mode;
     meta.cycle_speed = settings.cycle_speed;
     meta.weather = settings.weather;
-    meta.scenery_quality = settings.scenery_quality;
     meta.ship_inventory = ship_inventory.clone();
     meta.bot_world = brain.save.clone();
-    crate::bots::save_bot_world_files(&meta.name, &brain.save);
-    meta.world_edit_manifest = crate::world::save_edited_overrides_for_world(&meta.name, world);
     meta.ships = ship_q
         .iter()
         .map(|(_, tf, ship)| {
@@ -3256,8 +3395,28 @@ fn save_current_world(
     meta.player_mining = scratch.mining;
     meta.player_suit = scratch.suit;
     meta.last_played_epoch = crate::platform::now_epoch();
-    settings::save_world(&meta);
-    settings.save();
+    crate::bots::save_world_transaction_after_edit_store(
+        &active.meta.name,
+        generation_identity,
+        brain,
+        world,
+        |manifest| {
+            meta.world_edit_manifest = manifest.clone();
+            settings::save_world(&meta)?;
+            settings.save();
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+fn bounded_world_store_error(reason: &str) -> String {
+    const MAX_CHARS: usize = 180;
+    let mut out = reason.chars().take(MAX_CHARS).collect::<String>();
+    if reason.chars().count() > MAX_CHARS {
+        out.push_str("...");
+    }
+    out
 }
 
 fn rand_seed() -> u32 {

@@ -20,6 +20,7 @@ use crate::player::{Player, PlayerProgressScratch};
 use crate::settings::{self, ActiveWorld, CompanionDockPosition, HudProfile, WorldSettings};
 use crate::theme::{command_frame, metric_pill, MotionRole, ThemeSettings, UiDensity, AMBER, CYAN};
 use crate::toolbelt::{ToolbeltState, ToolbeltTool};
+use crate::world::VoxelWorld;
 
 pub struct CommandDeckPlugin;
 
@@ -1004,8 +1005,12 @@ fn execute_command_action(
     mut builder: ResMut<BuilderState>,
     mut studio: ResMut<AnimationStudio>,
     mut city: ResMut<CityState>,
-    mut toolbelt: ResMut<ToolbeltState>,
-    mut mode: ResMut<crate::mode::ModeContext>,
+    (mut toolbelt, mut mode, mut brain, mut world): (
+        ResMut<ToolbeltState>,
+        ResMut<crate::mode::ModeContext>,
+        ResMut<crate::bots::FriendlyWorldBrain>,
+        ResMut<VoxelWorld>,
+    ),
 ) {
     let Some(action) = palette.pending_action.take() else {
         return;
@@ -1027,10 +1032,21 @@ fn execute_command_action(
             }
         }
         CommandAction::SaveGame => {
-            save_current_world(&settings, active.as_deref(), &scratch, &player_q);
-            settings.save();
-            info!("Command Deck: save requested");
-            None
+            match save_current_world(
+                &settings,
+                active.as_deref(),
+                &scratch,
+                &player_q,
+                &mut brain,
+                &mut world,
+            ) {
+                Ok(()) => {
+                    settings.save();
+                    info!("Command Deck: world pose and settings saved");
+                    None
+                }
+                Err(error) => Some(format!("Save blocked: {error}")),
+            }
         }
         CommandAction::Screenshot => {
             editor.screenshot_requested = true;
@@ -1245,13 +1261,26 @@ fn quick_save_hotkey(
     active: Option<Res<ActiveWorld>>,
     scratch: Res<PlayerProgressScratch>,
     player_q: Query<(&Transform, &Player)>,
+    mut brain: ResMut<crate::bots::FriendlyWorldBrain>,
+    mut world: ResMut<VoxelWorld>,
 ) {
     if !keys.just_pressed(KeyCode::F5) {
         return;
     }
-    save_current_world(&settings, active.as_deref(), &scratch, &player_q);
-    settings.save();
-    info!("Quick-save: world pose and settings saved");
+    match save_current_world(
+        &settings,
+        active.as_deref(),
+        &scratch,
+        &player_q,
+        &mut brain,
+        &mut world,
+    ) {
+        Ok(()) => {
+            settings.save();
+            info!("Quick-save: world pose and settings saved");
+        }
+        Err(error) => warn!("Quick-save blocked: {error}"),
+    }
 }
 
 fn open_editor_tab(
@@ -1274,29 +1303,42 @@ fn save_current_world(
     active: Option<&ActiveWorld>,
     scratch: &PlayerProgressScratch,
     player_q: &Query<(&Transform, &Player)>,
-) {
+    brain: &mut crate::bots::FriendlyWorldBrain,
+    world: &mut VoxelWorld,
+) -> Result<(), String> {
     let Some(active) = active else {
-        return;
+        return Err("no active world authority".to_owned());
     };
+    settings::validate_world_storage_for_save(&active.meta)?;
     let mut meta = active.meta.clone();
-    meta.seed = settings.seed;
     meta.time_of_day = settings.time_of_day;
     meta.time_mode = settings.time_mode;
     meta.cycle_speed = settings.cycle_speed;
     meta.weather = settings.weather;
-    if let Ok((tf, player)) = player_q.get_single() {
-        settings::save_player_pose_checkpoint(
-            &meta,
-            settings,
-            [tf.translation.x, tf.translation.y, tf.translation.z],
-            player.yaw,
-            player.pitch,
-            scratch.mining,
-            scratch.suit,
-        );
-        return;
-    }
-    settings::save_world(&meta);
+    meta.bot_world = brain.save.clone();
+    crate::bots::save_world_transaction_after_edit_store(
+        &active.meta.name,
+        active.meta.generation_identity(),
+        brain,
+        world,
+        |manifest| {
+            meta.world_edit_manifest = manifest.clone();
+            if let Ok((tf, player)) = player_q.get_single() {
+                settings::save_player_pose_checkpoint(
+                    &meta,
+                    settings,
+                    [tf.translation.x, tf.translation.y, tf.translation.z],
+                    player.yaw,
+                    player.pitch,
+                    scratch.mining,
+                    scratch.suit,
+                )
+            } else {
+                settings::save_world(&meta)
+            }
+        },
+    )?;
+    Ok(())
 }
 
 fn city_tool_label(tool: CityTool) -> &'static str {

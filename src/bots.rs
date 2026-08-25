@@ -16,6 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
@@ -34,12 +35,13 @@ use crate::neurocore::RuntimeBudget;
 use crate::player::Player;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::settings::SAVES_DIR;
-use crate::settings::{ActiveWorld, WorldSettings};
+use crate::settings::{ActiveWorld, WorldEditManifest, WorldGenerationIdentity, WorldSettings};
 use crate::ships::ShipInstance;
 use crate::terrain::TerrainGenerator;
 use crate::world::{
-    save_edited_overrides_for_world, save_edited_overrides_snapshot, EditedChunkOverride,
-    VoxelWorld, WorldEditBatch,
+    capture_edited_overrides_for_world, capture_existing_edited_override_authority,
+    commit_edited_override_capture_with, EditedOverrideSaveCapture,
+    OrderedEditedOverrideSaveOutcome, VoxelWorld, WorldEditBatch, WorldEditStoreStatus,
 };
 
 const MEGA_CITY_RADIUS: i32 = 1024;
@@ -93,6 +95,42 @@ fn companion_workers_per_leader() -> u8 {
 
 #[cfg(not(target_arch = "wasm32"))]
 static BOT_SAVE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+#[derive(Resource, Clone, Default)]
+struct BotAutosaveCompletion(Arc<Mutex<Option<BotAutosaveCompletionRecord>>>);
+
+#[derive(Debug)]
+struct BotAutosaveCompletionRecord {
+    world_name: String,
+    generation_identity: WorldGenerationIdentity,
+    bot_revision: u64,
+    result: OrderedEditedOverrideSaveOutcome,
+}
+
+impl BotAutosaveCompletion {
+    fn publish(&self, completion: BotAutosaveCompletionRecord) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(completion);
+    }
+
+    fn take(&self) -> Option<BotAutosaveCompletionRecord> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BotSaveEnqueueOutcome {
+    Accepted,
+    #[cfg(not(target_arch = "wasm32"))]
+    Busy,
+    #[cfg(not(target_arch = "wasm32"))]
+    Failed(String),
+}
 
 fn bot_save_version() -> u32 {
     2
@@ -149,6 +187,7 @@ impl Plugin for BotsPlugin {
         app.insert_resource(FriendlyWorldBrain::default())
             .insert_resource(BotVisualCache::default())
             .insert_resource(BotRuntimeControl::default())
+            .insert_resource(BotAutosaveCompletion::default())
             .init_resource::<BotCommandExecutor>()
             .add_systems(OnEnter(GameState::InGame), load_or_seed_bot_world)
             .add_systems(
@@ -174,7 +213,6 @@ impl Plugin for BotsPlugin {
                     draw_companion_preview_gizmos,
                     sync_bot_visuals,
                     animate_worker_bots,
-                    manual_save_bot_world,
                     autosave_bot_world,
                 )
                     .chain()
@@ -211,6 +249,7 @@ pub struct FriendlyWorldBrain {
     project_scan_cursor: usize,
     world_name: String,
     dirty: bool,
+    save_revision: u64,
 }
 
 impl Default for FriendlyWorldBrain {
@@ -235,6 +274,7 @@ impl Default for FriendlyWorldBrain {
             project_scan_cursor: 0,
             world_name: String::new(),
             dirty: false,
+            save_revision: 0,
         }
     }
 }
@@ -382,7 +422,19 @@ impl CompanionAssistKind {
 
 impl FriendlyWorldBrain {
     pub(crate) fn mark_dirty(&mut self) {
+        self.save_revision = self
+            .save_revision
+            .checked_add(1)
+            .expect("in-memory bot-save revision exhausted");
         self.dirty = true;
+    }
+
+    fn confirm_save_revision(&mut self, captured_revision: u64, latest_receipt: bool) -> bool {
+        if !latest_receipt || self.save_revision != captured_revision {
+            return false;
+        }
+        self.dirty = false;
+        true
     }
 
     pub fn cockpit_line(&self) -> String {
@@ -714,10 +766,9 @@ impl BotWorldSave {
     fn seed_for_active_world(
         world_name: &str,
         hub: Vec3,
-        seed: u32,
-        world_profile: crate::settings::WorldProfile,
+        identity: WorldGenerationIdentity,
     ) -> Self {
-        let generator = TerrainGenerator::new(seed).with_world_profile(world_profile);
+        let generator = TerrainGenerator::from_identity(identity);
         Self::seed_with_surface_height(world_name, hub, |x, z| generator.surface_height_at(x, z))
     }
 
@@ -2895,8 +2946,7 @@ fn load_or_seed_bot_world(
         save = BotWorldSave::seed_for_active_world(
             &world_name,
             hub,
-            active.meta.seed,
-            active.meta.world_profile,
+            active.meta.generation_identity(),
         );
     }
     save.normalize();
@@ -2922,7 +2972,7 @@ fn load_or_seed_bot_world(
     brain.busy_timer = 0.5;
     brain.force_city_idea = false;
     brain.one_shot_plan_request = false;
-    brain.dirty = true;
+    brain.mark_dirty();
 }
 
 fn prime_autonomous_city_defaults(save: &mut BotWorldSave) {
@@ -5094,7 +5144,7 @@ fn tick_friendly_world(
             && sync_user_city_roads(&mut brain.save, &city.roads)
         {
             brain.force_city_idea = true;
-            brain.dirty = true;
+            brain.mark_dirty();
         }
     }
 
@@ -5108,7 +5158,7 @@ fn tick_friendly_world(
         };
         brain.save.autonomy.set_fleet_mode(mode);
         process_queued_commands(&mut brain, &world, player_pos, &ship_positions);
-        brain.dirty = true;
+        brain.mark_dirty();
     }
     if !brain.save.autonomy.bots_active {
         if brain.message_cooldown <= 0.0 {
@@ -5140,7 +5190,7 @@ fn tick_friendly_world(
                 &budget,
             )
         {
-            brain.dirty = true;
+            brain.mark_dirty();
         } else if !allow_new_city_work && brain.message_cooldown <= 0.0 {
             brain.hud_message = "Bot city paused while terrain and mesh streaming catch up.".into();
             brain.message_cooldown = VISIBLE_MESSAGE_COOLDOWN;
@@ -5239,21 +5289,21 @@ fn tick_friendly_world(
         } else {
             brain.plan_timer = brain.plan_timer.max(planner_interval(&brain.save) * 2.0);
         }
-        brain.dirty = true;
+        brain.mark_dirty();
     }
 
     for idx in blocked {
         let label = brain.save.projects[idx].label.clone();
         let reason = brain.save.projects[idx].blocked_reason.clone();
         show_city_message(&mut brain, format!("{label} blocked: {reason}"), 7);
-        brain.dirty = true;
+        brain.mark_dirty();
     }
 
     compact_project_history(&mut brain.save);
     sync_bot_task_progress(&mut brain.save);
     brain.save.journal.truncate(128);
     if changed_total > 0 {
-        brain.dirty = true;
+        brain.mark_dirty();
     }
 }
 
@@ -5316,12 +5366,12 @@ fn process_queued_commands(
                     .journal
                     .push(BotJournalEntry::new(message.clone()));
                 brain.hud_message = message;
-                brain.dirty = true;
+                brain.mark_dirty();
             }
             Err(reason) => {
                 brain.save.last_blocked_reason = reason.clone();
                 brain.hud_message = format!("Task rejected: {reason}");
-                brain.dirty = true;
+                brain.mark_dirty();
             }
         }
     }
@@ -11693,7 +11743,7 @@ fn process_companion_command(
             } else {
                 "Mega city autonomy online, but no loaded safe starter site was found yet.".into()
             };
-            brain.dirty = true;
+            brain.mark_dirty();
             return;
         }
         CompanionCommand::PreviewAssist(assist) => {
@@ -11711,7 +11761,7 @@ fn process_companion_command(
             brain.save.companion_preview = Some(preview);
             set_companion_preview_mode(&mut brain.save, selected, valid);
             brain.hud_message = msg;
-            brain.dirty = true;
+            brain.mark_dirty();
             return;
         }
         CompanionCommand::ExecutePreview => {
@@ -11730,7 +11780,7 @@ fn process_companion_command(
                 }
             }
             brain.hud_message = "Companion preview cleared.".into();
-            brain.dirty = true;
+            brain.mark_dirty();
             return;
         }
         _ => {}
@@ -11753,7 +11803,7 @@ fn process_companion_command(
     } else {
         format!("Companion command applied to {affected} helper(s).")
     };
-    brain.dirty = true;
+    brain.mark_dirty();
 }
 
 fn apply_companion_command(
@@ -12006,7 +12056,7 @@ fn execute_companion_preview(
                 bot.memory.last_message = format!("{label} approved. Building with undo safety.");
             }
             brain.hud_message = format!("{label} approved as project #{project_id}.");
-            brain.dirty = true;
+            brain.mark_dirty();
         }
         Err(reason) => {
             let author_id = preview.author_id;
@@ -12017,7 +12067,7 @@ fn execute_companion_preview(
             });
             set_companion_preview_mode(&mut brain.save, author_id, false);
             brain.hud_message = format!("Preview blocked: {reason}");
-            brain.dirty = true;
+            brain.mark_dirty();
         }
     }
 }
@@ -12829,22 +12879,76 @@ fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t.clamp(0.0, 1.0)
 }
 
-fn manual_save_bot_world(
-    keys: Res<ButtonInput<KeyCode>>,
-    active: Option<Res<ActiveWorld>>,
-    mut brain: ResMut<FriendlyWorldBrain>,
-    mut world: ResMut<VoxelWorld>,
-) {
-    if !keys.just_pressed(KeyCode::F5) {
-        return;
+pub(crate) fn save_world_transaction_after_edit_store(
+    world_name: &str,
+    generation_identity: WorldGenerationIdentity,
+    brain: &mut FriendlyWorldBrain,
+    world: &mut VoxelWorld,
+    dependent_write: impl FnOnce(&WorldEditManifest) -> Result<(), String>,
+) -> Result<WorldEditManifest, String> {
+    if !world
+        .edit_store_status
+        .is_compatible_with(generation_identity)
+    {
+        return Err(format!(
+            "edit authority is {} for the active generation identity",
+            world.edit_store_status.label()
+        ));
     }
-    let Some(active) = active else {
-        return;
-    };
-    save_bot_world_files(&active.meta.name, &brain.save);
-    save_edited_overrides_for_world(&active.meta.name, &world);
-    brain.dirty = false;
-    world.edit_save_dirty = false;
+    let capture = capture_edited_overrides_for_world(world_name, generation_identity, world);
+    let bot_snapshot = brain.save.clone();
+    let bot_revision = brain.save_revision;
+    match commit_edited_override_capture_with(capture, |manifest| {
+        save_bot_world_files(world_name, &bot_snapshot)?;
+        dependent_write(manifest)
+    }) {
+        OrderedEditedOverrideSaveOutcome::Committed(receipt) => {
+            let manifest = receipt.manifest.clone();
+            world.edit_store_status = WorldEditStoreStatus::Compatible {
+                generation_identity,
+                edited_chunks: manifest.edited_chunks,
+            };
+            let latest_receipt = receipt.is_latest_confirmed();
+            if !world.confirm_edited_override_save(&receipt) {
+                warn!(
+                    "bots: save receipt {} no longer matches the newest edit revision for '{}'",
+                    receipt.token(),
+                    world_name
+                );
+            }
+            brain.confirm_save_revision(bot_revision, latest_receipt);
+            Ok(manifest)
+        }
+        OrderedEditedOverrideSaveOutcome::Superseded {
+            capture_token,
+            latest_capture_token,
+        } => Err(format!(
+            "save capture {capture_token} was superseded by capture {latest_capture_token}"
+        )),
+        OrderedEditedOverrideSaveOutcome::AuthorityBlocked { reason } => {
+            world.edit_store_status = WorldEditStoreStatus::Blocked {
+                generation_identity,
+                reason_code: "authority_validation_failed",
+                detail: reason.clone(),
+            };
+            Err(reason)
+        }
+        OrderedEditedOverrideSaveOutcome::DependentWriteFailed { manifest, reason } => {
+            world.edit_store_status = WorldEditStoreStatus::Compatible {
+                generation_identity,
+                edited_chunks: manifest.edited_chunks,
+            };
+            Err(reason)
+        }
+    }
+}
+
+fn save_bot_snapshot_after_edit_store(
+    world_name: &str,
+    save: &BotWorldSave,
+    capture: EditedOverrideSaveCapture,
+) -> OrderedEditedOverrideSaveOutcome {
+    commit_edited_override_capture_with(capture, |_| save_bot_world_files(world_name, save))
 }
 
 fn autosave_bot_world(
@@ -12852,48 +12956,155 @@ fn autosave_bot_world(
     active: Option<Res<ActiveWorld>>,
     mut brain: ResMut<FriendlyWorldBrain>,
     mut world: ResMut<VoxelWorld>,
+    completion: Res<BotAutosaveCompletion>,
 ) {
+    let Some(active) = active else {
+        return;
+    };
+    let generation_identity = active.meta.generation_identity();
+    if let Some(completed) = completion.take() {
+        if completed.world_name == active.meta.name
+            && completed.generation_identity == generation_identity
+        {
+            match completed.result {
+                OrderedEditedOverrideSaveOutcome::Committed(receipt) => {
+                    world.edit_store_status = WorldEditStoreStatus::Compatible {
+                        generation_identity,
+                        edited_chunks: receipt.manifest.edited_chunks,
+                    };
+                    let latest_receipt = receipt.is_latest_confirmed();
+                    world.confirm_edited_override_save(&receipt);
+                    brain.confirm_save_revision(completed.bot_revision, latest_receipt);
+                }
+                OrderedEditedOverrideSaveOutcome::Superseded {
+                    capture_token,
+                    latest_capture_token,
+                } => {
+                    brain.autosave_timer = 4.0;
+                    info!(
+                        "bots: autosave capture {capture_token} for '{}' was superseded by {latest_capture_token}",
+                        active.meta.name
+                    );
+                }
+                OrderedEditedOverrideSaveOutcome::AuthorityBlocked { reason } => {
+                    world.edit_store_status = WorldEditStoreStatus::Blocked {
+                        generation_identity,
+                        reason_code: "authority_validation_failed",
+                        detail: reason.clone(),
+                    };
+                    brain.autosave_timer = 4.0;
+                    brain.hud_message = format!("Autosave blocked: {reason}");
+                    warn!(
+                        "bots: autosave blocked before bot journal write for '{}': {reason}",
+                        active.meta.name
+                    );
+                }
+                OrderedEditedOverrideSaveOutcome::DependentWriteFailed { manifest, reason } => {
+                    world.edit_store_status = WorldEditStoreStatus::Compatible {
+                        generation_identity,
+                        edited_chunks: manifest.edited_chunks,
+                    };
+                    brain.autosave_timer = 4.0;
+                    brain.hud_message = format!("Autosave failed: {reason}");
+                    warn!(
+                        "bots: autosave dependent write failed for '{}': {reason}",
+                        active.meta.name
+                    );
+                }
+            }
+        } else {
+            info!(
+                "bots: discarded autosave completion for inactive world '{}'",
+                completed.world_name
+            );
+        }
+    }
+
     brain.autosave_timer -= time.delta_seconds();
     if brain.autosave_timer > 0.0 {
         return;
     }
     brain.autosave_timer = 30.0;
-    let Some(active) = active else {
-        return;
-    };
     if !brain.dirty && !world.edit_save_dirty {
         return;
     }
 
-    let edited_overrides = if world.edit_save_dirty {
-        Some(world.edited_overrides.clone())
-    } else {
-        None
-    };
-    if queue_bot_world_save(
-        active.meta.name.clone(),
-        brain.save.clone(),
-        edited_overrides,
-    ) {
-        brain.dirty = false;
-        world.edit_save_dirty = false;
-    } else {
-        // A previous save is still flushing to disk. Try again soon,
-        // but do not serialize on the gameplay frame.
+    // Runtime load/preflight must have approved this exact identity. Avoid
+    // allocating a dense override clone when the authority is already known
+    // to be unchecked or blocked.
+    if !world
+        .edit_store_status
+        .is_compatible_with(generation_identity)
+    {
         brain.autosave_timer = 4.0;
+        warn!(
+            "bots: autosave held because edit-store authority for '{}' is {}",
+            active.meta.name,
+            world.edit_store_status.label()
+        );
+        return;
+    }
+
+    let bot_revision = brain.save_revision;
+    let capture = if world.edit_save_dirty {
+        capture_edited_overrides_for_world(&active.meta.name, generation_identity, &world)
+    } else {
+        capture_existing_edited_override_authority(&active.meta.name, generation_identity, &world)
+    };
+    match queue_bot_world_save(
+        active.meta.name.clone(),
+        generation_identity,
+        brain.save.clone(),
+        capture,
+        completion.as_ref().clone(),
+        bot_revision,
+    ) {
+        BotSaveEnqueueOutcome::Accepted => {
+            // Edit dirty remains true until the matching newest receipt comes
+            // back. Later edits advance the world revision and cannot be
+            // cleared by this completion.
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        BotSaveEnqueueOutcome::Busy => {
+            // A previous save is still flushing to disk. Try again soon,
+            // but do not serialize on the gameplay frame.
+            brain.autosave_timer = 4.0;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        BotSaveEnqueueOutcome::Failed(reason) => {
+            brain.autosave_timer = 4.0;
+            brain.hud_message = format!("Autosave failed: {reason}");
+            warn!(
+                "bots: autosave failed before bot journal write for '{}': {reason}",
+                active.meta.name
+            );
+        }
     }
 }
 
 fn save_bot_world_on_world_unload(
     active: Option<Res<ActiveWorld>>,
-    brain: Res<FriendlyWorldBrain>,
-    world: Res<VoxelWorld>,
+    mut brain: ResMut<FriendlyWorldBrain>,
+    mut world: ResMut<VoxelWorld>,
 ) {
     let Some(active) = active else {
         return;
     };
-    save_bot_world_files(&active.meta.name, &brain.save);
-    save_edited_overrides_for_world(&active.meta.name, &world);
+    match save_world_transaction_after_edit_store(
+        &active.meta.name,
+        active.meta.generation_identity(),
+        &mut brain,
+        &mut world,
+        |_| Ok(()),
+    ) {
+        Ok(_) => {}
+        Err(reason) => {
+            warn!(
+                "bots: world-unload save blocked before bot journal write for '{}': {reason}",
+                active.meta.name
+            );
+        }
+    }
 }
 
 fn save_bot_world_on_exit(
@@ -12902,7 +13113,7 @@ fn save_bot_world_on_exit(
     mut commands: ResMut<BotCommandStateMachine>,
     mut executor: ResMut<BotCommandExecutor>,
     mut brain: ResMut<FriendlyWorldBrain>,
-    world: Res<VoxelWorld>,
+    mut world: ResMut<VoxelWorld>,
 ) {
     if exit.read().next().is_none() {
         return;
@@ -12916,82 +13127,101 @@ fn save_bot_world_on_exit(
     let Some(active) = active else {
         return;
     };
-    save_bot_world_files(&active.meta.name, &brain.save);
-    save_edited_overrides_for_world(&active.meta.name, &world);
+    match save_world_transaction_after_edit_store(
+        &active.meta.name,
+        active.meta.generation_identity(),
+        &mut brain,
+        &mut world,
+        |_| Ok(()),
+    ) {
+        Ok(_) => {}
+        Err(reason) => {
+            warn!(
+                "bots: exit save blocked before bot journal write for '{}': {reason}",
+                active.meta.name
+            );
+        }
+    }
 }
 
-pub fn save_bot_world_files(world_name: &str, save: &BotWorldSave) {
+pub fn save_bot_world_files(world_name: &str, save: &BotWorldSave) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {
-        match ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default()) {
-            Ok(text) => {
-                if let Err(e) =
-                    crate::platform::browser_storage_set(&browser_bot_world_key(world_name), &text)
-                {
-                    warn!("{e}");
-                }
-            }
-            Err(e) => warn!("bots: failed serialising browser bot state: {e}"),
-        }
-        return;
+        let text = ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("bots: failed serialising browser bot state: {e}"))?;
+        return crate::platform::browser_storage_set(&browser_bot_world_key(world_name), &text);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
         let root = bot_root(world_name);
-        if let Err(e) = fs::create_dir_all(&root) {
-            warn!("bots: failed creating {}: {e}", root.display());
-            return;
-        }
-        if let Ok(text) = ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default()) {
-            let _ = crate::settings::atomic_write_text(&root.join("journal.ron"), &text);
-        }
+        fs::create_dir_all(&root)
+            .map_err(|e| format!("bots: failed creating {}: {e}", root.display()))?;
+        let text = ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("bots: failed serialising bot state: {e}"))?;
+        crate::settings::atomic_write_text(&root.join("journal.ron"), &text)
+            .map_err(|e| format!("bots: failed writing journal for '{world_name}': {e}"))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn queue_bot_world_save(
     world_name: String,
+    generation_identity: WorldGenerationIdentity,
     save: BotWorldSave,
-    edited_overrides: Option<AHashMap<crate::chunk::ChunkPos, EditedChunkOverride>>,
-) -> bool {
+    capture: EditedOverrideSaveCapture,
+    completion: BotAutosaveCompletion,
+    bot_revision: u64,
+) -> BotSaveEnqueueOutcome {
     if BOT_SAVE_IN_FLIGHT
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return false;
+        return BotSaveEnqueueOutcome::Busy;
     }
 
+    let completion_world_name = world_name.clone();
     let spawn = thread::Builder::new()
         .name("voxel-native-autosave".into())
         .spawn(move || {
-            save_bot_world_files(&world_name, &save);
-            if let Some(overrides) = edited_overrides {
-                save_edited_overrides_snapshot(&world_name, overrides);
-            }
+            let result = save_bot_snapshot_after_edit_store(&world_name, &save, capture);
+            completion.publish(BotAutosaveCompletionRecord {
+                world_name,
+                generation_identity,
+                bot_revision,
+                result,
+            });
             BOT_SAVE_IN_FLIGHT.store(false, Ordering::SeqCst);
         });
 
     if let Err(e) = spawn {
         BOT_SAVE_IN_FLIGHT.store(false, Ordering::SeqCst);
         warn!("bots: failed starting background autosave: {e}");
-        return false;
+        return BotSaveEnqueueOutcome::Failed(format!(
+            "failed starting autosave worker for '{completion_world_name}': {e}"
+        ));
     }
 
-    true
+    BotSaveEnqueueOutcome::Accepted
 }
 
 #[cfg(target_arch = "wasm32")]
 fn queue_bot_world_save(
     world_name: String,
+    generation_identity: WorldGenerationIdentity,
     save: BotWorldSave,
-    edited_overrides: Option<AHashMap<crate::chunk::ChunkPos, EditedChunkOverride>>,
-) -> bool {
-    save_bot_world_files(&world_name, &save);
-    if let Some(overrides) = edited_overrides {
-        save_edited_overrides_snapshot(&world_name, overrides);
-    }
-    true
+    capture: EditedOverrideSaveCapture,
+    completion: BotAutosaveCompletion,
+    bot_revision: u64,
+) -> BotSaveEnqueueOutcome {
+    let result = save_bot_snapshot_after_edit_store(&world_name, &save, capture);
+    completion.publish(BotAutosaveCompletionRecord {
+        world_name,
+        generation_identity,
+        bot_revision,
+        result,
+    });
+    BotSaveEnqueueOutcome::Accepted
 }
 
 pub fn load_bot_world_files(world_name: &str) -> Option<BotWorldSave> {
@@ -13239,7 +13469,7 @@ fn toggle_fleet_from_ui(brain: &mut FriendlyWorldBrain) {
     let current = brain.save.autonomy.fleet_mode();
     let next = next_fleet_mode_for_toggle(current, brain.save.autonomy.active_work_area.is_some());
     brain.save.autonomy.set_fleet_mode(next);
-    brain.dirty = true;
+    brain.mark_dirty();
     brain.hud_message = if next == BotFleetMode::Parked {
         "Fleet parked. Queued projects and progress are preserved.".into()
     } else {
@@ -14017,7 +14247,7 @@ fn queue_area_masterplan(
         brain.hud_message = format!(
             "Bot city area accepted from {source_label}: {queued} project(s) queued inside the marked footprint; {cancelled} old active job(s) parked."
         );
-        brain.dirty = true;
+        brain.mark_dirty();
     } else {
         brain.hud_message = "Marked city area is outside bot city bounds or too small.".into();
     }
@@ -14589,7 +14819,7 @@ fn draw_city_control_center(
                     BotFleetMode::Parked
                 };
                 brain.save.autonomy.set_fleet_mode(next);
-                brain.dirty = true;
+                brain.mark_dirty();
                 brain.hud_message = if next == BotFleetMode::Parked {
                     "Fleet parked. Queued projects and progress are preserved.".into()
                 } else {
@@ -14602,7 +14832,7 @@ fn draw_city_control_center(
             }
             if crate::ui_kit::icon_action(ui, Icon::Follow, "Add Bot", false, theme).clicked() {
                 let name = add_extra_companion(&mut brain.save);
-                brain.dirty = true;
+                brain.mark_dirty();
                 brain.hud_message = format!("{name} joined the swarm as a city specialist.");
             }
             if crate::ui_kit::icon_action(ui, Icon::Grid, "Road Grid", false, theme).clicked() {
@@ -14694,7 +14924,7 @@ fn draw_city_control_center(
                     brain.hud_message =
                         "Autonomy disabled. Fleet will finish only the existing queue.".into();
                 }
-                brain.dirty = true;
+                brain.mark_dirty();
             }
             ui.add(
                 egui::Slider::new(&mut brain.save.autonomy.intensity, 1..=10)
@@ -15102,7 +15332,7 @@ pub fn draw_bots_editor(
                     } else {
                         "Autonomy disabled; existing queue only.".into()
                     };
-                    brain.dirty = true;
+                    brain.mark_dirty();
                 }
                 if crate::ui_kit::icon_action(ui, Icon::Wand, "Queue Idea", false, theme).clicked()
                 {
@@ -15285,7 +15515,7 @@ pub fn draw_bots_editor(
             };
             brain.save.autonomy.set_fleet_mode(mode);
             brain.hud_message = "Manual bot task queued; continuous autonomy is off.".into();
-            brain.dirty = true;
+            brain.mark_dirty();
         }
     });
 
@@ -15348,6 +15578,22 @@ fn despawn(commands: &mut Commands, entity: Entity) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_dirty_clears_only_for_latest_matching_capture_revision() {
+        let mut brain = FriendlyWorldBrain::default();
+        brain.mark_dirty();
+        let delayed_revision = brain.save_revision;
+        brain.mark_dirty();
+        let newest_revision = brain.save_revision;
+
+        assert!(!brain.confirm_save_revision(delayed_revision, true));
+        assert!(brain.dirty);
+        assert!(!brain.confirm_save_revision(newest_revision, false));
+        assert!(brain.dirty);
+        assert!(brain.confirm_save_revision(newest_revision, true));
+        assert!(!brain.dirty);
+    }
 
     fn history_test_project(id: u64, status: BotProjectStatus) -> BotProject {
         BotProject {
@@ -15635,14 +15881,58 @@ mod tests {
         let save = BotWorldSave::seed_for_active_world(
             "active-seed-regression",
             Vec3::new(focus.x as f32 + 0.5, 82.0, focus.y as f32 + 0.5),
-            active_seed,
-            crate::settings::WorldProfile::Natural,
+            WorldGenerationIdentity {
+                seed: active_seed,
+                world_profile: crate::settings::WorldProfile::Natural,
+                scenery_quality: crate::settings::SceneryQuality::Balanced,
+                terrain_grammar: crate::settings::TerrainGrammarVersion::CURRENT,
+            },
         );
         let hub = save.settlements[0].hub;
         assert_eq!(hub[0], focus.x as f32 + 0.5);
         assert_eq!(hub[1], (active_surface + 2) as f32);
         assert_eq!(hub[2], focus.y as f32 + 0.5);
         assert_ne!(hub[1], (stale_surface + 2) as f32);
+    }
+
+    #[test]
+    fn fresh_bot_hub_preserves_the_active_world_terrain_grammar() {
+        let legacy_identity = WorldGenerationIdentity {
+            seed: 12_345,
+            world_profile: crate::settings::WorldProfile::Natural,
+            scenery_quality: crate::settings::SceneryQuality::Off,
+            terrain_grammar: crate::settings::TerrainGrammarVersion::V1,
+        };
+        let current_identity = WorldGenerationIdentity {
+            terrain_grammar: crate::settings::TerrainGrammarVersion::V2,
+            ..legacy_identity
+        };
+        let legacy = TerrainGenerator::from_identity(legacy_identity);
+        let current = TerrainGenerator::from_identity(current_identity);
+        let (x, z, legacy_height, current_height) = (-192..=192)
+            .step_by(4)
+            .find_map(|z| {
+                (-192..=192).step_by(4).find_map(|x| {
+                    let legacy_height = legacy.surface_height_at(x, z);
+                    let current_height = current.surface_height_at(x, z);
+                    (legacy_height != current_height).then_some((
+                        x,
+                        z,
+                        legacy_height,
+                        current_height,
+                    ))
+                })
+            })
+            .expect("Natural V1 and V2 must expose a distinct bank column");
+
+        let save = BotWorldSave::seed_for_active_world(
+            "legacy-grammar-regression",
+            Vec3::new(x as f32 + 0.5, 82.0, z as f32 + 0.5),
+            legacy_identity,
+        );
+        let hub = save.settlements[0].hub;
+        assert_eq!(hub[1], (legacy_height + 2) as f32);
+        assert_ne!(hub[1], (current_height + 2) as f32);
     }
 
     #[test]

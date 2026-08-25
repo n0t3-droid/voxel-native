@@ -38,7 +38,7 @@ would square the problem and multiply it again by vertical occupancy.
 
 ### Reference machine for the August 2026 baseline
 
-Measurements in this implementation pass use Windows 11 on an AMD Ryzen 7
+The August 2026 baseline was measured on Windows 11 with an AMD Ryzen 7
 5700G (8 cores / 16 threads), 31.3 GiB system RAM, and the integrated AMD
 Radeon adapter reported by Windows. WMI exposes only 0.5 GiB of dedicated
 adapter memory for this shared-memory GPU, so that number is recorded as a
@@ -57,7 +57,7 @@ them at different representations.
 | --- | ---: | --- | --- | ---: |
 | Interaction + near voxel field | 0-256 m maximum | full 16^3 voxels, physics near the player, material meshes | yes | 2,400 requested/resident-plus-terrain-job cap |
 | Midfield bricks | proposed 256 m-2 km | virtual hierarchy, occupancy/material/feature summaries | not integrated; promotion contract only | prototype cap 512 bricks |
-| Far clipmap | fallback from 0 m, horizon to 30.72 km | one finest parent plus five height/material annuli | no, descriptive only | exactly 6 entities |
+| Far clipmap | fallback from 0 m, 15.36 km L-infinity axis half-extent (30.72 km full width) | one finest parent plus five height/material annuli | no, descriptive only | exactly 6 entities |
 | Celestial field | beyond terrain horizon | analytic bodies and atmosphere | no | fixed body count |
 
 Distances are quality-profile inputs, not assumptions baked into save data.
@@ -70,18 +70,21 @@ and five square annuli. Each level has the same possible vertex dimensions;
 cell spacing doubles per level.
 
 ```text
-level 0:   32 m samples, complete safety parent with irregular Near cutout
-level 1:   64 m samples
-level 2:  128 m samples
-level 3:  256 m samples
-level 4:  512 m samples
-level 5: 1024 m samples, 30.72 km outer extent
+level 0:  16 m samples, complete safety parent with irregular Near cutout
+level 1:  32 m samples
+level 2:  64 m samples
+level 3: 128 m samples
+level 4: 256 m samples
+level 5: 512 m samples, 15.36 km L-infinity axis half-extent
+         (30.72 km full width)
 ```
 
 Each level owns a fixed 65x65 source window: 61x61 possible rendered vertices
-plus a two-cell sampling halo. Production QA currently installs 28,086 vertices
-and at most 117,960 indices across all six levels. Extending the horizon changes
-sample spacing, not the hard 35,000/150,000 geometry caps. The terrain generator
+plus a two-cell sampling halo. With no Near-coverage cutout, the current
+terminal-L5-only topology installs exactly 23,286 vertices and 110,760 indices
+across all six levels; Near coverage can only reduce those populations.
+Extending the horizon changes sample spacing, not the hard 35,000/150,000
+geometry caps. The terrain generator
 already exposes deterministic surface height, biome and environment fields, so
 far meshes do not allocate voxel volumes.
 

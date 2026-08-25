@@ -117,7 +117,7 @@ bounding the existing hot path.
 
 ## Proof after the change
 
-The world suite now contains 17 passing tests. New invariant tests cover:
+Focused world invariants cover:
 
 - a requested visual RD of 10,000 still produces exactly 2,400 unique dense
   requests and a 16-chunk candidate radius;
@@ -133,9 +133,10 @@ The world suite now contains 17 passing tests. New invariant tests cover:
 - current mesh-bucket entities and their lifetime peak remain exact telemetry
   even after the current set falls back to zero.
 
-The focused suite completed in 0.05 seconds after compilation on the current
-Windows/Rust 1.92.0 development environment. These are structural correctness
-and bounded-work measurements, not a frame-rate claim.
+A recorded focused run completed in 0.05 seconds after compilation on Windows
+with Rust 1.92.0. This timing is a historical development snapshot, not a
+current-environment result or a frame-rate claim; the structural assertions and
+bounded-work ceilings are the durable contract.
 
 ## Known limits and required real-engine QA
 

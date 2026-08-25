@@ -20,12 +20,13 @@ the measured baseline. Semantic pyramids, virtual pages, sparse bricks, and
 surfel landmarks below remain staged follow-up work with explicit acceptance
 gates.
 
-## How the supplied link graph was used
+## How the recorded discovery graph was used
 
-The canonical corpus contains 8,129 parent-child rows from 118 parent pages and
-5,527 unique child URLs. Four exact duplicate edges were found; none is on a
-far-world route. The duplicate rows were ignored. Parent degree was **not** used
-as a quality or importance score because it is strongly biased by article size,
+The recorded external corpus contained 8,129 parent-child rows from 118 parent
+pages and 5,527 unique child URLs. Four exact duplicate edges were found; none
+is on a far-world route. The duplicate rows were ignored. Parent degree was
+**not** used as a quality or importance score because it is strongly biased by
+article size,
 navigation templates, and list-heavy pages. Instead, the study followed named
 routes and inspected their actual outgoing edges: GIS, height fields,
 clipmaps/virtual texturing, point clouds/splatting, sparse volumes/ray casting,
@@ -35,6 +36,13 @@ The corpus is a discovery graph made largely of Wikipedia links. Wikipedia was
 used only to identify terminology, direct bridges, and neighbouring techniques;
 all technical conclusions below come from original papers, author project
 pages, standards, official API specifications, or official project manuals.
+
+The external corpus itself is not distributed with this repository, so its
+row/URL counts cannot be reproduced from a clean checkout alone. The checked-in
+[Research Link Graph Quality Report](RESEARCH_LINK_GRAPH_QUALITY.md) records the
+source-byte hashes, observed data shape, duplicate and bias audit, and approved
+discovery-only use. Those counts are provenance for the external snapshot, not
+release evidence or an independently reproducible engine result.
 
 | Link-graph cluster | What was retained | What was not treated as evidence |
 | --- | --- | --- |
@@ -53,7 +61,7 @@ pages, standards, official API specifications, or official project manuals.
 These graph edges explain *why* the primary-source research was grouped as it
 was. They are discovery evidence, not performance evidence.
 
-| Route in the supplied graph | Useful bridge | Consequence for Voxel-Native |
+| Route in the recorded discovery graph | Useful bridge | Consequence for Voxel-Native |
 | --- | --- | --- |
 | `MegaTexture -> Clipmap / Virtual Texturing / Texturestreaming` | geometry and material LOD have the same residency problem | pair the geometry rings with a separately bounded material-page cache |
 | `MegaTexture -> Octree / Sparse Voxel Octree / Raycasting` | virtual pages generalize from 2D texels to sparse 3D bricks | reuse page IDs, coarse fallback, request coalescing, and eviction telemetry across 2D and 3D caches |
@@ -100,19 +108,20 @@ Before that bound was introduced, real-engine QA recorded 7,204 resident full
 chunks at render distance 16 and 8,193 at render distance 23. A render-distance
 50 integer disc contains 7,845 horizontal columns; at eight vertical slots it
 can nominate 62,760 full chunk positions before empty-column rejection. Merely
-scaling that representation to 30.72 km would require 11,581,133 horizontal
-columns and up to 92,649,064 configured vertical slots. This is the baseline
-failure the far representation must avoid.
+scaling that representation to the shipping 15.36 km far radius would require
+2,895,185 horizontal columns and up to 23,161,480 configured vertical slots.
+This is the baseline failure the far representation must avoid.
 
 ### Implemented Phase-1 horizon
 
-The current `planetary_streaming` module renders six nested square annuli with
-spacings `32, 64, 128, 256, 512, 1024` metres. Their outer radii are `0.96,
-1.92, 3.84, 7.68, 15.36, 30.72` km.
+The current `planetary_streaming` module renders six nested square levels with
+shipping spacings `16, 32, 64, 128, 256, 512` metres. Their outer radii are
+`0.48, 0.96, 1.92, 3.84, 7.68, 15.36` km.
 
 | Far-field item | Fixed bound / measured result |
 | --- | ---: |
-| Render entities | 6 maximum |
+| Terrain-ring entities | 6 maximum |
+| Fully enabled far-render entities | 13 maximum: 6 terrain + up to 6 Hydro + up to 1 semantic cohort |
 | Hard vertex budget | 35,000 |
 | Exhaustive worst topology | 31,062 vertices |
 | Hard index budget | 150,000 |
@@ -125,13 +134,33 @@ spacings `32, 64, 128, 256, 512, 1024` metres. Their outer radii are `0.96,
 | Example cold six-ring sampling | 25,350 height + 2,469 biome queries |
 | Example cold six-ring CPU build p50 / p95 | 85.913 / 88.029 ms across nine optimized runs |
 
-The example benchmark is a local CPU measurement, not a universal frame-time
-promise. Runtime performs one build at a time off the native main thread. The
-same benchmark originally took 168.612 ms and 22,326 biome queries; a bounded
+The example benchmark is a local pre-refinement CPU measurement, not a
+universal frame-time promise or current 16 m acceptance. Runtime performs one
+build at a time off the native main thread. The same historical benchmark
+originally took 168.612 ms and 22,326 biome queries; a bounded
 biome lattice reduced recorded time by 30.9–33.6% and biome classifications by
-88.9% while leaving positions, indices, silhouette, radius, and entity count
-unchanged. Timing varies with machine load; the query-count reduction is the
-structural result.
+88.9% while leaving positions, indices, silhouette, radius, and terrain-entity
+count unchanged within that comparison. Timing varies with machine load; the
+query-count reduction is the structural result.
+
+The shipping refinement halves the legacy 32 m base spacing to 16 m and the
+BridgeV2 material cell from 128 m to 64 m. L0 now maps 1:1 to the 16 m Near
+chunk footprint, so a proven column hides exactly one fallback cell rather than
+participating in a four-column parent decision. The six levels, 60 x 60 cells,
+61 x 61 samples, topology/byte ceilings, six cache windows, one build task, and
+dirty-mask/job caps are unchanged; the deliberate trade is a 15.36 km outer
+radius. This removes the legacy mixed-readiness parent span and reduces
+material-transition breadth without claiming new population or performance
+wins.
+
+The compile-time rollback boundary is the refinement patch as one unit: its
+base-step/material-cell constants, L0 handoff tests, and L5 semantic-alignment
+assertions must remain consistent. Reverting that unit requires a fresh binary
+and also restores the legacy handoff risk. Operational rollback simply disables
+planetary streaming through its environment gate. No variant owns saves or
+authoritative voxels. Structural tests cover the refined invariants, but
+same-binary Natural/Astral screenshots and `report.ron` inspection are still
+outstanding; visual acceptance remains open.
 
 Tests rebuild the representation after simulated camera travel of 0, 1, 10,
 100, and 1,000 km and pin identical per-level entity/vertex/index counts.
@@ -159,11 +188,12 @@ buffer mutation. Telemetry reports current and peak cache windows/bytes under
 the six-window / 512 KiB cap.
 
 Far-surface material classification defaults to `BridgeV2`: vertices share a
-categorical biome/base-family lookup inside fixed absolute 128 m cells, with no
+categorical biome/base-family lookup inside fixed absolute 64 m cells, with no
 material-slope queries. `BridgeV1` remains the exact one-metre slope-family
 diagnostic and `LegacyPalette` the rollback. Across 25 optimized cold level-1
-builds per mode, Legacy measured 5.270/5.859 ms p50/p95, BridgeV1
-18.834/20.685 ms, and BridgeV2 5.364/5.944 ms. BridgeV2 can broaden categorical
+builds per mode before the refinement, Legacy measured 5.270/5.859 ms p50/p95,
+BridgeV1 18.834/20.685 ms, and BridgeV2 5.364/5.944 ms. Those timings are not a
+benchmark of the shipping 64 m quantum. BridgeV2 can still broaden categorical
 transitions, so same-seed Natural/Astral visual A/B remains pending.
 
 ## What the primary sources actually imply
@@ -330,7 +360,7 @@ authoritative seed + edits + authored object graph
        height/material/occupancy/water/edit/version
           /                  |                 \
  near full chunks      sparse 3D mid-field     far clipmap
- physics/edit tools    caves/vertical shells   30.72 km surface
+ physics/edit tools    caves/vertical shells   15.36 km surface
           \                  |                 /
              surfel landmark + virtual material pages
                     |
@@ -347,7 +377,10 @@ bubble; far layers have no collider or simulation tick.
 
 ### Stage 1 — bounded clipmap update model (implemented; visual gate open)
 
-- Keep six entities, 30.72 km extent, one task, and current hard topology caps.
+- Keep six terrain entities, a 15.36 km extent, one shared build task, and the
+  current terrain topology caps. Optional Hydro and semantic layers retain
+  their separate ceilings; fully enabled far rendering may contain at most 13
+  entities (`6 terrain + 6 Hydro + 1 cohort`).
 - Retain persistent per-level sample windows and use toroidal entering-strip
   source updates; refill incompatible targets in place.
 - Keep source-cache ownership at exactly six windows and 512 KiB while
@@ -356,10 +389,13 @@ bubble; far layers have no collider or simulation tick.
 - Expose update kind, shifts, new/reused samples, current/peak cache population,
   desired/resident material detail, and fixed-cell material reuse telemetry.
 
-Gate: a measured high-speed 30 km flight must show constant entities,
-vertices/indices, sample-cache bytes, request slots, and task count; frame
-pressure may age fine data but may not shorten the visible horizon. Natural and
-Astral visual A/B must also reject objectionable BridgeV2 transition broadening.
+Gate: with optional layers disabled, a measured high-speed 30 km flight must
+show six terrain entities and constant terrain vertices/indices, sample-cache
+bytes, request slots, and task count. Enabled-layer routes must separately stay
+within the 13-entity combined ceiling and their layer-specific payload caps;
+frame pressure may age fine data but may not shorten the visible horizon.
+Natural and Astral visual A/B must also reject objectionable BridgeV2 transition
+broadening.
 
 ### Stage 2 — semantic raster pyramid and material pages
 
@@ -402,9 +438,10 @@ the authoritative object, never the splat itself.
 
 ## Candid current limitations and rejection triggers
 
-1. **No authored far objects yet.** Current rings contain procedural surface
-   height and broad colour only; cities, shuttles, vegetation, crystals, water,
-   caves, floating-island undersides, and user edits need derived layers.
+1. **No authored far-object authority yet.** Current rings contain procedural
+   terrain, optional bounded hydro surfaces, and default-off semantic placeholder
+   frusta. Cities, shuttles, authored vegetation/crystals, caves,
+   floating-island undersides, and user edits still need derived layers.
 2. **Whole-ring GPU uploads remain.** Entering-strip procedural sampling and
    fixed memory are implemented, but the changed ring still receives complete
    CPU attribute assembly and asset upload. Rapid motion can still produce stale
