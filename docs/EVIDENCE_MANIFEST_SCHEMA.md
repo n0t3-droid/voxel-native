@@ -1,6 +1,6 @@
 # Voxel-Native Evidence Manifest Schema
 
-Status: schema `1.5.0`
+Status: schema `1.6.0`
 
 Generator: `tools/artifacts/build_evidence_manifest.py`
 
@@ -188,12 +188,12 @@ raw_observations
 
 `report_schema_variant` is:
 
-- `current`: `qa_report_schema_version` is exactly `2.5.0`; all missing or
+- `current`: `qa_report_schema_version` is exactly `2.6.0`; all missing or
   contradictory current fields then fail through their own explicit checks;
 - `legacy`: the report has no schema identity or is exactly `2.0.0`, `2.1.0`,
-  `2.2.0`, or `2.3.0`; its
+  `2.2.0`, `2.3.0`, `2.4.0`, or `2.5.0`; its
   historical observations remain inspectable, but every publishable claim is
-  `Blocked` and no 2.4 field is inferred;
+  `Blocked` and no current field is inferred;
 - `unsupported`: the report names any other schema version, including a future
   version; the run is `Rejected` until the parser and validators are explicitly
   upgraded;
@@ -264,12 +264,22 @@ The following values must all be finite and positive:
 - `physical_width`
 - `physical_height`
 - `scale_factor`
+- `base_scale_factor`
 - `dpi_percent`
 
 Physical width/height must retain their serialized unsigned-integer shape.
-Logical size multiplied by scale factor must agree with physical size within
-the one-pixel rounding boundary, and `dpi_percent` must agree with
-`scale_factor * 100`.
+Logical size multiplied by the effective `scale_factor` must agree with
+physical size within the one-pixel rounding boundary. For current 2.6 reports,
+`base_scale_factor` is required and records the OS/window-backend ratio before
+any application override; `dpi_percent` must agree with
+`base_scale_factor * 100`. This allows exact-pixel evidence to use an effective
+scale of 1.0 on a 200% desktop without falsifying the OS DPI as 100%.
+
+Exact legacy 2.5 reports retain their historical
+`dpi_percent == scale_factor * 100` interpretation and may omit
+`base_scale_factor`. That compatibility is confined to the legacy path: the
+run remains `Blocked` and cannot be relabeled or inferred as current 2.6
+evidence.
 
 The manifest records one viewport per run. It does not infer completion of the
 full responsive viewport/DPI matrix.
@@ -421,11 +431,12 @@ The observation separates:
   sample-cache, and coverage-work limits;
 - `telemetry`: scheduler, rebuild, query, cache, clamp, and camera coordinates.
 
-QA report schema `2.5.0` is the current contract with immutable terrain-grammar
-identity, edit-store compatibility, route-resolution truth, visibility-aware
-camera-plan evidence for applicable Hydro routes, per-kind Far Hydro evidence,
-Far Semantic Cohorts v1, and the exact combined resident-plus-in-flight dense
-chunk budget. Exact `2.4.0`, `2.3.0`, `2.2.0`, `2.1.0`, and `2.0.0`
+QA report schema `2.6.0` is the current contract with distinct effective and
+OS/window-backend viewport scale factors, immutable terrain-grammar identity,
+edit-store compatibility, route-resolution truth, visibility-aware camera-plan
+evidence for applicable Hydro routes, per-kind Far Hydro evidence, Far Semantic
+Cohorts v1, and the exact combined resident-plus-in-flight dense chunk budget.
+Exact `2.5.0`, `2.4.0`, `2.3.0`, `2.2.0`, `2.1.0`, and `2.0.0`
 reports remain readable historical evidence but are classified `legacy` and
 `Blocked`; field presence or zero defaults never reinterpret them as current.
 Any other named version is unsupported and rejected fail-closed.
@@ -611,7 +622,7 @@ The suite covers:
 - missing or stale QA report schema version, invalid Hydro modes, Hydro-disabled
   nonzero work, fluid scheduler/ECS mismatches, invalid observations, and fluid
   budget overflow;
-- exact 2.4/2.3/2.2/2.1/2.0 legacy blocking and rejection of unsupported
+- exact 2.5/2.4/2.3/2.2/2.1/2.0 legacy blocking and rejection of unsupported
   older/future schemas;
 - exact current/peak dense-residency accounting, the fixed 2,400-chunk budget,
   overflow/rejection truth, and final near-field settlement;
@@ -619,7 +630,7 @@ The suite covers:
   and desired/active far-grammar agreement;
 - contradictory requested/resolved route truth, unavailable-route blocking,
   optional search work, and cap overflow;
-- schema-2.5 camera applicability, exact non-applicable sentinel acceptance,
+- current camera applicability, exact non-applicable sentinel acceptance,
   missing/invalid plan binding, selected-clear-sample truth, exact XYZ
   chunk-check accounting, candidate-occlusion bounds, and obsolete field
   rejection;
@@ -650,5 +661,5 @@ DOCX, PDF, workbook, Sites, Visualize, and GitHub release workflows should:
 8. never infer test totals not present in a separately hashed gate transcript;
 9. rerender and visually inspect final artifacts on their delivery surface.
 
-Test and gate transcripts are intentionally not synthesized by schema `1.5.0`.
+Test and gate transcripts are intentionally not synthesized by schema `1.6.0`.
 They require an explicit, hashed input contract in a future schema revision.

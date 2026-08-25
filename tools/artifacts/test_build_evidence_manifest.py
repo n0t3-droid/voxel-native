@@ -26,7 +26,7 @@ FIXED_TIME = "2026-08-12T00:00:00Z"
 
 def modern_report(screenshot: str = "shot_0000.png") -> str:
     return f'''(
-    qa_report_schema_version: "2.5.0",
+    qa_report_schema_version: "2.6.0",
     run_identity: (
         package_version: "0.1.0",
         build_profile: "debug",
@@ -57,6 +57,7 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         physical_width: 1280,
         physical_height: 720,
         scale_factor: 1.0,
+        base_scale_factor: 1.0,
         dpi_percent: 100.0,
     )),
     planetary_streaming: Some((
@@ -299,7 +300,7 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
 
 def legacy_report() -> str:
     report = modern_report()
-    report = report.replace('    qa_report_schema_version: "2.5.0",\n', "")
+    report = report.replace('    qa_report_schema_version: "2.6.0",\n', "")
     report = report.replace('        build_profile: "debug",\n', "")
     report = report.replace('        git_sha: Some("abcdef1234567"),\n', "")
     report = report.replace('        git_dirty: Some(false),\n', "")
@@ -349,6 +350,8 @@ class EvidenceManifestTests(unittest.TestCase):
         run = self.make_run("run_current", modern_report())
         manifest = self.build(run)
 
+        self.assertEqual(manifest["schema_version"], "1.6.0")
+        self.assertEqual(manifest["generator"]["version"], "1.6.0")
         self.assertEqual(manifest["overall_classification"], "Observed")
         self.assertEqual(manifest["inputs"]["accepted_run_count"], 1)
         self.assertEqual(manifest["runs"][0]["report_schema_variant"], "current")
@@ -627,6 +630,44 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(record["overall_classification"], "Rejected")
         self.assertIn("invalid_viewport_field", {item["code"] for item in record["issues"]})
 
+    def test_current_viewport_separates_effective_scale_from_base_dpi(self) -> None:
+        report = modern_report().replace(
+            "        base_scale_factor: 1.0,\n",
+            "        base_scale_factor: 2.0,\n",
+        ).replace(
+            "        dpi_percent: 100.0,\n",
+            "        dpi_percent: 200.0,\n",
+        )
+        record = self.build(self.make_run("run_exact_scale_override", report))["runs"][0]
+
+        self.assertEqual(record["report_schema_variant"], "current")
+        self.assertEqual(record["overall_classification"], "Observed")
+        viewport = record["raw_observations"]["viewport"]
+        self.assertEqual(viewport["scale_factor"], 1.0)
+        self.assertEqual(viewport["base_scale_factor"], 2.0)
+        self.assertEqual(viewport["dpi_percent"], 200.0)
+
+    def test_current_viewport_requires_consistent_base_scale_factor(self) -> None:
+        cases = {
+            "missing": (
+                "        base_scale_factor: 1.0,\n",
+                "",
+                "invalid_viewport_field",
+            ),
+            "dpi_mismatch": (
+                "        base_scale_factor: 1.0,\n",
+                "        base_scale_factor: 2.0,\n",
+                "inconsistent_viewport_geometry",
+            ),
+        }
+        for name, (old, new, expected_code) in cases.items():
+            with self.subTest(name=name):
+                report = modern_report().replace(old, new)
+                record = self.build(self.make_run(f"run_base_scale_{name}", report))["runs"][0]
+                self.assertEqual(record["report_schema_variant"], "current")
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertIn(expected_code, {item["code"] for item in record["issues"]})
+
     def test_missing_planetary_budget_and_telemetry_are_rejected(self) -> None:
         report = modern_report().replace("        budget_vertices: 35000,\n", "")
         report = report.replace("        budget_rejections: 0,\n", "")
@@ -752,7 +793,7 @@ class EvidenceManifestTests(unittest.TestCase):
         )
 
     def test_missing_schema_version_is_legacy_and_blocked_with_complete_fields(self) -> None:
-        report = modern_report().replace('    qa_report_schema_version: "2.5.0",\n', "")
+        report = modern_report().replace('    qa_report_schema_version: "2.6.0",\n', "")
         run = self.make_run("run_pre_hydro_schema", report)
         record = self.build(run)["runs"][0]
 
@@ -763,9 +804,46 @@ class EvidenceManifestTests(unittest.TestCase):
             {item["code"] for item in record["issues"]},
         )
 
-    def test_exact_qa_24_through_20_are_legacy_blocked_and_other_versions_are_unsupported(self) -> None:
-        qa_24 = modern_report().replace(
+    def test_exact_qa_25_through_20_are_legacy_blocked_and_other_versions_are_unsupported(self) -> None:
+        qa_25 = modern_report().replace(
+            'qa_report_schema_version: "2.6.0"',
             'qa_report_schema_version: "2.5.0"',
+        )
+        legacy_25 = self.build(self.make_run("run_exact_25", qa_25))["runs"][0]
+        self.assertEqual(legacy_25["report_schema_variant"], "legacy")
+        self.assertEqual(legacy_25["overall_classification"], "Blocked")
+        self.assertIn(
+            "legacy_missing_current_qa_report_schema",
+            {item["code"] for item in legacy_25["issues"]},
+        )
+        legacy_25_claims = {item["id"].rsplit(":", 1)[-1]: item for item in legacy_25["claims"]}
+        self.assertEqual(
+            legacy_25_claims["world_edit_store"]["statement"],
+            "Legacy QA edit-store observations cannot authorize current compatibility.",
+        )
+        self.assertEqual(
+            legacy_25_claims["route_observation"]["statement"],
+            "Legacy QA route observations cannot authorize current publication.",
+        )
+        self.assertEqual(
+            legacy_25_claims["route_frame_times"]["statement"],
+            "Legacy frame-time data is historical and not publishable under the current manifest contract.",
+        )
+
+        historical_25 = qa_25.replace("        base_scale_factor: 1.0,\n", "")
+        historical_25_record = self.build(
+            self.make_run("run_historical_25_effective_dpi", historical_25)
+        )["runs"][0]
+        historical_25_codes = {
+            item["code"] for item in historical_25_record["issues"]
+        }
+        self.assertEqual(historical_25_record["report_schema_variant"], "legacy")
+        self.assertEqual(historical_25_record["overall_classification"], "Blocked")
+        self.assertNotIn("invalid_viewport_field", historical_25_codes)
+        self.assertNotIn("inconsistent_viewport_geometry", historical_25_codes)
+
+        qa_24 = modern_report().replace(
+            'qa_report_schema_version: "2.6.0"',
             'qa_report_schema_version: "2.4.0"',
         )
         legacy_24 = self.build(self.make_run("run_exact_24", qa_24))["runs"][0]
@@ -773,7 +851,7 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(legacy_24["overall_classification"], "Blocked")
 
         qa_23 = modern_report().replace(
-            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.6.0"',
             'qa_report_schema_version: "2.3.0"',
         )
         legacy_23 = self.build(self.make_run("run_exact_23", qa_23))["runs"][0]
@@ -781,7 +859,7 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(legacy_23["overall_classification"], "Blocked")
 
         qa_22 = modern_report().replace(
-            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.6.0"',
             'qa_report_schema_version: "2.2.0"',
         )
         legacy_22 = self.build(self.make_run("run_exact_22", qa_22))["runs"][0]
@@ -789,7 +867,7 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(legacy_22["overall_classification"], "Blocked")
 
         qa_21 = modern_report().replace(
-            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.6.0"',
             'qa_report_schema_version: "2.1.0"',
         )
         legacy_21 = self.build(self.make_run("run_exact_21", qa_21))["runs"][0]
@@ -797,7 +875,7 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(legacy_21["overall_classification"], "Blocked")
 
         qa_20 = modern_report().replace(
-            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.6.0"',
             'qa_report_schema_version: "2.0.0"',
         )
         legacy = self.build(self.make_run("run_exact_20", qa_20))["runs"][0]
@@ -805,8 +883,8 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(legacy["overall_classification"], "Blocked")
 
         future = modern_report().replace(
-            'qa_report_schema_version: "2.5.0"',
             'qa_report_schema_version: "2.6.0"',
+            'qa_report_schema_version: "2.7.0"',
         )
         unsupported = self.build(self.make_run("run_future", future))["runs"][0]
         self.assertEqual(unsupported["report_schema_variant"], "unsupported")
@@ -815,6 +893,29 @@ class EvidenceManifestTests(unittest.TestCase):
             "unsupported_qa_report_schema",
             {item["code"] for item in unsupported["issues"]},
         )
+
+    def test_non_bare_qa_schema_tokens_are_rejected_without_aborting_manifest(self) -> None:
+        for name, token in (
+            ("current_option", 'Some("2.6.0")'),
+            ("legacy_option", 'Some("2.5.0")'),
+            ("list", "[]"),
+            ("map", '{"unexpected": "2.6.0"}'),
+        ):
+            with self.subTest(name=name):
+                report = modern_report().replace(
+                    'qa_report_schema_version: "2.6.0"',
+                    f"qa_report_schema_version: {token}",
+                )
+                record = self.build(
+                    self.make_run(f"run_structured_schema_{name}", report)
+                )["runs"][0]
+
+                self.assertEqual(record["report_schema_variant"], "unsupported")
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertIn(
+                    "unsupported_qa_report_schema",
+                    {item["code"] for item in record["issues"]},
+                )
 
     def test_route_resolution_and_bounded_search_truth_fail_closed(self) -> None:
         contradictions = (
@@ -882,7 +983,7 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(record["overall_classification"], "Blocked")
         self.assertIn("camera_route_focus_unavailable", {item["code"] for item in record["issues"]})
 
-    def test_schema_25_camera_preflight_truth_fails_closed(self) -> None:
+    def test_schema_26_camera_preflight_truth_fails_closed(self) -> None:
         mutations = (
             (
                 "missing_plan_hash",
@@ -962,7 +1063,7 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(record["overall_classification"], "Blocked")
         self.assertIn("camera_route_unavailable", {item["code"] for item in record["issues"]})
 
-    def test_schema_25_non_applicable_camera_sentinel_is_current_observed(self) -> None:
+    def test_schema_26_non_applicable_camera_sentinel_is_current_observed(self) -> None:
         report = (
             modern_report()
             .replace('    requested_route_focus: "lava",\n', '    requested_route_focus: "streaming",\n')
@@ -1101,7 +1202,7 @@ class EvidenceManifestTests(unittest.TestCase):
         )
 
     def test_pre_hydro_report_without_fluid_contract_is_rejected(self) -> None:
-        report = modern_report().replace('    qa_report_schema_version: "2.5.0",\n', "")
+        report = modern_report().replace('    qa_report_schema_version: "2.6.0",\n', "")
         hydro_lines = (
             "        resident_fluid_entities: 6,\n",
             "        resident_fluid_vertices: 2100,\n",

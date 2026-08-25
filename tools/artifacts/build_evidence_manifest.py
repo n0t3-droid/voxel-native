@@ -21,12 +21,13 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-SCHEMA_VERSION = "1.5.0"
-GENERATOR_VERSION = "1.5.0"
-CURRENT_QA_REPORT_SCHEMA_VERSION = "2.5.0"
+SCHEMA_VERSION = "1.6.0"
+GENERATOR_VERSION = "1.6.0"
+CURRENT_QA_REPORT_SCHEMA_VERSION = "2.6.0"
 LEGACY_QA_REPORT_SCHEMA_VERSIONS = frozenset(
-    {"2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0"}
+    {"2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0", "2.5.0"}
 )
+NON_BARE_QA_REPORT_SCHEMA_TOKEN = "<non-bare-ron-string>"
 CLASSIFICATIONS = ("Passed", "Observed", "Rejected", "Planned", "Blocked")
 PROTECTED_OUTPUT_DIRS = ("saves", "qa_runs", "agent_runs")
 MAX_REPORT_BYTES = 4 * 1024 * 1024
@@ -91,6 +92,7 @@ VIEWPORT_FIELDS = (
     "physical_width",
     "physical_height",
     "scale_factor",
+    "base_scale_factor",
     "dpi_percent",
 )
 ROUTE_FIELDS = (
@@ -423,7 +425,7 @@ class RonParser:
                 self._expect(":")
                 if name in result:
                     self._fail(f"duplicate field {name!r}")
-                result[name] = self._value(depth)
+                result[name] = self._field_value(name, depth)
                 self._skip_trivia()
                 if self._take(")"):
                     return result
@@ -474,7 +476,7 @@ class RonParser:
             self._expect(":")
             if key_text in result:
                 self._fail(f"duplicate map key {key_text!r}")
-            result[key_text] = self._value(depth)
+            result[key_text] = self._field_value(key_text, depth)
             self._skip_trivia()
             if self._take("}"):
                 return result
@@ -522,6 +524,17 @@ class RonParser:
                 self._fail("Some requires exactly one value")
             return payload
         return {"__ron_variant__": identifier, "value": payload}
+
+    def _field_value(self, name: str, depth: int) -> Any:
+        self._skip_trivia()
+        schema_token_is_bare_string = (
+            name != "qa_report_schema_version"
+            or (self.pos < len(self.text) and self.text[self.pos] == '"')
+        )
+        value = self._value(depth)
+        if not schema_token_is_bare_string:
+            return NON_BARE_QA_REPORT_SCHEMA_TOKEN
+        return value
 
     def _string(self) -> str:
         self._expect('"')
@@ -1137,7 +1150,10 @@ def validate_world_edit_store(
 
 
 def validate_viewport(
-    report: dict[str, Any], run_key: str
+    report: dict[str, Any],
+    run_key: str,
+    *,
+    report_schema_version: Any,
 ) -> tuple[dict[str, Any] | None, dict[str, Any], list[dict[str, str]]]:
     viewport = report.get("viewport")
     if not isinstance(viewport, dict):
@@ -1152,9 +1168,13 @@ def validate_viewport(
         ), [problem]
 
     output = copy_known_fields(viewport, VIEWPORT_FIELDS)
+    uses_base_scale_contract = report_schema_version == CURRENT_QA_REPORT_SCHEMA_VERSION
+    finite_fields = ["logical_width", "logical_height", "scale_factor", "dpi_percent"]
+    if uses_base_scale_contract:
+        finite_fields.append("base_scale_factor")
     invalid_fields = [
         field
-        for field in ("logical_width", "logical_height", "scale_factor", "dpi_percent")
+        for field in finite_fields
         if not is_finite_number(viewport.get(field), minimum=0.000001)
     ]
     invalid_fields.extend(
@@ -1185,7 +1205,16 @@ def validate_viewport(
         inconsistent_fields.append("physical_width")
     if abs(logical_height * scale_factor - viewport["physical_height"]) > 1.5:
         inconsistent_fields.append("physical_height")
-    if abs(scale_factor * 100.0 - dpi_percent) > 0.01:
+    # QA 2.6 distinguishes an application-overridden effective scale from the
+    # OS/window-backend scale that defines DPI. Historical reports, including
+    # exact 2.5.0, retain their old effective-scale DPI interpretation but are
+    # never classified as current evidence.
+    dpi_scale_factor = (
+        float(viewport["base_scale_factor"])
+        if uses_base_scale_contract
+        else scale_factor
+    )
+    if abs(dpi_scale_factor * 100.0 - dpi_percent) > 0.01:
         inconsistent_fields.append("dpi_percent")
     if inconsistent_fields:
         return output, claim(
@@ -3669,7 +3698,10 @@ def process_run(
         report_schema_version = report.get("qa_report_schema_version")
         if report_schema_version == CURRENT_QA_REPORT_SCHEMA_VERSION:
             schema_variant = "current"
-        elif report_schema_version is None or report_schema_version in LEGACY_QA_REPORT_SCHEMA_VERSIONS:
+        elif report_schema_version is None or (
+            isinstance(report_schema_version, str)
+            and report_schema_version in LEGACY_QA_REPORT_SCHEMA_VERSIONS
+        ):
             schema_variant = "legacy"
         else:
             schema_variant = "unsupported"
@@ -3696,13 +3728,17 @@ def process_run(
         identity, identity_claim, identity_issues = validate_run_identity(
             report, run_key, require_current=schema_variant == "current"
         )
-        viewport, viewport_claim, viewport_issues = validate_viewport(report, run_key)
+        viewport, viewport_claim, viewport_issues = validate_viewport(
+            report,
+            run_key,
+            report_schema_version=report_schema_version,
+        )
         if schema_variant == "legacy":
             world_edit_store = copy_known_fields(report, WORLD_EDIT_STORE_FIELDS)
             world_edit_store_claim = claim(
                 f"{run_key}:world_edit_store",
                 "Blocked",
-                "Legacy QA evidence predates the schema-2.3 edit-store identity contract.",
+                "Legacy QA edit-store observations cannot authorize current compatibility.",
             )
             world_edit_store_issues: list[dict[str, str]] = []
             route = copy_known_fields(
@@ -3724,7 +3760,7 @@ def process_run(
             route_claim = claim(
                 f"{run_key}:route_observation",
                 "Blocked",
-                "Legacy QA route observations predate schema-2.3 terrain-grammar binding.",
+                "Legacy QA route observations cannot authorize current publication.",
             )
             route_issues: list[dict[str, str]] = []
             frame_times = copy_known_fields(
@@ -3733,7 +3769,7 @@ def process_run(
             frame_claim = claim(
                 f"{run_key}:route_frame_times",
                 "Blocked",
-                "Legacy frame-time data is historical and not publishable under manifest 1.2.",
+                "Legacy frame-time data is historical and not publishable under the current manifest contract.",
             )
             frame_issues: list[dict[str, str]] = []
             legacy_planetary = report.get("planetary_streaming")

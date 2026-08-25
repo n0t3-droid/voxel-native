@@ -160,8 +160,9 @@ runtime screenshot or convert pending visual acceptance into a pass.
 
 Every builder requires:
 
-- schema version `1.5.0` from generator version `1.5.0`;
-- exact current QA report schema `2.5.0`, including the 2,400-slot combined
+- schema version `1.6.0` from generator version `1.6.0`;
+- exact current QA report schema `2.6.0`, including distinct effective and
+  OS/window-backend viewport scale factors and the 2,400-slot combined
   resident-plus-in-flight total and independently observed peak;
 - the explicit-run selection policy recorded by the manifest generator;
 - an aggregate `Observed` classification;
@@ -241,7 +242,7 @@ The artifacts render only manifest observations, claims, issues, budgets, and
 file identities. Stable explanatory text describes the evidence contract, not
 unrecorded engine results. In particular:
 
-- automated test totals are omitted because schema `1.5.0` intentionally does
+- automated test totals are omitted because schema `1.6.0` intentionally does
   not synthesize test or gate transcripts, and this manifest has no separately
   hashed release-gate transcript;
 - `Passed` is used only for manifest integrity or like-for-like hard-budget
@@ -305,7 +306,7 @@ include or imply approved final evidence artifacts.
   route performance, current evidence limits, and the Hydro v1 evidence
   boundary. Slide 7 records that render-only Hydro v1 is implemented in
   `src/planetary_streaming.rs`; it deliberately reports no automated test total
-  or nonvisual gate result because schema `1.5.0` carries neither transcript.
+  or nonvisual gate result because schema `1.6.0` carries neither transcript.
   Formal same-binary visual acceptance and current-manifest acceptance remain
   pending until QA/report/manifest Hydro telemetry produces a Hydro-current
   manifest whose captures are fully reviewed.

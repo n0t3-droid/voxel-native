@@ -49,8 +49,12 @@ except ImportError as error:  # pragma: no cover - exercised by the CLI host
 ANALYZER_SCHEMA_VERSION = "voxel-native-l0-provenance-analysis-v1"
 EVIDENCE_DISPOSITION = "diagnostic-only-non-publishable"
 
-POINT_SCHEMA = "2.5.0-diagnostic-lod-provenance-v1"
+POINT_SCHEMA = "2.6.0-diagnostic-lod-provenance-v1"
 CANDIDATE_SCHEMA = (
+    "2.6.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1"
+)
+LEGACY_POINT_SCHEMA = "2.5.0-diagnostic-lod-provenance-v1"
+LEGACY_CANDIDATE_SCHEMA = (
     "2.5.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1"
 )
 POINT_DISPOSITION = "diagnostic-lod-provenance-only-non-publishable"
@@ -61,6 +65,16 @@ CANDIDATE_DISPOSITION = (
 POINT_MODE = "Point16V1"
 CANDIDATE_MODE = "CardinalTrimmed8V1"
 SURFACE_MODE = "LodProvenanceV1"
+DIAGNOSTIC_SCHEMAS_BY_MODE = {
+    POINT_MODE: {
+        "2.6.0": POINT_SCHEMA,
+        "2.5.0": LEGACY_POINT_SCHEMA,
+    },
+    CANDIDATE_MODE: {
+        "2.6.0": CANDIDATE_SCHEMA,
+        "2.5.0": LEGACY_CANDIDATE_SCHEMA,
+    },
+}
 EXPECTED_WORLD_SEED = 12_345
 EXPECTED_SCENERY = "Lush"
 EXPECTED_TERRAIN_GRAMMAR = "V3"
@@ -445,6 +459,7 @@ class RunEvidence:
     streaming: dict[str, Any]
     route_plan_hash: str
     route_variant_index: int
+    report_schema_generation: str
 
 
 def _is_bool(value: Any) -> bool:
@@ -665,13 +680,22 @@ def _sequence_of_ints(value: Any, length: int, context: str) -> tuple[int, ...]:
 
 def _validate_identity(
     report: dict[str, Any], spec: ArmSpec
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, int]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str, int, str]:
     context = spec.key
-    _expect_equal(
-        _string(report, "qa_report_schema_version", context),
-        spec.schema,
-        f"{context}.qa_report_schema_version",
+    report_schema = _string(report, "qa_report_schema_version", context)
+    schema_generation = next(
+        (
+            generation
+            for generation, expected_schema in DIAGNOSTIC_SCHEMAS_BY_MODE[spec.mode].items()
+            if report_schema == expected_schema
+        ),
+        None,
     )
+    if schema_generation is None:
+        expected = sorted(DIAGNOSTIC_SCHEMAS_BY_MODE[spec.mode].values())
+        raise AnalysisError(
+            f"{context}.qa_report_schema_version is {report_schema!r}, expected one of {expected!r}"
+        )
     _expect_equal(
         _string(report, "evidence_disposition", context),
         spec.disposition,
@@ -776,8 +800,23 @@ def _validate_identity(
         raise AnalysisError(f"{viewport_context} contains an invalid logical size or scale")
     if abs(logical_width * scale - width) > 1.0 or abs(logical_height * scale - height) > 1.0:
         raise AnalysisError(f"{viewport_context} logical and physical sizes disagree")
-    if abs(dpi - scale * 100.0) > 0.01:
-        raise AnalysisError(f"{viewport_context}.dpi_percent disagrees with scale_factor")
+    if schema_generation == "2.6.0":
+        base_scale = _number(viewport, "base_scale_factor", viewport_context)
+        if not 0.25 <= base_scale <= 8.0:
+            raise AnalysisError(f"{viewport_context}.base_scale_factor is invalid")
+        if abs(dpi - base_scale * 100.0) > 0.01:
+            raise AnalysisError(
+                f"{viewport_context}.dpi_percent disagrees with base_scale_factor"
+            )
+    else:
+        if "base_scale_factor" in viewport:
+            raise AnalysisError(
+                f"{viewport_context}.base_scale_factor is not part of the exact legacy 2.5 contract"
+            )
+        if abs(dpi - scale * 100.0) > 0.01:
+            raise AnalysisError(
+                f"{viewport_context}.dpi_percent disagrees with legacy scale_factor"
+            )
 
     _expect_equal(
         _string(report, "requested_route_focus", context),
@@ -858,7 +897,14 @@ def _validate_identity(
         f"{context}.planetary_streaming",
     )
     _validate_streaming(streaming, spec)
-    return identity, viewport, streaming, plan_hash, variant_index
+    return (
+        identity,
+        viewport,
+        streaming,
+        plan_hash,
+        variant_index,
+        schema_generation,
+    )
 
 
 def _expected_l0_sampling_identity(
@@ -1269,7 +1315,9 @@ def _load_images(
 def _load_run(raw_path: str | os.PathLike[str], spec: ArmSpec) -> RunEvidence:
     run_dir = _validate_run_dir(raw_path, spec.key)
     report, report_snapshot = _load_report(run_dir, spec)
-    identity, viewport, streaming, plan_hash, variant_index = _validate_identity(report, spec)
+    identity, viewport, streaming, plan_hash, variant_index, schema_generation = (
+        _validate_identity(report, spec)
+    )
     images = _load_images(report, run_dir, spec, viewport)
     return RunEvidence(
         spec=spec,
@@ -1282,6 +1330,7 @@ def _load_run(raw_path: str | os.PathLike[str], spec: ArmSpec) -> RunEvidence:
         streaming=streaming,
         route_plan_hash=plan_hash,
         route_variant_index=variant_index,
+        report_schema_generation=schema_generation,
     )
 
 
@@ -1301,6 +1350,10 @@ def _position_delta(first: Sequence[float], second: Sequence[float]) -> float:
 def _validate_common_identity(runs: Sequence[RunEvidence]) -> dict[str, Any]:
     if len({run.run_dir for run in runs}) != len(runs):
         raise AnalysisError("all four run directories must be distinct")
+    schema_generations = {run.report_schema_generation for run in runs}
+    if len(schema_generations) != 1:
+        raise AnalysisError("diagnostic schema generations differ across the four arms")
+    schema_generation = next(iter(schema_generations))
     fields = (
         "package_version",
         "build_profile",
@@ -1321,14 +1374,16 @@ def _validate_common_identity(runs: Sequence[RunEvidence]) -> dict[str, Any]:
             raise AnalysisError(f"run_identity.{field_name} differs across the four arms")
         common[field_name] = values[0]
 
-    viewport_fields = (
+    viewport_fields = [
         "logical_width",
         "logical_height",
         "physical_width",
         "physical_height",
         "scale_factor",
         "dpi_percent",
-    )
+    ]
+    if schema_generation == "2.6.0":
+        viewport_fields.append("base_scale_factor")
     for field_name in viewport_fields:
         values = [run.viewport[field_name] for run in runs]
         if any(value != values[0] for value in values[1:]):

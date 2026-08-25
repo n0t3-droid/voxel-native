@@ -163,7 +163,7 @@ OS/text-scale cells were not covered by that historical checkpoint and remain
 open until fresh evidence says otherwise. Layout metrics and safe window bounds
 are regression proof, but they are not substitutes for visual captures.
 
-QA report schema 2.5 also binds near-field memory truth to each run. It records
+QA report schema 2.6 also binds near-field memory truth to each run. It records
 `dense_chunks = loaded_chunks + pending_terrain`, the exact 2,400-chunk limit,
 an independent `peak_dense_chunks`, and a sticky overflow flag. Successful
 completion requires a complete frontier, zero terrain/mesh/dirty queues, no

@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = "1.5.0"
+SCHEMA_VERSION = "1.6.0"
 GENERATOR_NAME = "voxel-native-evidence-manifest"
-GENERATOR_VERSION = "1.5.0"
+GENERATOR_VERSION = "1.6.0"
 SELECTION_POLICY = "explicit_repo_contained_directories_only_no_latest_no_global_scan"
 CLASSIFICATIONS = ("Passed", "Observed", "Rejected", "Planned", "Blocked")
 PROTECTED_OUTPUT_DIRS = ("saves", "qa_runs", "agent_runs")
@@ -247,10 +247,25 @@ def _validate_run(
         )
 
     viewport = observations["viewport"]
-    for field in ("logical_width", "logical_height", "scale_factor", "dpi_percent"):
+    for field in (
+        "logical_width",
+        "logical_height",
+        "scale_factor",
+        "base_scale_factor",
+        "dpi_percent",
+    ):
         _require(_is_finite_number(viewport.get(field), positive=True), f"{scope} viewport {field} is invalid")
     for field in ("physical_width", "physical_height"):
         _require(_is_uint(viewport.get(field)) and viewport[field] > 0, f"{scope} viewport {field} is invalid")
+    _require(
+        abs(viewport["logical_width"] * viewport["scale_factor"] - viewport["physical_width"]) <= 1.5
+        and abs(viewport["logical_height"] * viewport["scale_factor"] - viewport["physical_height"]) <= 1.5,
+        f"{scope} viewport effective scale is inconsistent",
+    )
+    _require(
+        abs(viewport["base_scale_factor"] * 100.0 - viewport["dpi_percent"]) <= 0.01,
+        f"{scope} viewport base scale and DPI are inconsistent",
+    )
 
     route = observations["route"]
     supported_focuses = {"scenic", "waypoint", "streaming", "river", "lava", "near-far"}

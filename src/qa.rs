@@ -56,19 +56,19 @@ const QA_HARDWARE_MAX_CHARS: usize = 320;
 /// window guarantees a mismatched generator produces an explicit blocked
 /// report instead of leaving an unattended QA process alive indefinitely.
 const QA_GENERATOR_HANDOFF_TIMEOUT_SECONDS: f32 = 20.0;
-/// Versioned serialized QA contract. Version 2.5 adds an explicit exact and
-/// peak proof of the combined resident-plus-in-flight dense chunk budget.
-const QA_REPORT_SCHEMA_VERSION: &str = "2.5.0";
+/// Versioned serialized QA contract. Version 2.6 separates the effective
+/// physical/logical scale from the OS/window-backend scale used for DPI.
+const QA_REPORT_SCHEMA_VERSION: &str = "2.6.0";
 /// Deliberately unsupported by the canonical evidence-manifest builder. The
 /// alternate L0 height estimator and LOD-provenance palette are diagnostic
 /// axes, so their reports must not be mistaken for current release evidence
 /// even though they use the same QA harness and executable provenance contract.
 const QA_DIAGNOSTIC_L0_HEIGHT_REPORT_SCHEMA_VERSION: &str =
-    "2.5.0-diagnostic-l0-cardinal-trimmed-8-v1";
+    "2.6.0-diagnostic-l0-cardinal-trimmed-8-v1";
 const QA_DIAGNOSTIC_LOD_PROVENANCE_REPORT_SCHEMA_VERSION: &str =
-    "2.5.0-diagnostic-lod-provenance-v1";
+    "2.6.0-diagnostic-lod-provenance-v1";
 const QA_DIAGNOSTIC_L0_HEIGHT_LOD_PROVENANCE_REPORT_SCHEMA_VERSION: &str =
-    "2.5.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1";
+    "2.6.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1";
 const QA_CANONICAL_EVIDENCE_DISPOSITION: &str = "canonical-candidate";
 const QA_DIAGNOSTIC_EVIDENCE_DISPOSITION: &str = "diagnostic-only-non-publishable";
 const QA_DIAGNOSTIC_LOD_PROVENANCE_EVIDENCE_DISPOSITION: &str =
@@ -988,7 +988,10 @@ struct QaViewport {
     logical_height: f32,
     physical_width: u32,
     physical_height: u32,
+    /// Effective physical/logical ratio after any application override.
     scale_factor: f32,
+    /// OS/window-backend ratio before an application override.
+    base_scale_factor: f32,
     dpi_percent: f32,
 }
 
@@ -1240,13 +1243,15 @@ fn qa_optional_bool(value: &str) -> Option<bool> {
 fn qa_viewport(window: Option<&Window>) -> Option<QaViewport> {
     let window = window?;
     let scale_factor = window.resolution.scale_factor();
+    let base_scale_factor = window.resolution.base_scale_factor();
     Some(QaViewport {
         logical_width: window.resolution.width(),
         logical_height: window.resolution.height(),
         physical_width: window.resolution.physical_width(),
         physical_height: window.resolution.physical_height(),
         scale_factor,
-        dpi_percent: scale_factor * 100.0,
+        base_scale_factor,
+        dpi_percent: base_scale_factor * 100.0,
     })
 }
 
@@ -3282,7 +3287,7 @@ fn qa_capture_screenshot(
 ) {
     if !qa.enabled
         || qa.finished
-        || !qa.camera_route_available
+        || !qa_camera_capture_route_ready(qa.focus, qa.camera_route_available)
         || !qa_screenshot_due(qa.elapsed, qa.next_screenshot_at, qa.duration)
     {
         return;
@@ -3348,6 +3353,13 @@ fn qa_capture_screenshot(
             warn!("QA: screenshot failed: {e}");
         }
     }
+}
+
+/// Only hydro-anchored routes need the bounded voxel camera preflight.
+/// Scenic, waypoint, and streaming routes are authored independently and must
+/// not be prevented from capturing merely because no preflight applies.
+fn qa_camera_capture_route_ready(focus: QaFocus, camera_route_available: bool) -> bool {
+    !focus.requires_hydro_anchor() || camera_route_available
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3963,16 +3975,17 @@ mod tests {
     use super::qa_png_tail_is_complete;
     use super::{
         parse_finite_f32, parse_scenery_quality, parse_terrain_grammar, qa_bounded_text,
-        qa_camera_plan_hash, qa_camera_pose_voxel, qa_camera_preflight_staging_sample,
-        qa_camera_probe_body, qa_camera_probe_ray, qa_camera_route_preflight,
-        qa_camera_route_variant_basis, qa_camera_voxel_is_visual_body_blocker,
-        qa_completion_decision, qa_completion_streaming_settled, qa_dense_chunk_observation,
-        qa_find_hydro_focus, qa_focus_has_exact_search_work, qa_focus_search_exhausted,
-        qa_generator_signature, qa_git_sha, qa_hero_route_sample,
-        qa_hydro_route_sample_for_variant, qa_near_far_route_available, qa_nearest_rank,
-        qa_observe_route_frame_time, qa_observed_interval_elapsed, qa_optional_bool,
-        qa_planetary_streaming, qa_profile_anchor_ready, qa_provenance_token, qa_report_contract,
-        qa_requested_from, qa_route_lifecycle_timed_out, qa_route_phase, qa_screenshot_due,
+        qa_camera_capture_route_ready, qa_camera_plan_hash, qa_camera_pose_voxel,
+        qa_camera_preflight_staging_sample, qa_camera_probe_body, qa_camera_probe_ray,
+        qa_camera_route_preflight, qa_camera_route_variant_basis,
+        qa_camera_voxel_is_visual_body_blocker, qa_completion_decision,
+        qa_completion_streaming_settled, qa_dense_chunk_observation, qa_find_hydro_focus,
+        qa_focus_has_exact_search_work, qa_focus_search_exhausted, qa_generator_signature,
+        qa_git_sha, qa_hero_route_sample, qa_hydro_route_sample_for_variant,
+        qa_near_far_route_available, qa_nearest_rank, qa_observe_route_frame_time,
+        qa_observed_interval_elapsed, qa_optional_bool, qa_planetary_streaming,
+        qa_profile_anchor_ready, qa_provenance_token, qa_report_contract, qa_requested_from,
+        qa_route_lifecycle_timed_out, qa_route_phase, qa_screenshot_due,
         qa_screenshot_ledger_valid, qa_screenshot_observation, qa_stall_timing, qa_stream_ready,
         qa_streaming_route_sample, qa_viewport, qa_waypoint_axis, qa_waypoint_route_sample,
         QaCameraProbeResult, QaCameraQueryBudget, QaCameraVoxelResolution, QaCameraVoxelSource,
@@ -4320,7 +4333,7 @@ mod tests {
 
         let serialized = ron::ser::to_string(&report).expect("serialize QA report");
         assert!(serialized.contains("route_frame_times"));
-        assert!(serialized.contains("qa_report_schema_version:\"2.5.0\""));
+        assert!(serialized.contains("qa_report_schema_version:\"2.6.0\""));
         assert!(serialized.contains("evidence_disposition:\"canonical-candidate\""));
         assert!(serialized.contains("world_edit_store_status:\"compatible\""));
         assert!(serialized.contains("world_edit_store_compatible:true"));
@@ -4397,7 +4410,32 @@ mod tests {
         assert!(viewport.physical_width > 0);
         assert!(viewport.physical_height > 0);
         assert!(viewport.scale_factor.is_finite() && viewport.scale_factor > 0.0);
-        assert_eq!(viewport.dpi_percent, viewport.scale_factor * 100.0);
+        assert!(viewport.base_scale_factor.is_finite() && viewport.base_scale_factor > 0.0);
+        assert_eq!(viewport.dpi_percent, viewport.base_scale_factor * 100.0);
+    }
+
+    #[test]
+    fn report_viewport_keeps_os_dpi_truth_under_exact_pixel_override() {
+        let mut window = Window::default();
+        window.resolution.set_scale_factor(2.0);
+        window.resolution.set_scale_factor_override(Some(1.0));
+
+        let viewport = qa_viewport(Some(&window)).expect("configured primary window");
+        assert_eq!(viewport.scale_factor, 1.0);
+        assert_eq!(viewport.base_scale_factor, 2.0);
+        assert_eq!(viewport.dpi_percent, 200.0);
+        assert_eq!(viewport.logical_width, viewport.physical_width as f32);
+        assert_eq!(viewport.logical_height, viewport.physical_height as f32);
+
+        let serialized = ron::ser::to_string(&viewport).expect("serialize viewport");
+        let effective_offset = serialized
+            .find("scale_factor:1.0")
+            .expect("effective scale field");
+        let base_offset = serialized
+            .find("base_scale_factor:2.0")
+            .expect("base scale field");
+        let dpi_offset = serialized.find("dpi_percent:200.0").expect("DPI field");
+        assert!(effective_offset < base_offset && base_offset < dpi_offset);
     }
 
     #[test]
@@ -5045,6 +5083,19 @@ mod tests {
         assert!(!qa_screenshot_due(f32::NAN, 2.5, 10.0));
         assert!(!qa_screenshot_due(2.5, f32::INFINITY, 10.0));
         assert!(!qa_screenshot_due(2.5, 2.5, f32::NEG_INFINITY));
+    }
+
+    #[test]
+    fn screenshot_capture_only_requires_preflight_for_hydro_routes() {
+        for focus in [QaFocus::Scenic, QaFocus::Waypoint, QaFocus::Streaming] {
+            assert!(qa_camera_capture_route_ready(focus, false));
+            assert!(qa_camera_capture_route_ready(focus, true));
+        }
+
+        for focus in [QaFocus::River, QaFocus::Lava, QaFocus::NearFar] {
+            assert!(!qa_camera_capture_route_ready(focus, false));
+            assert!(qa_camera_capture_route_ready(focus, true));
+        }
     }
 
     #[test]

@@ -171,6 +171,7 @@ $MaxQaPngChunkCount = 65536
 $QaPngReadBufferBytes = 65536
 $MaxQaWorldNameChars = 72
 $MaxQaDerivedWorldPathChars = 240
+$QaRequestedLogicalViewportTolerance = 0.001
 
 # Process.Start happens only after any requested Cargo build has completed.
 # This wall-clock budget therefore covers the requested in-engine route plus
@@ -1677,7 +1678,16 @@ function Assert-QaScreenshotObservations {
         [string]$ReportPath,
 
         [Parameter(Mandatory = $true)]
-        [string]$QaRunsRoot
+        [string]$QaRunsRoot,
+
+        [Parameter(Mandatory = $true)]
+        [uint64]$ExpectedLogicalWidth,
+
+        [Parameter(Mandatory = $true)]
+        [uint64]$ExpectedLogicalHeight,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$RequireExactPhysicalViewport
     )
 
     $reportContext = Get-QaSelectedReportContext `
@@ -1692,6 +1702,7 @@ function Assert-QaScreenshotObservations {
             '\s*physical_width:\s*([0-9]+),?\s*\r?\n' +
             '\s*physical_height:\s*([0-9]+),?\s*\r?\n' +
             '\s*scale_factor:\s*' + $viewportNumberPattern + ',?\s*\r?\n' +
+            '\s*base_scale_factor:\s*' + $viewportNumberPattern + ',?\s*\r?\n' +
             '\s*dpi_percent:\s*' + $viewportNumberPattern + ',?\s*\r?\n' +
             '\s*\)\),?\s*$'
     )
@@ -1711,6 +1722,37 @@ function Assert-QaScreenshotObservations {
         [uint64]$viewportMatches[0].Groups[1].Value -ne $physicalWidth -or
         [uint64]$viewportMatches[0].Groups[2].Value -ne $physicalHeight) {
         throw 'Selected QA report physical viewport is empty or outside the screenshot pixel bound.'
+    }
+    $logicalWidth = Get-QaUniqueFiniteFieldValue `
+        -ReportText $ReportText `
+        -FieldName 'logical_width'
+    $logicalHeight = Get-QaUniqueFiniteFieldValue `
+        -ReportText $ReportText `
+        -FieldName 'logical_height'
+    $scaleFactor = Get-QaUniqueFiniteFieldValue `
+        -ReportText $ReportText `
+        -FieldName 'scale_factor'
+    $baseScaleFactor = Get-QaUniqueFiniteFieldValue `
+        -ReportText $ReportText `
+        -FieldName 'base_scale_factor'
+    $dpiPercent = Get-QaUniqueFiniteFieldValue `
+        -ReportText $ReportText `
+        -FieldName 'dpi_percent'
+    if ($logicalWidth -le 0.0 -or $logicalHeight -le 0.0 -or
+        $scaleFactor -le 0.0 -or $baseScaleFactor -le 0.0 -or
+        [Math]::Abs($logicalWidth * $scaleFactor - $physicalWidth) -gt 1.0 -or
+        [Math]::Abs($logicalHeight * $scaleFactor - $physicalHeight) -gt 1.0 -or
+        [Math]::Abs($dpiPercent - $baseScaleFactor * 100.0) -gt 0.001) {
+        throw 'Selected QA report viewport logical, physical, effective/base scale-factor, and DPI fields are inconsistent.'
+    }
+    if ([Math]::Abs($logicalWidth - $ExpectedLogicalWidth) -gt $QaRequestedLogicalViewportTolerance -or
+        [Math]::Abs($logicalHeight - $ExpectedLogicalHeight) -gt $QaRequestedLogicalViewportTolerance) {
+        throw 'Selected QA report logical viewport does not match the requested launch viewport.'
+    }
+    if ($RequireExactPhysicalViewport -and
+        ($physicalWidth -ne $ExpectedLogicalWidth -or
+            $physicalHeight -ne $ExpectedLogicalHeight)) {
+        throw 'Selected QA report physical viewport does not match the exact-pixel evidence contract.'
     }
 
     $observationCount = Get-QaUniqueUnsignedFieldValue `
@@ -1935,6 +1977,12 @@ function Assert-QaReportTextIdentity {
         [string]$L0HeightModeValue,
 
         [Parameter(Mandatory = $true)]
+        [uint64]$ExpectedLogicalWidth,
+
+        [Parameter(Mandatory = $true)]
+        [uint64]$ExpectedLogicalHeight,
+
+        [Parameter(Mandatory = $true)]
         [string]$ExpectedBuildProfile,
 
         [Parameter(Mandatory = $true)]
@@ -2000,16 +2048,16 @@ function Assert-QaReportTextIdentity {
     $diagnosticL0HeightMode = $L0HeightModeValue -eq 'cardinal-trimmed-8-v1'
     $diagnosticLodProvenance = $SurfaceMode -eq 'lod-provenance-v1'
     $expectedReportSchemaVersion = if ($diagnosticL0HeightMode -and $diagnosticLodProvenance) {
-        '2.5.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1'
+        '2.6.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1'
     }
     elseif ($diagnosticL0HeightMode) {
-        '2.5.0-diagnostic-l0-cardinal-trimmed-8-v1'
+        '2.6.0-diagnostic-l0-cardinal-trimmed-8-v1'
     }
     elseif ($diagnosticLodProvenance) {
-        '2.5.0-diagnostic-lod-provenance-v1'
+        '2.6.0-diagnostic-lod-provenance-v1'
     }
     else {
-        '2.5.0'
+        '2.6.0'
     }
     $expectedEvidenceDisposition = if ($diagnosticL0HeightMode -and $diagnosticLodProvenance) {
         'diagnostic-l0-height-and-lod-provenance-only-non-publishable'
@@ -2310,7 +2358,10 @@ function Assert-QaReportTextIdentity {
     Assert-QaScreenshotObservations `
         -ReportText $ReportText `
         -ReportPath $ReportPath `
-        -QaRunsRoot $QaRunsRoot
+        -QaRunsRoot $QaRunsRoot `
+        -ExpectedLogicalWidth $ExpectedLogicalWidth `
+        -ExpectedLogicalHeight $ExpectedLogicalHeight `
+        -RequireExactPhysicalViewport $diagnosticLodProvenance
 
     $l0QueryCaps = [ordered]@{
         last_l0_center_queries = [uint64]4225
@@ -2600,6 +2651,12 @@ function Assert-QaReportIdentity {
         [string]$L0HeightModeValue,
 
         [Parameter(Mandatory = $true)]
+        [uint64]$ExpectedLogicalWidth,
+
+        [Parameter(Mandatory = $true)]
+        [uint64]$ExpectedLogicalHeight,
+
+        [Parameter(Mandatory = $true)]
         $ExpectedProvenance,
 
         [Parameter(Mandatory = $true)]
@@ -2642,6 +2699,8 @@ function Assert-QaReportIdentity {
         -CohortMode $CohortMode `
         -TerrainGrammarMode $TerrainGrammarMode `
         -L0HeightModeValue $L0HeightModeValue `
+        -ExpectedLogicalWidth $ExpectedLogicalWidth `
+        -ExpectedLogicalHeight $ExpectedLogicalHeight `
         -ExpectedBuildProfile $ExpectedBuildProfile `
         -ExpectedGitSha $ExpectedProvenance.GitSha `
         -ExpectedGitDirty $ExpectedProvenance.GitDirty `
@@ -2972,13 +3031,16 @@ function Assert-QaReportParserFixtures {
     [byte[]]$validPngBytes = [Convert]::FromBase64String(
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
     )
+    [byte[]]$validTwoByTwoPngBytes = [Convert]::FromBase64String(
+        'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEElEQVR4nGNgYGD4D8UQBgAd9AP9yOH2qAAAAABJRU5ErkJggg=='
+    )
     [System.IO.File]::WriteAllBytes($fixtureScreenshotPath, $validPngBytes)
     try {
         # A resident L0 may install entirely from an unchanged sample cache. Its
         # truthful `last_*` query counters are then zero; resident mode identity,
         # not a cumulative interpretation of those counters, proves completion.
         $reusedPoint16ReportBody = @'
-qa_report_schema_version: "2.5.0",
+qa_report_schema_version: "2.6.0",
 evidence_disposition: "canonical-candidate",
 build_profile: "release",
 world_name: Some("qa_parser_fixture"),
@@ -3007,6 +3069,7 @@ viewport: Some((
     physical_width: 1,
     physical_height: 1,
     scale_factor: 1.0,
+    base_scale_factor: 1.0,
     dpi_percent: 100.0,
 )),
 profile: "Natural",
@@ -3145,7 +3208,12 @@ stalls: [
             (($reusedPoint16ReportBody -split '\r?\n' | ForEach-Object { "    $_" }) -join "`n") +
             "`n)"
     $assertPointFixture = {
-        param([string]$FixtureText, [string]$SelectedReportPath)
+        param(
+            [string]$FixtureText,
+            [string]$SelectedReportPath,
+            [uint64]$ExpectedLogicalWidth = 1,
+            [uint64]$ExpectedLogicalHeight = 1
+        )
         if ([string]::IsNullOrWhiteSpace($SelectedReportPath)) {
             $SelectedReportPath = $fixtureReportPath
         }
@@ -3165,6 +3233,8 @@ stalls: [
             -CohortMode 'off' `
             -TerrainGrammarMode 'v3' `
             -L0HeightModeValue 'point-16-v1' `
+            -ExpectedLogicalWidth $ExpectedLogicalWidth `
+            -ExpectedLogicalHeight $ExpectedLogicalHeight `
             -ExpectedBuildProfile 'release' `
             -ExpectedGitSha 'abcdef1234567890' `
             -ExpectedGitDirty $false `
@@ -3193,6 +3263,50 @@ stalls: [
         throw 'QA report parser fixture must contain one root and two nested pending_terrain declarations.'
     }
     & $assertPointFixture $reusedPoint16Report
+    $requestedViewportRejected = $false
+    try {
+        # Report and PNG agree with each other at 1x1, but the launch
+        # contract deliberately requests 2x1. This closes the independent
+        # requested-versus-observed viewport gap.
+        & $assertPointFixture $reusedPoint16Report $fixtureReportPath 2 1
+    }
+    catch {
+        $requestedViewportRejected = $true
+        if (-not [string]::Equals(
+                $_.Exception.Message,
+                'Selected QA report logical viewport does not match the requested launch viewport.',
+                [StringComparison]::Ordinal)) {
+            throw "Requested-logical viewport fixture failed for an unexpected reason: $($_.Exception.Message)"
+        }
+    }
+    if (-not $requestedViewportRejected) {
+        throw 'QA report parser accepted a report/PNG pair outside the requested logical viewport.'
+    }
+    $insideLogicalToleranceReport = $reusedPoint16Report.Replace(
+        'logical_width: 1.0',
+        'logical_width: 1.0009'
+    )
+    & $assertPointFixture $insideLogicalToleranceReport
+    $outsideLogicalToleranceReport = $reusedPoint16Report.Replace(
+        'logical_width: 1.0',
+        'logical_width: 1.0011'
+    )
+    $outsideLogicalToleranceRejected = $false
+    try {
+        & $assertPointFixture $outsideLogicalToleranceReport
+    }
+    catch {
+        $outsideLogicalToleranceRejected = $true
+        if (-not [string]::Equals(
+                $_.Exception.Message,
+                'Selected QA report logical viewport does not match the requested launch viewport.',
+                [StringComparison]::Ordinal)) {
+            throw "Strict requested-logical viewport fixture failed for an unexpected reason: $($_.Exception.Message)"
+        }
+    }
+    if (-not $outsideLogicalToleranceRejected) {
+        throw 'QA report parser accepted a logical viewport outside its strict request tolerance.'
+    }
     $incrementalPoint16Report = $reusedPoint16Report.Replace(
         'last_l0_center_queries: 0',
         'last_l0_center_queries: 65'
@@ -3458,6 +3572,19 @@ stalls: [
             'physical_width: 1',
             'physical_width: 2'
         )
+        viewport_scale_mismatch = [regex]::Replace(
+            $reusedPoint16Report,
+            '(?m)^(\s*)scale_factor:\s*1\.0,?\s*$',
+            '${1}scale_factor: 3.0,'
+        )
+        viewport_base_scale_mismatch = $reusedPoint16Report.Replace(
+            'base_scale_factor: 1.0',
+            'base_scale_factor: 2.0'
+        )
+        viewport_dpi_mismatch = $reusedPoint16Report.Replace(
+            'dpi_percent: 100.0',
+            'dpi_percent: 125.0'
+        )
         provenance_mismatch = $reusedPoint16Report.Replace(
             'git_sha: Some("abcdef1234567890")',
             'git_sha: Some("ffffffffffffffff")'
@@ -3512,8 +3639,8 @@ stalls: [
     }
 
     $compositeDiagnosticReport = $reusedPoint16Report.Replace(
-        'qa_report_schema_version: "2.5.0"',
-        'qa_report_schema_version: "2.5.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1"'
+        'qa_report_schema_version: "2.6.0"',
+        'qa_report_schema_version: "2.6.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1"'
     )
     $compositeDiagnosticReport = $compositeDiagnosticReport.Replace(
         'evidence_disposition: "canonical-candidate"',
@@ -3550,6 +3677,8 @@ stalls: [
             -CohortMode 'off' `
             -TerrainGrammarMode 'v3' `
             -L0HeightModeValue 'cardinal-trimmed-8-v1' `
+            -ExpectedLogicalWidth 1 `
+            -ExpectedLogicalHeight 1 `
             -ExpectedBuildProfile 'release' `
             -ExpectedGitSha 'abcdef1234567890' `
             -ExpectedGitDirty $false `
@@ -3559,6 +3688,67 @@ stalls: [
             -ExpectedHardware 'GPU "fixture" C:\Device'
     }
     & $assertCompositeFixture $compositeDiagnosticReport
+    # Exact-pixel mode deliberately overrides the effective scale to 1.0.
+    # The OS/backend scale remains independently truthful and therefore still
+    # reports a 200% desktop in this accepted 1x1 physical-pixel fixture.
+    $exactOverrideDpiReport = $compositeDiagnosticReport.Replace(
+        'base_scale_factor: 1.0',
+        'base_scale_factor: 2.0'
+    ).Replace(
+        'dpi_percent: 100.0',
+        'dpi_percent: 200.0'
+    )
+    $exactOverrideEffectiveScale = Get-QaUniqueFiniteFieldValue `
+        -ReportText $exactOverrideDpiReport `
+        -FieldName 'scale_factor'
+    $exactOverrideBaseScale = Get-QaUniqueFiniteFieldValue `
+        -ReportText $exactOverrideDpiReport `
+        -FieldName 'base_scale_factor'
+    $exactOverrideDpiPercent = Get-QaUniqueFiniteFieldValue `
+        -ReportText $exactOverrideDpiReport `
+        -FieldName 'dpi_percent'
+    if ($exactOverrideEffectiveScale -ne 1.0 -or
+        $exactOverrideBaseScale -ne 2.0 -or
+        $exactOverrideDpiPercent -ne 200.0) {
+        throw 'Exact-viewport DPI truth fixture was not constructed as effective=1, base=2, dpi=200.'
+    }
+    & $assertCompositeFixture $exactOverrideDpiReport
+
+    # Keep every viewport relation internally consistent while changing the
+    # physical PNG/report size. The exact-pixel contract must still reject the
+    # evidence for being 2x2 instead of the requested 1x1.
+    $exactPhysicalMismatchReport = $exactOverrideDpiReport.Replace(
+        'physical_width: 1',
+        'physical_width: 2'
+    ).Replace(
+        'physical_height: 1',
+        'physical_height: 2'
+    )
+    $exactPhysicalMismatchReport = [regex]::Replace(
+        $exactPhysicalMismatchReport,
+        '(?m)^(\s*)scale_factor:\s*1\.0,?\s*$',
+        '${1}scale_factor: 2.0,'
+    )
+    $exactPhysicalMismatchRejected = $false
+    try {
+        [System.IO.File]::WriteAllBytes($fixtureScreenshotPath, $validTwoByTwoPngBytes)
+        & $assertCompositeFixture $exactPhysicalMismatchReport
+    }
+    catch {
+        $exactPhysicalMismatchRejected = $true
+        if (-not [string]::Equals(
+                $_.Exception.Message,
+                'Selected QA report physical viewport does not match the exact-pixel evidence contract.',
+                [StringComparison]::Ordinal)) {
+            throw "Exact-physical viewport fixture failed for an unexpected reason: $($_.Exception.Message)"
+        }
+    }
+    finally {
+        [System.IO.File]::WriteAllBytes($fixtureScreenshotPath, $validPngBytes)
+    }
+    if (-not $exactPhysicalMismatchRejected) {
+        throw 'QA report parser accepted a scaled viewport for an exact-pixel evidence mode.'
+    }
     $incrementalCompositeReport = $compositeDiagnosticReport.Replace(
         'last_l0_center_queries: 0',
         'last_l0_center_queries: 65'
@@ -3710,6 +3900,9 @@ function Invoke-StreamingRoute {
     }
 
     $startInfo.EnvironmentVariables['VOXEL_NATIVE_QA'] = '1'
+    $startInfo.EnvironmentVariables['VOXEL_NATIVE_QA_EXACT_VIEWPORT'] = if (
+        $SurfaceMaterial -eq 'lod-provenance-v1'
+    ) { '1' } else { '0' }
     $startInfo.EnvironmentVariables['VOXEL_NATIVE_QA_FOCUS'] = $Focus
     $startInfo.EnvironmentVariables['VOXEL_NATIVE_QA_CAMERA_ROUTE_POLICY'] = 'preflight-v1'
     $startInfo.EnvironmentVariables['VOXEL_NATIVE_QA_PROFILE'] = $RouteProfile
@@ -3766,6 +3959,7 @@ function Invoke-StreamingRoute {
     if ($StaticDryRun) {
         $expectedLaunchVariables = [ordered]@{
             VOXEL_NATIVE_QA = '1'
+            VOXEL_NATIVE_QA_EXACT_VIEWPORT = if ($SurfaceMaterial -eq 'lod-provenance-v1') { '1' } else { '0' }
             VOXEL_NATIVE_QA_FOCUS = $Focus
             VOXEL_NATIVE_QA_CAMERA_ROUTE_POLICY = 'preflight-v1'
             VOXEL_NATIVE_QA_PROFILE = $RouteProfile
@@ -3986,6 +4180,8 @@ function Invoke-StreamingRoute {
         -CohortMode $Cohorts `
         -TerrainGrammarMode $TerrainGrammar `
         -L0HeightModeValue $L0HeightMode `
+        -ExpectedLogicalWidth $Width `
+        -ExpectedLogicalHeight $Height `
         -ExpectedProvenance $provenance `
         -ExpectedBuildProfile $targetFolder
     Write-Host "Completed $RouteProfile $Focus report: $reportPath"

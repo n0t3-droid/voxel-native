@@ -104,7 +104,7 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
 
     def test_current_observed_manifest_loads_and_rehashes_explicit_png(self) -> None:
         evidence = consumer.load_canonical_evidence(self.manifest_path)
-        self.assertEqual(evidence.data["schema_version"], "1.5.0")
+        self.assertEqual(evidence.data["schema_version"], "1.6.0")
         self.assertEqual(len(evidence.runs), 1)
         screenshots = consumer.verified_screenshots(evidence, self.root)
         self.assertEqual(len(screenshots), 1)
@@ -173,7 +173,79 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "1.5.0")
+        self.assertEqual(result.stdout, "1.6.0")
+
+    def test_consumers_share_exact_override_and_effective_geometry_contract(self) -> None:
+        run = self.root / "qa_runs" / "run_exact_viewport_override"
+        run.mkdir()
+        report = fixtures.modern_report().replace(
+            "        base_scale_factor: 1.0,\n",
+            "        base_scale_factor: 2.0,\n",
+        ).replace(
+            "        dpi_percent: 100.0,\n",
+            "        dpi_percent: 200.0,\n",
+        )
+        (run / "report.ron").write_text(report, encoding="utf-8")
+        (run / "shot_0000.png").write_bytes(fixtures.PNG_1X1)
+        manifest = manifest_builder.build_manifest(
+            [run], repo_root=self.root, generated_at_utc=fixtures.FIXED_TIME
+        )
+        self.assertEqual(manifest["overall_classification"], "Observed")
+        self.write_manifest(manifest)
+
+        viewport = consumer.load_canonical_evidence(self.manifest_path).runs[0][
+            "raw_observations"
+        ]["viewport"]
+        self.assertEqual(
+            (viewport["scale_factor"], viewport["base_scale_factor"], viewport["dpi_percent"]),
+            (1.0, 2.0, 200.0),
+        )
+
+        node = shutil.which("node")
+        node_command: list[str] | None = None
+        if node:
+            module_uri = (TOOLS_DIR / "evidence_manifest_consumer.mjs").resolve().as_uri()
+            node_command = [
+                node,
+                "--input-type=module",
+                "-e",
+                f'import({json.dumps(module_uri)}).then(m => m.loadCanonicalEvidence(process.argv[1])).then(e => process.stdout.write(JSON.stringify(e.data.runs[0].raw_observations.viewport)))',
+                str(self.manifest_path),
+            ]
+            accepted = subprocess.run(
+                node_command,
+                cwd=TOOLS_DIR.parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            javascript_viewport = json.loads(accepted.stdout)
+            self.assertEqual(
+                (
+                    javascript_viewport["scale_factor"],
+                    javascript_viewport["base_scale_factor"],
+                    javascript_viewport["dpi_percent"],
+                ),
+                (1.0, 2.0, 200.0),
+            )
+
+        inconsistent = copy.deepcopy(manifest)
+        inconsistent["runs"][0]["raw_observations"]["viewport"]["logical_width"] = 1200.0
+        self.write_manifest(inconsistent)
+        with self.assertRaisesRegex(consumer.EvidenceContractError, "effective scale"):
+            consumer.load_canonical_evidence(self.manifest_path)
+        if node_command:
+            rejected = subprocess.run(
+                node_command,
+                cwd=TOOLS_DIR.parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("effective scale", rejected.stderr)
+        self.write_manifest(self.manifest)
 
     def test_consumers_accept_current_non_applicable_camera_sentinel(self) -> None:
         run = self.root / "qa_runs" / "run_non_applicable"
@@ -214,9 +286,9 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 changed = copy.deepcopy(self.manifest)
                 if mutation == "schema":
-                    changed["schema_version"] = "1.2.0"
+                    changed["schema_version"] = "1.5.0"
                 elif mutation == "generator":
-                    changed["generator"]["version"] = "1.2.0"
+                    changed["generator"]["version"] = "1.5.0"
                 elif mutation == "classification":
                     changed["overall_classification"] = "Blocked"
                 else:
@@ -242,6 +314,12 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
 
     def test_consumers_reject_route_hydro_cohort_and_atomic_budget_tampering(self) -> None:
         mutations = (
+            lambda value: value["runs"][0]["raw_observations"]["viewport"].pop(
+                "base_scale_factor"
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["viewport"].update(
+                base_scale_factor=2.0
+            ),
             lambda value: value["runs"][0]["raw_observations"]["world_edit_store"].update(
                 world_edit_store_terrain_grammar="V1"
             ),
@@ -309,6 +387,14 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
             str(self.manifest_path),
         ]
         mutations = (
+            lambda value: value.update(schema_version="1.5.0"),
+            lambda value: value["generator"].update(version="1.5.0"),
+            lambda value: value["runs"][0]["raw_observations"]["viewport"].pop(
+                "base_scale_factor"
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["viewport"].update(
+                base_scale_factor=2.0
+            ),
             lambda value: value["runs"][0]["raw_observations"]["world_edit_store"].update(
                 world_edit_store_seed=54321
             ),
@@ -560,7 +646,7 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(first.stdout, second.stdout)
         summary = json.loads(first.stdout)
-        self.assertEqual(summary["schema_version"], "1.5.0")
+        self.assertEqual(summary["schema_version"], "1.6.0")
         self.assertFalse(output.exists())
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is unavailable")

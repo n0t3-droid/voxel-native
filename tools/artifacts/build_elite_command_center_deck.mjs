@@ -513,7 +513,7 @@ function buildOverviewSlide(presentation, evidence, reference, sources) {
     slide,
     "Command overview",
     "One manifest. Bounded truth.",
-    "Every visible metric is derived from explicit QA 2.5.0 current runs; absence remains absence.",
+    "Every visible metric is derived from explicit QA 2.6.0 current runs; absence remains absence.",
     2,
   );
   const runs = evidence.data.runs;
@@ -564,7 +564,7 @@ function buildOverviewSlide(presentation, evidence, reference, sources) {
     color: COLORS.muted,
     alignment: "center",
   }, "overview-tests-label");
-  addText(slide, "Not represented by schema 1.5.0", { left: 360, top: 626, width: 560, height: 40 }, {
+  addText(slide, "Not represented by schema 1.6.0", { left: 360, top: 626, width: 560, height: 40 }, {
     fontSize: TYPE_PX.mid,
     color: COLORS.white,
     alignment: "center",
@@ -615,8 +615,8 @@ function buildArchitectureSlide(presentation, evidence, reference, sources) {
     { left: 964, top: card.top, width: 250, height: card.height },
   ];
   const nodes = [
-    architectureNode(slide, "01 · EXPLICIT\nQA RUNS", "QA 2.5.0 report + PNG bytes.\nNo newest-run lookup.", positions[0], COLORS.cyan, "architecture-runs"),
-    architectureNode(slide, "02 · EVIDENCE\nMANIFEST", "Schema 1.5.0 also binds terrain grammar, edit-store compatibility, and dense-residency budget proof to the run identity.", positions[1], COLORS.magenta, "architecture-manifest"),
+    architectureNode(slide, "01 · EXPLICIT\nQA RUNS", "QA 2.6.0 report + PNG bytes.\nNo newest-run lookup.", positions[0], COLORS.cyan, "architecture-runs"),
+    architectureNode(slide, "02 · EVIDENCE\nMANIFEST", "Schema 1.6.0 also binds viewport DPI provenance, terrain grammar, edit-store compatibility, and dense-residency budget proof to the run identity.", positions[1], COLORS.magenta, "architecture-manifest"),
     architectureNode(slide, "03 · STRICT\nCONSUMER", "Rejects stale, incomplete, changed, or unsafe evidence.", positions[2], COLORS.orange, "architecture-consumer"),
     architectureNode(slide, "04 · ARTIFACT\nLANES", "DOCX · PDF · XLSX · PPTX share one bounded truth.", positions[3], COLORS.violet, "architecture-artifacts"),
   ];

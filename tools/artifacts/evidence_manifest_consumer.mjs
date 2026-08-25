@@ -3,9 +3,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 
-export const SCHEMA_VERSION = "1.5.0";
+export const SCHEMA_VERSION = "1.6.0";
 const GENERATOR_NAME = "voxel-native-evidence-manifest";
-const GENERATOR_VERSION = "1.5.0";
+const GENERATOR_VERSION = "1.6.0";
 const SELECTION_POLICY = "explicit_repo_contained_directories_only_no_latest_no_global_scan";
 const CLASSIFICATIONS = ["Passed", "Observed", "Rejected", "Planned", "Blocked"];
 const PROTECTED_OUTPUT_DIRS = ["saves", "qa_runs", "agent_runs"];
@@ -158,12 +158,21 @@ function validateRun(run, index, fileHashes) {
   ]) requireContract(editStore[field] === identity[identityField], `${scope} world edit-store identity contradicts run identity`);
 
   const viewport = observations.viewport;
-  for (const field of ["logical_width", "logical_height", "scale_factor", "dpi_percent"]) {
+  for (const field of ["logical_width", "logical_height", "scale_factor", "base_scale_factor", "dpi_percent"]) {
     requireContract(isFiniteNumber(viewport[field], true), `${scope} viewport ${field} is invalid`);
   }
   for (const field of ["physical_width", "physical_height"]) {
     requireContract(isUInt(viewport[field]) && viewport[field] > 0, `${scope} viewport ${field} is invalid`);
   }
+  requireContract(
+    Math.abs(viewport.logical_width * viewport.scale_factor - viewport.physical_width) <= 1.5
+      && Math.abs(viewport.logical_height * viewport.scale_factor - viewport.physical_height) <= 1.5,
+    `${scope} viewport effective scale is inconsistent`,
+  );
+  requireContract(
+    Math.abs(viewport.base_scale_factor * 100 - viewport.dpi_percent) <= 0.01,
+    `${scope} viewport base scale and DPI are inconsistent`,
+  );
 
   const route = observations.route;
   const supportedFocuses = new Set(["scenic", "waypoint", "streaming", "river", "lava", "near-far"]);

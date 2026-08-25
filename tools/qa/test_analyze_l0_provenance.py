@@ -213,6 +213,7 @@ class FourArmFixture:
                 "physical_width": 8,
                 "physical_height": 8,
                 "scale_factor": 1.0,
+                "base_scale_factor": 1.0,
                 "dpi_percent": 100.0,
             },
             "planetary_streaming": streaming,
@@ -371,13 +372,74 @@ class AnalyzeL0ProvenanceTests(unittest.TestCase):
             ledger["stop_tests"]["1_every_candidate_frame_at_most_half_baseline"]
         )
 
-    def test_wrong_schema_or_disposition_fails_closed(self) -> None:
+    def test_unsupported_diagnostic_schema_fails_closed(self) -> None:
         report = self.fixture.reports["natural_cardinal"]
-        report["qa_report_schema_version"] = "2.5.0"
-        report["evidence_disposition"] = "canonical-candidate"
+        report["qa_report_schema_version"] = (
+            "2.4.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1"
+        )
         self.fixture.write_report("natural_cardinal")
         with self.assertRaisesRegex(analyzer.AnalysisError, "schema_version"):
             self.fixture.analyze()
+
+    def test_homogeneous_historical_25_cohort_uses_old_dpi_contract(self) -> None:
+        for spec in analyzer.ARM_SPECS:
+            report = self.fixture.reports[spec.key]
+            report["qa_report_schema_version"] = (
+                analyzer.LEGACY_POINT_SCHEMA
+                if spec.mode == analyzer.POINT_MODE
+                else analyzer.LEGACY_CANDIDATE_SCHEMA
+            )
+            report["viewport"].pop("base_scale_factor")
+            self.fixture.write_report(spec.key)
+
+        ledger = self.fixture.analyze()
+        self.assertEqual(
+            {
+                run["qa_report_schema_version"]
+                for run in ledger["runs"].values()
+            },
+            {analyzer.LEGACY_POINT_SCHEMA, analyzer.LEGACY_CANDIDATE_SCHEMA},
+        )
+        self.assertEqual(
+            ledger["automated_decision"],
+            "pass-pending-mandatory-human-inspection",
+        )
+
+    def test_mixed_diagnostic_schema_generations_fail_closed(self) -> None:
+        report = self.fixture.reports["natural_cardinal"]
+        report["qa_report_schema_version"] = analyzer.LEGACY_CANDIDATE_SCHEMA
+        report["viewport"].pop("base_scale_factor")
+        self.fixture.write_report("natural_cardinal")
+
+        with self.assertRaisesRegex(analyzer.AnalysisError, "schema generations"):
+            self.fixture.analyze()
+
+    def test_diagnostic_viewport_requires_base_scale_factor(self) -> None:
+        report = self.fixture.reports["natural_cardinal"]
+        report["viewport"].pop("base_scale_factor")
+        self.fixture.write_report("natural_cardinal")
+        with self.assertRaisesRegex(analyzer.AnalysisError, "base_scale_factor"):
+            self.fixture.analyze()
+
+    def test_diagnostic_viewport_accepts_exact_pixel_override_with_os_dpi(self) -> None:
+        for report in self.fixture.reports.values():
+            report["viewport"]["base_scale_factor"] = 2.0
+            report["viewport"]["dpi_percent"] = 200.0
+        for key in self.fixture.reports:
+            self.fixture.write_report(key)
+
+        ledger = self.fixture.analyze()
+        self.assertEqual(
+            {
+                run["qa_report_schema_version"]
+                for run in ledger["runs"].values()
+            },
+            {analyzer.POINT_SCHEMA, analyzer.CANDIDATE_SCHEMA},
+        )
+        self.assertEqual(
+            ledger["automated_decision"],
+            "pass-pending-mandatory-human-inspection",
+        )
 
     def test_source_fingerprint_mismatch_fails_closed(self) -> None:
         identity = self.fixture.reports["astral_cardinal"]["run_identity"]

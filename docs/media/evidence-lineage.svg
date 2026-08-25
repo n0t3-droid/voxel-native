@@ -77,7 +77,7 @@
       <text x="22" y="80" class="nodeTitle">report.ron + screenshots</text>
       <path d="M22 100H288" stroke="#31515a"/>
       <text x="22" y="132" class="body">Current canonical report</text>
-      <text x="22" y="155" class="mono">QA report schema 2.5.0</text>
+      <text x="22" y="155" class="mono">QA report schema 2.6.0</text>
       <text x="22" y="193" class="body">Recorded observations</text>
       <text x="22" y="216" class="mono">route · viewport · frame quantiles</text>
       <text x="22" y="239" class="mono">budgets · screenshots · identities</text>
@@ -91,7 +91,7 @@
       <rect width="310" height="276" rx="20" fill="url(#manifestFill)" stroke="#65b9e9" stroke-width="2"/>
       <rect x="20" y="18" width="147" height="26" rx="13" fill="#17384e" stroke="#60b4e6"/>
       <text x="93" y="36" fill="#a9ddff" font-size="12" font-weight="bold" text-anchor="middle" letter-spacing="1">CANONICAL INDEX</text>
-      <text x="22" y="80" class="nodeTitle">Evidence Manifest 1.5.0</text>
+      <text x="22" y="80" class="nodeTitle">Evidence Manifest 1.6.0</text>
       <path d="M22 100H288" stroke="#31515a"/>
       <text x="22" y="132" class="body">Explicit run directories only</text>
       <text x="22" y="155" class="mono">never scan “latest” or qa_runs/</text>

@@ -250,19 +250,25 @@ canonical point/BridgeV2 report identity. The same binary must emit:
 
 ```text
 Point16V1:
-qa_report_schema_version = "2.5.0-diagnostic-lod-provenance-v1"
+qa_report_schema_version = "2.6.0-diagnostic-lod-provenance-v1"
 evidence_disposition = "diagnostic-lod-provenance-only-non-publishable"
 
 CardinalTrimmed8V1:
-qa_report_schema_version = "2.5.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1"
+qa_report_schema_version = "2.6.0-diagnostic-l0-cardinal-trimmed-8-v1-lod-provenance-v1"
 evidence_disposition = "diagnostic-l0-height-and-lod-provenance-only-non-publishable"
 ```
+
+The analyzer also names the archived 2.5 diagnostic identities explicitly for
+reproducibility. A historical four-arm cohort must be entirely 2.5, omit
+`base_scale_factor`, and retain `dpi_percent == scale_factor * 100`; a current
+cohort must be entirely 2.6, include `base_scale_factor`, and bind DPI to that
+OS/window-backend scale. Mixed schema generations fail closed.
 
 Those diagnostic schema strings are intentionally unsupported by the canonical
 manifest rules in
 [EVIDENCE_MANIFEST_SCHEMA.md](EVIDENCE_MANIFEST_SCHEMA.md). The manifest must
 reject them until a future, explicit schema and validator upgrade. Renaming
-either report to `2.5.0`, omitting its disposition, or copying its visual verdict
+either report to `2.6.0`, omitting its disposition, or copying its visual verdict
 into a canonical claim is forbidden. Passing this experiment permits only a
 follow-up design decision; it does not promote the filter or establish release
 readiness.

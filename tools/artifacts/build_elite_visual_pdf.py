@@ -658,7 +658,7 @@ def build(evidence: CanonicalEvidence, output: Path, repo_root: Path) -> None:
         [
             paragraph("Evidence boundary", "h1"),
             paragraph(
-                "Every run below uses QA report schema 2.5.0 through manifest schema 1.5.0, including immutable terrain grammar, compatible edit-store identity, combined dense-residency proof, route-only frame-time quantiles, explicit viewport provenance, planetary live values and hard budgets, and manifest-referenced PNG identities. The aggregate remains Observed because runtime measurements are observations even when integrity and budget checks Passed."
+                "Every run below uses QA report schema 2.6.0 through manifest schema 1.6.0, including immutable terrain grammar, compatible edit-store identity, combined dense-residency proof, route-only frame-time quantiles, explicit viewport provenance, planetary live values and hard budgets, and manifest-referenced PNG identities. The aggregate remains Observed because runtime measurements are observations even when integrity and budget checks Passed."
             ),
             callout(
                 "No fabricated release result",

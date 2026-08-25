@@ -323,7 +323,7 @@ async function buildWorkbook(evidence, output, qaDir) {
     verticalAlignment: "center",
   };
   overview.mergeCells("A3:H3");
-  overview.getRange("A3").values = [[`Explicit manifest schema ${evidence.data.schema_version} | QA 2.5.0 current runs | generated ${evidence.data.generated_at_utc} | sha256 ${evidence.manifestSha256}`]];
+  overview.getRange("A3").values = [[`Explicit manifest schema ${evidence.data.schema_version} | QA 2.6.0 current runs | generated ${evidence.data.generated_at_utc} | sha256 ${evidence.manifestSha256}`]];
   overview.getRange("A3:H3").format = { fill: colors.pale, font: { name: "Aptos", size: 9, italic: true, color: colors.navy }, wrapText: true };
   overview.getRange("A5:B5").values = [["Verified summary", "Value"]];
   overview.getRange("A6:A11").values = [
