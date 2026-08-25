@@ -14,12 +14,16 @@
 //! [`PlanetaryRenderOrigin`] without rebuilding height data or putting huge
 //! global coordinates in GPU vertex buffers.
 
+use bevy::asset::load_internal_asset;
 use bevy::ecs::schedule::apply_deferred;
-use bevy::pbr::{NotShadowCaster, NotShadowReceiver};
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialPlugin, NotShadowCaster, NotShadowReceiver,
+};
 use bevy::prelude::*;
+use bevy::reflect::TypePath;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
-use bevy::render::render_resource::Face;
+use bevy::render::render_resource::{AsBindGroup, Face, Shader, ShaderRef, ShaderType};
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,6 +41,7 @@ use crate::terrain::{
     coarse_surface_family, far_semantic_cohort_kind, far_semantic_cohort_signature, Biome,
     FarSemanticCohortKind, TerrainGenerator, FAR_SEMANTIC_COHORT_SUPERTILE_CELLS, WATER_LEVEL,
 };
+use crate::water::{WaterOpticsUniform, WaterSurfaceLibrary, WaterSurfaceMaterial};
 use crate::world::{ChunkAnchor, ChunkStreamer, StreamingGovernor, VoxelWorld, WorldSet};
 
 pub const FAR_FIELD_LEVELS: usize = 6;
@@ -253,18 +258,99 @@ const LEVEL_DEPTH_BIAS: f32 = 0.12;
 /// clipmap morph band while remaining far below a one-metre voxel step.
 const FAR_FIELD_FLUID_TOP_OFFSET_METRES: f32 = TOP_SURFACE_OFFSET;
 const FAR_FIELD_FLUID_LEVEL_DEPTH_BIAS_METRES: f32 = 0.02;
+/// Matches the Near mesher's exact integer-space water UV period. Far Hydro
+/// stores the same wrapped absolute X/Z phase in its existing UV attribute;
+/// no vertex, texture, sampler, entity, or worker-payload budget changes.
+const FAR_FIELD_FLUID_PHASE_PERIOD_METRES: i64 = 4_096;
+const FAR_FIELD_FLUID_UV_REPEATS_PER_METRE: f32 = 0.125;
+/// A ring wraps its anchor once and then preserves local continuity across the
+/// complete 61x61 lattice. At the coarsest step water U remains inside
+/// `[-1920, 2432)`. Lava adds this disjoint marker; the midpoint threshold
+/// stays strictly outside both water and encoded-lava ranges.
+const FAR_FIELD_FLUID_LAVA_UV_MARKER: f32 = 8_192.0;
+const FAR_FIELD_FLUID_LAVA_UV_THRESHOLD: f32 = FAR_FIELD_FLUID_LAVA_UV_MARKER * 0.5;
 /// Canonical near-generation lava fill ceiling in VolcanicWaste columns.
 /// This is an authored world rule (metres/voxel Y), not a physical claim.
 const FAR_FIELD_VOLCANIC_LAVA_LEVEL: i32 = 52;
 
 pub struct PlanetaryStreamingPlugin;
 
+pub const FAR_FIELD_FLUID_OPTICS_SHADER_HANDLE: Handle<Shader> =
+    Handle::weak_from_u128(0xfa12_2026_0825_5eed_ba11_0042_c0de_0001);
+const FAR_FIELD_FLUID_OPTICS_MATERIAL_HANDLE: Handle<FarFieldFluidMaterial> =
+    Handle::weak_from_u128(0xfa12_2026_0825_5eed_ba11_0042_c0de_0002);
+
+type FarFieldFluidMaterial = ExtendedMaterial<StandardMaterial, FarFieldFluidOptics>;
+
+/// Exact two-mode subset of the already-smoothed Near water spectrum. Copying
+/// the existing uniform keeps direction, amplitudes, dispersion calibration,
+/// phase offsets and CPU-integrated modulo phase coherent without a second
+/// weather response state or per-ring material.
+#[derive(Clone, Copy, Debug, ShaderType, PartialEq)]
+struct FarFieldFluidOpticsUniform {
+    wave_0: Vec4,
+    wave_1: Vec4,
+    temporal_phase: Vec4,
+    optics: Vec4,
+    shallow_color_linear: Vec4,
+    deep_color_linear: Vec4,
+}
+
+const _: () = assert!(size_of::<FarFieldFluidOpticsUniform>() == 6 * size_of::<Vec4>());
+
+impl FarFieldFluidOpticsUniform {
+    fn from_near(parameters: WaterOpticsUniform) -> Self {
+        Self {
+            wave_0: parameters.wave_0,
+            wave_1: parameters.wave_1,
+            temporal_phase: parameters.temporal_phase,
+            optics: parameters.optics,
+            shallow_color_linear: parameters.shallow_color_linear,
+            deep_color_linear: parameters.deep_color_linear,
+        }
+    }
+
+    fn flat_fallback() -> Self {
+        let linear_water = BlockType::Water.color().to_linear().to_f32_array();
+        let color = Vec4::from_array(linear_water);
+        Self {
+            wave_0: Vec4::new(1.0, 0.0, 0.0, 16.0),
+            wave_1: Vec4::new(1.0, 0.0, 0.0, 8.0),
+            temporal_phase: Vec4::ZERO,
+            optics: Vec4::new(0.0, 0.18, 0.27, 0.0),
+            shallow_color_linear: color,
+            deep_color_linear: color,
+        }
+    }
+}
+
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
+struct FarFieldFluidOptics {
+    #[uniform(100)]
+    parameters: FarFieldFluidOpticsUniform,
+}
+
+impl MaterialExtension for FarFieldFluidOptics {
+    fn fragment_shader() -> ShaderRef {
+        FAR_FIELD_FLUID_OPTICS_SHADER_HANDLE.clone().into()
+    }
+}
+
 impl Plugin for PlanetaryStreamingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PlanetaryStreamingConfig>()
+        load_internal_asset!(
+            app,
+            FAR_FIELD_FLUID_OPTICS_SHADER_HANDLE,
+            "../assets/shaders/far_water_optics.wgsl",
+            Shader::from_wgsl
+        );
+        app.add_plugins(MaterialPlugin::<FarFieldFluidMaterial>::default())
+            .init_resource::<PlanetaryStreamingConfig>()
             .init_resource::<PlanetaryRenderOrigin>()
             .init_resource::<PlanetaryStreamingTelemetry>()
             .init_resource::<PlanetaryStreamingRuntime>()
+            .add_systems(Startup, initialize_far_field_fluid_material)
+            .add_systems(Last, synchronize_far_field_fluid_optics)
             .add_systems(
                 Update,
                 (
@@ -1094,7 +1180,7 @@ struct PlanetaryStreamingRuntime {
     scheduler_deferred_frames: u64,
     material: Option<Handle<StandardMaterial>>,
     material_surface_mode: Option<FarFieldSurfaceMaterialMode>,
-    fluid_material: Option<Handle<StandardMaterial>>,
+    fluid_material: Option<Handle<FarFieldFluidMaterial>>,
     semantic_cohort_material: Option<Handle<StandardMaterial>>,
     #[cfg(not(target_arch = "wasm32"))]
     in_flight: Option<Task<RingBuildResult>>,
@@ -2637,10 +2723,10 @@ fn install_ring_result(
         if !updated_existing_fluid {
             let material = runtime
                 .fluid_material
-                .get_or_insert_with(|| materials.add(far_field_fluid_material()))
+                .get_or_insert_with(|| FAR_FIELD_FLUID_OPTICS_MATERIAL_HANDLE.clone())
                 .clone();
             commands.spawn((
-                PbrBundle {
+                MaterialMeshBundle {
                     mesh: new_handle,
                     material,
                     transform: Transform::from_translation(translation),
@@ -2890,9 +2976,10 @@ fn teardown_planetary_streaming(
         &mut semantic_cohort_rings,
     );
     release_far_field_material(&mut runtime, &mut materials);
-    if let Some(material) = runtime.fluid_material.take() {
-        let _ = materials.remove(material.id());
-    }
+    // The process-wide Far fluid material is initialized once and reused by
+    // all bounded rings across world/menu transitions. Dropping this runtime
+    // reference must not create a replacement asset trail on re-entry.
+    runtime.fluid_material = None;
     if let Some(material) = runtime.semantic_cohort_material.take() {
         let _ = materials.remove(material.id());
     }
@@ -3440,19 +3527,68 @@ fn far_field_material(mode: FarFieldSurfaceMaterialMode) -> StandardMaterial {
     }
 }
 
-fn far_field_fluid_material() -> StandardMaterial {
-    StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.72,
-        metallic: 0.0,
-        reflectance: 0.24,
-        // Hydro v1 deliberately uses opaque vertex colours. With global MSAA
-        // disabled this is depth-stable, order-independent, and avoids making
-        // a descriptive horizon overlay look like simulation-grade refraction.
-        alpha_mode: AlphaMode::Opaque,
-        cull_mode: None::<Face>,
-        double_sided: true,
-        ..default()
+fn far_field_fluid_material() -> FarFieldFluidMaterial {
+    FarFieldFluidMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.72,
+            metallic: 0.0,
+            reflectance: 0.24,
+            // Far Hydro remains opaque under global `Msaa::Off`: the custom
+            // extension changes bounded surface optics, not depth ordering or
+            // scene refraction. Lava keeps this scalar fallback response.
+            alpha_mode: AlphaMode::Opaque,
+            cull_mode: None::<Face>,
+            double_sided: true,
+            ..default()
+        },
+        extension: FarFieldFluidOptics {
+            parameters: FarFieldFluidOpticsUniform::flat_fallback(),
+        },
+    }
+}
+
+fn initialize_far_field_fluid_material(
+    mut materials: ResMut<Assets<FarFieldFluidMaterial>>,
+    near_library: Option<Res<WaterSurfaceLibrary>>,
+    near_materials: Option<Res<Assets<WaterSurfaceMaterial>>>,
+) {
+    let mut material = far_field_fluid_material();
+    if let (Some(library), Some(near_materials)) = (near_library, near_materials) {
+        if let Some(parameters) = library.current_parameters(&near_materials) {
+            material.extension.parameters = FarFieldFluidOpticsUniform::from_near(parameters);
+        }
+    }
+    materials.insert(FAR_FIELD_FLUID_OPTICS_MATERIAL_HANDLE.id(), material);
+}
+
+/// Synchronize one process-wide Far material from the one process-wide Near
+/// material after gameplay systems have advanced weather. `Last` guarantees
+/// the copy completes before render extraction without introducing an update
+/// queue, per-ring iteration, or a second temporal response.
+fn synchronize_far_field_fluid_optics(
+    near_library: Option<Res<WaterSurfaceLibrary>>,
+    near_materials: Option<Res<Assets<WaterSurfaceMaterial>>>,
+    mut far_materials: ResMut<Assets<FarFieldFluidMaterial>>,
+) {
+    let (Some(library), Some(near_materials)) = (near_library, near_materials) else {
+        return;
+    };
+    let Some(parameters) = library.current_parameters(&near_materials) else {
+        return;
+    };
+    let next = FarFieldFluidOpticsUniform::from_near(parameters);
+    let Some(current) = far_materials
+        .get(&FAR_FIELD_FLUID_OPTICS_MATERIAL_HANDLE)
+        .map(|far| far.extension.parameters)
+    else {
+        return;
+    };
+    if current == next {
+        return;
+    }
+    if let Some(far) = far_materials.get_mut(&FAR_FIELD_FLUID_OPTICS_MATERIAL_HANDLE) {
+        far.extension.parameters = next;
     }
 }
 
@@ -3955,6 +4091,45 @@ fn far_field_fluid_vertex_color(kind: FarFieldFluidKind) -> [f32; 4] {
     color
 }
 
+/// Encode the same wrapped absolute top-face phase used by the Near water
+/// mesher. For a Y face Near writes UV=(Z,X)/8 and its shader restores X/Z via
+/// `uv.yx*8`; retaining that convention makes shared lattice points match at
+/// negative coordinates and at every LOD. Only the ring anchor is reduced in
+/// integer space. Local lattice offsets remain unwrapped so a triangle that
+/// crosses the 4096 m seam interpolates by one `step`, not backwards through
+/// the entire period. The bounded local range remains exactly representable in
+/// `f32` even when the absolute anchor is near an i64 limit.
+fn far_field_fluid_vertex_uv(
+    spec: RingSpec,
+    gx: i32,
+    gz: i32,
+    kind: FarFieldFluidKind,
+) -> [f32; 2] {
+    let wrapped_anchor_x = spec
+        .anchor
+        .x
+        .rem_euclid(FAR_FIELD_FLUID_PHASE_PERIOD_METRES);
+    let wrapped_anchor_z = spec
+        .anchor
+        .z
+        .rem_euclid(FAR_FIELD_FLUID_PHASE_PERIOD_METRES);
+    let phase_x = wrapped_anchor_x.saturating_add(i64::from(gx).saturating_mul(spec.step));
+    let phase_z = wrapped_anchor_z.saturating_add(i64::from(gz).saturating_mul(spec.step));
+    let category_marker = match kind {
+        FarFieldFluidKind::Water => 0.0,
+        FarFieldFluidKind::Lava => FAR_FIELD_FLUID_LAVA_UV_MARKER,
+    };
+    let uv = [
+        phase_z as f32 * FAR_FIELD_FLUID_UV_REPEATS_PER_METRE + category_marker,
+        phase_x as f32 * FAR_FIELD_FLUID_UV_REPEATS_PER_METRE,
+    ];
+    debug_assert!(match kind {
+        FarFieldFluidKind::Water => uv[0] < FAR_FIELD_FLUID_LAVA_UV_THRESHOLD,
+        FarFieldFluidKind::Lava => uv[0] >= FAR_FIELD_FLUID_LAVA_UV_THRESHOLD,
+    });
+    uv
+}
+
 fn build_far_field_fluid_mesh<S: FarFieldSampler>(
     sampler: &S,
     spec: RingSpec,
@@ -3998,10 +4173,7 @@ fn build_far_field_fluid_mesh<S: FarFieldSampler>(
                     .map(far_field_fluid_vertex_color)
                     .unwrap_or([0.0, 0.0, 0.0, 1.0]),
             );
-            uvs.push([
-                (gx + half) as f32 / FAR_FIELD_GRID_CELLS as f32,
-                (gz + half) as f32 / FAR_FIELD_GRID_CELLS as f32,
-            ]);
+            uvs.push(far_field_fluid_vertex_uv(spec, gx, gz, kind));
         }
     }
 
@@ -6425,6 +6597,126 @@ mod tests {
     }
 
     #[test]
+    fn far_optics_uniform_is_an_exact_two_mode_projection_of_near() {
+        let near = WaterOpticsUniform {
+            wave_0: Vec4::new(240.0, 128.0, 0.072, 15.058_465),
+            wave_1: Vec4::new(384.0, -288.0, 0.0264, 8.533_334),
+            wave_2: Vec4::new(-576.0, 768.0, 0.0096, 4.266_667),
+            wave_3: Vec4::new(560.0, -1920.0, 0.00336, 2.048),
+            temporal_phase: Vec4::new(0.2, 1.1, 2.7, 5.9),
+            optics: Vec4::new(0.5, 0.11, 0.27, 0.10),
+            shallow_color_linear: Vec4::new(0.01, 0.12, 0.15, 1.0),
+            deep_color_linear: Vec4::new(0.001, 0.006, 0.015, 1.0),
+        };
+        let far = FarFieldFluidOpticsUniform::from_near(near);
+        assert_eq!(far.wave_0, near.wave_0);
+        assert_eq!(far.wave_1, near.wave_1);
+        assert_eq!(far.temporal_phase, near.temporal_phase);
+        assert_eq!(far.optics, near.optics);
+        assert_eq!(far.shallow_color_linear, near.shallow_color_linear);
+        assert_eq!(far.deep_color_linear, near.deep_color_linear);
+        assert_ne!(far.wave_1, near.wave_2);
+        assert_eq!(size_of::<FarFieldFluidOpticsUniform>(), 96);
+    }
+
+    #[test]
+    fn far_water_shader_keeps_the_exact_two_mode_phase_and_work_contract() {
+        let shader = include_str!("../assets/shaders/far_water_optics.wgsl");
+        for required in [
+            "water.temporal_phase.x, water.wave_0, 0.31",
+            "water.temporal_phase.y, water.wave_1, 1.73",
+        ] {
+            assert!(
+                shader.contains(required),
+                "missing far-water phase contract: {required}"
+            );
+        }
+        assert_eq!(shader.matches("spectral_slope(position_metres").count(), 2);
+        assert_eq!(shader.matches("spectral_height(position_metres").count(), 2);
+        assert_eq!(shader.matches("normalize(").count(), 1);
+        assert_eq!(shader.matches("wave.z * cos(phase)").count(), 1);
+        assert_eq!(shader.matches("wave.z * sin(phase)").count(), 1);
+        assert_eq!(shader.matches("textureSample").count(), 0);
+        assert!(!shader.contains("globals.time"));
+        assert!(!shader.contains("water.temporal_phase.z"));
+        assert!(!shader.contains("water.temporal_phase.w"));
+    }
+
+    #[test]
+    fn far_fluid_uv_matches_near_phase_period_and_keeps_kind_out_of_rgb() {
+        let base = RingSpec::for_level(5, 0, WorldXZ::new(-12_288, 8_192));
+        let shifted = RingSpec::for_level(
+            5,
+            0,
+            WorldXZ::new(
+                base.anchor.x + FAR_FIELD_FLUID_PHASE_PERIOD_METRES,
+                base.anchor.z - FAR_FIELD_FLUID_PHASE_PERIOD_METRES,
+            ),
+        );
+        for (gx, gz) in [(-30, -30), (-17, 9), (0, 0), (29, 30)] {
+            let water = far_field_fluid_vertex_uv(base, gx, gz, FarFieldFluidKind::Water);
+            let repeated = far_field_fluid_vertex_uv(shifted, gx, gz, FarFieldFluidKind::Water);
+            let lava = far_field_fluid_vertex_uv(base, gx, gz, FarFieldFluidKind::Lava);
+            assert_eq!(water, repeated);
+            assert!(water[0].abs() < FAR_FIELD_FLUID_LAVA_UV_THRESHOLD);
+            assert!(water[1].abs() < FAR_FIELD_FLUID_LAVA_UV_THRESHOLD);
+            assert_eq!(lava[0], water[0] + FAR_FIELD_FLUID_LAVA_UV_MARKER);
+            assert!(lava[0] >= FAR_FIELD_FLUID_LAVA_UV_THRESHOLD);
+            assert_eq!(lava[1], water[1]);
+            assert_eq!(
+                far_field_fluid_vertex_color(FarFieldFluidKind::Water)[3],
+                far_field_fluid_vertex_color(FarFieldFluidKind::Lava)[3]
+            );
+        }
+
+        let extreme = RingSpec {
+            level: FAR_FIELD_LEVELS - 1,
+            step: FAR_FIELD_BASE_STEP_METRES << (FAR_FIELD_LEVELS - 1),
+            inner_extent: 0,
+            outer_extent: FAR_FIELD_OUTER_RADIUS_METRES,
+            anchor: WorldXZ::new(i64::MIN + 1_024, i64::MAX - 1_024),
+        };
+        for (gx, gz) in [(-30, -30), (30, 30)] {
+            let uv = far_field_fluid_vertex_uv(extreme, gx, gz, FarFieldFluidKind::Water);
+            assert!(uv.into_iter().all(f32::is_finite));
+            assert!(uv[0].abs() < FAR_FIELD_FLUID_LAVA_UV_THRESHOLD);
+            assert!(uv[1].abs() < FAR_FIELD_FLUID_LAVA_UV_THRESHOLD);
+        }
+
+        let seam = RingSpec {
+            level: 0,
+            step: FAR_FIELD_BASE_STEP_METRES,
+            inner_extent: 0,
+            outer_extent: FAR_FIELD_OUTER_RADIUS_METRES,
+            anchor: WorldXZ::new(4_080, 4_080),
+        };
+        let before = far_field_fluid_vertex_uv(seam, 0, 0, FarFieldFluidKind::Water);
+        let after_z = far_field_fluid_vertex_uv(seam, 0, 1, FarFieldFluidKind::Water);
+        let after_x = far_field_fluid_vertex_uv(seam, 1, 0, FarFieldFluidKind::Water);
+        let expected_step_uv = seam.step as f32 * FAR_FIELD_FLUID_UV_REPEATS_PER_METRE;
+        assert_eq!(after_z[0] - before[0], expected_step_uv);
+        assert_eq!(after_x[1] - before[1], expected_step_uv);
+
+        let representation_a = RingSpec {
+            anchor: WorldXZ::ZERO,
+            step: 512,
+            ..seam
+        };
+        let representation_b = RingSpec {
+            anchor: WorldXZ::new(FAR_FIELD_FLUID_PHASE_PERIOD_METRES, 0),
+            ..representation_a
+        };
+        let same_world_a =
+            far_field_fluid_vertex_uv(representation_a, 0, 0, FarFieldFluidKind::Water);
+        let same_world_b =
+            far_field_fluid_vertex_uv(representation_b, -8, 0, FarFieldFluidKind::Water);
+        let uv_period =
+            FAR_FIELD_FLUID_PHASE_PERIOD_METRES as f32 * FAR_FIELD_FLUID_UV_REPEATS_PER_METRE;
+        assert_eq!(same_world_b[0], same_world_a[0]);
+        assert_eq!(same_world_b[1] - same_world_a[1], -uv_period);
+    }
+
+    #[test]
     fn natural_water_and_astral_lava_follow_near_column_fill_rules() {
         let (water, water_stats) = build_test_fluid_mesh(
             FluidSampler {
@@ -6442,6 +6734,7 @@ mod tests {
             water.colors[0],
             far_field_fluid_vertex_color(FarFieldFluidKind::Water)
         );
+        assert!(water.uvs[0][0] < FAR_FIELD_FLUID_LAVA_UV_THRESHOLD);
         assert_eq!(
             water_stats.fluid_classification_queries,
             FAR_FIELD_MAX_FLUID_CLASSIFICATION_QUERIES_PER_RING
@@ -6468,6 +6761,7 @@ mod tests {
             far_field_fluid_vertex_color(FarFieldFluidKind::Lava)
         );
         assert_eq!(lava.colors[0][3], 1.0);
+        assert!(lava.uvs[0][0] >= FAR_FIELD_FLUID_LAVA_UV_THRESHOLD);
     }
 
     #[test]
@@ -6740,7 +7034,10 @@ mod tests {
             vec![crate::world::ChunkMeshEntity {
                 entity: Entity::PLACEHOLDER,
                 handle: Handle::default(),
-                material: 0,
+                bucket: crate::mesher::MeshBucketKey {
+                    render_class: crate::mesher::MeshRenderClass::Standard,
+                    material: crate::blocks::DEFAULT_MATERIAL,
+                },
             }],
         );
         assert!(near_column_is_visually_ready(

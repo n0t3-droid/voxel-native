@@ -12,6 +12,11 @@ use crate::settings::{GraphicsMode, TimeMode, WorldProfile, WorldSettings};
 use crate::terrain::Biome;
 use crate::world::VoxelWorld;
 
+/// Relative-luminance coefficients for linear-light sRGB / BT.709 primaries.
+/// Source: W3C CSS Color 4 and WCAG 2.2, derived from IEC 61966-2-1.
+/// Dimensionless; coefficients sum to one within f32 precision.
+const LINEAR_SRGB_LUMINANCE: Vec3 = Vec3::new(0.2126, 0.7152, 0.0722);
+
 #[derive(Debug, Clone, Copy)]
 pub struct BiomeArtProfile {
     pub fog_density_mul: f32,
@@ -527,13 +532,13 @@ fn update_sun(
 
     // Sky (clear colour) interpolates similarly — grounded blue day,
     // readable twilight, and deep indigo night without a milky clear fog.
-    let sky_srgb = sky_srgb_for_profile_conditions(
+    let sky_rgb = sky_linear_rgb_for_profile_conditions(
         solar,
         intel.profile.sky_saturation,
         intel.biome,
         world_profile,
     );
-    let sky = Color::srgb(sky_srgb.x, sky_srgb.y, sky_srgb.z).to_linear();
+    let sky = LinearRgba::rgb(sky_rgb.x, sky_rgb.y, sky_rgb.z);
     clear_color.0 = Color::LinearRgba(sky);
 
     // Drive fog colour from the same sky interpolation so the horizon
@@ -601,21 +606,40 @@ fn lerp_vec3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
     a + (b - a) * t.clamp(0.0, 1.0)
 }
 
-fn sky_srgb_for_conditions(solar: SolarBlend, sky_saturation: f32, biome: Biome) -> Vec3 {
-    let sky_day = Vec3::new(0.38, 0.64, 0.94);
-    let sky_twilight = Vec3::new(0.38, 0.28, 0.40);
-    let sky_night = Vec3::new(0.095, 0.125, 0.22);
+fn srgb_vec3_to_linear_rgb(srgb: Vec3) -> Vec3 {
+    // Bevy implements the IEC 61966-2-1 piecewise sRGB transfer function.
+    // Author-facing palette triples are decoded exactly once; all following
+    // interpolation and luminance operations stay in linear-light RGB.
+    let linear = Color::srgb(srgb.x, srgb.y, srgb.z).to_linear();
+    Vec3::new(linear.red, linear.green, linear.blue)
+}
 
-    let mut sky =
-        sky_night * solar.night + sky_twilight * solar.twilight + sky_day * solar.daylight;
+fn adjust_linear_saturation(rgb: Vec3, saturation: f32) -> Vec3 {
+    let luminance = rgb.dot(LINEAR_SRGB_LUMINANCE);
+    let saturation = if saturation.is_finite() {
+        saturation.clamp(0.72, 1.48)
+    } else {
+        1.0
+    };
+    (Vec3::splat(luminance) + (rgb - Vec3::splat(luminance)) * saturation)
+        .clamp(Vec3::ZERO, Vec3::ONE)
+}
 
-    let sat = sky_saturation;
-    sky = lerp_vec3(sky, Vec3::splat(0.5), (1.0_f32 - sat).max(0.0));
+fn sky_linear_rgb_for_conditions(solar: SolarBlend, sky_saturation: f32, biome: Biome) -> Vec3 {
+    let sky_day = srgb_vec3_to_linear_rgb(Vec3::new(0.38, 0.64, 0.94));
+    let sky_twilight = srgb_vec3_to_linear_rgb(Vec3::new(0.38, 0.28, 0.40));
+    let sky_night = srgb_vec3_to_linear_rgb(Vec3::new(0.095, 0.125, 0.22));
+
+    // SolarBlend weights are normalized. Mixing decoded endpoints therefore
+    // models additive radiance instead of averaging gamma-encoded display
+    // values, which previously made the civil-twilight interval too dark.
+    let sky = sky_night * solar.night + sky_twilight * solar.twilight + sky_day * solar.daylight;
+    let sky = adjust_linear_saturation(sky, sky_saturation);
 
     match biome {
         Biome::CrystalSpires => {
-            let void_v = Vec3::new(0.06, 0.02, 0.20);
-            let acc_c = Vec3::new(0.04, 0.26, 0.40);
+            let void_v = srgb_vec3_to_linear_rgb(Vec3::new(0.06, 0.02, 0.20));
+            let acc_c = srgb_vec3_to_linear_rgb(Vec3::new(0.04, 0.26, 0.40));
             lerp_vec3(
                 lerp_vec3(sky, void_v, solar.night * 0.62 + 0.07),
                 acc_c,
@@ -623,20 +647,20 @@ fn sky_srgb_for_conditions(solar: SolarBlend, sky_saturation: f32, biome: Biome)
             )
         }
         Biome::AlienReef => {
-            let reef = Vec3::new(0.16, 0.04, 0.22);
+            let reef = srgb_vec3_to_linear_rgb(Vec3::new(0.16, 0.04, 0.22));
             lerp_vec3(sky, reef, solar.night * 0.48 + 0.11)
         }
         _ => sky,
     }
 }
 
-fn sky_srgb_for_profile_conditions(
+fn sky_linear_rgb_for_profile_conditions(
     solar: SolarBlend,
     sky_saturation: f32,
     biome: Biome,
     world_profile: WorldProfile,
 ) -> Vec3 {
-    let natural = sky_srgb_for_conditions(solar, sky_saturation, biome);
+    let natural = sky_linear_rgb_for_conditions(solar, sky_saturation, biome);
     if world_profile == WorldProfile::Natural {
         return natural;
     }
@@ -645,9 +669,9 @@ fn sky_srgb_for_profile_conditions(
     // not the nebula itself. A darker indigo/cobalt foundation gives its
     // cyan and rose filaments room to read while retaining a bright daytime
     // horizon and smooth day/night exposure.
-    let astral_day = Vec3::new(0.24, 0.47, 0.80);
-    let astral_twilight = Vec3::new(0.37, 0.19, 0.45);
-    let astral_night = Vec3::new(0.045, 0.055, 0.16);
+    let astral_day = srgb_vec3_to_linear_rgb(Vec3::new(0.24, 0.47, 0.80));
+    let astral_twilight = srgb_vec3_to_linear_rgb(Vec3::new(0.37, 0.19, 0.45));
+    let astral_night = srgb_vec3_to_linear_rgb(Vec3::new(0.045, 0.055, 0.16));
     let astral =
         astral_night * solar.night + astral_twilight * solar.twilight + astral_day * solar.daylight;
     lerp_vec3(natural, astral, 0.52)
@@ -690,8 +714,9 @@ mod tests {
             ambient_brightness_for_conditions(-1.0, solar, quality, 1.0) >= 1_100.0,
             "night ambient must keep terrain/trees readable instead of black silhouettes"
         );
-        let sky = sky_srgb_for_conditions(solar, 1.0, Biome::Plains);
-        assert!(sky.min_element() >= 0.09);
+        let sky = sky_linear_rgb_for_conditions(solar, 1.0, Biome::Plains);
+        let authored_night = srgb_vec3_to_linear_rgb(Vec3::new(0.095, 0.125, 0.22));
+        assert!(sky.min_element() >= authored_night.min_element() - 1.0e-6);
     }
 
     #[test]
@@ -714,14 +739,14 @@ mod tests {
     #[test]
     fn normal_day_sky_is_blue_not_whitewashed() {
         let solar = SolarBlend::for_elevation_sine(1.0);
-        let sky = sky_srgb_for_conditions(solar, 1.0, Biome::Plains);
+        let sky = sky_linear_rgb_for_conditions(solar, 1.0, Biome::Plains);
 
         assert!(
             sky.z > sky.y && sky.y > sky.x,
             "clear day sky should stay visibly blue"
         );
         assert!(
-            sky.x <= 0.46,
+            sky.x <= srgb_vec3_to_linear_rgb(Vec3::splat(0.46)).x,
             "clear day red channel should stay low enough to avoid milky fog"
         );
     }
@@ -742,10 +767,10 @@ mod tests {
     #[test]
     fn astral_clear_sky_is_profile_scoped_and_leaves_room_for_nebulae() {
         let solar = SolarBlend::for_elevation_sine(1.0);
-        let legacy = sky_srgb_for_conditions(solar, 1.0, Biome::Plains);
+        let legacy = sky_linear_rgb_for_conditions(solar, 1.0, Biome::Plains);
         let natural =
-            sky_srgb_for_profile_conditions(solar, 1.0, Biome::Plains, WorldProfile::Natural);
-        let astral = sky_srgb_for_profile_conditions(
+            sky_linear_rgb_for_profile_conditions(solar, 1.0, Biome::Plains, WorldProfile::Natural);
+        let astral = sky_linear_rgb_for_profile_conditions(
             solar,
             1.0,
             Biome::Plains,
@@ -758,13 +783,90 @@ mod tests {
 
     #[test]
     fn evening_sky_keeps_readable_brightness_floor() {
-        let sky = sky_srgb_for_conditions(SolarBlend::for_elevation_sine(0.0), 1.0, Biome::Plains);
-        let luminance = sky.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+        let sky =
+            sky_linear_rgb_for_conditions(SolarBlend::for_elevation_sine(0.0), 1.0, Biome::Plains);
+        let luminance = sky.dot(LINEAR_SRGB_LUMINANCE);
 
         assert!(
-            luminance >= 0.24,
+            luminance >= 0.06,
             "evening sky should not collapse to an overly dark horizon"
         );
+    }
+
+    #[test]
+    fn sky_palette_interpolates_in_linear_light_and_preserves_endpoints() {
+        let night = sky_linear_rgb_for_conditions(
+            SolarBlend {
+                daylight: 0.0,
+                twilight: 0.0,
+                night: 1.0,
+            },
+            1.0,
+            Biome::Plains,
+        );
+        let day = sky_linear_rgb_for_conditions(
+            SolarBlend {
+                daylight: 1.0,
+                twilight: 0.0,
+                night: 0.0,
+            },
+            1.0,
+            Biome::Plains,
+        );
+        assert!(night.distance(srgb_vec3_to_linear_rgb(Vec3::new(0.095, 0.125, 0.22))) < 1.0e-6);
+        assert!(day.distance(srgb_vec3_to_linear_rgb(Vec3::new(0.38, 0.64, 0.94))) < 1.0e-6);
+
+        let midpoint = sky_linear_rgb_for_conditions(
+            SolarBlend {
+                daylight: 0.5,
+                twilight: 0.0,
+                night: 0.5,
+            },
+            1.0,
+            Biome::Plains,
+        );
+        assert!(midpoint.distance((night + day) * 0.5) < 1.0e-6);
+    }
+
+    #[test]
+    fn biome_saturation_changes_chroma_without_moving_linear_luminance() {
+        let input = srgb_vec3_to_linear_rgb(Vec3::new(0.28, 0.52, 0.78));
+        let neutral = adjust_linear_saturation(input, 1.0);
+        let vivid = adjust_linear_saturation(input, 1.35);
+        let neutral_luminance = neutral.dot(LINEAR_SRGB_LUMINANCE);
+        let vivid_luminance = vivid.dot(LINEAR_SRGB_LUMINANCE);
+        let neutral_chroma = neutral.max_element() - neutral.min_element();
+        let vivid_chroma = vivid.max_element() - vivid.min_element();
+
+        assert!((neutral_luminance - vivid_luminance).abs() < 1.0e-6);
+        assert!(vivid_chroma > neutral_chroma);
+    }
+
+    #[test]
+    fn every_route_sky_output_is_finite_and_bounded() {
+        let biomes = [
+            Biome::Plains,
+            Biome::CrystalSpires,
+            Biome::AlienReef,
+            Biome::VolcanicWaste,
+        ];
+        for profile in [WorldProfile::Natural, WorldProfile::AstralFrontier] {
+            for biome in biomes {
+                for elevation in [-1.0, -0.104_528_464, -0.01, 0.0, 0.22, 1.0] {
+                    for saturation in [f32::NAN, -10.0, 0.72, 1.0, 1.48, 10.0] {
+                        let sky = sky_linear_rgb_for_profile_conditions(
+                            SolarBlend::for_elevation_sine(elevation),
+                            saturation,
+                            biome,
+                            profile,
+                        );
+                        assert!(sky.is_finite());
+                        assert!(sky.min_element() >= 0.0);
+                        assert!(sky.max_element() <= 1.0);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

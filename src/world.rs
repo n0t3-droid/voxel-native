@@ -29,12 +29,13 @@ use crate::chunk::{
     world_to_chunk, Chunk, ChunkPos, SharedMaterials, SharedVoxels, CHUNK_SIZE_I, CHUNK_VOLUME,
 };
 use crate::horizon::SharedHorizonCache;
-use crate::mesher::build_mesh_buckets_budgeted_with_horizon;
+use crate::mesher::{build_mesh_buckets_budgeted_with_horizon, MeshBucketKey, MeshRenderClass};
 use crate::neurocore::{QualityState, RuntimeBudget, RuntimeIntent, RuntimeProfile};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::settings::TerrainGrammarVersion;
 use crate::settings::{WorldGenerationIdentity, WorldSettings};
 use crate::terrain::TerrainGenerator;
+use crate::vegetation::VegetationSpecies;
 use crate::voxel_budget::{VoxelDetailTier, WorldQualityBudget};
 
 pub struct WorldPlugin;
@@ -2827,7 +2828,7 @@ pub struct ChunkStreamer {
     pub pending_terrain: AHashMap<ChunkPos, (u64, Task<(ChunkPos, SharedVoxels)>)>,
     /// In-flight meshing tasks (one per chunk position). `None` mesh =
     /// chunk is empty / uniform-solid and needs no geometry.
-    pub pending_meshes: AHashMap<ChunkPos, (u64, Task<(ChunkPos, Vec<(MaterialId, Mesh)>)>)>,
+    pub pending_meshes: AHashMap<ChunkPos, (u64, Task<(ChunkPos, Vec<(MeshBucketKey, Mesh)>)>)>,
     /// Dirty-chunk set so the mesh scheduler doesn't walk the entire
     /// chunk hashmap every frame AND so a given chunk cannot end up in
     /// the work list 20× per frame. Before this was a `Vec<ChunkPos>`
@@ -2886,7 +2887,32 @@ pub struct ChunkStreamer {
 pub struct ChunkMeshEntity {
     pub entity: Entity,
     pub handle: Handle<Mesh>,
-    pub material: MaterialId,
+    pub bucket: MeshBucketKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MeshMaterialRoute {
+    Standard,
+    Vegetation(VegetationSpecies),
+    WaterOptics,
+}
+
+/// Shader-family policy is owned by the voxel category, never inferred from
+/// editable material presentation data. A custom material on Water therefore
+/// remains a distinct edit/bucket identity but cannot opt the voxel out of the
+/// one canonical water presentation; its custom base texture (including the
+/// unresolved sentinel) is intentionally suppressed. Conversely, a solid
+/// borrowing Water's material id cannot opt in. Vegetation follows the same
+/// authority rule with one of four voxel-derived species presets; nonmatching
+/// or custom base textures are suppressed rather than allocating an unbounded
+/// material-by-species cross-product. This preserves the fixed one-Water plus
+/// four-Vegetation material asset budget and makes the policy explicit.
+fn mesh_material_route(bucket: MeshBucketKey) -> MeshMaterialRoute {
+    match bucket.render_class {
+        MeshRenderClass::Standard => MeshMaterialRoute::Standard,
+        MeshRenderClass::Vegetation(species) => MeshMaterialRoute::Vegetation(species),
+        MeshRenderClass::Water => MeshMaterialRoute::WaterOptics,
+    }
 }
 
 fn init_world(
@@ -3837,6 +3863,7 @@ fn mesh_dirty_chunks(
     settings: Res<WorldSettings>,
     budget: Res<RuntimeBudget>,
     material_library: Res<crate::textures::MaterialLibrary>,
+    water_surface: Res<crate::water::WaterSurfaceLibrary>,
     anchors: Query<&Transform, With<ChunkAnchor>>,
 ) {
     {
@@ -3881,7 +3908,7 @@ fn mesh_dirty_chunks(
     let spawn_cap = budget.mesh_applies_per_frame as usize;
     let mut applied = 0usize;
     let mut done_keys: Vec<ChunkPos> = Vec::new();
-    let mut finished: Vec<(u64, ChunkPos, Vec<(MaterialId, Mesh)>)> = Vec::new();
+    let mut finished: Vec<(u64, ChunkPos, Vec<(MeshBucketKey, Mesh)>)> = Vec::new();
 
     for (pos, (task_epoch, task)) in streamer.pending_meshes.iter_mut() {
         if applied >= spawn_cap {
@@ -3928,15 +3955,28 @@ fn mesh_dirty_chunks(
         let far = dx * dx + dz * dz > shadow_r2;
         let mut next_entries = Vec::with_capacity(buckets.len());
 
-        for (material_id, mesh) in buckets {
-            let vegetation_material = material_library.vegetation_handle_for(material_id);
+        for (bucket, mesh) in buckets {
+            let material_id = bucket.material;
+            let route = mesh_material_route(bucket);
+            let water_material = match route {
+                MeshMaterialRoute::WaterOptics => {
+                    water_surface.handle_for(BlockType::Water as MaterialId)
+                }
+                MeshMaterialRoute::Standard | MeshMaterialRoute::Vegetation(_) => None,
+            };
+            let vegetation_material = match route {
+                MeshMaterialRoute::Vegetation(species) => {
+                    material_library.vegetation_handle_for_species(species)
+                }
+                MeshMaterialRoute::Standard | MeshMaterialRoute::WaterOptics => None,
+            };
             let Some(material_handle) = material_library
                 .handle_for(material_id)
                 .or_else(|| streamer.material.clone())
             else {
                 continue;
             };
-            let culling_margin = if vegetation_material.is_some() {
+            let culling_margin = if matches!(route, MeshMaterialRoute::Vegetation(_)) {
                 crate::vegetation::MAX_VEGETATION_DISPLACEMENT_VOXELS
             } else {
                 0.0
@@ -3946,13 +3986,12 @@ fn mesh_dirty_chunks(
                 Vec3::splat(CHUNK_SIZE_I as f32 + culling_margin),
             );
 
-            if let Some(idx) = previous
-                .iter()
-                .position(|entry| entry.material == material_id)
-            {
+            if let Some(idx) = previous.iter().position(|entry| entry.bucket == bucket) {
                 let mut entry = previous.swap_remove(idx);
                 if let Some(mut entity_commands) = commands.get_entity(entry.entity) {
-                    if let Some(vegetation_material) = vegetation_material.clone() {
+                    if let Some(water_material) = water_material.clone() {
+                        entity_commands.insert(water_material);
+                    } else if let Some(vegetation_material) = vegetation_material.clone() {
                         entity_commands.insert(vegetation_material);
                     } else {
                         entity_commands.insert(material_handle.clone());
@@ -3973,7 +4012,34 @@ fn mesh_dirty_chunks(
             }
 
             let handle = meshes.add(mesh);
-            let entity = if let Some(vegetation_material) = vegetation_material {
+            let entity = if let Some(water_material) = water_material {
+                if far {
+                    commands
+                        .spawn((
+                            MaterialMeshBundle {
+                                mesh: handle.clone(),
+                                material: water_material,
+                                transform,
+                                ..default()
+                            },
+                            aabb,
+                            bevy::pbr::NotShadowCaster,
+                        ))
+                        .id()
+                } else {
+                    commands
+                        .spawn((
+                            MaterialMeshBundle {
+                                mesh: handle.clone(),
+                                material: water_material,
+                                transform,
+                                ..default()
+                            },
+                            aabb,
+                        ))
+                        .id()
+                }
+            } else if let Some(vegetation_material) = vegetation_material {
                 if far {
                     commands
                         .spawn((
@@ -4029,7 +4095,7 @@ fn mesh_dirty_chunks(
             next_entries.push(ChunkMeshEntity {
                 entity,
                 handle,
-                material: material_id,
+                bucket,
             });
         }
 
@@ -4243,6 +4309,7 @@ fn mesh_dirty_chunks(
                 &mut meshes,
                 &mut streamer,
                 &material_library,
+                &water_surface,
                 &budget,
                 pcx,
                 pcz,
@@ -4393,11 +4460,12 @@ fn apply_mesh_buckets_now(
     meshes: &mut Assets<Mesh>,
     streamer: &mut ChunkStreamer,
     material_library: &crate::textures::MaterialLibrary,
+    water_surface: &crate::water::WaterSurfaceLibrary,
     budget: &RuntimeBudget,
     pcx: i32,
     pcz: i32,
     pos: ChunkPos,
-    buckets: Vec<(MaterialId, Mesh)>,
+    buckets: Vec<(MeshBucketKey, Mesh)>,
 ) {
     let mut previous = streamer.entities.remove(&pos).unwrap_or_default();
     if buckets.is_empty() {
@@ -4419,15 +4487,28 @@ fn apply_mesh_buckets_now(
     let far = dx * dx + dz * dz > shadow_r2;
     let mut next_entries = Vec::with_capacity(buckets.len());
 
-    for (material_id, mesh) in buckets {
-        let vegetation_material = material_library.vegetation_handle_for(material_id);
+    for (bucket, mesh) in buckets {
+        let material_id = bucket.material;
+        let route = mesh_material_route(bucket);
+        let water_material = match route {
+            MeshMaterialRoute::WaterOptics => {
+                water_surface.handle_for(BlockType::Water as MaterialId)
+            }
+            MeshMaterialRoute::Standard | MeshMaterialRoute::Vegetation(_) => None,
+        };
+        let vegetation_material = match route {
+            MeshMaterialRoute::Vegetation(species) => {
+                material_library.vegetation_handle_for_species(species)
+            }
+            MeshMaterialRoute::Standard | MeshMaterialRoute::WaterOptics => None,
+        };
         let Some(material_handle) = material_library
             .handle_for(material_id)
             .or_else(|| streamer.material.clone())
         else {
             continue;
         };
-        let culling_margin = if vegetation_material.is_some() {
+        let culling_margin = if matches!(route, MeshMaterialRoute::Vegetation(_)) {
             crate::vegetation::MAX_VEGETATION_DISPLACEMENT_VOXELS
         } else {
             0.0
@@ -4437,13 +4518,12 @@ fn apply_mesh_buckets_now(
             Vec3::splat(CHUNK_SIZE_I as f32 + culling_margin),
         );
 
-        if let Some(idx) = previous
-            .iter()
-            .position(|entry| entry.material == material_id)
-        {
+        if let Some(idx) = previous.iter().position(|entry| entry.bucket == bucket) {
             let mut entry = previous.swap_remove(idx);
             if let Some(mut entity_commands) = commands.get_entity(entry.entity) {
-                if let Some(vegetation_material) = vegetation_material.clone() {
+                if let Some(water_material) = water_material.clone() {
+                    entity_commands.insert(water_material);
+                } else if let Some(vegetation_material) = vegetation_material.clone() {
                     entity_commands.insert(vegetation_material);
                 } else {
                     entity_commands.insert(material_handle.clone());
@@ -4464,7 +4544,34 @@ fn apply_mesh_buckets_now(
         }
 
         let handle = meshes.add(mesh);
-        let entity = if let Some(vegetation_material) = vegetation_material {
+        let entity = if let Some(water_material) = water_material {
+            if far {
+                commands
+                    .spawn((
+                        MaterialMeshBundle {
+                            mesh: handle.clone(),
+                            material: water_material,
+                            transform,
+                            ..default()
+                        },
+                        aabb,
+                        bevy::pbr::NotShadowCaster,
+                    ))
+                    .id()
+            } else {
+                commands
+                    .spawn((
+                        MaterialMeshBundle {
+                            mesh: handle.clone(),
+                            material: water_material,
+                            transform,
+                            ..default()
+                        },
+                        aabb,
+                    ))
+                    .id()
+            }
+        } else if let Some(vegetation_material) = vegetation_material {
             if far {
                 commands
                     .spawn((
@@ -4520,7 +4627,7 @@ fn apply_mesh_buckets_now(
         next_entries.push(ChunkMeshEntity {
             entity,
             handle,
-            material: material_id,
+            bucket,
         });
     }
 
@@ -4622,6 +4729,60 @@ impl ChunkSnapshot {
 mod tests {
     use super::*;
     use crate::blocks::BlockType;
+
+    #[test]
+    fn mesh_shader_route_uses_voxel_class_and_species_not_editable_material_id() {
+        let water_material = BlockType::Water as MaterialId;
+        let leaves_material = BlockType::Leaves as MaterialId;
+        let stone_with_water_material =
+            MeshBucketKey::new(BlockType::Stone as Voxel, water_material);
+        let stone_with_leaves_material =
+            MeshBucketKey::new(BlockType::Stone as Voxel, leaves_material);
+        let custom_water = MeshBucketKey::new(
+            BlockType::Water as Voxel,
+            crate::blocks::CUSTOM_MATERIAL_BASE,
+        );
+        let custom_leaves = MeshBucketKey::new(
+            BlockType::Leaves as Voxel,
+            crate::blocks::CUSTOM_MATERIAL_BASE,
+        );
+        let custom_sakura = MeshBucketKey::new(
+            BlockType::SakuraPetals as Voxel,
+            crate::blocks::CUSTOM_MATERIAL_BASE,
+        );
+        let leaves_with_sakura_material = MeshBucketKey::new(
+            BlockType::Leaves as Voxel,
+            BlockType::SakuraPetals as MaterialId,
+        );
+
+        assert_eq!(
+            mesh_material_route(stone_with_water_material),
+            MeshMaterialRoute::Standard
+        );
+        assert_eq!(
+            mesh_material_route(custom_water),
+            MeshMaterialRoute::WaterOptics
+        );
+        assert_eq!(
+            mesh_material_route(stone_with_leaves_material),
+            MeshMaterialRoute::Standard
+        );
+        assert_eq!(
+            mesh_material_route(custom_leaves),
+            MeshMaterialRoute::Vegetation(VegetationSpecies::Leaves)
+        );
+        assert_eq!(
+            mesh_material_route(custom_sakura),
+            MeshMaterialRoute::Vegetation(VegetationSpecies::SakuraPetals)
+        );
+        assert_eq!(
+            mesh_material_route(leaves_with_sakura_material),
+            MeshMaterialRoute::Vegetation(VegetationSpecies::Leaves),
+            "voxel species, not a borrowed foliage material id, owns the preset"
+        );
+        assert_ne!(stone_with_water_material, custom_water);
+        assert_ne!(custom_leaves, custom_sakura);
+    }
 
     #[test]
     fn near_chunk_worker_preserves_the_complete_v1_generation_identity() {
@@ -5351,12 +5512,18 @@ mod tests {
                 ChunkMeshEntity {
                     entity: Entity::from_raw(1),
                     handle: Handle::default(),
-                    material: DEFAULT_MATERIAL,
+                    bucket: MeshBucketKey {
+                        render_class: MeshRenderClass::Standard,
+                        material: DEFAULT_MATERIAL,
+                    },
                 },
                 ChunkMeshEntity {
                     entity: Entity::from_raw(2),
                     handle: Handle::default(),
-                    material: DEFAULT_MATERIAL,
+                    bucket: MeshBucketKey {
+                        render_class: MeshRenderClass::Standard,
+                        material: DEFAULT_MATERIAL,
+                    },
                 },
             ],
         );

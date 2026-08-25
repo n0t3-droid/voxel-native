@@ -24,7 +24,60 @@ use crate::blocks::{
 };
 use crate::chunk::{ChunkPos, CHUNK_SIZE, CHUNK_SIZE_I};
 use crate::horizon::VirtualHorizonField;
+use crate::vegetation::VegetationSpecies;
 use crate::voxel_budget::EmissionBudget;
+
+/// Authoritative presentation class carried beside a material id.
+///
+/// A material is editable presentation data and therefore cannot prove that a
+/// voxel is water or foliage. Keeping this small class in the deterministic
+/// bucket key prevents distinct voxel categories that share one material id
+/// from being installed with the wrong shader.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MeshRenderClass {
+    Standard,
+    Vegetation(VegetationSpecies),
+    Water,
+}
+
+impl MeshRenderClass {
+    #[inline]
+    pub fn for_voxel(voxel: Voxel) -> Self {
+        if voxel == BlockType::Water as Voxel {
+            Self::Water
+        } else if let Some(species) = VegetationSpecies::for_voxel(voxel) {
+            Self::Vegetation(species)
+        } else {
+            Self::Standard
+        }
+    }
+}
+
+/// Deterministic, bounded key for one chunk mesh.
+///
+/// `material` remains part of the key even when the authoritative render
+/// class selects an extension shader. This preserves edit/bucket identity and
+/// deterministic entity reuse while keeping at most six ordered
+/// class/species routes per `u16` material id. Water presentation is
+/// deliberately canonical downstream; its custom base texture is not claimed
+/// to survive the optics route. Vegetation likewise keeps exactly four
+/// canonical species materials so a custom base cannot change its wind preset
+/// or create an unbounded material cross-product.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MeshBucketKey {
+    pub render_class: MeshRenderClass,
+    pub material: MaterialId,
+}
+
+impl MeshBucketKey {
+    #[inline]
+    pub fn new(voxel: Voxel, material: MaterialId) -> Self {
+        Self {
+            render_class: MeshRenderClass::for_voxel(voxel),
+            material,
+        }
+    }
+}
 
 /// Greedy-mesh a chunk into a Bevy `Mesh`. Positions are in world-space
 /// offset so the owning entity can sit at the origin.
@@ -286,14 +339,15 @@ impl MeshBuffers {
     }
 }
 
-/// Greedy-mesh a chunk into one mesh per effective material id. The budget
-/// changes shading work and HDR energy, never voxel topology.
+/// Greedy-mesh a chunk into one mesh per authoritative render class and
+/// effective material id. The budget changes shading work and HDR energy,
+/// never voxel topology.
 pub fn build_mesh_buckets_budgeted<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
     pos: ChunkPos,
     sample: F,
     compute_ao: bool,
     emission_budget: EmissionBudget,
-) -> Vec<(MaterialId, Mesh)> {
+) -> Vec<(MeshBucketKey, Mesh)> {
     build_mesh_buckets_budgeted_with_horizon(pos, sample, compute_ao, emission_budget, None)
 }
 
@@ -307,7 +361,7 @@ pub fn build_mesh_buckets_budgeted_with_horizon<F: Fn(i32, i32, i32) -> (Voxel, 
     compute_ao: bool,
     emission_budget: EmissionBudget,
     horizon: Option<&VirtualHorizonField>,
-) -> Vec<(MaterialId, Mesh)> {
+) -> Vec<(MeshBucketKey, Mesh)> {
     let (ox, oy, oz) = pos.origin();
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -318,7 +372,7 @@ pub fn build_mesh_buckets_budgeted_with_horizon<F: Fn(i32, i32, i32) -> (Voxel, 
         ao: [u8; 4],
     }
 
-    let mut buckets: std::collections::BTreeMap<MaterialId, MeshBuffers> =
+    let mut buckets: std::collections::BTreeMap<MeshBucketKey, MeshBuffers> =
         std::collections::BTreeMap::new();
     let mut mask: Vec<Option<MaskCell>> = vec![None; CHUNK_SIZE * CHUNK_SIZE];
 
@@ -435,7 +489,8 @@ pub fn build_mesh_buckets_budgeted_with_horizon<F: Fn(i32, i32, i32) -> (Voxel, 
                             h += 1;
                         }
 
-                        let buf = buckets.entry(current.material).or_default();
+                        let key = MeshBucketKey::new(current.voxel, current.material);
+                        let buf = buckets.entry(key).or_default();
                         emit_quad(
                             &mut buf.positions,
                             &mut buf.normals,
@@ -475,11 +530,11 @@ pub fn build_mesh_buckets_budgeted_with_horizon<F: Fn(i32, i32, i32) -> (Voxel, 
 
     buckets
         .into_iter()
-        .filter_map(|(material, buffers)| {
+        .filter_map(|(key, buffers)| {
             if buffers.is_empty() {
                 None
             } else {
-                Some((material, buffers.into_mesh()))
+                Some((key, buffers.into_mesh()))
             }
         })
         .collect()
@@ -768,12 +823,18 @@ fn material_world_uv_rect(
 
 #[inline]
 fn texture_world_scale(voxel: Voxel, material: MaterialId) -> f32 {
+    // Water optics reconstruct metres from UV at an exact 8:1 ratio. Voxel
+    // category therefore takes priority over a custom presentation material;
+    // otherwise custom Water would run its spectrum at eight times the Near
+    // frequency and break the exact Near/Far phase bridge.
+    if voxel == BlockType::Water as Voxel {
+        return 0.125;
+    }
     if material_is_custom(material) {
         return 1.0;
     }
 
     match BlockType::from_voxel(voxel) {
-        BlockType::Water => 0.125,
         BlockType::Leaves
         | BlockType::JungleLeaves
         | BlockType::BlossomLeaves
@@ -812,10 +873,23 @@ fn world_uv_rect(
     height: i32,
     scale: f32,
 ) -> [[f32; 2]; 4] {
-    let u_min = (world_origin[u_axis] + u0) as f32 * scale;
-    let v_min = (world_origin[v_axis] + v0) as f32 * scale;
-    let u_max = (world_origin[u_axis] + u0 + width) as f32 * scale;
-    let v_max = (world_origin[v_axis] + v0 + height) as f32 * scale;
+    // Repeat samplers make integer texture periods observationally
+    // equivalent. Reduce signed i32 world coordinates in integer space before
+    // the f32 cast so UV detail (and the analytic water spectrum derived from
+    // it) retains sub-voxel precision even near coordinate extremes. Every
+    // built-in scale above maps this 4096-voxel period to an exact integer
+    // number of texture repeats. Width/height are added after reduction so a
+    // greedy quad crossing the seam keeps its local orientation and extent.
+    const WORLD_UV_PERIOD_VOXELS: i64 = 4_096;
+    let wrapped_axis = |axis: usize, local: i32| {
+        (i64::from(world_origin[axis]) + i64::from(local)).rem_euclid(WORLD_UV_PERIOD_VOXELS)
+    };
+    let u_base = wrapped_axis(u_axis, u0);
+    let v_base = wrapped_axis(v_axis, v0);
+    let u_min = u_base as f32 * scale;
+    let v_min = v_base as f32 * scale;
+    let u_max = (u_base + i64::from(width)) as f32 * scale;
+    let v_max = (v_base + i64::from(height)) as f32 * scale;
     [
         [u_min, v_min],
         [u_max, v_min],
@@ -828,6 +902,78 @@ fn world_uv_rect(
 mod tests {
     use super::*;
     use crate::blocks::CUSTOM_MATERIAL_BASE;
+
+    #[test]
+    fn render_buckets_keep_voxel_class_authoritative_and_material_identity_distinct() {
+        let water_material = BlockType::Water as MaterialId;
+        let leaves_material = BlockType::Leaves as MaterialId;
+        let stone_material = BlockType::Stone as MaterialId;
+        let custom_material_a = CUSTOM_MATERIAL_BASE;
+        let custom_material_b = CUSTOM_MATERIAL_BASE + 1;
+        let buckets = build_mesh_buckets_budgeted(
+            ChunkPos::new(0, 0, 0),
+            |wx, wy, wz| match (wx, wy, wz) {
+                // A presentation override must not turn solid stone into a
+                // water-category draw, even when it reuses Water's built-in id.
+                (1, 1, 1) => (BlockType::Stone as Voxel, water_material),
+                // The authoritative Water voxel keeps water optics for both
+                // its default and custom presentation material identities.
+                (3, 1, 1) => (BlockType::Water as Voxel, water_material),
+                (5, 1, 1) => (BlockType::Water as Voxel, custom_material_a),
+                (7, 1, 1) => (BlockType::Water as Voxel, custom_material_b),
+                // Foliage species likewise come from voxel authority. Two
+                // species sharing one custom id must not merge or borrow each
+                // other's wind preset, and an ordinary solid cannot opt in by
+                // borrowing a foliage material id.
+                (9, 1, 1) => (BlockType::Leaves as Voxel, custom_material_a),
+                (11, 1, 1) => (BlockType::SakuraPetals as Voxel, custom_material_a),
+                (13, 1, 1) => (BlockType::Leaves as Voxel, stone_material),
+                (15, 1, 1) => (BlockType::Stone as Voxel, leaves_material),
+                _ => (AIR, DEFAULT_MATERIAL),
+            },
+            false,
+            EmissionBudget::Balanced,
+        );
+        let keys: Vec<_> = buckets.into_iter().map(|(key, _)| key).collect();
+
+        assert_eq!(
+            keys,
+            vec![
+                MeshBucketKey {
+                    render_class: MeshRenderClass::Standard,
+                    material: water_material,
+                },
+                MeshBucketKey {
+                    render_class: MeshRenderClass::Standard,
+                    material: leaves_material,
+                },
+                MeshBucketKey {
+                    render_class: MeshRenderClass::Vegetation(VegetationSpecies::Leaves),
+                    material: stone_material,
+                },
+                MeshBucketKey {
+                    render_class: MeshRenderClass::Vegetation(VegetationSpecies::Leaves),
+                    material: custom_material_a,
+                },
+                MeshBucketKey {
+                    render_class: MeshRenderClass::Vegetation(VegetationSpecies::SakuraPetals),
+                    material: custom_material_a,
+                },
+                MeshBucketKey {
+                    render_class: MeshRenderClass::Water,
+                    material: water_material,
+                },
+                MeshBucketKey {
+                    render_class: MeshRenderClass::Water,
+                    material: custom_material_a,
+                },
+                MeshBucketKey {
+                    render_class: MeshRenderClass::Water,
+                    material: custom_material_b,
+                },
+            ]
+        );
+    }
 
     fn quad_colors_with_horizon(
         voxel: Voxel,
@@ -968,12 +1114,14 @@ mod tests {
             BlockType::RoofTile as MaterialId,
         );
         let custom = texture_world_scale(BlockType::Grass as Voxel, CUSTOM_MATERIAL_BASE);
+        let custom_water = texture_world_scale(BlockType::Water as Voxel, CUSTOM_MATERIAL_BASE);
 
         assert_eq!(grass, 0.375);
         assert_eq!(water, 0.125);
         assert_eq!(leaves, 0.75);
         assert_eq!(roof, 1.0);
         assert_eq!(custom, 1.0);
+        assert_eq!(custom_water, 0.125);
     }
 
     #[test]
@@ -1053,6 +1201,21 @@ mod tests {
 
         assert_eq!(left[1], right[0]);
         assert_eq!(left[2], right[3]);
+    }
+
+    #[test]
+    fn periodic_world_uvs_preserve_extent_at_signed_coordinate_extremes() {
+        for origin in [i32::MIN, -4_097, -1, 0, 4_095, i32::MAX] {
+            let rect = world_uv_rect([origin, 0, origin], 0, 2, 0, 0, 16, 16, 0.125);
+            assert!(rect.iter().flatten().all(|value| value.is_finite()));
+            assert_eq!(rect[1][0] - rect[0][0], 2.0);
+            assert_eq!(rect[3][1] - rect[0][1], 2.0);
+        }
+
+        let before_wrap = world_uv_rect([4_095, 0, 0], 0, 2, 0, 0, 1, 1, 1.0);
+        let after_wrap = world_uv_rect([4_096, 0, 0], 0, 2, 0, 0, 1, 1, 1.0);
+        assert_eq!(before_wrap[1][0], 4_096.0);
+        assert_eq!(after_wrap[0][0], 0.0);
     }
 
     #[test]

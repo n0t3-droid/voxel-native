@@ -32,6 +32,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::blocks::{BlockType, MaterialId, CUSTOM_MATERIAL_BASE};
+use crate::vegetation::VegetationSpecies;
 
 /// Folder (relative to cwd) from which the engine loads user-supplied
 /// texture overrides and into which the Texture Viewer exports PNGs.
@@ -103,6 +104,7 @@ struct TerrainMaterialProfile {
     base_alpha: f32,
     perceptual_roughness: f32,
     reflectance: f32,
+    metallic: f32,
     alpha_mode: AlphaMode,
 }
 
@@ -609,7 +611,11 @@ fn terrain_material_profile(block: BlockType) -> TerrainMaterialProfile {
         TerrainMaterialProfile {
             base_alpha: 1.0,
             perceptual_roughness: 0.18,
-            reflectance: 0.50,
+            // Bevy maps this parameter to dielectric F0 as 0.16*r^2.
+            // r=0.357 therefore gives 2.04%, matching the normal-incidence
+            // Fresnel reflectance of an air/water interface at IOR 1.333.
+            reflectance: 0.357,
+            metallic: 0.0,
             alpha_mode: AlphaMode::AlphaToCoverage,
         }
     } else if block == BlockType::Lava {
@@ -617,6 +623,7 @@ fn terrain_material_profile(block: BlockType) -> TerrainMaterialProfile {
             base_alpha: 1.0,
             perceptual_roughness: 1.0,
             reflectance: 0.05,
+            metallic: 0.0,
             alpha_mode: AlphaMode::Opaque,
         }
     } else if matches!(
@@ -639,17 +646,88 @@ fn terrain_material_profile(block: BlockType) -> TerrainMaterialProfile {
             } else {
                 0.82
             },
-            reflectance: 0.12,
+            // A non-metallic cuticle sits in the ordinary dielectric band;
+            // 0.42 maps to about 2.82% normal-incidence F0 in Bevy.
+            reflectance: 0.42,
+            metallic: 0.0,
             // The procedural albedo contains a restrained binary pore mask.
             // Alpha mask is temporally stable, works with the vegetation
             // extension, and avoids sorting thousands of canopy surfaces.
             alpha_mode: AlphaMode::Mask(0.42),
         }
     } else {
+        // Scalar optical families give the procedural albedos distinct,
+        // physically legible responses without adding textures, tangents,
+        // vertices, entities or draw calls. Reflectance is Bevy's remapped
+        // dielectric control (F0 = 0.16*r^2), not a direct percentage.
+        let (perceptual_roughness, reflectance, metallic) = match block {
+            // Loose mineral/organic ground: broad, low-energy highlights.
+            BlockType::Dirt => (0.96, 0.36, 0.0),
+            BlockType::Grass
+            | BlockType::TundraGrass
+            | BlockType::SavannaGrass
+            | BlockType::AlienMoss => (0.90, 0.38, 0.0),
+            BlockType::Sand | BlockType::RedSand | BlockType::GlowSand => (0.92, 0.40, 0.0),
+
+            // Rock remains rough, but no longer shares soil's chalk-flat
+            // response. Polished zen stone is deliberately the smoothest.
+            BlockType::Gravel | BlockType::Bedrock | BlockType::Basalt => (0.88, 0.46, 0.0),
+            BlockType::Stone
+            | BlockType::RedStone
+            | BlockType::MesaClay
+            | BlockType::MossStone
+            | BlockType::Limestone
+            | BlockType::BoneRock => (0.78, 0.48, 0.0),
+            BlockType::ZenStone => (0.58, 0.50, 0.0),
+
+            // Fibrous surfaces retain elongated-looking soft highlights even
+            // though the current bounded mesh contract has no tangents.
+            BlockType::Wood | BlockType::Bamboo | BlockType::TatamiMat => (0.76, 0.42, 0.0),
+            BlockType::ShojiPaper => (0.93, 0.36, 0.0),
+            BlockType::RoofTile => (0.64, 0.50, 0.0),
+
+            // Snow is diffuse; ice and dielectric crystals carry tight
+            // highlights. Transparent blocks keep their existing depth-stable
+            // alpha policy rather than entering the sorted Blend path.
+            BlockType::Snow => (0.82, 0.42, 0.0),
+            BlockType::Ice => (0.20, 0.46, 0.0),
+            BlockType::Crystal
+            | BlockType::CockpitGlass
+            | BlockType::LuminiteCrystal
+            | BlockType::NeonGlass => (0.12, 0.50, 0.0),
+            BlockType::NeonCyan | BlockType::NeonMagenta | BlockType::NeonAmber => {
+                (0.22, 0.48, 0.0)
+            }
+
+            // Manufactured and ore-bearing surfaces are the only built-in
+            // conductors. Metallic remains bounded below one so their baked
+            // albedo and bounded emission still retain readable mid-tones.
+            BlockType::ShipHullDark => (0.42, 0.52, 0.72),
+            BlockType::ShipHullAlloy => (0.28, 0.56, 0.90),
+            BlockType::MagnetiteOre => (0.54, 0.50, 0.58),
+            BlockType::IridiumVein => (0.30, 0.54, 0.78),
+            BlockType::EngineCore => (0.34, 0.50, 0.62),
+
+            // Warm lamp ceramic is rough while its light output remains under
+            // the existing emission authority.
+            BlockType::ShojiLamp => (0.70, 0.46, 0.0),
+
+            // Air is never materialized; keep a finite fail-closed profile if
+            // a diagnostic path nevertheless asks for it.
+            BlockType::Air => (1.0, 0.0, 0.0),
+            // Water, lava and foliage were handled above.
+            BlockType::Water
+            | BlockType::Lava
+            | BlockType::Leaves
+            | BlockType::JungleLeaves
+            | BlockType::BlossomLeaves
+            | BlockType::SakuraPetals => unreachable!("special material handled above"),
+        };
         TerrainMaterialProfile {
             base_alpha: alpha,
-            perceptual_roughness: 1.0,
-            reflectance: 0.05,
+            perceptual_roughness,
+            reflectance,
+            metallic,
             alpha_mode: terrain_alpha_mode_for_block(block),
         }
     }
@@ -754,6 +832,7 @@ impl MaterialLibrary {
                 emissive,
                 perceptual_roughness: profile.perceptual_roughness,
                 reflectance: profile.reflectance,
+                metallic: profile.metallic,
                 alpha_mode: profile.alpha_mode,
                 cull_mode: if foliage {
                     None
@@ -1023,11 +1102,17 @@ impl MaterialLibrary {
         self.handles.get(&(BlockType::Stone as MaterialId)).cloned()
     }
 
-    pub fn vegetation_handle_for(
+    /// Resolve the fixed canonical material for an authoritative foliage
+    /// species. Editable material IDs remain in the mesh key, but do not select
+    /// the extension preset: doing so would let a custom/non-foliage material
+    /// opt foliage out of wind or require an unbounded material cross-product.
+    pub fn vegetation_handle_for_species(
         &self,
-        id: MaterialId,
+        species: VegetationSpecies,
     ) -> Option<Handle<crate::vegetation::VegetationMaterial>> {
-        self.vegetation_handles.get(&id).cloned()
+        self.vegetation_handles
+            .get(&(species.block() as MaterialId))
+            .cloned()
     }
 
     #[allow(dead_code)]
@@ -2040,6 +2125,27 @@ mod tests {
         assert_eq!(expected, (45, 4, 45));
         assert_eq!(expected.0, library.handles.len() + 1);
         assert_eq!(expected.1, library.vegetation_handles.len());
+        for species in VegetationSpecies::ALL {
+            let canonical = library
+                .vegetation_handles
+                .get(&(species.block() as MaterialId))
+                .expect("canonical foliage material");
+            let routed = library
+                .vegetation_handle_for_species(species)
+                .expect("species route");
+            assert_eq!(routed.id(), canonical.id());
+            let material = vegetation_materials.get(&routed).unwrap();
+            let authored = crate::vegetation::VegetationWind::for_block(species.block())
+                .expect("authoritative species preset");
+            assert_eq!(
+                material.extension.parameters.direction_macro,
+                authored.parameters.direction_macro
+            );
+            assert_eq!(
+                material.extension.parameters.flutter_phase,
+                authored.parameters.flutter_phase
+            );
+        }
 
         for _ in 0..5 {
             rebuild_without_custom(
@@ -2794,12 +2900,66 @@ mod tests {
         let grass = terrain_material_profile(BlockType::Grass);
 
         assert!(water.perceptual_roughness < 0.25);
-        assert!(water.reflectance >= 0.45);
+        let water_f0 = 0.16 * water.reflectance * water.reflectance;
+        let ior_water = 1.333_f32;
+        let expected_f0 = ((ior_water - 1.0) / (ior_water + 1.0)).powi(2);
+        assert!((water_f0 - expected_f0).abs() < 0.0001);
         assert!(water.perceptual_roughness < grass.perceptual_roughness);
-        assert!(water.reflectance > grass.reflectance);
+        assert_eq!(water.metallic, 0.0);
         assert_eq!(water.alpha_mode, AlphaMode::AlphaToCoverage);
         assert_eq!(water.base_alpha, 1.0);
         assert!((0.50..=0.80).contains(&BlockType::Water.color().to_srgba().alpha));
+    }
+
+    #[test]
+    fn built_in_optical_families_are_finite_bounded_and_distinct() {
+        let mut signatures = std::collections::BTreeSet::new();
+        for voxel in 1..=BlockType::ShojiLamp as u16 {
+            let block = BlockType::from_voxel(voxel);
+            let profile = terrain_material_profile(block);
+            assert!(profile.base_alpha.is_finite(), "{block:?}");
+            assert!(profile.perceptual_roughness.is_finite(), "{block:?}");
+            assert!(profile.reflectance.is_finite(), "{block:?}");
+            assert!(profile.metallic.is_finite(), "{block:?}");
+            assert!((0.0..=1.0).contains(&profile.base_alpha), "{block:?}");
+            assert!(
+                (0.089..=1.0).contains(&profile.perceptual_roughness),
+                "{block:?}"
+            );
+            assert!((0.0..=1.0).contains(&profile.reflectance), "{block:?}");
+            assert!((0.0..=1.0).contains(&profile.metallic), "{block:?}");
+            signatures.insert((
+                profile.perceptual_roughness.to_bits(),
+                profile.reflectance.to_bits(),
+                profile.metallic.to_bits(),
+            ));
+        }
+
+        // The baseline collapsed 38 of 44 built-ins onto one scalar profile.
+        // Ten or more signatures prove the family split remains meaningful.
+        assert!(
+            signatures.len() >= 10,
+            "only {} optical signatures remain",
+            signatures.len()
+        );
+    }
+
+    #[test]
+    fn optical_family_order_preserves_material_semantics() {
+        let dirt = terrain_material_profile(BlockType::Dirt);
+        let stone = terrain_material_profile(BlockType::Stone);
+        let ice = terrain_material_profile(BlockType::Ice);
+        let alloy = terrain_material_profile(BlockType::ShipHullAlloy);
+        let glass = terrain_material_profile(BlockType::CockpitGlass);
+
+        assert!(dirt.perceptual_roughness > stone.perceptual_roughness);
+        assert!(stone.perceptual_roughness > ice.perceptual_roughness);
+        assert!(glass.perceptual_roughness < stone.perceptual_roughness);
+        assert_eq!(dirt.metallic, 0.0);
+        assert_eq!(stone.metallic, 0.0);
+        assert_eq!(glass.metallic, 0.0);
+        assert!(alloy.metallic >= 0.85);
+        assert!(alloy.perceptual_roughness < stone.perceptual_roughness);
     }
 
     #[test]
@@ -2810,8 +2970,9 @@ mod tests {
 
         assert!((0.75..=0.88).contains(&leaves.perceptual_roughness));
         assert!((0.68..leaves.perceptual_roughness).contains(&blossoms.perceptual_roughness));
-        assert!(leaves.reflectance > stone.reflectance);
-        assert!(leaves.reflectance < 0.20);
+        assert!((0.30..=0.55).contains(&leaves.reflectance));
+        assert_eq!(leaves.metallic, 0.0);
+        assert_eq!(stone.metallic, 0.0);
         assert_eq!(leaves.alpha_mode, AlphaMode::Mask(0.42));
         assert_eq!(blossoms.alpha_mode, AlphaMode::Mask(0.42));
     }

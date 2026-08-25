@@ -471,35 +471,63 @@ fn update_bloom_by_graphics(
 }
 
 fn color_grading_for_world_profile(profile: WorldProfile) -> ColorGrading {
-    if profile == WorldProfile::Natural {
-        return ColorGrading::default();
-    }
-
-    // The world camera owns terrain and emissive voxels, while the sky camera
-    // is composed independently behind it. Compress only the world highlights
-    // so cyan transit rails retain a coloured core instead of clipping to a
-    // solid white stripe. Midtone contrast recovers material relief; the tiny
-    // shadow lift avoids crushing the opposite cliff face.
-    ColorGrading {
-        global: bevy::render::view::ColorGradingGlobal {
-            post_saturation: 1.03,
-            ..default()
+    // These are deliberately bounded display transforms, not exposure
+    // simulation. Bevy applies section grading to linear HDR values before
+    // ACES and `post_saturation` after tonemapping. Natural therefore gets a
+    // small midtone separation and highlight shoulder instead of the previous
+    // identity transform that let bright limestone and water converge toward
+    // flat white. Astral keeps the stronger emissive-core protection required
+    // by its neon palette. Neither route shifts hue or white balance.
+    match profile {
+        WorldProfile::Natural => ColorGrading {
+            global: bevy::render::view::ColorGradingGlobal {
+                // -0.06 EV = 2^-0.06 ~= 0.96 exposure scale. This is an
+                // artistic headroom reserve, expressed in Bevy's documented
+                // stop unit rather than a gamma-space multiplier.
+                exposure: -0.06,
+                post_saturation: 1.015,
+                ..default()
+            },
+            shadows: ColorGradingSection {
+                contrast: 1.015,
+                lift: 0.003,
+                ..default()
+            },
+            midtones: ColorGradingSection {
+                saturation: 1.01,
+                contrast: 1.055,
+                gain: 0.985,
+                ..default()
+            },
+            highlights: ColorGradingSection {
+                saturation: 0.97,
+                contrast: 0.975,
+                gain: 0.92,
+                ..default()
+            },
         },
-        shadows: ColorGradingSection {
-            contrast: 1.02,
-            lift: 0.006,
-            ..default()
-        },
-        midtones: ColorGradingSection {
-            contrast: 1.05,
-            gain: 0.98,
-            ..default()
-        },
-        highlights: ColorGradingSection {
-            saturation: 0.94,
-            contrast: 0.96,
-            gain: 0.86,
-            ..default()
+        WorldProfile::AstralFrontier => ColorGrading {
+            global: bevy::render::view::ColorGradingGlobal {
+                exposure: -0.04,
+                post_saturation: 1.03,
+                ..default()
+            },
+            shadows: ColorGradingSection {
+                contrast: 1.02,
+                lift: 0.006,
+                ..default()
+            },
+            midtones: ColorGradingSection {
+                contrast: 1.05,
+                gain: 0.98,
+                ..default()
+            },
+            highlights: ColorGradingSection {
+                saturation: 0.94,
+                contrast: 0.96,
+                gain: 0.86,
+                ..default()
+            },
         },
     }
 }
@@ -1611,16 +1639,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn astral_highlight_rolloff_is_profile_scoped() {
+    fn world_profiles_have_bounded_distinct_highlight_rolloff() {
         let natural = color_grading_for_world_profile(WorldProfile::Natural);
-        assert_eq!(natural.highlights, ColorGradingSection::default());
-        assert_eq!(natural.midtones, ColorGradingSection::default());
+        assert!(natural.global.exposure < 0.0);
+        assert!(natural.highlights.gain < 0.95);
+        assert!(natural.highlights.contrast < 1.0);
+        assert!(natural.midtones.contrast > 1.0);
+        assert!(natural.shadows.lift > 0.0);
 
         let astral = color_grading_for_world_profile(WorldProfile::AstralFrontier);
         assert!(astral.highlights.gain < 0.90);
         assert!(astral.highlights.contrast < 1.0);
         assert!(astral.midtones.contrast > 1.0);
         assert!(astral.shadows.lift > 0.0);
+
+        assert!(astral.highlights.gain < natural.highlights.gain);
+        assert!(astral.highlights.saturation < natural.highlights.saturation);
+    }
+
+    #[test]
+    fn world_color_grades_stay_inside_the_release_safety_envelope() {
+        for profile in [WorldProfile::Natural, WorldProfile::AstralFrontier] {
+            let grade = color_grading_for_world_profile(profile);
+            assert!(grade.global.exposure.is_finite());
+            assert!((-0.125..=0.0).contains(&grade.global.exposure));
+            assert!((1.0..=1.05).contains(&grade.global.post_saturation));
+            assert_eq!(grade.global.temperature, 0.0);
+            assert_eq!(grade.global.tint, 0.0);
+            assert_eq!(grade.global.hue, 0.0);
+
+            for section in [grade.shadows, grade.midtones, grade.highlights] {
+                assert!((0.92..=1.05).contains(&section.saturation));
+                assert!((0.94..=1.08).contains(&section.contrast));
+                assert!((0.84..=1.02).contains(&section.gain));
+                assert!((0.0..=0.008).contains(&section.lift));
+                assert!((0.98..=1.02).contains(&section.gamma));
+            }
+        }
     }
 
     #[test]

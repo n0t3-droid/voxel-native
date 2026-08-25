@@ -15,6 +15,7 @@
 <p align="center">
   <a href="docs/CODEX_ENGINEERING_ATLAS.md">Engineering atlas</a> ·
   <a href="docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf">Technical atlas PDF</a> ·
+  <a href="docs/WORLD_LOOK_CONTINUUM_V1.md">World-look continuum</a> ·
   <a href="docs/PLANETARY_STREAMING_PHASE1.md">Planetary streaming</a> ·
   <a href="docs/LIVE_OBSERVER_WORKFLOW.md">Live observer</a> ·
   <a href="docs/VOXEL_DISCOVERY_ATLAS.md">Research atlas</a> ·
@@ -46,6 +47,8 @@ pending its separate visual gate.
 | Planetary far field | One finest parent plus five annuli; spacing doubles from 16 m to 512 m and reaches a 15.36 km axis half-extent (`L∞` radius) with exactly six terrain entities. It is live for Astral Frontier by default; Natural remains explicitly gated pending matched visual acceptance. | [`src/planetary_streaming.rs`](src/planetary_streaming.rs), [Phase 1 contract](docs/PLANETARY_STREAMING_PHASE1.md) |
 | Seam and handoff logic | Shared integer-world samples, parent morphing, a fail-closed Near-coverage stencil, local GPU coordinates, and a terminal-only horizon skirt. | [Terminal-skirt proof](docs/FAR_TERMINAL_SKIRTS_V1.md) |
 | Far hydrography | A gated render-only water/lava layer shares the terrain lattice and retains independent telemetry and hard budgets. It does not claim fluid simulation. | [Hydro v1 contract](docs/FAR_HYDROGRAPHIC_CONTINUITY_V1.md) |
+| Near/Far water optics | Near evaluates four exact integer-lattice modes; Far copies the two longest modes and the same bounded CPU phase. Optical response remains opaque, render-only, category-safe, and independent of fluid authority. | [World-look continuum](docs/WORLD_LOOK_CONTINUUM_V1.md), [`src/water.rs`](src/water.rs) |
+| Vegetation and atmosphere | Four existing foliage families receive bounded species signatures and analytic normal correction. Sky, fog, lighting, and Natural/Astral grading use a controlled linear-light path. | [World-look continuum](docs/WORLD_LOOK_CONTINUUM_V1.md), [`src/vegetation.rs`](src/vegetation.rs), [`src/daynight.rs`](src/daynight.rs) |
 | Autonomous construction | Road-first bot planning uses bounded candidate scoring, footprint reservations, frontage bindings, and smooth deck grades. | [City planner math](docs/CITY_PLANNER_MATH.md) |
 | Middle-LOD research layer | A fixed-memory virtual voxel hierarchy is implemented and compile-registered as a pure data layer. It is **not** connected to live rendering, physics, or saves yet. | [Virtual hierarchy status](docs/VIRTUAL_VOXEL_HIERARCHY.md) |
 | Evidence tooling | Native routes emit provenance-bound screenshots and RON telemetry. Separately, a typed graph compiler validates explicitly authored JSON evidence candidates; the report/manifest-to-graph adapter is not implemented yet. | [Evidence graph contract](docs/EVIDENCE_GRAPH_CONTRACT.md) |
@@ -100,6 +103,55 @@ The [Codex Engineering Atlas](docs/CODEX_ENGINEERING_ATLAS.md) derives the
 clipmap recurrence, morph, toroidal cache work, negative-coordinate mapping,
 semantic selection ceiling, virtual-brick accounting, city score, and evidence
 identity model directly from the implementation contracts.
+
+## A bounded world-look continuum
+
+The visual system is treated as a representation problem, not as a collection
+of unrelated effects. Near water, Far Hydro, foliage, atmosphere, fog, and
+camera grading preserve explicit ownership boundaries: voxel category and
+simulation state remain authoritative on the CPU, while shaders receive only
+bounded presentation records.
+
+For water mode `i`, one exact integer lattice vector `qᵢ` defines a spatially
+periodic wave vector, and standard deep-water dispersion defines its angular
+frequency:
+
+```text
+κᵢ = (2π / 4096 m) qᵢ
+ωᵢ = √(g ‖κᵢ‖)                    g = 9.80665 m s⁻²
+φᵢ(t + Δt) = (φᵢ(t) − ωᵢ Δt) mod 2π
+∇h = Σᵢ Aᵢ κᵢ cos(κᵢ·x + φᵢ + δᵢ)
+n = normalize((-∂h/∂x, 1, -∂h/∂z))
+```
+
+The phase is integrated in bounded CPU state rather than sampled from a
+renderer clock that wraps. Near uses four modes; Far receives byte-identical
+copies of the two longest records and their phases. This preserves the
+low-frequency handoff without creating a second clock, weather response,
+texture, queue, or per-ring material. The visible water response uses the
+air/water normal-incidence Fresnel term
+`F₀ = ((1.333 − 1) / (1.333 + 1))² ≈ 0.0204`; it does not pretend that opaque
+PBR is scene refraction or a fluid solver.
+
+Foliage follows the same discipline. A fixed two-band displacement field is
+differentiated analytically, and the geometric normal is transformed by the
+cofactor of its bounded deformation Jacobian. Across every authored weather
+response, the source proof keeps displacement at or below `0.28 voxel`, the
+horizontal Jacobian perturbation below `0.12`, and its determinant above
+`0.88`. Runtime work remains at most four existing material-uniform writes per
+active update; there are no vegetation entities, force fields, colliders, or
+animation jobs.
+
+<p align="center">
+  <a href="docs/media/world-look-continuum.svg"><img src="docs/media/world-look-continuum.svg" alt="World-look continuum showing authoritative voxel categories, bounded material families, four-mode Near water, two-mode Far water, analytic vegetation normals, linear-light atmosphere, exact resource budgets, and the evidence gate" width="100%"></a>
+</p>
+
+The full [World Look Continuum V1 contract](docs/WORLD_LOOK_CONTINUUM_V1.md)
+records units, equations, shader-operation ceilings, uniform sizes, failure
+behavior, rollback boundaries, Natural/Astral criteria, and remaining
+acceptance work. Source implementation is deliberately distinguished from
+visual promotion: a pretty frame is not evidence until its route, viewport,
+binary identity, telemetry, and limitations are all retained together.
 
 ### Bounded reuse, not unbounded recomputation
 

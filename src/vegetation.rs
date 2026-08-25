@@ -6,14 +6,17 @@
 //! authority. The two-frequency response follows the real-time animation
 //! pattern of slow spring-like branch motion plus faster, lower-amplitude leaf
 //! motion described by Muraoka et al. (2011), DOI 10.3756/artsci.10.140.
+//! CPU-side modulo-`2*pi` phase integration prevents renderer-time wrapping or
+//! weather-frequency changes from introducing visible animation phase jumps.
 
 use bevy::asset::load_internal_asset;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, Shader, ShaderRef, ShaderType};
+use std::mem::size_of;
 
-use crate::blocks::{BlockType, MaterialId};
+use crate::blocks::{BlockType, MaterialId, Voxel};
 use crate::settings::{WeatherSettings, WorldSettings};
 use crate::textures::MaterialLibrary;
 
@@ -34,12 +37,54 @@ pub const MAX_VEGETATION_ANIMATED_DISPLACEMENT_VOXELS: f32 =
 /// A weather update touches this fixed set of existing material assets. It
 /// creates no vegetation entities, geometry, draw calls, or per-frame lists.
 pub const VEGETATION_WIND_MATERIAL_COUNT: usize = 4;
-const WEATHER_DRIVEN_FOLIAGE: [BlockType; VEGETATION_WIND_MATERIAL_COUNT] = [
-    BlockType::Leaves,
-    BlockType::JungleLeaves,
-    BlockType::BlossomLeaves,
-    BlockType::SakuraPetals,
-];
+
+/// Authoritative foliage species carried by the mesh bucket independently of
+/// editable material identity. Keeping the four-species discriminator bounded
+/// lets a custom material preserve edit/bucket identity without choosing the
+/// wrong wind preset or opting the voxel out of vegetation rendering.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VegetationSpecies {
+    Leaves = 0,
+    JungleLeaves = 1,
+    BlossomLeaves = 2,
+    SakuraPetals = 3,
+}
+
+impl VegetationSpecies {
+    pub const ALL: [Self; VEGETATION_WIND_MATERIAL_COUNT] = [
+        Self::Leaves,
+        Self::JungleLeaves,
+        Self::BlossomLeaves,
+        Self::SakuraPetals,
+    ];
+
+    #[inline]
+    pub const fn for_voxel(voxel: Voxel) -> Option<Self> {
+        match voxel {
+            value if value == BlockType::Leaves as Voxel => Some(Self::Leaves),
+            value if value == BlockType::JungleLeaves as Voxel => Some(Self::JungleLeaves),
+            value if value == BlockType::BlossomLeaves as Voxel => Some(Self::BlossomLeaves),
+            value if value == BlockType::SakuraPetals as Voxel => Some(Self::SakuraPetals),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub const fn block(self) -> BlockType {
+        match self {
+            Self::Leaves => BlockType::Leaves,
+            Self::JungleLeaves => BlockType::JungleLeaves,
+            Self::BlossomLeaves => BlockType::BlossomLeaves,
+            Self::SakuraPetals => BlockType::SakuraPetals,
+        }
+    }
+
+    #[inline]
+    const fn phase_index(self) -> usize {
+        self as usize
+    }
+}
 
 /// Runtime settings already clamp each horizontal wind component to this
 /// engine-relative value in `WorldSettings::normalize_runtime_safety`.
@@ -89,6 +134,9 @@ impl Plugin for VegetationPlugin {
 struct WeatherWindResponse {
     direction: Vec2,
     strength: f32,
+    /// `[gust, macro, primary flutter, secondary flutter]` per fixed foliage
+    /// material, in the same deterministic order as `VegetationSpecies::ALL`.
+    phase_radians: [[f64; 4]; VEGETATION_WIND_MATERIAL_COUNT],
 }
 
 impl Default for WeatherWindResponse {
@@ -96,6 +144,7 @@ impl Default for WeatherWindResponse {
         Self {
             direction: DEFAULT_WIND_DIRECTION,
             strength: 0.0,
+            phase_radians: [[0.0; 4]; VEGETATION_WIND_MATERIAL_COUNT],
         }
     }
 }
@@ -132,6 +181,47 @@ impl WeatherWindResponse {
 
         self.strength != previous.strength || self.direction != previous.direction
     }
+
+    /// Advances animation by the complete finite frame delta. Unlike weather
+    /// smoothing, time integration must not clamp hitches or motion would
+    /// permanently drift from omega*t. Modulo arithmetic keeps it bounded.
+    fn advance_temporal_phase(&mut self, raw_delta_seconds: f32) -> bool {
+        if !raw_delta_seconds.is_finite() || raw_delta_seconds <= 0.0 {
+            return false;
+        }
+        let delta_seconds = f64::from(raw_delta_seconds);
+        let strength = self.strength.clamp(0.0, 1.0);
+        for species in VegetationSpecies::ALL {
+            let index = species.phase_index();
+            let block = species.block();
+            let authored = VegetationWind::for_block(block)
+                .expect("fixed foliage set must have a wind preset")
+                .parameters;
+            let macro_omega = f64::from(authored.direction_macro.w * (0.72 + 0.28 * strength));
+            let flutter_omega = f64::from(authored.flutter_phase.y * (0.78 + 0.22 * strength));
+            let frequencies = [
+                0.37 * macro_omega,
+                macro_omega,
+                flutter_omega,
+                1.71 * flutter_omega,
+            ];
+            for (phase, omega) in self.phase_radians[index].iter_mut().zip(frequencies) {
+                *phase = (*phase + omega * delta_seconds).rem_euclid(std::f64::consts::TAU);
+            }
+        }
+        true
+    }
+
+    fn temporal_phase_for_block(self, block: BlockType) -> Option<Vec4> {
+        let index = foliage_phase_index(block)?;
+        Some(Vec4::from_array(
+            self.phase_radians[index].map(|phase| phase as f32),
+        ))
+    }
+}
+
+fn foliage_phase_index(block: BlockType) -> Option<usize> {
+    VegetationSpecies::for_voxel(block as Voxel).map(VegetationSpecies::phase_index)
 }
 
 fn smoothing_alpha(raw_delta_seconds: f32) -> f32 {
@@ -215,6 +305,7 @@ fn weather_parameters_for_block(
     parameters.flutter_phase.x *=
         CALM_MICRO_FLUTTER_SHARE + (1.0 - CALM_MICRO_FLUTTER_SHARE) * amplitude_response;
     parameters.flutter_phase.y *= 0.78 + 0.22 * strength;
+    parameters.temporal_phase = response.temporal_phase_for_block(block)?;
     Some(parameters)
 }
 
@@ -227,13 +318,15 @@ fn update_weather_coherent_vegetation_wind(
 ) {
     let target = weather_wind_target(&settings.weather);
     let response_changed = response.advance(target, time.delta_seconds());
-    if !response_changed && !material_library.is_changed() {
+    let phase_changed = response.advance_temporal_phase(time.delta_seconds());
+    if !response_changed && !phase_changed && !material_library.is_changed() {
         return;
     }
 
     // Constant work: at most four BTreeMap lookups and four existing uniform
     // writes. No collection is built and no asset/entity is created here.
-    for block in WEATHER_DRIVEN_FOLIAGE {
+    for species in VegetationSpecies::ALL {
+        let block = species.block();
         let material_id = block as MaterialId;
         let Some(handle) = material_library.vegetation_handles.get(&material_id) else {
             continue;
@@ -266,7 +359,12 @@ pub struct VegetationWindUniform {
     /// x = flutter amplitude [voxel]; y = flutter angular frequency [rad/s];
     /// z = spatial phase gradient [rad/voxel]; w = cross-wind share [0, 1].
     pub flutter_phase: Vec4,
+    /// x/y/z/w = modulo-`2*pi` gust, macro, primary-flutter and
+    /// secondary-flutter phases [rad], integrated on the CPU.
+    pub temporal_phase: Vec4,
 }
+
+const _: () = assert!(size_of::<VegetationWindUniform>() == 3 * size_of::<Vec4>());
 
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct VegetationWind {
@@ -326,6 +424,7 @@ impl VegetationWind {
                     0.17, // radians of phase shift per voxel
                     0.62, // dimensionless cross-wind share
                 ),
+                temporal_phase: Vec4::ZERO,
             },
         };
         debug_assert!(
@@ -354,6 +453,85 @@ impl VegetationWind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn foliage_blocks() -> impl Iterator<Item = BlockType> {
+        VegetationSpecies::ALL
+            .into_iter()
+            .map(VegetationSpecies::block)
+    }
+
+    #[test]
+    fn vegetation_species_discriminator_is_exact_bounded_and_round_trips() {
+        assert_eq!(VegetationSpecies::ALL.len(), VEGETATION_WIND_MATERIAL_COUNT);
+        let mut blocks = std::collections::BTreeSet::new();
+        for (expected_index, species) in VegetationSpecies::ALL.into_iter().enumerate() {
+            let block = species.block();
+            assert_eq!(species.phase_index(), expected_index);
+            assert_eq!(VegetationSpecies::for_voxel(block as Voxel), Some(species));
+            assert!(blocks.insert(block as Voxel));
+        }
+        for block in [BlockType::Stone, BlockType::Water, BlockType::Lava] {
+            assert_eq!(VegetationSpecies::for_voxel(block as Voxel), None);
+        }
+    }
+
+    // These factors mirror the fixed spatial/height coefficients in
+    // `vegetation_wind.wgsl`. The shader-contract test below prevents this
+    // conservative derivative proof from silently drifting from the shader.
+    const SHADER_PHASE_X_SHARE: f32 = 0.73;
+    const SHADER_PHASE_Z_SHARE: f32 = 1.11;
+    const SHADER_GUST_PHASE_SHARE: f32 = 0.31;
+    const SHADER_FLUTTER_PRIMARY_PHASE_SHARE: f32 = 3.17;
+    const SHADER_FLUTTER_SECONDARY_PHASE_SHARE: f32 = 2.30;
+    const SHADER_FLUTTER_SECONDARY_AMPLITUDE: f32 = 0.5;
+    const SHADER_FLUTTER_HEIGHT_PHASE: f32 = 0.41;
+    const SHADER_LOCAL_VARIATION_AMPLITUDE: f32 = 0.22;
+    const SHADER_LOCAL_SPATIAL_PHASE_SHARE: f32 = 0.61;
+    const SHADER_LOCAL_HEIGHT_PHASE: f32 = 0.83;
+
+    #[derive(Clone, Copy, Debug)]
+    struct AnalyticDerivativeBudget {
+        offset_per_spatial_phase: f32,
+        offset_per_height: f32,
+        horizontal_jacobian_delta: f32,
+        determinant_floor: f32,
+    }
+
+    /// Bounds the shader's analytic derivatives without sampling phase or
+    /// time. The horizontal map is `xz' = xz + offset(s)` with
+    /// `s = dot(xz, phase_gradient)`, so its determinant differs from one by
+    /// at most `|d(offset)/ds| * |phase_gradient|`.
+    fn analytic_derivative_budget(parameters: VegetationWindUniform) -> AnalyticDerivativeBudget {
+        let macro_amplitude = parameters.direction_macro.z.abs();
+        let flutter_amplitude = parameters.flutter_phase.x.abs();
+        let displacement = macro_amplitude + flutter_amplitude * 1.5;
+
+        let gust_derivative = 0.28 * 0.5 * SHADER_GUST_PHASE_SHARE;
+        let macro_derivative = macro_amplitude * (1.0 + gust_derivative);
+        let flutter_spatial_derivative = flutter_amplitude
+            * (SHADER_FLUTTER_PRIMARY_PHASE_SHARE
+                + SHADER_FLUTTER_SECONDARY_AMPLITUDE * SHADER_FLUTTER_SECONDARY_PHASE_SHARE);
+        let local_spatial_derivative =
+            SHADER_LOCAL_VARIATION_AMPLITUDE * SHADER_LOCAL_SPATIAL_PHASE_SHARE;
+        let offset_per_spatial_phase =
+            local_spatial_derivative * displacement + macro_derivative + flutter_spatial_derivative;
+
+        let local_height_derivative = SHADER_LOCAL_VARIATION_AMPLITUDE * SHADER_LOCAL_HEIGHT_PHASE;
+        let flutter_height_derivative =
+            flutter_amplitude * SHADER_FLUTTER_SECONDARY_AMPLITUDE * SHADER_FLUTTER_HEIGHT_PHASE;
+        let offset_per_height = local_height_derivative * displacement + flutter_height_derivative;
+
+        let phase_gradient_length = parameters.flutter_phase.z.abs()
+            * Vec2::new(SHADER_PHASE_X_SHARE, SHADER_PHASE_Z_SHARE).length();
+        let horizontal_jacobian_delta = offset_per_spatial_phase * phase_gradient_length;
+
+        AnalyticDerivativeBudget {
+            offset_per_spatial_phase,
+            offset_per_height,
+            horizontal_jacobian_delta,
+            determinant_floor: 1.0 - horizontal_jacobian_delta,
+        }
+    }
 
     fn weather(wind_x: f32, wind_z: f32) -> WeatherSettings {
         WeatherSettings {
@@ -387,7 +565,7 @@ mod tests {
 
     #[test]
     fn every_wind_preset_is_normalized_positive_and_inside_culling_budget() {
-        for block in WEATHER_DRIVEN_FOLIAGE {
+        for block in foliage_blocks() {
             let wind = VegetationWind::for_block(block).expect("foliage preset");
             let direction = wind.parameters.direction_macro.xy();
             assert!((direction.length() - 1.0).abs() < 1e-5);
@@ -400,12 +578,13 @@ mod tests {
     #[test]
     fn species_keep_distinct_macro_sway_and_micro_flutter_signatures() {
         let mut signatures = std::collections::BTreeSet::new();
-        for block in WEATHER_DRIVEN_FOLIAGE {
+        for block in foliage_blocks() {
             let parameters = weather_parameters_for_block(
                 block,
                 WeatherWindResponse {
                     direction: Vec2::X,
                     strength: 1.0,
+                    ..default()
                 },
             )
             .unwrap();
@@ -455,6 +634,7 @@ mod tests {
             WeatherWindResponse {
                 direction: DEFAULT_WIND_DIRECTION,
                 strength: calm.strength,
+                ..default()
             },
         )
         .unwrap();
@@ -463,6 +643,7 @@ mod tests {
             WeatherWindResponse {
                 direction: storm.direction,
                 strength: storm.strength,
+                ..default()
             },
         )
         .unwrap();
@@ -538,14 +719,58 @@ mod tests {
     }
 
     #[test]
+    fn temporal_phases_are_bounded_and_hitches_do_not_slow_animation_time() {
+        let initial = WeatherWindResponse {
+            direction: DEFAULT_WIND_DIRECTION,
+            strength: 0.65,
+            ..default()
+        };
+        let mut one_hitch = initial;
+        let mut segmented = initial;
+        assert!(one_hitch.advance_temporal_phase(0.75));
+        for _ in 0..3 {
+            assert!(segmented.advance_temporal_phase(0.25));
+        }
+
+        for (single_species, split_species) in one_hitch
+            .phase_radians
+            .into_iter()
+            .zip(segmented.phase_radians)
+        {
+            for (single, split) in single_species.into_iter().zip(split_species) {
+                assert!((0.0..std::f64::consts::TAU).contains(&single));
+                assert!((single - split).abs() < 1.0e-12);
+            }
+        }
+
+        let unchanged = one_hitch;
+        assert!(!one_hitch.advance_temporal_phase(f32::NAN));
+        assert!(!one_hitch.advance_temporal_phase(-1.0));
+        assert_eq!(one_hitch.phase_radians, unchanged.phase_radians);
+
+        let leaves = one_hitch
+            .temporal_phase_for_block(BlockType::Leaves)
+            .unwrap();
+        let sakura = one_hitch
+            .temporal_phase_for_block(BlockType::SakuraPetals)
+            .unwrap();
+        assert!(leaves.is_finite() && sakura.is_finite());
+        assert_ne!(leaves, sakura, "species frequencies must remain distinct");
+        assert!(one_hitch
+            .temporal_phase_for_block(BlockType::Stone)
+            .is_none());
+    }
+
+    #[test]
     fn exact_amplitude_and_displacement_caps_hold_for_every_weather_strength() {
         let mut maximum_observed = 0.0_f32;
         for step in 0..=100 {
             let response = WeatherWindResponse {
                 direction: Vec2::X,
                 strength: step as f32 / 100.0,
+                ..default()
             };
-            for block in WEATHER_DRIVEN_FOLIAGE {
+            for block in foliage_blocks() {
                 let parameters = weather_parameters_for_block(block, response).unwrap();
                 let wind = VegetationWind { parameters };
                 assert!(
@@ -565,10 +790,93 @@ mod tests {
     }
 
     #[test]
+    fn analytic_normal_derivatives_are_finite_bounded_and_non_singular() {
+        let mut maximum_spatial_derivative = 0.0_f32;
+        let mut maximum_height_derivative = 0.0_f32;
+        let mut maximum_jacobian_delta = 0.0_f32;
+        let mut minimum_determinant = 1.0_f32;
+
+        for step in 0..=100 {
+            let response = WeatherWindResponse {
+                direction: Vec2::X,
+                strength: step as f32 / 100.0,
+                ..default()
+            };
+            for block in foliage_blocks() {
+                let parameters = weather_parameters_for_block(block, response).unwrap();
+                let budget = analytic_derivative_budget(parameters);
+                for value in [
+                    budget.offset_per_spatial_phase,
+                    budget.offset_per_height,
+                    budget.horizontal_jacobian_delta,
+                    budget.determinant_floor,
+                ] {
+                    assert!(
+                        value.is_finite(),
+                        "{block:?} strength={}",
+                        response.strength
+                    );
+                }
+
+                maximum_spatial_derivative =
+                    maximum_spatial_derivative.max(budget.offset_per_spatial_phase);
+                maximum_height_derivative = maximum_height_derivative.max(budget.offset_per_height);
+                maximum_jacobian_delta =
+                    maximum_jacobian_delta.max(budget.horizontal_jacobian_delta);
+                minimum_determinant = minimum_determinant.min(budget.determinant_floor);
+            }
+        }
+
+        assert!(
+            maximum_spatial_derivative < 0.50,
+            "{maximum_spatial_derivative}"
+        );
+        assert!(
+            maximum_height_derivative < 0.064,
+            "{maximum_height_derivative}"
+        );
+        assert!(maximum_jacobian_delta < 0.12, "{maximum_jacobian_delta}");
+        assert!(minimum_determinant > 0.88, "{minimum_determinant}");
+    }
+
+    #[test]
+    fn shader_normal_correction_uses_the_analytic_deformation_in_all_paths() {
+        const SOURCE: &str = include_str!("../assets/shaders/vegetation_wind.wgsl");
+
+        for contract_fragment in [
+            "struct FoliageDeformation",
+            "let spatial_phase_gradient = vec2<f32>(0.73, 1.11)",
+            "let gust_envelope_derivative = 0.28 * 0.5 * 0.31",
+            "let flutter_spatial_derivative",
+            "let offset_spatial_derivative",
+            "let offset_height_derivative",
+            "let determinant = a * f - c * d",
+            "!(corrected_length_squared > 1e-12)",
+            "corrected_length_squared > 1e20",
+            "vegetation_wind.temporal_phase.x",
+            "let flutter_secondary_cos = cos",
+            "let local_cos = cos",
+        ] {
+            assert!(SOURCE.contains(contract_fragment), "{contract_fragment}");
+        }
+        assert_eq!(
+            SOURCE
+                .matches("out.world_normal = displaced_world_normal")
+                .count(),
+            2,
+            "forward and prepass/deferred paths must share the correction"
+        );
+        assert!(!SOURCE.contains("fn displace_foliage("));
+        assert!(!SOURCE.contains("globals.time"));
+        assert_eq!(SOURCE.matches("sin(").count(), 5);
+        assert_eq!(SOURCE.matches("cos(").count(), 5);
+    }
+
+    #[test]
     fn weather_update_work_set_is_exactly_four_existing_foliage_materials() {
-        assert_eq!(WEATHER_DRIVEN_FOLIAGE.len(), VEGETATION_WIND_MATERIAL_COUNT);
+        assert_eq!(foliage_blocks().count(), VEGETATION_WIND_MATERIAL_COUNT);
         let mut unique_ids = std::collections::BTreeSet::new();
-        for block in WEATHER_DRIVEN_FOLIAGE {
+        for block in foliage_blocks() {
             assert!(VegetationWind::for_block(block).is_some());
             unique_ids.insert(block as MaterialId);
         }
@@ -584,7 +892,7 @@ mod tests {
 
         let mut library = MaterialLibrary::default();
         let mut materials = Assets::<VegetationMaterial>::default();
-        for block in WEATHER_DRIVEN_FOLIAGE {
+        for block in foliage_blocks() {
             let handle = materials.add(ExtendedMaterial {
                 base: StandardMaterial {
                     base_color: Color::srgb(0.12, 0.34, 0.56),
@@ -614,7 +922,7 @@ mod tests {
 
         let library = app.world().resource::<MaterialLibrary>();
         let materials = app.world().resource::<Assets<VegetationMaterial>>();
-        for block in WEATHER_DRIVEN_FOLIAGE {
+        for block in foliage_blocks() {
             let handle = library
                 .vegetation_handles
                 .get(&(block as MaterialId))

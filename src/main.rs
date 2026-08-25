@@ -50,6 +50,7 @@ mod ui_kit;
 mod vegetation;
 pub mod virtual_voxel_hierarchy;
 mod voxel_budget;
+mod water;
 mod weapons;
 mod weather;
 mod world;
@@ -61,6 +62,7 @@ use bevy::render::settings::{Backends, InstanceFlags, RenderCreation, WgpuSettin
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::render::RenderPlugin;
 use bevy::utils::Duration;
+use bevy::window::WindowResolution;
 use bevy::winit::{UpdateMode, WinitSettings};
 
 const MENU_LOW_POWER_INTERVAL: Duration = Duration::from_millis(250);
@@ -105,6 +107,34 @@ fn configured_window_title() -> String {
 
 const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 720.0;
+const QA_EXACT_VIEWPORT_ENV: &str = "VOXEL_NATIVE_QA_EXACT_VIEWPORT";
+
+fn env_value_is_enabled(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn exact_qa_viewport_requested(qa_requested: bool, exact_viewport: Option<&str>) -> bool {
+    qa_requested && env_value_is_enabled(exact_viewport)
+}
+
+fn configured_exact_qa_viewport() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return exact_qa_viewport_requested(
+            qa::qa_enabled(),
+            std::env::var(QA_EXACT_VIEWPORT_ENV).ok().as_deref(),
+        );
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
 
 fn bounded_window_extent(raw: Option<&str>, fallback: f32, minimum: f32) -> f32 {
     raw.and_then(|value| value.trim().parse::<f32>().ok())
@@ -135,6 +165,42 @@ fn configured_window_resolution() -> (f32, f32) {
     }
 }
 
+fn primary_window_for_viewport(
+    title: String,
+    width: f32,
+    height: f32,
+    exact_qa_viewport: bool,
+) -> Window {
+    let resolution = if exact_qa_viewport {
+        // Diagnostic image experiments compare exact physical pixels. A
+        // borderless, non-resizable QA window avoids Windows maximizing a
+        // decorated 1920x1080 client surface down to the work area.
+        WindowResolution::new(width, height).with_scale_factor_override(1.0)
+    } else {
+        (width, height).into()
+    };
+    Window {
+        title,
+        resolution,
+        resizable: !exact_qa_viewport,
+        decorations: !exact_qa_viewport,
+        enabled_buttons: if exact_qa_viewport {
+            bevy::window::EnabledButtons {
+                minimize: false,
+                maximize: false,
+                close: true,
+            }
+        } else {
+            default()
+        },
+        // AutoVsync caps the frame rate to the monitor refresh and blocks on
+        // the compositor. Uncapped FPS remains a deliberate benchmark-only
+        // policy rather than a window-shape side effect.
+        present_mode: bevy::window::PresentMode::AutoVsync,
+        ..default()
+    }
+}
+
 fn main() -> AppExit {
     configure_render_environment();
 
@@ -160,21 +226,15 @@ fn main() -> AppExit {
 
     App::new()
         .add_plugins({
+            let exact_qa_viewport = configured_exact_qa_viewport();
+            let (window_width, window_height) = configured_window_resolution();
             let plugins = DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: configured_window_title(),
-                    resolution: configured_window_resolution().into(),
-                    // AutoVsync caps the frame rate to the monitor
-                    // refresh and blocks on the compositor. On
-                    // integrated GPUs this is strictly better than
-                    // the previous AutoNoVsync: GPU stays ~30°C
-                    // cooler, no tearing, and at 60 fps the vertex
-                    // bandwidth cost of the greedy mesh is a non-
-                    // issue. Uncapped FPS is still available by
-                    // flipping this to AutoNoVsync for benchmarks.
-                    present_mode: bevy::window::PresentMode::AutoVsync,
-                    ..default()
-                }),
+                primary_window: Some(primary_window_for_viewport(
+                    configured_window_title(),
+                    window_width,
+                    window_height,
+                    exact_qa_viewport,
+                )),
                 ..default()
             });
             #[cfg(not(target_arch = "wasm32"))]
@@ -215,6 +275,9 @@ fn main() -> AppExit {
         // its block material library. This wind path never enters gameplay
         // physics, so shuttle/player handling remains deterministic.
         .add_plugins(vegetation::VegetationPlugin)
+        // The water spectrum is likewise presentation-only: one shared
+        // material, constant-work weather uniforms, no fluid authority.
+        .add_plugins(water::WaterOpticsPlugin)
         .add_plugins((
             settings::SettingsPlugin,
             world::WorldPlugin,
@@ -325,14 +388,7 @@ fn render_instance_flags() -> InstanceFlags {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    env_value_is_enabled(std::env::var(name).ok().as_deref())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -462,6 +518,42 @@ mod tests {
             assert_eq!(bounded_window_extent(Some(raw), 1280.0, 320.0), 1280.0);
         }
         assert_eq!(bounded_window_extent(None, 720.0, 240.0), 720.0);
+    }
+
+    #[test]
+    fn exact_viewport_is_strictly_qa_scoped() {
+        for enabled in ["1", " true ", "YES", "on"] {
+            assert!(exact_qa_viewport_requested(true, Some(enabled)));
+        }
+        for disabled in [None, Some(""), Some("0"), Some("false"), Some("unknown")] {
+            assert!(!exact_qa_viewport_requested(false, Some("1")));
+            assert!(!exact_qa_viewport_requested(true, disabled));
+        }
+    }
+
+    #[test]
+    fn exact_qa_window_policy_does_not_change_normal_or_observer_windows() {
+        let normal = primary_window_for_viewport("observer".into(), 1600.0, 900.0, false);
+        assert_eq!(normal.title, "observer");
+        assert_eq!(normal.resolution.physical_size(), UVec2::new(1600, 900));
+        assert_eq!(normal.resolution.scale_factor_override(), None);
+        assert!(normal.resizable);
+        assert!(normal.decorations);
+        assert_eq!(normal.enabled_buttons, default());
+
+        let exact = primary_window_for_viewport("qa".into(), 1920.0, 1080.0, true);
+        assert_eq!(exact.resolution.physical_size(), UVec2::new(1920, 1080));
+        assert_eq!(exact.resolution.scale_factor_override(), Some(1.0));
+        assert!(!exact.resizable);
+        assert!(!exact.decorations);
+        assert_eq!(
+            exact.enabled_buttons,
+            bevy::window::EnabledButtons {
+                minimize: false,
+                maximize: false,
+                close: true,
+            }
+        );
     }
 }
 
