@@ -1,0 +1,524 @@
+{
+  "$id": "https://voxel-native.invalid/schema/evidence-graph-1.0.0.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "edges": {
+      "items": {
+        "$ref": "#/$defs/edge"
+      },
+      "maxItems": 32000,
+      "type": "array"
+    },
+    "evidence_classifications": {
+      "const": [
+        "Passed",
+        "Observed",
+        "Rejected",
+        "Planned",
+        "Blocked"
+      ]
+    },
+    "generator": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "const": "voxel-native-evidence-graph"
+        },
+        "version": {
+          "const": "1.0.0"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "graph_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/node"
+      },
+      "maxItems": 12000,
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "evidence-graph/1.0.0"
+    },
+    "source_inputs": {
+      "items": {
+        "$ref": "#/$defs/sourceInput"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "task_states": {
+      "const": [
+        "planned",
+        "ready",
+        "running",
+        "blocked",
+        "review",
+        "complete",
+        "cancelled"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "generator",
+    "evidence_classifications",
+    "task_states",
+    "source_inputs",
+    "nodes",
+    "edges",
+    "summary",
+    "graph_sha256"
+  ],
+  "title": "Voxel-Native Evidence Graph 1.0.0",
+  "type": "object",
+  "$defs": {
+    "classification": {
+      "enum": [
+        "Passed",
+        "Observed",
+        "Rejected",
+        "Planned",
+        "Blocked"
+      ],
+      "type": "string"
+    },
+    "countMapClassifications": {
+      "additionalProperties": false,
+      "properties": {
+        "Blocked": {
+          "$ref": "#/$defs/uint"
+        },
+        "Observed": {
+          "$ref": "#/$defs/uint"
+        },
+        "Passed": {
+          "$ref": "#/$defs/uint"
+        },
+        "Planned": {
+          "$ref": "#/$defs/uint"
+        },
+        "Rejected": {
+          "$ref": "#/$defs/uint"
+        }
+      },
+      "required": [
+        "Passed",
+        "Observed",
+        "Rejected",
+        "Planned",
+        "Blocked"
+      ],
+      "type": "object"
+    },
+    "countMapKinds": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/uint"
+        },
+        "artifact": {
+          "$ref": "#/$defs/uint"
+        },
+        "claim": {
+          "$ref": "#/$defs/uint"
+        },
+        "external_asset": {
+          "$ref": "#/$defs/uint"
+        },
+        "gate_run": {
+          "$ref": "#/$defs/uint"
+        },
+        "github_check": {
+          "$ref": "#/$defs/uint"
+        },
+        "issue": {
+          "$ref": "#/$defs/uint"
+        },
+        "observation": {
+          "$ref": "#/$defs/uint"
+        },
+        "qa_run": {
+          "$ref": "#/$defs/uint"
+        },
+        "source_file": {
+          "$ref": "#/$defs/uint"
+        },
+        "task": {
+          "$ref": "#/$defs/uint"
+        },
+        "visual_review": {
+          "$ref": "#/$defs/uint"
+        }
+      },
+      "required": [
+        "source_file",
+        "qa_run",
+        "observation",
+        "claim",
+        "issue",
+        "gate_run",
+        "visual_review",
+        "task",
+        "agent",
+        "artifact",
+        "external_asset",
+        "github_check"
+      ],
+      "type": "object"
+    },
+    "countMapRelations": {
+      "additionalProperties": false,
+      "properties": {
+        "assigned_to": {
+          "$ref": "#/$defs/uint"
+        },
+        "blocks": {
+          "$ref": "#/$defs/uint"
+        },
+        "contradicts": {
+          "$ref": "#/$defs/uint"
+        },
+        "depends_on": {
+          "$ref": "#/$defs/uint"
+        },
+        "derived_from": {
+          "$ref": "#/$defs/uint"
+        },
+        "generated_by": {
+          "$ref": "#/$defs/uint"
+        },
+        "published_as": {
+          "$ref": "#/$defs/uint"
+        },
+        "references": {
+          "$ref": "#/$defs/uint"
+        },
+        "renders": {
+          "$ref": "#/$defs/uint"
+        },
+        "supports": {
+          "$ref": "#/$defs/uint"
+        },
+        "validated_by": {
+          "$ref": "#/$defs/uint"
+        }
+      },
+      "required": [
+        "derived_from",
+        "supports",
+        "contradicts",
+        "generated_by",
+        "validated_by",
+        "assigned_to",
+        "depends_on",
+        "blocks",
+        "renders",
+        "published_as",
+        "references"
+      ],
+      "type": "object"
+    },
+    "countMapTaskStates": {
+      "additionalProperties": false,
+      "properties": {
+        "blocked": {
+          "$ref": "#/$defs/uint"
+        },
+        "cancelled": {
+          "$ref": "#/$defs/uint"
+        },
+        "complete": {
+          "$ref": "#/$defs/uint"
+        },
+        "planned": {
+          "$ref": "#/$defs/uint"
+        },
+        "ready": {
+          "$ref": "#/$defs/uint"
+        },
+        "review": {
+          "$ref": "#/$defs/uint"
+        },
+        "running": {
+          "$ref": "#/$defs/uint"
+        }
+      },
+      "required": [
+        "planned",
+        "ready",
+        "running",
+        "blocked",
+        "review",
+        "complete",
+        "cancelled"
+      ],
+      "type": "object"
+    },
+    "edge": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "object"
+        },
+        "from": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "relation": {
+          "enum": [
+            "derived_from",
+            "supports",
+            "contradicts",
+            "generated_by",
+            "validated_by",
+            "assigned_to",
+            "depends_on",
+            "blocks",
+            "renders",
+            "published_as",
+            "references"
+          ],
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/$defs/nodeId"
+        }
+      },
+      "required": [
+        "data",
+        "from",
+        "relation",
+        "to"
+      ],
+      "type": "object"
+    },
+    "node": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "task"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "classification"
+              ]
+            },
+            "required": [
+              "task_state"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "task_state"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "claim",
+                  "issue"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "classification"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "agent",
+                  "artifact"
+                ]
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "classification"
+              ]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "data": {
+          "type": "object"
+        },
+        "description": {
+          "$ref": "#/$defs/string"
+        },
+        "id": {
+          "$ref": "#/$defs/nodeId"
+        },
+        "identity": {
+          "minProperties": 1,
+          "type": "object"
+        },
+        "kind": {
+          "enum": [
+            "source_file",
+            "qa_run",
+            "observation",
+            "claim",
+            "issue",
+            "gate_run",
+            "visual_review",
+            "task",
+            "agent",
+            "artifact",
+            "external_asset",
+            "github_check"
+          ],
+          "type": "string"
+        },
+        "task_state": {
+          "$ref": "#/$defs/taskState"
+        },
+        "title": {
+          "$ref": "#/$defs/string"
+        }
+      },
+      "required": [
+        "data",
+        "id",
+        "identity",
+        "kind",
+        "title"
+      ],
+      "type": "object"
+    },
+    "nodeId": {
+      "maxLength": 256,
+      "pattern": "^(source_file|qa_run|observation|claim|issue|gate_run|visual_review|task|agent|artifact|external_asset|github_check):[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "sourceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "maximum": 16777216,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "size_bytes"
+      ],
+      "type": "object"
+    },
+    "string": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "type": "string"
+    },
+    "summary": {
+      "additionalProperties": false,
+      "properties": {
+        "classification_counts": {
+          "$ref": "#/$defs/countMapClassifications"
+        },
+        "edge_count": {
+          "$ref": "#/$defs/uint"
+        },
+        "node_count": {
+          "$ref": "#/$defs/uint"
+        },
+        "node_kind_counts": {
+          "$ref": "#/$defs/countMapKinds"
+        },
+        "relation_counts": {
+          "$ref": "#/$defs/countMapRelations"
+        },
+        "source_input_count": {
+          "$ref": "#/$defs/uint"
+        },
+        "task_state_counts": {
+          "$ref": "#/$defs/countMapTaskStates"
+        }
+      },
+      "required": [
+        "classification_counts",
+        "edge_count",
+        "node_count",
+        "node_kind_counts",
+        "relation_counts",
+        "source_input_count",
+        "task_state_counts"
+      ],
+      "type": "object"
+    },
+    "taskState": {
+      "enum": [
+        "planned",
+        "ready",
+        "running",
+        "blocked",
+        "review",
+        "complete",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "uint": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  }
+}

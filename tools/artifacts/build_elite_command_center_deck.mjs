@@ -292,6 +292,53 @@ function compactText(value, limit) {
 }
 
 
+function routeResolutionLabel(route) {
+  return `${route.requested_route_focus} -> ${route.resolved_route_focus} · ${route.route_focus_available ? "available" : "unavailable"}`;
+}
+
+
+function optionalWork(value) {
+  return value == null ? "not recorded" : formatInteger(value);
+}
+
+
+function routeWorkLabel(route) {
+  return `candidate work ${optionalWork(route.route_focus_search_visited_candidates)}/${formatInteger(route.route_focus_search_candidate_cap)} · classification work ${optionalWork(route.route_focus_classification_queries)}/${formatInteger(route.route_focus_classification_query_cap)}`;
+}
+
+
+function generationIdentityLabel(run) {
+  const identity = run.raw_observations.run_identity;
+  return `${identity.world_name ?? "unrecorded"} · seed ${identity.world_seed ?? "not recorded"} · ${identity.world_profile ?? "unrecorded"}/${identity.scenery_quality ?? "unrecorded"}/${identity.terrain_grammar}`;
+}
+
+
+function editStoreLabel(run) {
+  const editStore = run.raw_observations.world_edit_store;
+  const editedChunks = editStore.world_edit_store_edited_chunks == null
+    ? "not recorded"
+    : formatInteger(editStore.world_edit_store_edited_chunks);
+  return `${editStore.world_edit_store_status} · compatible ${editStore.world_edit_store_compatible ? "yes" : "no"} · ${editedChunks} edited chunks · reason ${editStore.world_edit_store_block_reason_code ?? "none"} · identity seed ${editStore.world_edit_store_seed ?? "not recorded"}/${editStore.world_edit_store_profile ?? "not recorded"}/${editStore.world_edit_store_scenery_quality ?? "not recorded"}/${editStore.world_edit_store_terrain_grammar ?? "not recorded"}`;
+}
+
+
+function farGrammarLabel(run) {
+  const telemetry = run.raw_observations.planetary_streaming.telemetry;
+  return `far grammar desired ${telemetry.desired_terrain_grammar} -> active ${telemetry.active_terrain_grammar ?? "not active"}`;
+}
+
+
+function layerSummary(run) {
+  const planetary = run.raw_observations.planetary_streaming;
+  const live = planetary.live;
+  const telemetry = planetary.telemetry;
+  return {
+    hydro: `${telemetry.hydro_mode} · water ${formatInteger(live.resident_water_indices)} · lava ${formatInteger(live.resident_lava_indices)}`,
+    cohorts: `${telemetry.semantic_cohort_mode} · ${formatInteger(live.resident_semantic_cohort_count)} cohorts · ${formatInteger(live.resident_semantic_cohort_vertices)} vertices`,
+  };
+}
+
+
 function publicSourceLabel(sourcePath, repoRoot, fallback) {
   const absolute = path.resolve(sourcePath);
   const relative = path.relative(path.resolve(repoRoot), absolute);
@@ -466,13 +513,15 @@ function buildOverviewSlide(presentation, evidence, reference, sources) {
     slide,
     "Command overview",
     "One manifest. Bounded truth.",
-    "Every visible metric is derived from explicit current-schema runs; absence remains absence.",
+    "Every visible metric is derived from explicit QA 2.5.0 current runs; absence remains absence.",
     2,
   );
   const runs = evidence.data.runs;
   const viewports = unique(runs.map((run) => viewportLabel(run.raw_observations.viewport)));
-  const routes = unique(runs.map((run) => run.raw_observations.route.route_focus));
-  const materialModes = unique(runs.map((run) => run.raw_observations.planetary_streaming.telemetry.surface_material_mode));
+  const routes = unique(runs.map((run) => routeResolutionLabel(run.raw_observations.route)));
+  const grammars = unique(runs.map((run) => run.raw_observations.run_identity.terrain_grammar));
+  const compatibleStoreCount = runs.filter((run) => run.raw_observations.world_edit_store.world_edit_store_compatible).length;
+  const editedChunkCount = runs.reduce((sum, run) => sum + run.raw_observations.world_edit_store.world_edit_store_edited_chunks, 0);
 
   addShape(slide, "ellipse", { left: 472, top: 236, width: 336, height: 336 }, {
     fill: COLORS.panel,
@@ -499,8 +548,15 @@ function buildOverviewSlide(presentation, evidence, reference, sources) {
 
   addMetricLabel(slide, "Current runs", formatInteger(runs.length), { left: 72, top: 254, width: 250 }, COLORS.cyan, "overview-runs");
   addMetricLabel(slide, "Recorded viewports", formatInteger(viewports.length), { left: 76, top: 458, width: 250 }, COLORS.magenta, "overview-viewports");
-  addMetricLabel(slide, "Route focuses", formatInteger(routes.length), { left: 936, top: 254, width: 250 }, COLORS.orange, "overview-routes");
-  addMetricLabel(slide, "Surface modes", formatInteger(materialModes.length), { left: 932, top: 458, width: 250 }, COLORS.violet, "overview-materials");
+  addMetricLabel(slide, "Route resolutions", formatInteger(routes.length), { left: 936, top: 254, width: 250 }, COLORS.orange, "overview-routes");
+  addMetricLabel(slide, "Terrain grammars", compactText(grammars.join(" + "), 14), { left: 932, top: 458, width: 250 }, COLORS.violet, "overview-materials");
+
+  addText(slide, `EDIT STORES · ${compatibleStoreCount}/${runs.length} COMPATIBLE\nEDITED CHUNKS · ${formatInteger(editedChunkCount)}`, { left: 510, top: 486, width: 260, height: 68 }, {
+    fontSize: 22,
+    bold: true,
+    color: COLORS.cyanSoft,
+    alignment: "center",
+  }, "overview-edit-store");
 
   addText(slide, "AUTOMATED TEST TOTAL", { left: 430, top: 584, width: 420, height: 40 }, {
     fontSize: TYPE_PX.mid,
@@ -508,14 +564,15 @@ function buildOverviewSlide(presentation, evidence, reference, sources) {
     color: COLORS.muted,
     alignment: "center",
   }, "overview-tests-label");
-  addText(slide, "Not represented by schema 1.0.0", { left: 360, top: 626, width: 560, height: 40 }, {
+  addText(slide, "Not represented by schema 1.5.0", { left: 360, top: 626, width: 560, height: 40 }, {
     fontSize: TYPE_PX.mid,
     color: COLORS.white,
     alignment: "center",
   }, "overview-tests-value");
   addSourceFooter(slide, `manifest ${shortHash(evidence.manifestSha256)}`, 2);
   addNotes(slide, [
-    `Run count, viewport count, route-focus count, material modes, and classification: ${sources.manifest}; SHA-256 ${evidence.manifestSha256}.`,
+    `Run count, viewport count, route-resolution count, terrain grammars, edit-store compatibility/counts, and classification: ${sources.manifest}; SHA-256 ${evidence.manifestSha256}.`,
+    ...runs.map((run, index) => `${runLabel(run, index)} generation ${generationIdentityLabel(run)}; edit store ${editStoreLabel(run)}; ${farGrammarLabel(run)}.`),
     `Deck-wide visual direction: ${sources.reference}; SHA-256 ${reference.sha256}.`,
   ], "The manifest does not contain an independently hashed release-gate transcript, so no automated test total is shown.");
 }
@@ -558,8 +615,8 @@ function buildArchitectureSlide(presentation, evidence, reference, sources) {
     { left: 964, top: card.top, width: 250, height: card.height },
   ];
   const nodes = [
-    architectureNode(slide, "01 · EXPLICIT\nQA RUNS", "Current report + PNG bytes.\nNo newest-run lookup.", positions[0], COLORS.cyan, "architecture-runs"),
-    architectureNode(slide, "02 · EVIDENCE\nMANIFEST", "Schema 1.0.0 records claims, observations, paths, sizes, and hashes.", positions[1], COLORS.magenta, "architecture-manifest"),
+    architectureNode(slide, "01 · EXPLICIT\nQA RUNS", "QA 2.5.0 report + PNG bytes.\nNo newest-run lookup.", positions[0], COLORS.cyan, "architecture-runs"),
+    architectureNode(slide, "02 · EVIDENCE\nMANIFEST", "Schema 1.5.0 also binds terrain grammar, edit-store compatibility, and dense-residency budget proof to the run identity.", positions[1], COLORS.magenta, "architecture-manifest"),
     architectureNode(slide, "03 · STRICT\nCONSUMER", "Rejects stale, incomplete, changed, or unsafe evidence.", positions[2], COLORS.orange, "architecture-consumer"),
     architectureNode(slide, "04 · ARTIFACT\nLANES", "DOCX · PDF · XLSX · PPTX share one bounded truth.", positions[3], COLORS.violet, "architecture-artifacts"),
   ];
@@ -583,6 +640,7 @@ function buildArchitectureSlide(presentation, evidence, reference, sources) {
   addSourceFooter(slide, `manifest generator + consumer contract · ${shortHash(evidence.manifestSha256)}`, 3);
   addNotes(slide, [
     `Manifest generator identity, selection policy, classifications, and evidence records: ${sources.manifest}; SHA-256 ${evidence.manifestSha256}.`,
+    ...evidence.data.runs.map((run, index) => `${runLabel(run, index)} generation ${generationIdentityLabel(run)}; edit store ${editStoreLabel(run)}; ${farGrammarLabel(run)}.`),
     `Strict consumer implementation: tools/artifacts/evidence_manifest_consumer.mjs.`,
     `Deck-wide visual direction: ${sources.reference}; SHA-256 ${reference.sha256}.`,
   ]);
@@ -603,10 +661,12 @@ async function addScreenshot(slide, shot, position, index, total) {
   );
   const viewport = shot.run.raw_observations.viewport;
   const route = shot.run.raw_observations.route;
+  const identity = shot.run.raw_observations.run_identity;
+  const editStore = shot.run.raw_observations.world_edit_store;
   slide.images.add({
     blob: asArrayBuffer(payload),
     contentType: "image/png",
-    alt: `Manifest-verified QA screenshot for route ${route.route_focus} at ${viewportLabel(viewport)}. Byte integrity is Passed; visual acceptance is not implied.`,
+    alt: `Manifest-verified QA screenshot for requested route ${route.requested_route_focus}, resolved as ${route.resolved_route_focus}, at ${viewportLabel(viewport)}, under terrain grammar ${identity.terrain_grammar}. Edit store ${editStore.world_edit_store_status}, ${editStore.world_edit_store_edited_chunks} edited chunks. Byte integrity is Passed; visual acceptance is not implied.`,
     fit: "contain",
     position,
     geometry: "roundRect",
@@ -614,8 +674,8 @@ async function addScreenshot(slide, shot, position, index, total) {
     name: `evidence-screenshot-${index + 1}`,
   });
   const label = total === 1
-    ? `${compactText(route.route_focus, 44)} · ${viewportLabel(viewport)}`
-    : `RUN ${index + 1} · ${compactText(route.route_focus, 20)}\n${viewportLabel(viewport)}`;
+    ? `${compactText(routeResolutionLabel(route), 44)} · ${viewportLabel(viewport)}`
+    : `RUN ${index + 1} · ${compactText(routeResolutionLabel(route), 28)}\n${viewportLabel(viewport)}`;
   addText(slide, label, {
     left: position.left,
     top: position.top + position.height + 10,
@@ -756,7 +816,7 @@ function buildPerformanceSlide(presentation, evidence, reference, sources) {
   addText(slide, `${formatMs(Math.min(...p95Values))}\n→ ${formatMs(Math.max(...p95Values))}`, { left: 964, top: 462, width: 252, height: 58 }, { fontSize: 24, bold: true, color: COLORS.white }, "performance-p95-range");
   addText(slide, "MAX RANGE", { left: 966, top: 538, width: 250, height: 42 }, { fontSize: TYPE_PX.mid, bold: true, color: COLORS.orange }, "performance-max-label");
   addText(slide, `${formatMs(Math.min(...maxValues))}\n→ ${formatMs(Math.max(...maxValues))}`, { left: 964, top: 586, width: 252, height: 64 }, { fontSize: 24, bold: true, color: COLORS.white }, "performance-max-range");
-  addText(slide, runs.map((run, index) => `${runLabel(run, index)} · ${compactText(run.raw_observations.route.route_focus, 28)}`).join("  |  "), { left: 68, top: 618, width: 850, height: 34 }, {
+  addText(slide, runs.map((run, index) => `${runLabel(run, index)} · ${compactText(routeResolutionLabel(run.raw_observations.route), 36)}`).join("  |  "), { left: 68, top: 618, width: 850, height: 34 }, {
     fontSize: 22,
     color: COLORS.muted,
   }, "performance-run-key");
@@ -832,11 +892,18 @@ function buildLimitsSlide(presentation, evidence, reference, sources) {
 
 function buildNextSliceSlide(presentation, evidence, reference, sources) {
   const slide = presentation.slides.add();
+  const runs = evidence.data.runs;
+  const hydroModes = unique(runs.map((run) => run.raw_observations.planetary_streaming.telemetry.hydro_mode));
+  const cohortModes = unique(runs.map((run) => run.raw_observations.planetary_streaming.telemetry.semantic_cohort_mode));
+  const waterIndices = runs.reduce((sum, run) => sum + run.raw_observations.planetary_streaming.live.resident_water_indices, 0);
+  const lavaIndices = runs.reduce((sum, run) => sum + run.raw_observations.planetary_streaming.live.resident_lava_indices, 0);
+  const cohortCount = runs.reduce((sum, run) => sum + run.raw_observations.planetary_streaming.live.resident_semantic_cohort_count, 0);
+  const cohortVertices = runs.reduce((sum, run) => sum + run.raw_observations.planetary_streaming.live.resident_semantic_cohort_vertices, 0);
   addBase(
     slide,
     "IMPLEMENTED / RENDER-ONLY V1",
     "Hydro v1 evidence boundary",
-    "Implemented render-only v1. Hydro-current telemetry is recorded. Human same-binary visual acceptance is pending.",
+    "Implemented render-only v1. Hydro-current telemetry is recorded. Semantic-cohort payloads are recorded separately. Human same-binary visual acceptance is pending.",
     7,
   );
   addShape(slide, "roundRect", { left: 74, top: 238, width: 1132, height: 282 }, {
@@ -846,8 +913,8 @@ function buildNextSliceSlide(presentation, evidence, reference, sources) {
     name: "next-slice-field",
   });
   const phases = [
-    { left: 104, title: "IMPLEMENTED", detail: "Render-only Hydro v1 lives in planetary streaming. No gameplay-water claim.", accent: COLORS.cyan },
-    { left: 490, title: "RECORDED", detail: "Hydro-current telemetry records Natural + Astral on/off evidence.", accent: COLORS.magenta },
+    { left: 104, title: "HYDRO RECORDED", detail: `${hydroModes.join(" + ")} · run-sum water ${formatInteger(waterIndices)} · lava ${formatInteger(lavaIndices)} indices. No gameplay-water claim.`, accent: COLORS.cyan },
+    { left: 490, title: "COHORTS RECORDED", detail: `${cohortModes.join(" + ")} · run-sum ${formatInteger(cohortCount)} cohorts · ${formatInteger(cohortVertices)} vertices. Render-only L5 layer.`, accent: COLORS.magenta },
     { left: 876, title: "PENDING", detail: "Human review of the same-binary captures and formal visual acceptance.", accent: COLORS.orange },
   ];
   const phaseNodes = phases.map((phase, index) => {
@@ -893,8 +960,13 @@ function buildNextSliceSlide(presentation, evidence, reference, sources) {
   addSourceFooter(slide, `Hydro-current manifest recorded / human visual acceptance pending`, 7);
   addNotes(slide, [
     `Implementation source: src/planetary_streaming.rs; render-only Hydro v1 is implemented.`,
-    `Nonvisual gate state: current task evidence records green gates. The manifest contains no independently hashed gate transcript, so no automated test total is shown.`,
+    `The manifest contains no independently hashed release-gate transcript, so no automated test total or nonvisual gate result is shown.`,
     `Hydro-current telemetry and byte-verified same-binary captures: ${sources.manifest}; SHA-256 ${evidence.manifestSha256}. Human visual review and formal visual acceptance remain pending.`,
+    ...runs.map((run, index) => {
+      const route = run.raw_observations.route;
+      const layers = layerSummary(run);
+      return `${runLabel(run, index)} generation ${generationIdentityLabel(run)}; edit store ${editStoreLabel(run)}; ${farGrammarLabel(run)}; route ${routeResolutionLabel(route)}; ${routeWorkLabel(route)}; Hydro ${layers.hydro}; cohorts ${layers.cohorts}.`;
+    }),
     `Deck-wide visual direction: ${sources.reference}; SHA-256 ${reference.sha256}.`,
   ], "Implementation, Hydro-current telemetry, and capture byte identity are recorded. Human visual review and formal visual acceptance are not recorded by the manifest and remain pending.");
 }

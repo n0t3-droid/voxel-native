@@ -21,9 +21,12 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 
-SCHEMA_VERSION = "1.0.0"
-GENERATOR_VERSION = "1.0.0"
-CURRENT_QA_REPORT_SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "1.5.0"
+GENERATOR_VERSION = "1.5.0"
+CURRENT_QA_REPORT_SCHEMA_VERSION = "2.5.0"
+LEGACY_QA_REPORT_SCHEMA_VERSIONS = frozenset(
+    {"2.0.0", "2.1.0", "2.2.0", "2.3.0", "2.4.0"}
+)
 CLASSIFICATIONS = ("Passed", "Observed", "Rejected", "Planned", "Blocked")
 PROTECTED_OUTPUT_DIRS = ("saves", "qa_runs", "agent_runs")
 MAX_REPORT_BYTES = 4 * 1024 * 1024
@@ -33,6 +36,28 @@ MAX_RON_STRING_CHARS = 16_384
 HASH_CHUNK_BYTES = 1024 * 1024
 EXPECTED_ROUTE_FRAME_SCOPE = "active_route_only_warmup_and_write_tail_excluded"
 EXPECTED_QUANTILE_METHOD = "nearest_rank_conservative_bucket_upper_bound"
+EXPECTED_CAMERA_ROUTE_POLICY = "preflight-v1"
+EXPECTED_CAMERA_ROUTE_VARIANTS = 8
+EXPECTED_CAMERA_ROUTE_VALIDATION_SAMPLES = 16
+EXPECTED_CAMERA_ROUTE_VOXEL_QUERY_CAP = 153_600
+EXPECTED_DENSE_CHUNK_BUDGET = 2_400
+PREFLIGHT_CAMERA_FOCUSES = frozenset({"river", "lava", "near-far"})
+OBSOLETE_CAMERA_COLUMN_FIELDS = frozenset(
+    {
+        "camera_route_required_columns",
+        "camera_route_loaded_columns",
+        "camera_route_unloaded_columns",
+    }
+)
+OBSOLETE_CAMERA_ROUTE_FIELDS = OBSOLETE_CAMERA_COLUMN_FIELDS | frozenset(
+    {
+        "camera_route_body_occlusions",
+        "camera_route_los_occlusions",
+        "camera_route_required_chunks",
+        "camera_route_loaded_chunks",
+        "camera_route_unloaded_chunks",
+    }
+)
 
 RUN_IDENTITY_FIELDS = (
     "package_version",
@@ -42,12 +67,23 @@ RUN_IDENTITY_FIELDS = (
     "world_seed",
     "world_profile",
     "scenery_quality",
+    "terrain_grammar",
     "git_sha",
     "git_dirty",
     "source_fingerprint",
     "executable_hash",
     "toolchain",
     "hardware",
+)
+WORLD_EDIT_STORE_FIELDS = (
+    "world_edit_store_status",
+    "world_edit_store_compatible",
+    "world_edit_store_seed",
+    "world_edit_store_profile",
+    "world_edit_store_scenery_quality",
+    "world_edit_store_terrain_grammar",
+    "world_edit_store_edited_chunks",
+    "world_edit_store_block_reason_code",
 )
 VIEWPORT_FIELDS = (
     "logical_width",
@@ -58,7 +94,35 @@ VIEWPORT_FIELDS = (
     "dpi_percent",
 )
 ROUTE_FIELDS = (
-    "route_focus",
+    "requested_route_focus",
+    "resolved_route_focus",
+    "route_focus_available",
+    "route_focus_unavailable_reason",
+    "route_focus_anchor",
+    "route_focus_search_visited_candidates",
+    "route_focus_classification_queries",
+    "route_focus_search_candidate_cap",
+    "route_focus_classification_query_cap",
+    "route_focus_search_cap_exhausted",
+    "camera_route_policy",
+    "camera_route_preflight_applicable",
+    "camera_route_plan_hash",
+    "camera_route_available",
+    "camera_route_unavailable_reason",
+    "camera_route_variant_index",
+    "camera_route_variant_count",
+    "camera_route_validation_samples",
+    "camera_route_voxel_queries",
+    "camera_route_voxel_query_cap",
+    "camera_route_required_chunk_checks",
+    "camera_route_loaded_chunk_checks",
+    "camera_route_proven_air_chunk_checks",
+    "camera_route_unloaded_chunk_checks",
+    "camera_route_candidate_body_occlusions",
+    "camera_route_candidate_los_occlusions",
+    "camera_route_selected_clear_samples",
+    "camera_route_minimum_clearance_voxels",
+    "camera_route_work_cap_exhausted",
     "requested_route_distance_m",
     "max_horizontal_displacement_m",
     "requested_duration_seconds",
@@ -69,6 +133,17 @@ ROUTE_FIELDS = (
     "average_fps",
     "max_frame_ms",
     "final_smoothed_fps",
+    "loaded_chunks",
+    "pending_terrain",
+    "pending_meshes",
+    "dirty_chunks",
+    "dense_chunks",
+    "dense_chunk_budget",
+    "dense_chunk_budget_exceeded",
+    "frontier_complete",
+    "peak_loaded_chunks",
+    "peak_pending_terrain",
+    "peak_dense_chunks",
 )
 ROUTE_FRAME_TIME_FIELDS = (
     "scope",
@@ -116,9 +191,19 @@ PLANETARY_LIVE_FIELDS = (
     "resident_fluid_entities",
     "resident_fluid_vertices",
     "resident_fluid_indices",
+    "resident_water_indices",
+    "resident_lava_indices",
     "fluid_ring_vertices",
     "fluid_ring_indices",
+    "water_ring_indices",
+    "lava_ring_indices",
     "resident_fluid_mesh_bytes",
+    "resident_semantic_cohort_entities",
+    "resident_semantic_cohort_vertices",
+    "resident_semantic_cohort_indices",
+    "resident_semantic_cohort_mesh_bytes",
+    "resident_semantic_cohort_count",
+    "resident_semantic_cohort_kind_counts",
     "live_sample_cache_windows",
     "live_sample_cache_bytes",
 )
@@ -136,9 +221,19 @@ PLANETARY_BUDGET_FIELDS = (
     "budget_fluid_indices",
     "budget_fluid_mesh_bytes",
     "budget_fluid_ring_build_bytes",
+    "budget_hydro_atomic_ring_build_bytes",
     "budget_atomic_ring_build_bytes",
+    "budget_semantic_cohort_entities",
+    "budget_semantic_cohort_vertices",
+    "budget_semantic_cohort_indices",
+    "budget_semantic_cohort_mesh_bytes",
+    "budget_semantic_cohort_hash_scans",
+    "budget_semantic_cohort_height_queries",
+    "budget_semantic_cohort_biome_queries",
 )
 PLANETARY_TELEMETRY_FIELDS = (
+    "desired_terrain_grammar",
+    "active_terrain_grammar",
     "pending_rebuilds",
     "dirty_mask",
     "build_in_flight",
@@ -150,6 +245,7 @@ PLANETARY_TELEMETRY_FIELDS = (
     "resident_reduced_levels",
     "surface_material_mode",
     "hydro_mode",
+    "semantic_cohort_mode",
     "scheduler_deferred_frames",
     "completed_rebuilds",
     "stale_builds_discarded",
@@ -163,6 +259,8 @@ PLANETARY_TELEMETRY_FIELDS = (
     "last_fluid_biome_queries",
     "last_fluid_vertices",
     "last_fluid_indices",
+    "last_water_indices",
+    "last_lava_indices",
     "peak_live_sample_cache_windows",
     "peak_live_sample_cache_bytes",
     "scheduler_resident_entities",
@@ -173,10 +271,20 @@ PLANETARY_TELEMETRY_FIELDS = (
     "scheduler_resident_fluid_vertices",
     "scheduler_resident_fluid_indices",
     "scheduler_resident_fluid_mesh_bytes",
+    "scheduler_resident_water_indices",
+    "scheduler_resident_lava_indices",
+    "scheduler_resident_semantic_cohort_entities",
+    "scheduler_resident_semantic_cohort_vertices",
+    "scheduler_resident_semantic_cohort_indices",
+    "scheduler_resident_semantic_cohort_mesh_bytes",
+    "scheduler_resident_semantic_cohort_count",
     "scheduler_ring_vertices",
     "scheduler_ring_indices",
     "scheduler_fluid_ring_vertices",
     "scheduler_fluid_ring_indices",
+    "scheduler_water_ring_indices",
+    "scheduler_lava_ring_indices",
+    "scheduler_resident_semantic_cohort_kind_counts",
     "resident_observation_valid",
     "resident_entity_count_overflow",
     "resident_duplicate_levels",
@@ -185,12 +293,27 @@ PLANETARY_TELEMETRY_FIELDS = (
     "resident_budget_exceeded",
     "resident_observation_rejections",
     "resident_fluid_observation_valid",
+    "resident_fluid_kind_integrity_valid",
     "resident_fluid_entity_count_overflow",
     "resident_fluid_duplicate_slots",
     "resident_fluid_out_of_range_levels",
     "resident_fluid_scheduler_mismatch",
     "resident_fluid_budget_exceeded",
     "resident_fluid_observation_rejections",
+    "resident_semantic_cohort_observation_valid",
+    "resident_semantic_cohort_payload_integrity_valid",
+    "resident_semantic_cohort_entity_count_overflow",
+    "resident_semantic_cohort_scheduler_mismatch",
+    "resident_semantic_cohort_budget_exceeded",
+    "resident_semantic_cohort_observation_rejections",
+    "last_semantic_cohort_hash_scans",
+    "last_semantic_cohort_height_queries",
+    "last_semantic_cohort_biome_queries",
+    "last_semantic_cohort_candidates",
+    "last_semantic_cohort_emitted",
+    "last_semantic_cohort_vertices",
+    "last_semantic_cohort_indices",
+    "last_semantic_cohort_kind_counts",
     "last_biome_queries",
     "last_reused_height_samples",
     "last_reused_biome_samples",
@@ -205,6 +328,22 @@ PLANETARY_TELEMETRY_FIELDS = (
     "camera_world_z",
 )
 PLANETARY_FAR_FIELD_LEVELS = 6
+PLANETARY_SEMANTIC_COHORT_KIND_COUNT = 6
+PLANETARY_SEMANTIC_COHORT_VERTICES_PER_COHORT = 24
+PLANETARY_SEMANTIC_COHORT_INDICES_PER_COHORT = 36
+PLANETARY_VERTEX_BYTES = 48
+PLANETARY_INDEX_BYTES = 4
+PLANETARY_EXPECTED_HYDRO_ATOMIC_RING_BUILD_BYTES = 653_008
+PLANETARY_EXPECTED_ATOMIC_RING_BUILD_BYTES = 757_984
+PLANETARY_EXPECTED_SEMANTIC_COHORT_BUDGETS = {
+    "budget_semantic_cohort_entities": 1,
+    "budget_semantic_cohort_vertices": 1_944,
+    "budget_semantic_cohort_indices": 2_916,
+    "budget_semantic_cohort_mesh_bytes": 104_976,
+    "budget_semantic_cohort_hash_scans": 3_721,
+    "budget_semantic_cohort_height_queries": 81,
+    "budget_semantic_cohort_biome_queries": 81,
+}
 
 _NUMBER_RE = re.compile(
     r"[+-]?(?:\d(?:_?\d)*(?:\.\d(?:_?\d)*)?(?:[eE][+-]?\d(?:_?\d)*)?)"
@@ -524,7 +663,7 @@ def display_path(path: Path, repo_root: Path) -> str:
     try:
         return resolved.relative_to(repo_root.resolve()).as_posix()
     except (OSError, RuntimeError, ValueError):
-        return resolved.as_posix()
+        return "external"
 
 
 def path_is_within(path: Path, parent: Path) -> bool:
@@ -735,7 +874,7 @@ def copy_known_fields(source: dict[str, Any], fields: Sequence[str]) -> dict[str
 
 
 def validate_run_identity(
-    report: dict[str, Any], run_key: str
+    report: dict[str, Any], run_key: str, *, require_current: bool
 ) -> tuple[dict[str, Any] | None, dict[str, Any], list[dict[str, str]]]:
     problems: list[dict[str, str]] = []
     identity = report.get("run_identity")
@@ -814,6 +953,28 @@ def validate_run_identity(
                 "world seed must be a non-negative integer",
             )
         )
+    terrain_grammar = identity.get("terrain_grammar")
+    if terrain_grammar is None:
+        blocked = not require_current
+        invalid = invalid or require_current
+        problems.append(
+            issue(
+                "missing_terrain_grammar",
+                "Rejected" if require_current else "Blocked",
+                "run_identity.terrain_grammar",
+                "current evidence must bind the procedural world to an explicit V1, V2, or V3 terrain grammar",
+            )
+        )
+    elif terrain_grammar not in {"V1", "V2", "V3"}:
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_terrain_grammar",
+                "Rejected",
+                "run_identity.terrain_grammar",
+                "terrain grammar must be exactly V1, V2, or V3",
+            )
+        )
     if identity.get("git_dirty") is not None and type(identity.get("git_dirty")) is not bool:
         invalid = True
         problems.append(
@@ -870,6 +1031,109 @@ def validate_run_identity(
         else "Run identity cannot support a current provenance claim."
     )
     return output, claim(f"{run_key}:run_identity", classification, statement), problems
+
+
+def validate_world_edit_store(
+    report: dict[str, Any], run_key: str
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]]]:
+    output = copy_known_fields(report, WORLD_EDIT_STORE_FIELDS)
+    problems: list[dict[str, str]] = []
+    invalid = False
+    blocked = False
+
+    identity = report.get("run_identity")
+    expected = {
+        "world_edit_store_seed": identity.get("world_seed") if isinstance(identity, dict) else None,
+        "world_edit_store_profile": identity.get("world_profile") if isinstance(identity, dict) else None,
+        "world_edit_store_scenery_quality": identity.get("scenery_quality")
+        if isinstance(identity, dict)
+        else None,
+        "world_edit_store_terrain_grammar": identity.get("terrain_grammar")
+        if isinstance(identity, dict)
+        else None,
+    }
+    status = report.get("world_edit_store_status")
+    compatible = report.get("world_edit_store_compatible")
+    edited_chunks = report.get("world_edit_store_edited_chunks")
+    reason_code = report.get("world_edit_store_block_reason_code")
+
+    if status not in {"unchecked", "compatible", "blocked"} or type(compatible) is not bool:
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_world_edit_store_status",
+                "Rejected",
+                "world_edit_store_status",
+                "edit-store status must use the closed unchecked/compatible/blocked contract with an explicit compatibility boolean",
+            )
+        )
+    elif status == "compatible":
+        if compatible is not True or not is_non_negative_integer(edited_chunks) or reason_code is not None:
+            invalid = True
+            problems.append(
+                issue(
+                    "inconsistent_compatible_world_edit_store",
+                    "Rejected",
+                    "world_edit_store_status",
+                    "a compatible edit store requires compatible=true, a non-negative edited-chunk count, and no block reason",
+                )
+            )
+    elif status == "blocked":
+        blocked = True
+        if compatible is not False or edited_chunks is not None or not is_provenance_token(reason_code, 64):
+            invalid = True
+            problems.append(
+                issue(
+                    "inconsistent_blocked_world_edit_store",
+                    "Rejected",
+                    "world_edit_store_status",
+                    "a blocked edit store requires compatible=false, no edited-chunk count, and one bounded reason code",
+                )
+            )
+    elif status == "unchecked":
+        blocked = True
+        if compatible is not False or edited_chunks is not None or reason_code is not None:
+            invalid = True
+            problems.append(
+                issue(
+                    "inconsistent_unchecked_world_edit_store",
+                    "Rejected",
+                    "world_edit_store_status",
+                    "an unchecked edit store requires an empty fail-closed sentinel",
+                )
+            )
+
+    for field, expected_value in expected.items():
+        actual = report.get(field)
+        if status == "unchecked":
+            if actual is not None:
+                invalid = True
+                problems.append(
+                    issue(
+                        "unchecked_world_edit_store_has_identity",
+                        "Rejected",
+                        field,
+                        "an unchecked edit store must not claim a generation identity",
+                    )
+                )
+        elif actual != expected_value or expected_value is None:
+            invalid = True
+            problems.append(
+                issue(
+                    "world_edit_store_identity_mismatch",
+                    "Rejected",
+                    field,
+                    "edit-store generation identity must exactly match the immutable run identity",
+                )
+            )
+
+    classification = "Rejected" if invalid else "Blocked" if blocked else "Passed"
+    statement = (
+        "Edited voxel snapshots are bound to the exact world-generation identity."
+        if classification == "Passed"
+        else "Edited voxel snapshot compatibility does not authorize current evidence."
+    )
+    return output, claim(f"{run_key}:world_edit_store", classification, statement), problems
 
 
 def validate_viewport(
@@ -940,6 +1204,348 @@ def validate_viewport(
     ), []
 
 
+def validate_camera_route(
+    report: dict[str, Any], run_key: str
+) -> tuple[bool, bool, list[dict[str, str]]]:
+    """Validate the schema-2.3 camera-route preflight as an acceptance binding.
+
+    Candidate occlusion counters are diagnostics across rejected variants.
+    Acceptance is bound separately to all selected-route samples being clear.
+    """
+
+    invalid = False
+    blocked = False
+    problems: list[dict[str, str]] = []
+    policy = report.get("camera_route_policy")
+    requested_focus = report.get("requested_route_focus")
+    requires_plan = requested_focus in PREFLIGHT_CAMERA_FOCUSES
+    preflight_applicable = report.get("camera_route_preflight_applicable")
+    available = report.get("camera_route_available")
+    reason = report.get("camera_route_unavailable_reason")
+    plan_hash = report.get("camera_route_plan_hash")
+    variant_index = report.get("camera_route_variant_index")
+    minimum_clearance = report.get("camera_route_minimum_clearance_voxels")
+    work_cap_exhausted = report.get("camera_route_work_cap_exhausted")
+    counter_names = (
+        "camera_route_variant_count",
+        "camera_route_validation_samples",
+        "camera_route_voxel_queries",
+        "camera_route_voxel_query_cap",
+        "camera_route_required_chunk_checks",
+        "camera_route_loaded_chunk_checks",
+        "camera_route_proven_air_chunk_checks",
+        "camera_route_unloaded_chunk_checks",
+        "camera_route_candidate_body_occlusions",
+        "camera_route_candidate_los_occlusions",
+        "camera_route_selected_clear_samples",
+    )
+    counters = {name: report.get(name) for name in counter_names}
+
+    for name in sorted(OBSOLETE_CAMERA_ROUTE_FIELDS.intersection(report)):
+        invalid = True
+        problems.append(
+            issue(
+                "obsolete_camera_route_field",
+                "Rejected",
+                name,
+                "schema 2.3 rejects obsolete column-only or ambiguous occlusion telemetry names",
+            )
+        )
+
+    if policy not in {EXPECTED_CAMERA_ROUTE_POLICY, "legacy"}:
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_camera_route_policy",
+                "Rejected",
+                "camera_route_policy",
+                "schema 2.3 camera policy must be preflight-v1 or the explicit blocked legacy policy",
+            )
+        )
+    if (
+        type(preflight_applicable) is not bool
+        or type(available) is not bool
+        or type(work_cap_exhausted) is not bool
+    ):
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_camera_route_state",
+                "Rejected",
+                "camera_route_available",
+                "camera-route applicability, availability, and work-cap exhaustion must be booleans",
+            )
+        )
+    allowed_reasons = {
+        "camera-route-focus-unavailable",
+        "camera-route-chunks-unloaded",
+        "camera-route-body-occluded",
+        "camera-route-los-occluded",
+        "camera-route-work-cap",
+        "camera-route-coordinate-range",
+    }
+    if reason is not None and reason not in allowed_reasons:
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_camera_route_unavailable_reason",
+                "Rejected",
+                "camera_route_unavailable_reason",
+                "camera-route unavailability must use a closed schema-2.3 reason",
+            )
+        )
+    for name, value in counters.items():
+        if not is_non_negative_integer(value):
+            invalid = True
+            problems.append(
+                issue(
+                    "invalid_camera_route_counter",
+                    "Rejected",
+                    name,
+                    "camera-route work and validation counters must be non-negative integers",
+                )
+            )
+    if variant_index is not None and not is_non_negative_integer(variant_index):
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_camera_route_variant",
+                "Rejected",
+                "camera_route_variant_index",
+                "camera-route variant must be null or a non-negative integer",
+            )
+        )
+    if minimum_clearance is not None and not is_non_negative_integer(minimum_clearance):
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_camera_route_clearance",
+                "Rejected",
+                "camera_route_minimum_clearance_voxels",
+                "minimum camera clearance must be null or a non-negative integer",
+            )
+        )
+
+    if policy == "legacy":
+        blocked = True
+        problems.append(
+            issue(
+                "legacy_camera_route_policy",
+                "Blocked",
+                "camera_route_policy",
+                "legacy camera motion has no visibility-aware route-plan binding",
+            )
+        )
+        return invalid, blocked, problems
+    if policy != EXPECTED_CAMERA_ROUTE_POLICY:
+        return invalid, blocked, problems
+
+    if type(preflight_applicable) is bool and preflight_applicable is not requires_plan:
+        invalid = True
+        problems.append(
+            issue(
+                "camera_route_applicability_mismatch",
+                "Rejected",
+                "camera_route_preflight_applicable",
+                "camera preflight applies exactly to river, lava, and near-far route focuses",
+            )
+        )
+
+    if not requires_plan:
+        sentinel_valid = (
+            preflight_applicable is False
+            and available is False
+            and reason is None
+            and plan_hash is None
+            and variant_index is None
+            and minimum_clearance is None
+            and all(value == 0 for value in counters.values() if value is not None)
+            and work_cap_exhausted is False
+        )
+        if not sentinel_valid:
+            invalid = True
+            problems.append(
+                issue(
+                    "unexpected_camera_preflight_for_legacy_route_shape",
+                    "Rejected",
+                    "camera_route_plan_hash",
+                    "scenic, waypoint, and streaming routes must serialize the schema-2.3 non-preflight sentinel exactly",
+                )
+            )
+        return invalid, blocked, problems
+
+    if available is False and reason == "camera-route-focus-unavailable":
+        sentinel_valid = (
+            preflight_applicable is True
+            and report.get("route_focus_available") is False
+            and plan_hash is None
+            and variant_index is None
+            and minimum_clearance is None
+            and all(value == 0 for value in counters.values() if value is not None)
+            and work_cap_exhausted is False
+        )
+        if not sentinel_valid:
+            invalid = True
+            problems.append(
+                issue(
+                    "contradictory_focus_unavailable_camera_route",
+                    "Rejected",
+                    "camera_route_unavailable_reason",
+                    "focus-unavailable camera state requires an unavailable focus and exact zero-work sentinel",
+                )
+            )
+        else:
+            blocked = True
+            problems.append(
+                issue(
+                    "camera_route_focus_unavailable",
+                    "Blocked",
+                    "camera_route_available",
+                    "camera preflight could not start because the requested spatial focus was unavailable",
+                )
+            )
+        return invalid, blocked, problems
+
+    variants = counters["camera_route_variant_count"]
+    samples = counters["camera_route_validation_samples"]
+    queries = counters["camera_route_voxel_queries"]
+    query_cap = counters["camera_route_voxel_query_cap"]
+    required = counters["camera_route_required_chunk_checks"]
+    loaded = counters["camera_route_loaded_chunk_checks"]
+    proven_air = counters["camera_route_proven_air_chunk_checks"]
+    unloaded = counters["camera_route_unloaded_chunk_checks"]
+    body_occlusions = counters["camera_route_candidate_body_occlusions"]
+    los_occlusions = counters["camera_route_candidate_los_occlusions"]
+    selected_clear_samples = counters["camera_route_selected_clear_samples"]
+    if all(is_non_negative_integer(value) for value in counters.values()):
+        if (
+            variants != EXPECTED_CAMERA_ROUTE_VARIANTS
+            or samples != EXPECTED_CAMERA_ROUTE_VALIDATION_SAMPLES
+            or query_cap != EXPECTED_CAMERA_ROUTE_VOXEL_QUERY_CAP
+        ):
+            invalid = True
+            problems.append(
+                issue(
+                    "camera_route_contract_mismatch",
+                    "Rejected",
+                    "camera_route_variant_count",
+                    "preflight-v1 requires exactly 8 variants, 16 samples, and a 153600-query cap",
+                )
+            )
+        if queries > query_cap:
+            invalid = True
+            problems.append(
+                issue(
+                    "camera_route_work_cap_exceeded",
+                    "Rejected",
+                    "camera_route_voxel_queries",
+                    "camera-route voxel work exceeds its serialized hard cap",
+                )
+            )
+        if required != loaded + proven_air + unloaded or queries != required:
+            invalid = True
+            problems.append(
+                issue(
+                    "camera_route_chunk_accounting_mismatch",
+                    "Rejected",
+                    "camera_route_required_chunk_checks",
+                    "required chunk checks must equal loaded plus proven-air plus unloaded checks and voxel queries",
+                )
+            )
+        if body_occlusions > variants * samples or los_occlusions > variants * samples:
+            invalid = True
+            problems.append(
+                issue(
+                    "camera_route_candidate_occlusion_count_exceeded",
+                    "Rejected",
+                    "camera_route_candidate_body_occlusions",
+                    "candidate occlusion diagnostics cannot exceed the bounded attempted-pose population",
+                )
+            )
+        if type(work_cap_exhausted) is bool and work_cap_exhausted is not (queries >= query_cap):
+            invalid = True
+            problems.append(
+                issue(
+                    "camera_route_work_cap_state_mismatch",
+                    "Rejected",
+                    "camera_route_work_cap_exhausted",
+                    "work-cap exhaustion must exactly match reaching the serialized query cap",
+                )
+            )
+
+    hash_valid = type(plan_hash) is str and re.fullmatch(r"[0-9a-f]{16}", plan_hash) is not None
+    variant_valid = (
+        is_non_negative_integer(variant_index)
+        and is_non_negative_integer(variants)
+        and variant_index < variants
+    )
+    if available is True:
+        acceptance_valid = (
+            preflight_applicable is True
+            and hash_valid
+            and variant_valid
+            and is_non_negative_integer(queries)
+            and 0 < queries < EXPECTED_CAMERA_ROUTE_VOXEL_QUERY_CAP
+            and all(
+                is_non_negative_integer(value)
+                for value in (required, loaded, proven_air, unloaded)
+            )
+            and required == queries
+            and loaded + proven_air == required
+            and unloaded == 0
+            and selected_clear_samples == samples == EXPECTED_CAMERA_ROUTE_VALIDATION_SAMPLES
+            and is_non_negative_integer(minimum_clearance)
+            and minimum_clearance > 0
+            and reason is None
+            and work_cap_exhausted is False
+        )
+        if not acceptance_valid:
+            invalid = True
+            problems.append(
+                issue(
+                    "camera_route_acceptance_invariant_failed",
+                    "Rejected",
+                    "camera_route_available",
+                    "an available route requires a bound 16-hex plan, exact loaded/proven-air accounting, 16 selected clear samples, positive clearance, and work strictly below cap",
+                )
+            )
+    elif available is False:
+        blocked = True
+        absence_valid = (
+            reason in allowed_reasons
+            and plan_hash is None
+            and variant_index is None
+            and minimum_clearance is None
+            and selected_clear_samples == 0
+            and (
+                reason == "camera-route-work-cap"
+                and work_cap_exhausted is True
+                or reason != "camera-route-work-cap"
+                and work_cap_exhausted is False
+            )
+        )
+        if not absence_valid:
+            invalid = True
+            problems.append(
+                issue(
+                    "contradictory_unavailable_camera_route",
+                    "Rejected",
+                    "camera_route_unavailable_reason",
+                    "an unavailable preflight route needs one exact reason, no plan, and a consistent work-cap state",
+                )
+            )
+        else:
+            problems.append(
+                issue(
+                    "camera_route_unavailable",
+                    "Blocked",
+                    "camera_route_available",
+                    "visibility-aware camera preflight did not produce a publishable route plan",
+                )
+            )
+    return invalid, blocked, problems
+
+
 def validate_route(
     report: dict[str, Any], run_key: str
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]]]:
@@ -948,16 +1554,198 @@ def validate_route(
     invalid = False
     blocked = False
 
-    if not is_bounded_text(report.get("route_focus"), 64):
+    supported_focuses = {"scenic", "waypoint", "streaming", "river", "lava", "near-far"}
+    anchored_focuses = {"waypoint", "river", "lava", "near-far"}
+    compatible_world_profiles = {
+        "waypoint": {"AstralFrontier"},
+        "river": {"Natural"},
+        "lava": {"AstralFrontier"},
+        "near-far": {"Natural", "AstralFrontier"},
+    }
+    requested_focus = report.get("requested_route_focus")
+    resolved_focus = report.get("resolved_route_focus")
+    focus_available = report.get("route_focus_available")
+    unavailable_reason = report.get("route_focus_unavailable_reason")
+    focus_anchor = report.get("route_focus_anchor")
+    visited_candidates = report.get("route_focus_search_visited_candidates")
+    classification_queries = report.get("route_focus_classification_queries")
+    candidate_cap = report.get("route_focus_search_candidate_cap")
+    classification_cap = report.get("route_focus_classification_query_cap")
+    cap_exhausted = report.get("route_focus_search_cap_exhausted")
+    identity = report.get("run_identity")
+    world_profile = identity.get("world_profile") if isinstance(identity, dict) else None
+    camera_invalid, camera_blocked, camera_problems = validate_camera_route(report, run_key)
+    invalid = invalid or camera_invalid
+    blocked = blocked or camera_blocked
+    problems.extend(camera_problems)
+
+    for field, value in (
+        ("requested_route_focus", requested_focus),
+        ("resolved_route_focus", resolved_focus),
+    ):
+        if not is_bounded_text(value, 64) or value not in supported_focuses:
+            invalid = True
+            problems.append(
+                issue(
+                    "invalid_route_focus",
+                    "Rejected",
+                    field,
+                    "route focus must name a supported real route",
+                )
+            )
+    if type(focus_available) is not bool or type(cap_exhausted) is not bool:
         invalid = True
         problems.append(
             issue(
-                "invalid_route_focus",
+                "invalid_route_resolution_state",
                 "Rejected",
-                "route_focus",
-                "route focus must be non-empty text",
+                "route_focus_available",
+                "route availability and cap-exhaustion states must be booleans",
             )
         )
+    if unavailable_reason is not None and not is_bounded_text(unavailable_reason, 512):
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_route_unavailable_reason",
+                "Rejected",
+                "route_focus_unavailable_reason",
+                "an unavailable reason must be null or bounded non-empty text",
+            )
+        )
+    if focus_anchor is not None and (
+        type(focus_anchor) is not list
+        or len(focus_anchor) != 3
+        or any(type(value) is not int for value in focus_anchor)
+    ):
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_route_focus_anchor",
+                "Rejected",
+                "route_focus_anchor",
+                "route anchor must be null or exactly three signed integers",
+            )
+        )
+    for field, value in (
+        ("route_focus_search_visited_candidates", visited_candidates),
+        ("route_focus_classification_queries", classification_queries),
+    ):
+        if value is not None and not is_non_negative_integer(value):
+            invalid = True
+            problems.append(
+                issue(
+                    "invalid_route_search_count",
+                    "Rejected",
+                    field,
+                    "optional route-search work must be a non-negative integer",
+                )
+            )
+    for field, value in (
+        ("route_focus_search_candidate_cap", candidate_cap),
+        ("route_focus_classification_query_cap", classification_cap),
+    ):
+        if not is_non_negative_integer(value):
+            invalid = True
+            problems.append(
+                issue(
+                    "invalid_route_search_cap",
+                    "Rejected",
+                    field,
+                    "route-search caps must be non-negative integers",
+                )
+            )
+    if (
+        is_non_negative_integer(visited_candidates)
+        and is_non_negative_integer(candidate_cap)
+        and visited_candidates > candidate_cap
+    ) or (
+        is_non_negative_integer(classification_queries)
+        and is_non_negative_integer(classification_cap)
+        and classification_queries > classification_cap
+    ):
+        invalid = True
+        problems.append(
+            issue(
+                "route_search_cap_exceeded",
+                "Rejected",
+                "route_focus_search_visited_candidates",
+                "observed route-search work exceeds its serialized hard cap",
+            )
+        )
+
+    reached_cap = (
+        is_non_negative_integer(visited_candidates)
+        and is_non_negative_integer(candidate_cap)
+        and visited_candidates == candidate_cap
+    ) or (
+        is_non_negative_integer(classification_queries)
+        and is_non_negative_integer(classification_cap)
+        and classification_queries == classification_cap
+    )
+    if focus_available is True:
+        if requested_focus != resolved_focus or unavailable_reason is not None or cap_exhausted is not False:
+            invalid = True
+            problems.append(
+                issue(
+                    "contradictory_available_route_resolution",
+                    "Rejected",
+                    "route_focus_available",
+                    "an available focus must resolve to itself without a reason or exhausted search",
+                )
+            )
+        if requested_focus in anchored_focuses and focus_anchor is None:
+            invalid = True
+            problems.append(
+                issue(
+                    "available_route_focus_missing_anchor",
+                    "Rejected",
+                    "route_focus_anchor",
+                    "an available spatial route focus must serialize its resolved world anchor",
+                )
+            )
+        expected_profiles = compatible_world_profiles.get(requested_focus)
+        if expected_profiles is not None and world_profile not in expected_profiles:
+            invalid = True
+            problems.append(
+                issue(
+                    "route_focus_profile_mismatch",
+                    "Rejected",
+                    "run_identity.world_profile",
+                    "the available route focus is incompatible with the serialized world profile",
+                )
+            )
+    elif focus_available is False:
+        blocked = True
+        if requested_focus == resolved_focus:
+            invalid = True
+            problems.append(
+                issue(
+                    "contradictory_unavailable_route_resolution",
+                    "Rejected",
+                    "resolved_route_focus",
+                    "an unavailable requested focus must name the actual fallback route",
+                )
+            )
+        if not is_bounded_text(unavailable_reason, 512) or cap_exhausted is not reached_cap:
+            invalid = True
+            problems.append(
+                issue(
+                    "contradictory_unavailable_route_resolution",
+                    "Rejected",
+                    "route_focus_unavailable_reason",
+                    "an unavailable focus needs a reason and exact bounded-search exhaustion state",
+                )
+            )
+        else:
+            problems.append(
+                issue(
+                    "requested_route_focus_unavailable",
+                    "Blocked",
+                    "route_focus_available",
+                    "the requested evidence focus was unavailable; metrics describe the explicit resolved fallback route",
+                )
+            )
     numeric_fields = (
         "requested_route_distance_m",
         "max_horizontal_displacement_m",
@@ -986,6 +1774,107 @@ def validate_route(
                 "Rejected",
                 "frames",
                 "frame count must be a non-negative integer",
+            )
+        )
+
+    dense_integer_fields = (
+        "loaded_chunks",
+        "pending_terrain",
+        "pending_meshes",
+        "dirty_chunks",
+        "dense_chunks",
+        "dense_chunk_budget",
+        "peak_loaded_chunks",
+        "peak_pending_terrain",
+        "peak_dense_chunks",
+    )
+    for field in dense_integer_fields:
+        if not is_non_negative_integer(report.get(field)):
+            invalid = True
+            problems.append(
+                issue(
+                    "invalid_dense_chunk_budget_evidence",
+                    "Rejected",
+                    field,
+                    "dense residency evidence must be a non-negative integer",
+                )
+            )
+    loaded_chunks = report.get("loaded_chunks")
+    pending_terrain = report.get("pending_terrain")
+    dense_chunks = report.get("dense_chunks")
+    peak_loaded_chunks = report.get("peak_loaded_chunks")
+    peak_pending_terrain = report.get("peak_pending_terrain")
+    peak_dense_chunks = report.get("peak_dense_chunks")
+    dense_budget = report.get("dense_chunk_budget")
+    if dense_budget != EXPECTED_DENSE_CHUNK_BUDGET:
+        invalid = True
+        problems.append(
+            issue(
+                "dense_chunk_budget_identity_drift",
+                "Rejected",
+                "dense_chunk_budget",
+                f"current evidence requires the exact {EXPECTED_DENSE_CHUNK_BUDGET}-chunk budget",
+            )
+        )
+    if report.get("dense_chunk_budget_exceeded") is not False:
+        invalid = True
+        problems.append(
+            issue(
+                "dense_chunk_budget_exceeded",
+                "Rejected",
+                "dense_chunk_budget_exceeded",
+                "a current QA run cannot publish after any dense residency budget violation",
+            )
+        )
+    if (
+        is_non_negative_integer(loaded_chunks)
+        and is_non_negative_integer(pending_terrain)
+        and is_non_negative_integer(dense_chunks)
+        and dense_chunks != loaded_chunks + pending_terrain
+    ):
+        invalid = True
+        problems.append(
+            issue(
+                "dense_chunk_total_mismatch",
+                "Rejected",
+                "dense_chunks",
+                "dense_chunks must equal loaded_chunks plus pending_terrain",
+            )
+        )
+    if (
+        is_non_negative_integer(peak_dense_chunks)
+        and is_non_negative_integer(dense_chunks)
+        and is_non_negative_integer(peak_loaded_chunks)
+        and is_non_negative_integer(peak_pending_terrain)
+        and (
+            peak_dense_chunks > EXPECTED_DENSE_CHUNK_BUDGET
+            or peak_dense_chunks < dense_chunks
+            or peak_dense_chunks < peak_loaded_chunks
+            or peak_dense_chunks < peak_pending_terrain
+        )
+    ):
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_peak_dense_chunk_budget_evidence",
+                "Rejected",
+                "peak_dense_chunks",
+                "peak dense residency must remain within budget and dominate every component observation",
+            )
+        )
+    if (
+        report.get("pending_terrain") != 0
+        or report.get("pending_meshes") != 0
+        or report.get("dirty_chunks") != 0
+        or report.get("frontier_complete") is not True
+    ):
+        invalid = True
+        problems.append(
+            issue(
+                "near_field_not_settled",
+                "Rejected",
+                "frontier_complete",
+                "current evidence requires zero near-field queues and a complete frontier",
             )
         )
 
@@ -1396,6 +2285,56 @@ def validate_planetary_streaming(
     }
     problems: list[dict[str, str]] = []
     invalid = False
+    run_identity = report.get("run_identity")
+    run_grammar = (
+        run_identity.get("terrain_grammar") if isinstance(run_identity, dict) else None
+    )
+    run_profile = (
+        run_identity.get("world_profile") if isinstance(run_identity, dict) else None
+    )
+    if planetary.get("profile") != run_profile:
+        invalid = True
+        problems.append(
+            issue(
+                "planetary_world_profile_mismatch",
+                "Rejected",
+                "planetary_streaming.profile",
+                "far-field profile must exactly equal the immutable run identity profile",
+            )
+        )
+    desired_grammar = planetary.get("desired_terrain_grammar")
+    active_grammar = planetary.get("active_terrain_grammar")
+    if desired_grammar not in {"V1", "V2", "V3"} or desired_grammar != run_grammar:
+        invalid = True
+        problems.append(
+            issue(
+                "planetary_desired_terrain_grammar_mismatch",
+                "Rejected",
+                "planetary_streaming.desired_terrain_grammar",
+                "far-field desired grammar must exactly equal the run's immutable terrain grammar",
+            )
+        )
+    planetary_enabled = planetary.get("enabled")
+    if planetary_enabled is True and active_grammar != desired_grammar:
+        invalid = True
+        problems.append(
+            issue(
+                "planetary_active_terrain_grammar_mismatch",
+                "Rejected",
+                "planetary_streaming.active_terrain_grammar",
+                "an enabled far field must be resident under the exact desired terrain grammar",
+            )
+        )
+    elif planetary_enabled is False and active_grammar is not None:
+        invalid = True
+        problems.append(
+            issue(
+                "disabled_planetary_has_active_terrain_grammar",
+                "Rejected",
+                "planetary_streaming.active_terrain_grammar",
+                "a disabled far field must not retain an active worker grammar",
+            )
+        )
     for field in PLANETARY_BUDGET_FIELDS:
         if not is_non_negative_integer(planetary.get(field)):
             invalid = True
@@ -1407,6 +2346,32 @@ def validate_planetary_streaming(
                     "planetary budget must be a non-negative integer",
                 )
             )
+    for field, expected in PLANETARY_EXPECTED_SEMANTIC_COHORT_BUDGETS.items():
+        if planetary.get(field) != expected:
+            invalid = True
+            problems.append(
+                issue(
+                    "unexpected_semantic_cohort_budget",
+                    "Rejected",
+                    f"planetary_streaming.{field}",
+                    f"semantic-cohort v1 contract requires the exact serialized budget {expected}",
+                )
+            )
+    if (
+        planetary.get("budget_hydro_atomic_ring_build_bytes")
+        != PLANETARY_EXPECTED_HYDRO_ATOMIC_RING_BUILD_BYTES
+        or planetary.get("budget_atomic_ring_build_bytes")
+        != PLANETARY_EXPECTED_ATOMIC_RING_BUILD_BYTES
+    ):
+        invalid = True
+        problems.append(
+            issue(
+                "unexpected_atomic_build_budget",
+                "Rejected",
+                "planetary_streaming.budget_atomic_ring_build_bytes",
+                "Hydro-only and combined atomic worker-result byte ceilings must remain separately exact",
+            )
+        )
     integer_live = (
         "interaction_radius_metres",
         "confirmed_near_extent_metres",
@@ -1420,7 +2385,14 @@ def validate_planetary_streaming(
         "resident_fluid_entities",
         "resident_fluid_vertices",
         "resident_fluid_indices",
+        "resident_water_indices",
+        "resident_lava_indices",
         "resident_fluid_mesh_bytes",
+        "resident_semantic_cohort_entities",
+        "resident_semantic_cohort_vertices",
+        "resident_semantic_cohort_indices",
+        "resident_semantic_cohort_mesh_bytes",
+        "resident_semantic_cohort_count",
         "live_sample_cache_windows",
         "live_sample_cache_bytes",
     )
@@ -1444,6 +2416,10 @@ def validate_planetary_streaming(
         ("fluid_ring_indices", "resident_fluid_indices"),
         ("scheduler_fluid_ring_vertices", "scheduler_resident_fluid_vertices"),
         ("scheduler_fluid_ring_indices", "scheduler_resident_fluid_indices"),
+        ("water_ring_indices", "resident_water_indices"),
+        ("lava_ring_indices", "resident_lava_indices"),
+        ("scheduler_water_ring_indices", "scheduler_resident_water_indices"),
+        ("scheduler_lava_ring_indices", "scheduler_resident_lava_indices"),
     ):
         values = planetary.get(field)
         if (
@@ -1480,6 +2456,60 @@ def validate_planetary_streaming(
                 "planetary enabled state must be a boolean",
             )
         )
+
+    fluid_total = planetary.get("resident_fluid_indices")
+    water_total = planetary.get("resident_water_indices")
+    lava_total = planetary.get("resident_lava_indices")
+    scheduler_fluid_total = planetary.get("scheduler_resident_fluid_indices")
+    scheduler_water_total = planetary.get("scheduler_resident_water_indices")
+    scheduler_lava_total = planetary.get("scheduler_resident_lava_indices")
+    fluid_kind_contracts = (
+        (water_total, lava_total, fluid_total),
+        (scheduler_water_total, scheduler_lava_total, scheduler_fluid_total),
+        (
+            planetary.get("last_water_indices"),
+            planetary.get("last_lava_indices"),
+            planetary.get("last_fluid_indices"),
+        ),
+    )
+    ring_kind_contracts = (
+        (planetary.get("water_ring_indices"), planetary.get("lava_ring_indices"), planetary.get("fluid_ring_indices")),
+        (planetary.get("scheduler_water_ring_indices"), planetary.get("scheduler_lava_ring_indices"), planetary.get("scheduler_fluid_ring_indices")),
+    )
+    fluid_kind_invalid = any(
+        not all(is_non_negative_integer(value) for value in (water, lava, fluid))
+        or water % 6 != 0
+        or lava % 6 != 0
+        or water + lava != fluid
+        for water, lava, fluid in fluid_kind_contracts
+    )
+    for water, lava, fluid in ring_kind_contracts:
+        if (
+            type(water) is not list
+            or type(lava) is not list
+            or type(fluid) is not list
+            or len(water) != PLANETARY_FAR_FIELD_LEVELS
+            or len(lava) != PLANETARY_FAR_FIELD_LEVELS
+            or len(fluid) != PLANETARY_FAR_FIELD_LEVELS
+            or any(
+                not all(is_non_negative_integer(value) for value in (water[index], lava[index], fluid[index]))
+                or water[index] % 6 != 0
+                or lava[index] % 6 != 0
+                or water[index] + lava[index] != fluid[index]
+                for index in range(PLANETARY_FAR_FIELD_LEVELS)
+            )
+        ):
+            fluid_kind_invalid = True
+    if fluid_kind_invalid:
+        invalid = True
+        problems.append(
+            issue(
+                "planetary_fluid_kind_integrity_mismatch",
+                "Rejected",
+                "planetary_streaming.resident_water_indices",
+                "water and lava counts must be complete quads whose exact sum equals fluid indices per ring and in total",
+            )
+        )
     if not is_bounded_text(planetary.get("profile"), 160):
         invalid = True
         problems.append(
@@ -1488,6 +2518,16 @@ def validate_planetary_streaming(
                 "Rejected",
                 "planetary_streaming.profile",
                 "planetary profile must be non-empty text",
+            )
+        )
+    elif planetary.get("profile") not in {"Natural", "AstralFrontier"}:
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_planetary_profile",
+                "Rejected",
+                "planetary_streaming.profile",
+                "planetary profile is not a supported generator contract",
             )
         )
 
@@ -1514,17 +2554,34 @@ def validate_planetary_streaming(
         "scheduler_resident_fluid_vertices",
         "scheduler_resident_fluid_indices",
         "scheduler_resident_fluid_mesh_bytes",
+        "scheduler_resident_water_indices",
+        "scheduler_resident_lava_indices",
+        "scheduler_resident_semantic_cohort_entities",
+        "scheduler_resident_semantic_cohort_vertices",
+        "scheduler_resident_semantic_cohort_indices",
+        "scheduler_resident_semantic_cohort_mesh_bytes",
+        "scheduler_resident_semantic_cohort_count",
         "resident_duplicate_levels",
         "resident_out_of_range_levels",
         "resident_observation_rejections",
         "resident_fluid_duplicate_slots",
         "resident_fluid_out_of_range_levels",
         "resident_fluid_observation_rejections",
+        "resident_semantic_cohort_observation_rejections",
         "last_biome_queries",
         "last_fluid_classification_queries",
         "last_fluid_biome_queries",
         "last_fluid_vertices",
         "last_fluid_indices",
+        "last_water_indices",
+        "last_lava_indices",
+        "last_semantic_cohort_hash_scans",
+        "last_semantic_cohort_height_queries",
+        "last_semantic_cohort_biome_queries",
+        "last_semantic_cohort_candidates",
+        "last_semantic_cohort_emitted",
+        "last_semantic_cohort_vertices",
+        "last_semantic_cohort_indices",
         "last_reused_height_samples",
         "last_reused_biome_samples",
         "incremental_strip_rebuilds",
@@ -1543,6 +2600,118 @@ def validate_planetary_streaming(
                     "planetary telemetry count must be a non-negative integer",
                 )
             )
+
+    cohort_kind_counts = planetary.get("resident_semantic_cohort_kind_counts")
+    scheduler_cohort_kind_counts = planetary.get(
+        "scheduler_resident_semantic_cohort_kind_counts"
+    )
+    last_cohort_kind_counts = planetary.get("last_semantic_cohort_kind_counts")
+    cohort_count = planetary.get("resident_semantic_cohort_count")
+    scheduler_cohort_count = planetary.get("scheduler_resident_semantic_cohort_count")
+    last_cohort_count = planetary.get("last_semantic_cohort_emitted")
+    cohort_contracts = (
+        (
+            cohort_kind_counts,
+            cohort_count,
+            planetary.get("resident_semantic_cohort_vertices"),
+            planetary.get("resident_semantic_cohort_indices"),
+            planetary.get("resident_semantic_cohort_mesh_bytes"),
+        ),
+        (
+            scheduler_cohort_kind_counts,
+            scheduler_cohort_count,
+            planetary.get("scheduler_resident_semantic_cohort_vertices"),
+            planetary.get("scheduler_resident_semantic_cohort_indices"),
+            planetary.get("scheduler_resident_semantic_cohort_mesh_bytes"),
+        ),
+        (
+            last_cohort_kind_counts,
+            last_cohort_count,
+            planetary.get("last_semantic_cohort_vertices"),
+            planetary.get("last_semantic_cohort_indices"),
+            None,
+        ),
+    )
+    cohort_payload_invalid = False
+    for kind_counts, count, vertices, indices, mesh_bytes in cohort_contracts:
+        if (
+            type(kind_counts) is not list
+            or len(kind_counts) != PLANETARY_SEMANTIC_COHORT_KIND_COUNT
+            or any(not is_non_negative_integer(value) for value in kind_counts)
+            or not all(is_non_negative_integer(value) for value in (count, vertices, indices))
+        ):
+            cohort_payload_invalid = True
+            continue
+        expected_vertices = count * PLANETARY_SEMANTIC_COHORT_VERTICES_PER_COHORT
+        expected_indices = count * PLANETARY_SEMANTIC_COHORT_INDICES_PER_COHORT
+        expected_bytes = (
+            expected_vertices * PLANETARY_VERTEX_BYTES
+            + expected_indices * PLANETARY_INDEX_BYTES
+        )
+        if (
+            sum(kind_counts) != count
+            or vertices != expected_vertices
+            or indices != expected_indices
+            or (mesh_bytes is not None and mesh_bytes != expected_bytes)
+        ):
+            cohort_payload_invalid = True
+    last_candidates = planetary.get("last_semantic_cohort_candidates")
+    if (
+        is_non_negative_integer(last_cohort_count)
+        and is_non_negative_integer(last_candidates)
+        and last_cohort_count > last_candidates
+    ):
+        cohort_payload_invalid = True
+    expected_cohort_entities = (
+        int(cohort_count > 0) if is_non_negative_integer(cohort_count) else None
+    )
+    scheduler_expected_cohort_entities = (
+        int(scheduler_cohort_count > 0)
+        if is_non_negative_integer(scheduler_cohort_count)
+        else None
+    )
+    if (
+        planetary.get("resident_semantic_cohort_entities")
+        != expected_cohort_entities
+        or planetary.get("scheduler_resident_semantic_cohort_entities")
+        != scheduler_expected_cohort_entities
+        or (
+            is_non_negative_integer(cohort_count)
+            and cohort_count
+            > PLANETARY_EXPECTED_SEMANTIC_COHORT_BUDGETS[
+                "budget_semantic_cohort_height_queries"
+            ]
+        )
+        or (
+            is_non_negative_integer(last_candidates)
+            and last_candidates
+            > PLANETARY_EXPECTED_SEMANTIC_COHORT_BUDGETS[
+                "budget_semantic_cohort_height_queries"
+            ]
+        )
+    ):
+        cohort_payload_invalid = True
+    profile = planetary.get("profile")
+    for kind_counts in (
+        cohort_kind_counts,
+        scheduler_cohort_kind_counts,
+        last_cohort_kind_counts,
+    ):
+        if type(kind_counts) is list and len(kind_counts) == 6:
+            if (profile == "Natural" and any(kind_counts[3:])) or (
+                profile == "AstralFrontier" and any(kind_counts[:3])
+            ):
+                cohort_payload_invalid = True
+    if cohort_payload_invalid:
+        invalid = True
+        problems.append(
+            issue(
+                "planetary_semantic_cohort_payload_mismatch",
+                "Rejected",
+                "planetary_streaming.resident_semantic_cohort_kind_counts",
+                "cohort kind totals, fixed 24/36 geometry, mesh bytes, and candidate/emission counts must agree exactly",
+            )
+        )
     for field in (
         "last_cache_shift_x_cells",
         "last_cache_shift_z_cells",
@@ -1566,9 +2735,15 @@ def validate_planetary_streaming(
         "resident_scheduler_mismatch",
         "resident_budget_exceeded",
         "resident_fluid_observation_valid",
+        "resident_fluid_kind_integrity_valid",
         "resident_fluid_entity_count_overflow",
         "resident_fluid_scheduler_mismatch",
         "resident_fluid_budget_exceeded",
+        "resident_semantic_cohort_observation_valid",
+        "resident_semantic_cohort_payload_integrity_valid",
+        "resident_semantic_cohort_entity_count_overflow",
+        "resident_semantic_cohort_scheduler_mismatch",
+        "resident_semantic_cohort_budget_exceeded",
     ):
         if type(planetary.get(field)) is not bool:
             invalid = True
@@ -1580,7 +2755,13 @@ def validate_planetary_streaming(
                     "planetary scheduler and observation states must be booleans",
                 )
             )
-    for field in ("material_detail", "surface_material_mode", "hydro_mode", "last_cache_update"):
+    for field in (
+        "material_detail",
+        "surface_material_mode",
+        "hydro_mode",
+        "semantic_cohort_mode",
+        "last_cache_update",
+    ):
         if not is_bounded_text(planetary.get(field), 160):
             invalid = True
             problems.append(
@@ -1615,6 +2796,37 @@ def validate_planetary_streaming(
                 "far hydro mode is not a supported evidence value",
             )
         )
+    if planetary.get("semantic_cohort_mode") not in {"Disabled", "SilhouettesV1"}:
+        invalid = True
+        problems.append(
+            issue(
+                "invalid_planetary_semantic_cohort_mode",
+                "Rejected",
+                "planetary_streaming.semantic_cohort_mode",
+                "far semantic-cohort mode is not a supported evidence value",
+            )
+        )
+
+    for field in (
+        "resident_semantic_cohort_kind_counts",
+        "scheduler_resident_semantic_cohort_kind_counts",
+        "last_semantic_cohort_kind_counts",
+    ):
+        values = planetary.get(field)
+        if (
+            type(values) is not list
+            or len(values) != PLANETARY_SEMANTIC_COHORT_KIND_COUNT
+            or any(not is_non_negative_integer(value) for value in values)
+        ):
+            invalid = True
+            problems.append(
+                issue(
+                    "invalid_semantic_cohort_kind_population",
+                    "Rejected",
+                    f"planetary_streaming.{field}",
+                    f"cohort kind population must contain exactly {PLANETARY_SEMANTIC_COHORT_KIND_COUNT} non-negative integers",
+                )
+            )
 
     desired_detail = planetary.get("desired_material_detail")
     resident_detail = planetary.get("resident_material_detail")
@@ -1697,6 +2909,7 @@ def validate_planetary_streaming(
 
     fluid_observation_fault = (
         planetary.get("resident_fluid_observation_valid") is not True
+        or planetary.get("resident_fluid_kind_integrity_valid") is not True
         or planetary.get("resident_fluid_entity_count_overflow") is not False
         or planetary.get("resident_fluid_duplicate_slots") != 0
         or planetary.get("resident_fluid_out_of_range_levels") != 0
@@ -1715,6 +2928,25 @@ def validate_planetary_streaming(
             )
         )
 
+    cohort_observation_fault = (
+        planetary.get("resident_semantic_cohort_observation_valid") is not True
+        or planetary.get("resident_semantic_cohort_payload_integrity_valid") is not True
+        or planetary.get("resident_semantic_cohort_entity_count_overflow") is not False
+        or planetary.get("resident_semantic_cohort_scheduler_mismatch") is not False
+        or planetary.get("resident_semantic_cohort_budget_exceeded") is not False
+        or planetary.get("resident_semantic_cohort_observation_rejections") != 0
+    )
+    if cohort_observation_fault:
+        invalid = True
+        problems.append(
+            issue(
+                "planetary_semantic_cohort_observation_rejected",
+                "Rejected",
+                "planetary_streaming.resident_semantic_cohort_observation_valid",
+                "post-deferred semantic-cohort ECS residency reported invalid payload, overflow, scheduler mismatch, budget failure, or a prior rejection episode",
+            )
+        )
+
     scheduler_pairs = (
         ("resident_entities", "scheduler_resident_entities"),
         ("resident_vertices", "scheduler_resident_vertices"),
@@ -1728,6 +2960,16 @@ def validate_planetary_streaming(
         ("resident_fluid_mesh_bytes", "scheduler_resident_fluid_mesh_bytes"),
         ("fluid_ring_vertices", "scheduler_fluid_ring_vertices"),
         ("fluid_ring_indices", "scheduler_fluid_ring_indices"),
+        ("resident_water_indices", "scheduler_resident_water_indices"),
+        ("resident_lava_indices", "scheduler_resident_lava_indices"),
+        ("water_ring_indices", "scheduler_water_ring_indices"),
+        ("lava_ring_indices", "scheduler_lava_ring_indices"),
+        ("resident_semantic_cohort_entities", "scheduler_resident_semantic_cohort_entities"),
+        ("resident_semantic_cohort_vertices", "scheduler_resident_semantic_cohort_vertices"),
+        ("resident_semantic_cohort_indices", "scheduler_resident_semantic_cohort_indices"),
+        ("resident_semantic_cohort_mesh_bytes", "scheduler_resident_semantic_cohort_mesh_bytes"),
+        ("resident_semantic_cohort_count", "scheduler_resident_semantic_cohort_count"),
+        ("resident_semantic_cohort_kind_counts", "scheduler_resident_semantic_cohort_kind_counts"),
     )
     if any(planetary.get(observed) != planetary.get(scheduled) for observed, scheduled in scheduler_pairs):
         invalid = True
@@ -1780,6 +3022,19 @@ def validate_planetary_streaming(
         ("scheduler_resident_fluid_vertices", "budget_fluid_vertices"),
         ("scheduler_resident_fluid_indices", "budget_fluid_indices"),
         ("scheduler_resident_fluid_mesh_bytes", "budget_fluid_mesh_bytes"),
+        ("resident_semantic_cohort_entities", "budget_semantic_cohort_entities"),
+        ("resident_semantic_cohort_vertices", "budget_semantic_cohort_vertices"),
+        ("resident_semantic_cohort_indices", "budget_semantic_cohort_indices"),
+        ("resident_semantic_cohort_mesh_bytes", "budget_semantic_cohort_mesh_bytes"),
+        ("scheduler_resident_semantic_cohort_entities", "budget_semantic_cohort_entities"),
+        ("scheduler_resident_semantic_cohort_vertices", "budget_semantic_cohort_vertices"),
+        ("scheduler_resident_semantic_cohort_indices", "budget_semantic_cohort_indices"),
+        ("scheduler_resident_semantic_cohort_mesh_bytes", "budget_semantic_cohort_mesh_bytes"),
+        ("last_semantic_cohort_hash_scans", "budget_semantic_cohort_hash_scans"),
+        ("last_semantic_cohort_height_queries", "budget_semantic_cohort_height_queries"),
+        ("last_semantic_cohort_biome_queries", "budget_semantic_cohort_biome_queries"),
+        ("last_semantic_cohort_vertices", "budget_semantic_cohort_vertices"),
+        ("last_semantic_cohort_indices", "budget_semantic_cohort_indices"),
         ("live_sample_cache_bytes", "budget_sample_cache_bytes"),
         ("peak_live_sample_cache_bytes", "budget_sample_cache_bytes"),
     )
@@ -1862,12 +3117,22 @@ def validate_planetary_streaming(
             "last_fluid_biome_queries",
             "last_fluid_vertices",
             "last_fluid_indices",
+            "resident_water_indices",
+            "resident_lava_indices",
+            "scheduler_resident_water_indices",
+            "scheduler_resident_lava_indices",
+            "last_water_indices",
+            "last_lava_indices",
         )
         disabled_fluid_arrays = (
             "fluid_ring_vertices",
             "fluid_ring_indices",
             "scheduler_fluid_ring_vertices",
             "scheduler_fluid_ring_indices",
+            "water_ring_indices",
+            "lava_ring_indices",
+            "scheduler_water_ring_indices",
+            "scheduler_lava_ring_indices",
         )
         if any(planetary.get(field) != 0 for field in disabled_fluid_fields) or any(
             planetary.get(field) != [0] * PLANETARY_FAR_FIELD_LEVELS
@@ -1880,6 +3145,81 @@ def validate_planetary_streaming(
                     "Rejected",
                     "planetary_streaming.hydro_mode",
                     "Disabled far hydro must report zero fluid residency, scheduler payload, latest fluid work, and per-ring populations",
+                )
+            )
+
+    semantic_cohort_mode = planetary.get("semantic_cohort_mode")
+    if semantic_cohort_mode == "Disabled":
+        disabled_cohort_fields = (
+            "resident_semantic_cohort_entities",
+            "resident_semantic_cohort_vertices",
+            "resident_semantic_cohort_indices",
+            "resident_semantic_cohort_mesh_bytes",
+            "resident_semantic_cohort_count",
+            "scheduler_resident_semantic_cohort_entities",
+            "scheduler_resident_semantic_cohort_vertices",
+            "scheduler_resident_semantic_cohort_indices",
+            "scheduler_resident_semantic_cohort_mesh_bytes",
+            "scheduler_resident_semantic_cohort_count",
+            "last_semantic_cohort_hash_scans",
+            "last_semantic_cohort_height_queries",
+            "last_semantic_cohort_biome_queries",
+            "last_semantic_cohort_candidates",
+            "last_semantic_cohort_emitted",
+            "last_semantic_cohort_vertices",
+            "last_semantic_cohort_indices",
+        )
+        disabled_cohort_arrays = (
+            "resident_semantic_cohort_kind_counts",
+            "scheduler_resident_semantic_cohort_kind_counts",
+            "last_semantic_cohort_kind_counts",
+        )
+        if any(planetary.get(field) != 0 for field in disabled_cohort_fields) or any(
+            planetary.get(field) != [0] * PLANETARY_SEMANTIC_COHORT_KIND_COUNT
+            for field in disabled_cohort_arrays
+        ):
+            invalid = True
+            problems.append(
+                issue(
+                    "planetary_disabled_semantic_cohorts_have_live_work",
+                    "Rejected",
+                    "planetary_streaming.semantic_cohort_mode",
+                    "Disabled semantic cohorts must report zero live, scheduler, latest-work, and per-kind populations",
+                )
+            )
+    elif semantic_cohort_mode == "SilhouettesV1":
+        hash_scans = planetary.get("last_semantic_cohort_hash_scans")
+        height_queries = planetary.get("last_semantic_cohort_height_queries")
+        biome_queries = planetary.get("last_semantic_cohort_biome_queries")
+        candidates = planetary.get("last_semantic_cohort_candidates")
+        if (
+            hash_scans
+            not in {
+                0,
+                PLANETARY_EXPECTED_SEMANTIC_COHORT_BUDGETS[
+                    "budget_semantic_cohort_hash_scans"
+                ],
+            }
+            or (hash_scans == 0 and any(
+                planetary.get(field) != 0
+                for field in (
+                    "last_semantic_cohort_height_queries",
+                    "last_semantic_cohort_biome_queries",
+                    "last_semantic_cohort_candidates",
+                    "last_semantic_cohort_emitted",
+                    "last_semantic_cohort_vertices",
+                    "last_semantic_cohort_indices",
+                )
+            ))
+            or (hash_scans != 0 and (height_queries != candidates or biome_queries != candidates))
+        ):
+            invalid = True
+            problems.append(
+                issue(
+                    "semantic_cohort_latest_work_scope_mismatch",
+                    "Rejected",
+                    "planetary_streaming.last_semantic_cohort_hash_scans",
+                    "SilhouettesV1 latest L5 work must scan the fixed lattice and classify each admitted candidate exactly once",
                 )
             )
 
@@ -2326,16 +3666,15 @@ def process_run(
                 [report_hash["path"]] if report_hash else [],
             )
         )
-        schema_variant = (
-            "current"
-            if report.get("qa_report_schema_version")
-            == CURRENT_QA_REPORT_SCHEMA_VERSION
-            and isinstance(report.get("route_frame_times"), dict)
-            and isinstance(report.get("run_identity"), dict)
-            and report["run_identity"].get("build_profile") in {"debug", "release"}
-            else "legacy"
-        )
-        if report.get("qa_report_schema_version") != CURRENT_QA_REPORT_SCHEMA_VERSION:
+        report_schema_version = report.get("qa_report_schema_version")
+        if report_schema_version == CURRENT_QA_REPORT_SCHEMA_VERSION:
+            schema_variant = "current"
+        elif report_schema_version is None or report_schema_version in LEGACY_QA_REPORT_SCHEMA_VERSIONS:
+            schema_variant = "legacy"
+        else:
+            schema_variant = "unsupported"
+
+        if schema_variant == "legacy":
             run_issues.append(
                 issue(
                     "legacy_missing_current_qa_report_schema",
@@ -2344,28 +3683,107 @@ def process_run(
                     f"current evidence requires QA report schema {CURRENT_QA_REPORT_SCHEMA_VERSION}",
                 )
             )
+        elif schema_variant == "unsupported":
+            run_issues.append(
+                issue(
+                    "unsupported_qa_report_schema",
+                    "Rejected",
+                    "qa_report_schema_version",
+                    f"report schema {report_schema_version!r} is not explicitly supported; current evidence requires exact {CURRENT_QA_REPORT_SCHEMA_VERSION}",
+                )
+            )
 
-        identity, identity_claim, identity_issues = validate_run_identity(report, run_key)
-        viewport, viewport_claim, viewport_issues = validate_viewport(report, run_key)
-        route, route_claim, route_issues = validate_route(report, run_key)
-        frame_times, frame_claim, frame_issues = validate_route_frame_times(report, run_key)
-        planetary, planetary_claim, planetary_issues = validate_planetary_streaming(
-            report, run_key
+        identity, identity_claim, identity_issues = validate_run_identity(
+            report, run_key, require_current=schema_variant == "current"
         )
+        viewport, viewport_claim, viewport_issues = validate_viewport(report, run_key)
+        if schema_variant == "legacy":
+            world_edit_store = copy_known_fields(report, WORLD_EDIT_STORE_FIELDS)
+            world_edit_store_claim = claim(
+                f"{run_key}:world_edit_store",
+                "Blocked",
+                "Legacy QA evidence predates the schema-2.3 edit-store identity contract.",
+            )
+            world_edit_store_issues: list[dict[str, str]] = []
+            route = copy_known_fields(
+                report,
+                (
+                    "route_focus",
+                    "requested_route_distance_m",
+                    "max_horizontal_displacement_m",
+                    "requested_duration_seconds",
+                    "duration_seconds",
+                    "warmup_seconds",
+                    "write_tail_seconds",
+                    "frames",
+                    "average_fps",
+                    "max_frame_ms",
+                    "final_smoothed_fps",
+                ),
+            )
+            route_claim = claim(
+                f"{run_key}:route_observation",
+                "Blocked",
+                "Legacy QA route observations predate schema-2.3 terrain-grammar binding.",
+            )
+            route_issues: list[dict[str, str]] = []
+            frame_times = copy_known_fields(
+                report.get("route_frame_times", {}), ROUTE_FRAME_TIME_FIELDS
+            )
+            frame_claim = claim(
+                f"{run_key}:route_frame_times",
+                "Blocked",
+                "Legacy frame-time data is historical and not publishable under manifest 1.2.",
+            )
+            frame_issues: list[dict[str, str]] = []
+            legacy_planetary = report.get("planetary_streaming")
+            planetary = (
+                {
+                    "budgets": copy_known_fields(legacy_planetary, PLANETARY_BUDGET_FIELDS),
+                    "live": copy_known_fields(legacy_planetary, PLANETARY_LIVE_FIELDS),
+                    "telemetry": copy_known_fields(legacy_planetary, PLANETARY_TELEMETRY_FIELDS),
+                }
+                if isinstance(legacy_planetary, dict)
+                else None
+            )
+            planetary_claim = claim(
+                f"{run_key}:planetary_budgets",
+                "Blocked",
+                "Legacy planetary observations are not publishable under the current QA contract.",
+            )
+            planetary_issues: list[dict[str, str]] = []
+        else:
+            world_edit_store, world_edit_store_claim, world_edit_store_issues = (
+                validate_world_edit_store(report, run_key)
+            )
+            route, route_claim, route_issues = validate_route(report, run_key)
+            frame_times, frame_claim, frame_issues = validate_route_frame_times(report, run_key)
+            planetary, planetary_claim, planetary_issues = validate_planetary_streaming(
+                report, run_key
+            )
         observations.update(
             {
                 "planetary_streaming": planetary,
                 "route": route,
                 "route_frame_times": frame_times,
                 "run_identity": identity,
+                "world_edit_store": world_edit_store,
                 "viewport": viewport,
             }
         )
         run_claims.extend(
-            [identity_claim, viewport_claim, route_claim, frame_claim, planetary_claim]
+            [
+                identity_claim,
+                world_edit_store_claim,
+                viewport_claim,
+                route_claim,
+                frame_claim,
+                planetary_claim,
+            ]
         )
         run_issues.extend(
             identity_issues
+            + world_edit_store_issues
             + viewport_issues
             + route_issues
             + frame_issues
@@ -2415,7 +3833,7 @@ def build_manifest(
 
     for raw_path in qa_run_directories:
         path = Path(raw_path)
-        display_raw = path.as_posix()
+        display_raw = display_path(path, root)
         if path.name.casefold() == "latest":
             top_issues.append(
                 issue(
@@ -2455,6 +3873,16 @@ def build_manifest(
                     "Rejected",
                     display_path(resolved, root),
                     "a path resolving to latest is not an explicit immutable QA run",
+                )
+            )
+            continue
+        if not path_is_within(resolved, root):
+            top_issues.append(
+                issue(
+                    "run_outside_repository",
+                    "Rejected",
+                    "external",
+                    "public evidence runs must resolve inside the repository",
                 )
             )
             continue
@@ -2562,7 +3990,7 @@ def build_manifest(
             "accepted_run_count": len(accepted_inputs),
             "argument_count": raw_argument_count,
             "qa_run_directories": [run["input_path"] for run in runs],
-            "selection_policy": "explicit_cli_directories_only_no_latest_no_global_scan",
+            "selection_policy": "explicit_repo_contained_directories_only_no_latest_no_global_scan",
         },
         "issues": top_issues,
         "overall_classification": overall,

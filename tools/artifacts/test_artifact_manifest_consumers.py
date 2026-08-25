@@ -59,6 +59,30 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
             newline="\n",
         )
 
+    @staticmethod
+    def non_applicable_report() -> str:
+        return (
+            fixtures.modern_report()
+            .replace('    requested_route_focus: "lava",\n', '    requested_route_focus: "streaming",\n')
+            .replace('    resolved_route_focus: "lava",\n', '    resolved_route_focus: "streaming",\n')
+            .replace("    route_focus_anchor: Some([1520, 52, -2320]),\n", "    route_focus_anchor: None,\n")
+            .replace("    camera_route_preflight_applicable: true,\n", "    camera_route_preflight_applicable: false,\n")
+            .replace('    camera_route_plan_hash: Some("0000000000000001"),\n', "    camera_route_plan_hash: None,\n")
+            .replace("    camera_route_available: true,\n", "    camera_route_available: false,\n")
+            .replace("    camera_route_variant_index: Some(0),\n", "    camera_route_variant_index: None,\n")
+            .replace("    camera_route_variant_count: 8,\n", "    camera_route_variant_count: 0,\n")
+            .replace("    camera_route_validation_samples: 16,\n", "    camera_route_validation_samples: 0,\n")
+            .replace("    camera_route_voxel_queries: 12,\n", "    camera_route_voxel_queries: 0,\n")
+            .replace("    camera_route_voxel_query_cap: 153600,\n", "    camera_route_voxel_query_cap: 0,\n")
+            .replace("    camera_route_required_chunk_checks: 12,\n", "    camera_route_required_chunk_checks: 0,\n")
+            .replace("    camera_route_loaded_chunk_checks: 9,\n", "    camera_route_loaded_chunk_checks: 0,\n")
+            .replace("    camera_route_proven_air_chunk_checks: 3,\n", "    camera_route_proven_air_chunk_checks: 0,\n")
+            .replace("    camera_route_candidate_body_occlusions: 2,\n", "    camera_route_candidate_body_occlusions: 0,\n")
+            .replace("    camera_route_candidate_los_occlusions: 3,\n", "    camera_route_candidate_los_occlusions: 0,\n")
+            .replace("    camera_route_selected_clear_samples: 16,\n", "    camera_route_selected_clear_samples: 0,\n")
+            .replace("    camera_route_minimum_clearance_voxels: Some(1),\n", "    camera_route_minimum_clearance_voxels: None,\n")
+        )
+
     def replace_manifest_with_run_count(self, run_count: int) -> None:
         runs = []
         generation = len(list((self.root / "qa_runs").glob("manifest_set_*"))) + 1
@@ -66,10 +90,7 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
             name = f"manifest_set_{generation}_run_{index + 1}"
             run = self.root / "qa_runs" / name
             run.mkdir(parents=True)
-            report = fixtures.modern_report().replace(
-                '    route_focus: "streaming",',
-                f'    route_focus: "route_{index + 1}_' + ('x' * 32) + '",',
-            )
+            report = fixtures.modern_report()
             (run / "report.ron").write_text(report, encoding="utf-8")
             (run / "shot_0000.png").write_bytes(fixtures.PNG_1X1)
             runs.append(run)
@@ -83,18 +104,119 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
 
     def test_current_observed_manifest_loads_and_rehashes_explicit_png(self) -> None:
         evidence = consumer.load_canonical_evidence(self.manifest_path)
-        self.assertEqual(evidence.data["schema_version"], "1.0.0")
+        self.assertEqual(evidence.data["schema_version"], "1.5.0")
         self.assertEqual(len(evidence.runs), 1)
         screenshots = consumer.verified_screenshots(evidence, self.root)
         self.assertEqual(len(screenshots), 1)
         self.assertEqual(screenshots[0][1], "qa_runs/run_current/shot_0000.png")
 
-    def test_consumer_rejects_stale_schema_nonobserved_and_legacy_runs(self) -> None:
-        for mutation in ("schema", "classification", "legacy"):
+    def test_consumers_reject_serialized_absolute_workstation_paths(self) -> None:
+        changed = copy.deepcopy(self.manifest)
+        changed["inputs"]["qa_run_directories"][0] = "C:/private/operator/run_current"
+        changed["runs"][0]["input_path"] = "C:/private/operator/run_current"
+        self.write_manifest(changed)
+
+        with self.assertRaisesRegex(consumer.EvidenceContractError, "invalid run path"):
+            consumer.load_canonical_evidence(self.manifest_path)
+
+        if shutil.which("node"):
+            module_uri = (TOOLS_DIR / "evidence_manifest_consumer.mjs").resolve().as_uri()
+            result = subprocess.run(
+                [
+                    shutil.which("node") or "node",
+                    "--input-type=module",
+                    "-e",
+                    f'import({json.dumps(module_uri)}).then(m => m.loadCanonicalEvidence(process.argv[1]))',
+                    str(self.manifest_path),
+                ],
+                cwd=TOOLS_DIR.parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("run directory list is invalid", result.stderr)
+        self.write_manifest(self.manifest)
+
+    def test_python_consumer_accepts_each_current_terrain_grammar_with_exact_identity(self) -> None:
+        for grammar in ("V1", "V2", "V3"):
+            with self.subTest(grammar=grammar):
+                changed = copy.deepcopy(self.manifest)
+                observations = changed["runs"][0]["raw_observations"]
+                observations["run_identity"]["terrain_grammar"] = grammar
+                observations["world_edit_store"]["world_edit_store_terrain_grammar"] = grammar
+                telemetry = observations["planetary_streaming"]["telemetry"]
+                telemetry["desired_terrain_grammar"] = grammar
+                telemetry["active_terrain_grammar"] = grammar
+                self.write_manifest(changed)
+                evidence = consumer.load_canonical_evidence(self.manifest_path)
+                self.assertEqual(
+                    evidence.runs[0]["raw_observations"]["run_identity"]["terrain_grammar"],
+                    grammar,
+                )
+        self.write_manifest(self.manifest)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is unavailable")
+    def test_javascript_consumer_accepts_current_manifest(self) -> None:
+        module_uri = (TOOLS_DIR / "evidence_manifest_consumer.mjs").resolve().as_uri()
+        result = subprocess.run(
+            [
+                shutil.which("node") or "node",
+                "--input-type=module",
+                "-e",
+                f'import({json.dumps(module_uri)}).then(m => m.loadCanonicalEvidence(process.argv[1])).then(e => process.stdout.write(e.data.schema_version))',
+                str(self.manifest_path),
+            ],
+            cwd=TOOLS_DIR.parents[1],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "1.5.0")
+
+    def test_consumers_accept_current_non_applicable_camera_sentinel(self) -> None:
+        run = self.root / "qa_runs" / "run_non_applicable"
+        run.mkdir()
+        (run / "report.ron").write_text(self.non_applicable_report(), encoding="utf-8")
+        (run / "shot_0000.png").write_bytes(fixtures.PNG_1X1)
+        manifest = manifest_builder.build_manifest(
+            [run], repo_root=self.root, generated_at_utc=fixtures.FIXED_TIME
+        )
+        self.assertEqual(manifest["overall_classification"], "Observed")
+        self.write_manifest(manifest)
+        self.assertFalse(
+            consumer.load_canonical_evidence(self.manifest_path)
+            .runs[0]["raw_observations"]["route"]["camera_route_preflight_applicable"]
+        )
+
+        if shutil.which("node"):
+            module_uri = (TOOLS_DIR / "evidence_manifest_consumer.mjs").resolve().as_uri()
+            result = subprocess.run(
+                [
+                    shutil.which("node") or "node",
+                    "--input-type=module",
+                    "-e",
+                    f'import({json.dumps(module_uri)}).then(m => m.loadCanonicalEvidence(process.argv[1])).then(e => process.stdout.write(String(e.data.runs[0].raw_observations.route.camera_route_preflight_applicable)))',
+                    str(self.manifest_path),
+                ],
+                cwd=TOOLS_DIR.parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "false")
+        self.write_manifest(self.manifest)
+
+    def test_consumer_rejects_stale_schema_generator_nonobserved_and_legacy_runs(self) -> None:
+        for mutation in ("schema", "generator", "classification", "legacy"):
             with self.subTest(mutation=mutation):
                 changed = copy.deepcopy(self.manifest)
                 if mutation == "schema":
-                    changed["schema_version"] = "0.9.0"
+                    changed["schema_version"] = "1.2.0"
+                elif mutation == "generator":
+                    changed["generator"]["version"] = "1.2.0"
                 elif mutation == "classification":
                     changed["overall_classification"] = "Blocked"
                 else:
@@ -116,6 +238,121 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
             self.write_manifest(changed)
             with self.assertRaises(consumer.EvidenceContractError):
                 consumer.load_canonical_evidence(self.manifest_path)
+        self.write_manifest(self.manifest)
+
+    def test_consumers_reject_route_hydro_cohort_and_atomic_budget_tampering(self) -> None:
+        mutations = (
+            lambda value: value["runs"][0]["raw_observations"]["world_edit_store"].update(
+                world_edit_store_terrain_grammar="V1"
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["world_edit_store"].update(
+                world_edit_store_status="blocked",
+                world_edit_store_compatible=False,
+                world_edit_store_edited_chunks=None,
+                world_edit_store_block_reason_code="manifest-mismatch",
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                resolved_route_focus="scenic"
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                requested_route_focus="waypoint",
+                resolved_route_focus="waypoint",
+                route_focus_anchor=None,
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                requested_route_focus="river",
+                resolved_route_focus="river",
+                route_focus_anchor=[1, 2, 3],
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                camera_route_plan_hash=None
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                camera_route_unloaded_chunk_checks=1,
+                camera_route_loaded_chunk_checks=8,
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                camera_route_proven_air_chunk_checks=4,
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                camera_route_selected_clear_samples=15
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["planetary_streaming"]["live"].update(
+                resident_water_indices=4194
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["planetary_streaming"]["live"].update(
+                resident_semantic_cohort_kind_counts=[0, 0, 0, 1, 0, 0]
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["planetary_streaming"]["budgets"].update(
+                budget_atomic_ring_build_bytes=757983
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["planetary_streaming"]["telemetry"].update(
+                resident_fluid_kind_integrity_valid=False
+            ),
+        )
+        for mutation in mutations:
+            changed = copy.deepcopy(self.manifest)
+            mutation(changed)
+            self.write_manifest(changed)
+            with self.assertRaises(consumer.EvidenceContractError):
+                consumer.load_canonical_evidence(self.manifest_path)
+        self.write_manifest(self.manifest)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is unavailable")
+    def test_javascript_consumer_rejects_same_adversarial_tampering(self) -> None:
+        module_uri = (TOOLS_DIR / "evidence_manifest_consumer.mjs").resolve().as_uri()
+        command = [
+            shutil.which("node") or "node",
+            "--input-type=module",
+            "-e",
+            f'import({json.dumps(module_uri)}).then(m => m.loadCanonicalEvidence(process.argv[1]))',
+            str(self.manifest_path),
+        ]
+        mutations = (
+            lambda value: value["runs"][0]["raw_observations"]["world_edit_store"].update(
+                world_edit_store_seed=54321
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                route_focus_search_cap_exhausted=True
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                requested_route_focus="waypoint",
+                resolved_route_focus="waypoint",
+                route_focus_anchor=None,
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                requested_route_focus="river",
+                resolved_route_focus="river",
+                route_focus_anchor=[1, 2, 3],
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                camera_route_candidate_los_occlusions=129
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                camera_route_required_chunk_checks=11
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["route"].update(
+                camera_route_proven_air_chunk_checks=4
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["planetary_streaming"]["live"].update(
+                resident_semantic_cohort_vertices=47
+            ),
+            lambda value: value["runs"][0]["raw_observations"]["planetary_streaming"]["telemetry"].update(
+                scheduler_resident_water_indices=4194
+            ),
+        )
+        for mutation in mutations:
+            changed = copy.deepcopy(self.manifest)
+            mutation(changed)
+            self.write_manifest(changed)
+            result = subprocess.run(
+                command,
+                cwd=TOOLS_DIR.parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
         self.write_manifest(self.manifest)
 
     def test_consumer_rejects_png_changed_after_manifest_generation(self) -> None:
@@ -323,7 +560,7 @@ class ArtifactManifestConsumerTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(first.stdout, second.stdout)
         summary = json.loads(first.stdout)
-        self.assertEqual(summary["schema_version"], "1.0.0")
+        self.assertEqual(summary["schema_version"], "1.5.0")
         self.assertFalse(output.exists())
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is unavailable")

@@ -12,6 +12,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import build_evidence_manifest as evidence
 
@@ -25,7 +26,7 @@ FIXED_TIME = "2026-08-12T00:00:00Z"
 
 def modern_report(screenshot: str = "shot_0000.png") -> str:
     return f'''(
-    qa_report_schema_version: "2.0.0",
+    qa_report_schema_version: "2.5.0",
     run_identity: (
         package_version: "0.1.0",
         build_profile: "debug",
@@ -34,6 +35,7 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         world_seed: Some(12345),
         world_profile: Some("AstralFrontier"),
         scenery_quality: Some("Lush"),
+        terrain_grammar: Some("V3"),
         git_sha: Some("abcdef1234567"),
         git_dirty: Some(false),
         source_fingerprint: Some("sha256:source"),
@@ -41,6 +43,14 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         toolchain: Some("rustc fixture"),
         hardware: Some("fixture hardware"),
     ),
+    world_edit_store_status: "compatible",
+    world_edit_store_compatible: true,
+    world_edit_store_seed: Some(12345),
+    world_edit_store_profile: Some("AstralFrontier"),
+    world_edit_store_scenery_quality: Some("Lush"),
+    world_edit_store_terrain_grammar: Some("V3"),
+    world_edit_store_edited_chunks: Some(0),
+    world_edit_store_block_reason_code: None,
     viewport: Some((
         logical_width: 1280.0,
         logical_height: 720.0,
@@ -52,6 +62,8 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
     planetary_streaming: Some((
         enabled: true,
         profile: "AstralFrontier",
+        desired_terrain_grammar: Some("V3"),
+        active_terrain_grammar: Some("V3"),
         interaction_radius_metres: 256,
         confirmed_near_extent_metres: 64,
         near_coverage_ready_columns: 32,
@@ -66,9 +78,19 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         resident_fluid_entities: 6,
         resident_fluid_vertices: 2100,
         resident_fluid_indices: 6300,
+        resident_water_indices: 4200,
+        resident_lava_indices: 2100,
         fluid_ring_vertices: [100, 200, 300, 400, 500, 600],
         fluid_ring_indices: [300, 600, 900, 1200, 1500, 1800],
+        water_ring_indices: [300, 600, 600, 900, 900, 900],
+        lava_ring_indices: [0, 0, 300, 300, 600, 900],
         resident_fluid_mesh_bytes: 100800,
+        resident_semantic_cohort_entities: 1,
+        resident_semantic_cohort_vertices: 48,
+        resident_semantic_cohort_indices: 72,
+        resident_semantic_cohort_mesh_bytes: 2592,
+        resident_semantic_cohort_count: 2,
+        resident_semantic_cohort_kind_counts: [0, 0, 0, 1, 1, 0],
         scheduler_resident_entities: 6,
         scheduler_resident_vertices: 28000,
         scheduler_resident_indices: 117000,
@@ -78,9 +100,19 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         scheduler_resident_fluid_entities: 6,
         scheduler_resident_fluid_vertices: 2100,
         scheduler_resident_fluid_indices: 6300,
+        scheduler_resident_water_indices: 4200,
+        scheduler_resident_lava_indices: 2100,
         scheduler_fluid_ring_vertices: [100, 200, 300, 400, 500, 600],
         scheduler_fluid_ring_indices: [300, 600, 900, 1200, 1500, 1800],
+        scheduler_water_ring_indices: [300, 600, 600, 900, 900, 900],
+        scheduler_lava_ring_indices: [0, 0, 300, 300, 600, 900],
         scheduler_resident_fluid_mesh_bytes: 100800,
+        scheduler_resident_semantic_cohort_entities: 1,
+        scheduler_resident_semantic_cohort_vertices: 48,
+        scheduler_resident_semantic_cohort_indices: 72,
+        scheduler_resident_semantic_cohort_mesh_bytes: 2592,
+        scheduler_resident_semantic_cohort_count: 2,
+        scheduler_resident_semantic_cohort_kind_counts: [0, 0, 0, 1, 1, 0],
         resident_observation_valid: true,
         resident_entity_count_overflow: false,
         resident_duplicate_levels: 0,
@@ -94,7 +126,14 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         resident_fluid_out_of_range_levels: 0,
         resident_fluid_scheduler_mismatch: false,
         resident_fluid_budget_exceeded: false,
+        resident_fluid_kind_integrity_valid: true,
         resident_fluid_observation_rejections: 0,
+        resident_semantic_cohort_observation_valid: true,
+        resident_semantic_cohort_entity_count_overflow: false,
+        resident_semantic_cohort_scheduler_mismatch: false,
+        resident_semantic_cohort_budget_exceeded: false,
+        resident_semantic_cohort_payload_integrity_valid: true,
+        resident_semantic_cohort_observation_rejections: 0,
         live_sample_cache_windows: 6,
         live_sample_cache_bytes: 152000,
         budget_entities: 6,
@@ -110,7 +149,15 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         budget_fluid_indices: 129600,
         budget_fluid_mesh_bytes: 1590048,
         budget_fluid_ring_build_bytes: 265008,
-        budget_atomic_ring_build_bytes: 653008,
+        budget_hydro_atomic_ring_build_bytes: 653008,
+        budget_atomic_ring_build_bytes: 757984,
+        budget_semantic_cohort_entities: 1,
+        budget_semantic_cohort_vertices: 1944,
+        budget_semantic_cohort_indices: 2916,
+        budget_semantic_cohort_mesh_bytes: 104976,
+        budget_semantic_cohort_hash_scans: 3721,
+        budget_semantic_cohort_height_queries: 81,
+        budget_semantic_cohort_biome_queries: 81,
         pending_rebuilds: 0,
         dirty_mask: 0,
         build_in_flight: false,
@@ -122,6 +169,7 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         resident_reduced_levels: 0,
         surface_material_mode: "BridgeV2",
         hydro_mode: "DescriptiveV1",
+        semantic_cohort_mode: "SilhouettesV1",
         scheduler_deferred_frames: 0,
         completed_rebuilds: 10,
         stale_builds_discarded: 1,
@@ -135,6 +183,16 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         last_fluid_biome_queries: 835,
         last_fluid_vertices: 600,
         last_fluid_indices: 1800,
+        last_water_indices: 1200,
+        last_lava_indices: 600,
+        last_semantic_cohort_hash_scans: 3721,
+        last_semantic_cohort_height_queries: 2,
+        last_semantic_cohort_biome_queries: 2,
+        last_semantic_cohort_candidates: 2,
+        last_semantic_cohort_emitted: 2,
+        last_semantic_cohort_vertices: 48,
+        last_semantic_cohort_indices: 72,
+        last_semantic_cohort_kind_counts: [0, 0, 0, 1, 1, 0],
         peak_live_sample_cache_windows: 6,
         peak_live_sample_cache_bytes: 152000,
         last_biome_queries: 0,
@@ -150,7 +208,35 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
         camera_world_x: 0,
         camera_world_z: 0,
     )),
-    route_focus: "streaming",
+    requested_route_focus: "lava",
+    resolved_route_focus: "lava",
+    route_focus_available: true,
+    route_focus_unavailable_reason: None,
+    route_focus_anchor: Some([1520, 52, -2320]),
+    route_focus_search_candidate_cap: 0,
+    route_focus_search_visited_candidates: None,
+    route_focus_classification_query_cap: 0,
+    route_focus_classification_queries: None,
+    route_focus_search_cap_exhausted: false,
+    camera_route_policy: "preflight-v1",
+    camera_route_preflight_applicable: true,
+    camera_route_plan_hash: Some("0000000000000001"),
+    camera_route_available: true,
+    camera_route_unavailable_reason: None,
+    camera_route_variant_index: Some(0),
+    camera_route_variant_count: 8,
+    camera_route_validation_samples: 16,
+    camera_route_voxel_queries: 12,
+    camera_route_voxel_query_cap: 153600,
+    camera_route_required_chunk_checks: 12,
+    camera_route_loaded_chunk_checks: 9,
+    camera_route_proven_air_chunk_checks: 3,
+    camera_route_unloaded_chunk_checks: 0,
+    camera_route_candidate_body_occlusions: 2,
+    camera_route_candidate_los_occlusions: 3,
+    camera_route_selected_clear_samples: 16,
+    camera_route_minimum_clearance_voxels: Some(1),
+    camera_route_work_cap_exhausted: false,
     requested_route_distance_m: 8000.0,
     max_horizontal_displacement_m: 8000.0,
     requested_duration_seconds: 12.0,
@@ -195,8 +281,13 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
     pending_terrain: 0,
     pending_meshes: 0,
     dirty_chunks: 0,
+    dense_chunks: 100,
+    dense_chunk_budget: 2400,
+    dense_chunk_budget_exceeded: false,
+    frontier_complete: true,
     render_distance: 36,
     peak_loaded_chunks: 120,
+    peak_dense_chunks: 121,
     peak_mesh_entities: 90,
     peak_pending_terrain: 1,
     peak_pending_meshes: 1,
@@ -208,7 +299,7 @@ def modern_report(screenshot: str = "shot_0000.png") -> str:
 
 def legacy_report() -> str:
     report = modern_report()
-    report = report.replace('    qa_report_schema_version: "2.0.0",\n', "")
+    report = report.replace('    qa_report_schema_version: "2.5.0",\n', "")
     report = report.replace('        build_profile: "debug",\n', "")
     report = report.replace('        git_sha: Some("abcdef1234567"),\n', "")
     report = report.replace('        git_dirty: Some(false),\n', "")
@@ -263,6 +354,9 @@ class EvidenceManifestTests(unittest.TestCase):
         self.assertEqual(manifest["runs"][0]["report_schema_variant"], "current")
         observations = manifest["runs"][0]["raw_observations"]
         self.assertEqual(observations["run_identity"]["build_profile"], "debug")
+        self.assertEqual(observations["world_edit_store"]["world_edit_store_status"], "compatible")
+        self.assertTrue(observations["world_edit_store"]["world_edit_store_compatible"])
+        self.assertEqual(observations["world_edit_store"]["world_edit_store_edited_chunks"], 0)
         self.assertEqual(observations["viewport"]["physical_width"], 1280)
         self.assertEqual(observations["route_frame_times"]["p99_ms"], 18.0)
         self.assertEqual(
@@ -290,6 +384,98 @@ class EvidenceManifestTests(unittest.TestCase):
             any(record["kind"] == "screenshot" for record in manifest["file_hashes"])
         )
 
+    def test_current_terrain_grammar_identity_is_required_and_matches_far_worker(self) -> None:
+        mutations = (
+            (
+                "missing_run_grammar",
+                '        terrain_grammar: Some("V3"),\n',
+                "",
+                "missing_terrain_grammar",
+            ),
+            (
+                "unknown_run_grammar",
+                '        terrain_grammar: Some("V3"),\n',
+                '        terrain_grammar: Some("V4"),\n',
+                "invalid_terrain_grammar",
+            ),
+            (
+                "desired_grammar_mismatch",
+                '        desired_terrain_grammar: Some("V3"),\n',
+                '        desired_terrain_grammar: Some("V1"),\n',
+                "planetary_desired_terrain_grammar_mismatch",
+            ),
+            (
+                "active_grammar_mismatch",
+                '        active_terrain_grammar: Some("V3"),\n',
+                '        active_terrain_grammar: Some("V1"),\n',
+                "planetary_active_terrain_grammar_mismatch",
+            ),
+        )
+        for name, old, new, expected_code in mutations:
+            with self.subTest(name=name):
+                report = modern_report().replace(old, new)
+                record = self.build(self.make_run(f"run_{name}", report))["runs"][0]
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertIn(expected_code, {item["code"] for item in record["issues"]})
+
+        for grammar in ("V1", "V2", "V3"):
+            with self.subTest(accepted_grammar=grammar):
+                report = modern_report().replace('Some("V3")', f'Some("{grammar}")')
+                record = self.build(
+                    self.make_run(f"run_accepted_{grammar.lower()}", report)
+                )["runs"][0]
+                self.assertEqual(record["report_schema_variant"], "current")
+                self.assertEqual(record["overall_classification"], "Observed")
+
+    def test_current_edit_store_identity_is_exact_and_blocked_state_stays_blocked(self) -> None:
+        mutations = (
+            (
+                "store_grammar_mismatch",
+                '    world_edit_store_terrain_grammar: Some("V3"),\n',
+                '    world_edit_store_terrain_grammar: Some("V1"),\n',
+                "world_edit_store_identity_mismatch",
+            ),
+            (
+                "store_seed_missing",
+                "    world_edit_store_seed: Some(12345),\n",
+                "    world_edit_store_seed: None,\n",
+                "world_edit_store_identity_mismatch",
+            ),
+            (
+                "compatible_without_count",
+                "    world_edit_store_edited_chunks: Some(0),\n",
+                "    world_edit_store_edited_chunks: None,\n",
+                "inconsistent_compatible_world_edit_store",
+            ),
+        )
+        for name, old, new, expected_code in mutations:
+            with self.subTest(name=name):
+                report = modern_report().replace(old, new)
+                record = self.build(self.make_run(f"run_{name}", report))["runs"][0]
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertIn(expected_code, {item["code"] for item in record["issues"]})
+
+        blocked_report = modern_report()
+        blocked_report = blocked_report.replace(
+            '    world_edit_store_status: "compatible",\n',
+            '    world_edit_store_status: "blocked",\n',
+        ).replace(
+            "    world_edit_store_compatible: true,\n",
+            "    world_edit_store_compatible: false,\n",
+        ).replace(
+            "    world_edit_store_edited_chunks: Some(0),\n",
+            "    world_edit_store_edited_chunks: None,\n",
+        ).replace(
+            "    world_edit_store_block_reason_code: None,\n",
+            '    world_edit_store_block_reason_code: Some("manifest-mismatch"),\n',
+        )
+        blocked = self.build(self.make_run("run_store_blocked", blocked_report))["runs"][0]
+        self.assertEqual(blocked["overall_classification"], "Blocked")
+        store_claim = next(
+            item for item in blocked["claims"] if item["id"].endswith(":world_edit_store")
+        )
+        self.assertEqual(store_claim["classification"], "Blocked")
+
     def test_legacy_report_is_blocked_without_invented_route_statistics(self) -> None:
         run = self.make_run("run_legacy", legacy_report())
         manifest = self.build(run)
@@ -297,10 +483,15 @@ class EvidenceManifestTests(unittest.TestCase):
 
         self.assertEqual(record["report_schema_variant"], "legacy")
         self.assertEqual(record["overall_classification"], "Blocked")
-        self.assertIsNone(record["raw_observations"]["route_frame_times"])
+        self.assertTrue(
+            all(
+                value is None
+                for value in record["raw_observations"]["route_frame_times"].values()
+            )
+        )
         codes = {item["code"] for item in record["issues"]}
         self.assertIn("legacy_missing_build_profile", codes)
-        self.assertIn("legacy_missing_route_frame_times", codes)
+        self.assertIn("legacy_missing_current_qa_report_schema", codes)
         self.assertNotIn("p95_ms", json.dumps(record["raw_observations"]["route"]))
 
     def test_malformed_report_is_rejected_but_its_bytes_are_hashed(self) -> None:
@@ -388,6 +579,43 @@ class EvidenceManifestTests(unittest.TestCase):
 
         self.assertEqual(record["overall_classification"], "Rejected")
         self.assertIn("invalid_route_timing", {item["code"] for item in record["issues"]})
+
+    def test_dense_chunk_budget_evidence_fails_closed(self) -> None:
+        cases = {
+            "missing_total": ("    dense_chunks: 100,\n", ""),
+            "total_mismatch": ("    dense_chunks: 100,", "    dense_chunks: 101,"),
+            "budget_drift": (
+                "    dense_chunk_budget: 2400,",
+                "    dense_chunk_budget: 2399,",
+            ),
+            "budget_exceeded": (
+                "    dense_chunk_budget_exceeded: false,",
+                "    dense_chunk_budget_exceeded: true,",
+            ),
+            "peak_over_budget": (
+                "    peak_dense_chunks: 121,",
+                "    peak_dense_chunks: 2401,",
+            ),
+            "near_field_pending": (
+                "    pending_meshes: 0,",
+                "    pending_meshes: 1,",
+            ),
+        }
+        for name, (old, new) in cases.items():
+            with self.subTest(name=name):
+                report = modern_report().replace(old, new)
+                record = self.build(self.make_run(f"run_dense_{name}", report))["runs"][0]
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertTrue(
+                    {
+                        "invalid_dense_chunk_budget_evidence",
+                        "dense_chunk_total_mismatch",
+                        "dense_chunk_budget_identity_drift",
+                        "dense_chunk_budget_exceeded",
+                        "invalid_peak_dense_chunk_budget_evidence",
+                        "near_field_not_settled",
+                    }.intersection(item["code"] for item in record["issues"])
+                )
 
     def test_viewport_physical_dimensions_retain_integer_type(self) -> None:
         report = modern_report().replace(
@@ -524,7 +752,7 @@ class EvidenceManifestTests(unittest.TestCase):
         )
 
     def test_missing_schema_version_is_legacy_and_blocked_with_complete_fields(self) -> None:
-        report = modern_report().replace('    qa_report_schema_version: "2.0.0",\n', "")
+        report = modern_report().replace('    qa_report_schema_version: "2.5.0",\n', "")
         run = self.make_run("run_pre_hydro_schema", report)
         record = self.build(run)["runs"][0]
 
@@ -535,8 +763,345 @@ class EvidenceManifestTests(unittest.TestCase):
             {item["code"] for item in record["issues"]},
         )
 
+    def test_exact_qa_24_through_20_are_legacy_blocked_and_other_versions_are_unsupported(self) -> None:
+        qa_24 = modern_report().replace(
+            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.4.0"',
+        )
+        legacy_24 = self.build(self.make_run("run_exact_24", qa_24))["runs"][0]
+        self.assertEqual(legacy_24["report_schema_variant"], "legacy")
+        self.assertEqual(legacy_24["overall_classification"], "Blocked")
+
+        qa_23 = modern_report().replace(
+            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.3.0"',
+        )
+        legacy_23 = self.build(self.make_run("run_exact_23", qa_23))["runs"][0]
+        self.assertEqual(legacy_23["report_schema_variant"], "legacy")
+        self.assertEqual(legacy_23["overall_classification"], "Blocked")
+
+        qa_22 = modern_report().replace(
+            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.2.0"',
+        )
+        legacy_22 = self.build(self.make_run("run_exact_22", qa_22))["runs"][0]
+        self.assertEqual(legacy_22["report_schema_variant"], "legacy")
+        self.assertEqual(legacy_22["overall_classification"], "Blocked")
+
+        qa_21 = modern_report().replace(
+            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.1.0"',
+        )
+        legacy_21 = self.build(self.make_run("run_exact_21", qa_21))["runs"][0]
+        self.assertEqual(legacy_21["report_schema_variant"], "legacy")
+        self.assertEqual(legacy_21["overall_classification"], "Blocked")
+
+        qa_20 = modern_report().replace(
+            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.0.0"',
+        )
+        legacy = self.build(self.make_run("run_exact_20", qa_20))["runs"][0]
+        self.assertEqual(legacy["report_schema_variant"], "legacy")
+        self.assertEqual(legacy["overall_classification"], "Blocked")
+
+        future = modern_report().replace(
+            'qa_report_schema_version: "2.5.0"',
+            'qa_report_schema_version: "2.6.0"',
+        )
+        unsupported = self.build(self.make_run("run_future", future))["runs"][0]
+        self.assertEqual(unsupported["report_schema_variant"], "unsupported")
+        self.assertEqual(unsupported["overall_classification"], "Rejected")
+        self.assertIn(
+            "unsupported_qa_report_schema",
+            {item["code"] for item in unsupported["issues"]},
+        )
+
+    def test_route_resolution_and_bounded_search_truth_fail_closed(self) -> None:
+        contradictions = (
+            (
+                "available_fallback",
+                '    resolved_route_focus: "lava",\n',
+                '    resolved_route_focus: "scenic",\n',
+                "contradictory_available_route_resolution",
+            ),
+            (
+                "candidate_overflow",
+                "    route_focus_search_visited_candidates: None,\n",
+                "    route_focus_search_visited_candidates: Some(1),\n",
+                "route_search_cap_exceeded",
+            ),
+        )
+        for name, old, new, code in contradictions:
+            with self.subTest(name=name):
+                report = modern_report().replace(old, new)
+                record = self.build(self.make_run(f"run_{name}", report))["runs"][0]
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertIn(code, {item["code"] for item in record["issues"]})
+
+        unavailable = modern_report().replace(
+            '    resolved_route_focus: "lava",\n',
+            '    resolved_route_focus: "scenic",\n',
+        ).replace(
+            "    route_focus_available: true,\n",
+            "    route_focus_available: false,\n",
+        ).replace(
+            "    route_focus_unavailable_reason: None,\n",
+            '    route_focus_unavailable_reason: Some("no bounded focus found"),\n',
+        )
+        record = self.build(self.make_run("run_unavailable_route", unavailable))["runs"][0]
+        self.assertEqual(record["overall_classification"], "Blocked")
+        self.assertIn(
+            "requested_route_focus_unavailable",
+            {item["code"] for item in record["issues"]},
+        )
+
+        focus_unavailable_camera = (
+            unavailable
+            .replace('    camera_route_plan_hash: Some("0000000000000001"),\n', "    camera_route_plan_hash: None,\n")
+            .replace("    camera_route_available: true,\n", "    camera_route_available: false,\n")
+            .replace(
+                "    camera_route_unavailable_reason: None,\n",
+                '    camera_route_unavailable_reason: Some("camera-route-focus-unavailable"),\n',
+            )
+            .replace("    camera_route_variant_index: Some(0),\n", "    camera_route_variant_index: None,\n")
+            .replace("    camera_route_variant_count: 8,\n", "    camera_route_variant_count: 0,\n")
+            .replace("    camera_route_validation_samples: 16,\n", "    camera_route_validation_samples: 0,\n")
+            .replace("    camera_route_voxel_queries: 12,\n", "    camera_route_voxel_queries: 0,\n")
+            .replace("    camera_route_voxel_query_cap: 153600,\n", "    camera_route_voxel_query_cap: 0,\n")
+            .replace("    camera_route_required_chunk_checks: 12,\n", "    camera_route_required_chunk_checks: 0,\n")
+            .replace("    camera_route_loaded_chunk_checks: 9,\n", "    camera_route_loaded_chunk_checks: 0,\n")
+            .replace("    camera_route_proven_air_chunk_checks: 3,\n", "    camera_route_proven_air_chunk_checks: 0,\n")
+            .replace("    camera_route_candidate_body_occlusions: 2,\n", "    camera_route_candidate_body_occlusions: 0,\n")
+            .replace("    camera_route_candidate_los_occlusions: 3,\n", "    camera_route_candidate_los_occlusions: 0,\n")
+            .replace("    camera_route_selected_clear_samples: 16,\n", "    camera_route_selected_clear_samples: 0,\n")
+            .replace("    camera_route_minimum_clearance_voxels: Some(1),\n", "    camera_route_minimum_clearance_voxels: None,\n")
+        )
+        record = self.build(
+            self.make_run("run_focus_unavailable_camera", focus_unavailable_camera)
+        )["runs"][0]
+        self.assertEqual(record["overall_classification"], "Blocked")
+        self.assertIn("camera_route_focus_unavailable", {item["code"] for item in record["issues"]})
+
+    def test_schema_25_camera_preflight_truth_fails_closed(self) -> None:
+        mutations = (
+            (
+                "missing_plan_hash",
+                '    camera_route_plan_hash: Some("0000000000000001"),\n',
+                "",
+                "camera_route_acceptance_invariant_failed",
+            ),
+            (
+                "unloaded_chunk",
+                "    camera_route_loaded_chunk_checks: 9,\n    camera_route_proven_air_chunk_checks: 3,\n    camera_route_unloaded_chunk_checks: 0,\n",
+                "    camera_route_loaded_chunk_checks: 8,\n    camera_route_proven_air_chunk_checks: 3,\n    camera_route_unloaded_chunk_checks: 1,\n",
+                "camera_route_acceptance_invariant_failed",
+            ),
+            (
+                "proven_air_accounting_mismatch",
+                "    camera_route_proven_air_chunk_checks: 3,\n",
+                "    camera_route_proven_air_chunk_checks: 4,\n",
+                "camera_route_chunk_accounting_mismatch",
+            ),
+            (
+                "missing_proven_air_counter",
+                "    camera_route_proven_air_chunk_checks: 3,\n",
+                "",
+                "invalid_camera_route_counter",
+            ),
+            (
+                "selected_route_not_clear",
+                "    camera_route_selected_clear_samples: 16,\n",
+                "    camera_route_selected_clear_samples: 15,\n",
+                "camera_route_acceptance_invariant_failed",
+            ),
+            (
+                "candidate_occlusion_overflow",
+                "    camera_route_candidate_los_occlusions: 3,\n",
+                "    camera_route_candidate_los_occlusions: 129,\n",
+                "camera_route_candidate_occlusion_count_exceeded",
+            ),
+            (
+                "work_cap",
+                "    camera_route_voxel_queries: 12,\n    camera_route_voxel_query_cap: 153600,\n    camera_route_required_chunk_checks: 12,\n    camera_route_loaded_chunk_checks: 9,\n    camera_route_proven_air_chunk_checks: 3,\n",
+                "    camera_route_voxel_queries: 153600,\n    camera_route_voxel_query_cap: 153600,\n    camera_route_required_chunk_checks: 153600,\n    camera_route_loaded_chunk_checks: 120000,\n    camera_route_proven_air_chunk_checks: 33600,\n",
+                "camera_route_acceptance_invariant_failed",
+            ),
+            (
+                "obsolete_columns",
+                "    camera_route_required_chunk_checks: 12,\n",
+                "    camera_route_required_columns: 12,\n",
+                "obsolete_camera_route_field",
+            ),
+        )
+        for name, old, new, expected_code in mutations:
+            with self.subTest(name=name):
+                report = modern_report().replace(old, new)
+                record = self.build(self.make_run(f"run_camera_{name}", report))["runs"][0]
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertIn(expected_code, {item["code"] for item in record["issues"]})
+
+        unavailable = (
+            modern_report()
+            .replace('    camera_route_plan_hash: Some("0000000000000001"),\n', "    camera_route_plan_hash: None,\n")
+            .replace("    camera_route_available: true,\n", "    camera_route_available: false,\n")
+            .replace(
+                "    camera_route_unavailable_reason: None,\n",
+                '    camera_route_unavailable_reason: Some("camera-route-los-occluded"),\n',
+            )
+            .replace("    camera_route_variant_index: Some(0),\n", "    camera_route_variant_index: None,\n")
+            .replace(
+                "    camera_route_minimum_clearance_voxels: Some(1),\n",
+                "    camera_route_minimum_clearance_voxels: None,\n",
+            )
+            .replace(
+                "    camera_route_selected_clear_samples: 16,\n",
+                "    camera_route_selected_clear_samples: 0,\n",
+            )
+        )
+        record = self.build(self.make_run("run_camera_unavailable", unavailable))["runs"][0]
+        self.assertEqual(record["overall_classification"], "Blocked")
+        self.assertIn("camera_route_unavailable", {item["code"] for item in record["issues"]})
+
+    def test_schema_25_non_applicable_camera_sentinel_is_current_observed(self) -> None:
+        report = (
+            modern_report()
+            .replace('    requested_route_focus: "lava",\n', '    requested_route_focus: "streaming",\n')
+            .replace('    resolved_route_focus: "lava",\n', '    resolved_route_focus: "streaming",\n')
+            .replace("    route_focus_anchor: Some([1520, 52, -2320]),\n", "    route_focus_anchor: None,\n")
+            .replace("    camera_route_preflight_applicable: true,\n", "    camera_route_preflight_applicable: false,\n")
+            .replace('    camera_route_plan_hash: Some("0000000000000001"),\n', "    camera_route_plan_hash: None,\n")
+            .replace("    camera_route_available: true,\n", "    camera_route_available: false,\n")
+            .replace("    camera_route_variant_index: Some(0),\n", "    camera_route_variant_index: None,\n")
+            .replace("    camera_route_variant_count: 8,\n", "    camera_route_variant_count: 0,\n")
+            .replace("    camera_route_validation_samples: 16,\n", "    camera_route_validation_samples: 0,\n")
+            .replace("    camera_route_voxel_queries: 12,\n", "    camera_route_voxel_queries: 0,\n")
+            .replace("    camera_route_voxel_query_cap: 153600,\n", "    camera_route_voxel_query_cap: 0,\n")
+            .replace("    camera_route_required_chunk_checks: 12,\n", "    camera_route_required_chunk_checks: 0,\n")
+            .replace("    camera_route_loaded_chunk_checks: 9,\n", "    camera_route_loaded_chunk_checks: 0,\n")
+            .replace("    camera_route_proven_air_chunk_checks: 3,\n", "    camera_route_proven_air_chunk_checks: 0,\n")
+            .replace("    camera_route_candidate_body_occlusions: 2,\n", "    camera_route_candidate_body_occlusions: 0,\n")
+            .replace("    camera_route_candidate_los_occlusions: 3,\n", "    camera_route_candidate_los_occlusions: 0,\n")
+            .replace("    camera_route_selected_clear_samples: 16,\n", "    camera_route_selected_clear_samples: 0,\n")
+            .replace("    camera_route_minimum_clearance_voxels: Some(1),\n", "    camera_route_minimum_clearance_voxels: None,\n")
+        )
+        record = self.build(self.make_run("run_camera_not_applicable", report))["runs"][0]
+        self.assertEqual(record["report_schema_variant"], "current")
+        self.assertEqual(record["overall_classification"], "Observed")
+
+    def test_available_spatial_route_requires_anchor_and_compatible_profile(self) -> None:
+        cases = (
+            (
+                "waypoint_without_anchor",
+                "waypoint",
+                "AstralFrontier",
+                "None",
+                "available_route_focus_missing_anchor",
+            ),
+            (
+                "river_in_astral_world",
+                "river",
+                "AstralFrontier",
+                "Some([1, 2, 3])",
+                "route_focus_profile_mismatch",
+            ),
+            (
+                "lava_in_natural_world",
+                "lava",
+                "Natural",
+                "Some([1, 2, 3])",
+                "route_focus_profile_mismatch",
+            ),
+            (
+                "near_far_in_unknown_world",
+                "near-far",
+                "Unknown",
+                "Some([1, 2, 3])",
+                "route_focus_profile_mismatch",
+            ),
+        )
+        for name, focus, world_profile, anchor, code in cases:
+            with self.subTest(name=name):
+                report = (
+                    modern_report()
+                    .replace(
+                        '        world_profile: Some("AstralFrontier"),\n',
+                        f'        world_profile: Some("{world_profile}"),\n',
+                    )
+                    .replace(
+                        '    requested_route_focus: "lava",\n',
+                        f'    requested_route_focus: "{focus}",\n',
+                    )
+                    .replace(
+                        '    resolved_route_focus: "lava",\n',
+                        f'    resolved_route_focus: "{focus}",\n',
+                    )
+                    .replace(
+                        "    route_focus_anchor: Some([1520, 52, -2320]),\n",
+                        f"    route_focus_anchor: {anchor},\n",
+                    )
+                )
+                record = self.build(self.make_run(f"run_{name}", report))["runs"][0]
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertIn(code, {item["code"] for item in record["issues"]})
+
+        anchored_waypoint = modern_report().replace(
+            '    requested_route_focus: "lava",\n',
+            '    requested_route_focus: "waypoint",\n',
+        ).replace(
+            '    resolved_route_focus: "lava",\n',
+            '    resolved_route_focus: "waypoint",\n',
+        ).replace(
+            "    route_focus_anchor: Some([1520, 52, -2320]),\n",
+            "    route_focus_anchor: Some([1, 2, 3]),\n",
+        )
+        record = self.build(
+            self.make_run("run_anchored_waypoint", anchored_waypoint)
+        )["runs"][0]
+        self.assertEqual(record["overall_classification"], "Rejected")
+
+    def test_hydro_kind_and_semantic_cohort_invariants_fail_closed(self) -> None:
+        mutations = (
+            (
+                "hydro_total",
+                "        resident_water_indices: 4200,\n",
+                "        resident_water_indices: 4194,\n",
+                "planetary_fluid_kind_integrity_mismatch",
+            ),
+            (
+                "cohort_kind_sum",
+                "        resident_semantic_cohort_kind_counts: [0, 0, 0, 1, 1, 0],\n",
+                "        resident_semantic_cohort_kind_counts: [0, 0, 0, 1, 0, 0],\n",
+                "planetary_semantic_cohort_payload_mismatch",
+            ),
+            (
+                "cohort_budget",
+                "        budget_semantic_cohort_vertices: 1944,\n",
+                "        budget_semantic_cohort_vertices: 1945,\n",
+                "unexpected_semantic_cohort_budget",
+            ),
+        )
+        for name, old, new, code in mutations:
+            with self.subTest(name=name):
+                record = self.build(
+                    self.make_run(f"run_{name}", modern_report().replace(old, new))
+                )["runs"][0]
+                self.assertEqual(record["overall_classification"], "Rejected")
+                self.assertIn(code, {item["code"] for item in record["issues"]})
+
+    def test_disabled_semantic_cohorts_require_zero_population_and_work(self) -> None:
+        report = modern_report().replace(
+            '        semantic_cohort_mode: "SilhouettesV1",\n',
+            '        semantic_cohort_mode: "Disabled",\n',
+        )
+        record = self.build(self.make_run("run_disabled_cohorts_with_work", report))["runs"][0]
+        self.assertEqual(record["overall_classification"], "Rejected")
+        self.assertIn(
+            "planetary_disabled_semantic_cohorts_have_live_work",
+            {item["code"] for item in record["issues"]},
+        )
+
     def test_pre_hydro_report_without_fluid_contract_is_rejected(self) -> None:
-        report = modern_report().replace('    qa_report_schema_version: "2.0.0",\n', "")
+        report = modern_report().replace('    qa_report_schema_version: "2.5.0",\n', "")
         hydro_lines = (
             "        resident_fluid_entities: 6,\n",
             "        resident_fluid_vertices: 2100,\n",
@@ -575,11 +1140,11 @@ class EvidenceManifestTests(unittest.TestCase):
         record = self.build(run)["runs"][0]
 
         self.assertEqual(record["report_schema_variant"], "legacy")
-        self.assertEqual(record["overall_classification"], "Rejected")
+        self.assertEqual(record["overall_classification"], "Blocked")
         codes = {item["code"] for item in record["issues"]}
         self.assertIn("legacy_missing_current_qa_report_schema", codes)
-        self.assertIn("invalid_planetary_hydro_mode", codes)
-        self.assertIn("invalid_planetary_budget", codes)
+        self.assertNotIn("invalid_planetary_hydro_mode", codes)
+        self.assertNotIn("invalid_planetary_budget", codes)
 
     def test_report_symlink_escape_is_rejected_without_hashing_target(self) -> None:
         outside_report = self.root / "outside-report.ron"
@@ -666,6 +1231,27 @@ class EvidenceManifestTests(unittest.TestCase):
         codes = {item["code"] for item in manifest["issues"]}
         self.assertEqual(codes, {"implicit_latest_forbidden", "run_path_traversal"})
 
+    def test_external_run_is_rejected_without_serializing_workstation_path(self) -> None:
+        external_run = Path(self.temporary.name) / "private-owner" / "run_external"
+        external_run.mkdir(parents=True)
+        (external_run / "report.ron").write_text(modern_report(), encoding="utf-8")
+        (external_run / "shot_0000.png").write_bytes(PNG_1X1)
+
+        manifest = evidence.build_manifest(
+            [external_run], repo_root=self.root, generated_at_utc=FIXED_TIME
+        )
+        serialized = json.dumps(manifest)
+
+        self.assertEqual(manifest["overall_classification"], "Rejected")
+        self.assertEqual(manifest["inputs"]["accepted_run_count"], 0)
+        self.assertEqual(manifest["runs"], [])
+        self.assertEqual(
+            {item["code"] for item in manifest["issues"]},
+            {"run_outside_repository"},
+        )
+        self.assertNotIn("private-owner", serialized)
+        self.assertNotIn(str(external_run), serialized)
+
     def test_rejected_input_issue_dominates_an_observed_valid_run(self) -> None:
         run = self.make_run("run_valid_beside_bad_input", modern_report())
         traversing = run / ".." / run.name
@@ -691,7 +1277,12 @@ class EvidenceManifestTests(unittest.TestCase):
         output = self.root / "generated" / "manifest.json"
         stdout = io.StringIO()
 
-        with contextlib.redirect_stdout(stdout):
+        synthetic_script = self.root / "tools" / "artifacts" / "build_evidence_manifest.py"
+        synthetic_script.parent.mkdir(parents=True)
+        synthetic_script.write_text("# fixture generator\n", encoding="utf-8")
+        with contextlib.redirect_stdout(stdout), mock.patch.object(
+            evidence, "__file__", str(synthetic_script)
+        ):
             exit_code = evidence.main(
                 ["--qa-run", str(run), "--output", str(output)]
             )

@@ -32,7 +32,7 @@ MAX_ARTIFACT_ROWS = 300
 PDF_CONTENT_WIDTH_MM = 174
 RUN_TABLE_HEADERS = (
     "Explicit run",
-    "Build / world",
+    "Build / world / grammar",
     "Viewport",
     "Route",
     "Route-only frame time",
@@ -58,6 +58,14 @@ CLAIM_ROWS_PER_PAGE = 8
 FILE_IDENTITY_HEADERS = ("Kind", "Path", "Bytes", "SHA-256")
 FILE_IDENTITY_WIDTHS_MM = (30, 66, 18, 60)
 GENERATOR_SOURCE_DISPLAY_LABEL = "generator\u00a0source"
+COHORT_KIND_NAMES = (
+    "NaturalGrove",
+    "NaturalKarst",
+    "NaturalMesa",
+    "AstralCrystal",
+    "AstralBasalt",
+    "AstralReef",
+)
 
 
 def load_pdf_dependencies() -> None:
@@ -190,6 +198,50 @@ def display_hash(value: str) -> str:
     return " ".join(value[index : index + 8] for index in range(0, len(value), 8))
 
 
+def fmt_optional_count(value: object) -> str:
+    return "not recorded" if value is None else fmt_number(value, 0)
+
+
+def route_evidence_text(route: dict[str, Any]) -> str:
+    return (
+        f"{route['requested_route_focus']} -> {route['resolved_route_focus']}\n"
+        f"{fmt_number(route['requested_route_distance_m'], 0)} m"
+    )
+
+
+def generation_identity_text(identity: dict[str, Any]) -> str:
+    return (
+        f"{identity.get('world_name') or 'unrecorded'}\n"
+        f"seed {identity.get('world_seed')}; profile {identity.get('world_profile')}; "
+        f"scenery {identity.get('scenery_quality')}; grammar {identity['terrain_grammar']}"
+    )
+
+
+def edit_store_state_text(edit_store: dict[str, Any]) -> str:
+    return (
+        f"{edit_store['world_edit_store_status']}; compatible "
+        f"{'yes' if edit_store['world_edit_store_compatible'] else 'no'}\n"
+        f"edited chunks {fmt_optional_count(edit_store['world_edit_store_edited_chunks'])}; "
+        f"reason {edit_store['world_edit_store_block_reason_code'] or 'none'}"
+    )
+
+
+def edit_store_identity_text(edit_store: dict[str, Any]) -> str:
+    return (
+        f"seed {edit_store['world_edit_store_seed']}; "
+        f"profile {edit_store['world_edit_store_profile']}; "
+        f"scenery {edit_store['world_edit_store_scenery_quality']}; "
+        f"grammar {edit_store['world_edit_store_terrain_grammar']}"
+    )
+
+
+def cohort_kind_text(counts: Sequence[int]) -> str:
+    return "; ".join(
+        f"{name} {fmt_number(count, 0)}"
+        for name, count in zip(COHORT_KIND_NAMES, counts, strict=True)
+    )
+
+
 def scaled_image(path: Path, width: float) -> Image:
     with PILImage.open(path) as source:
         pixel_width, pixel_height = source.size
@@ -292,12 +344,85 @@ def run_rows(evidence: CanonicalEvidence) -> list[list[str]]:
         rows.append(
             [
                 run["input_path"],
-                f"{identity['build_profile']} / {identity.get('world_profile', 'unrecorded')}",
+                f"{identity['build_profile']} / {identity.get('world_profile', 'unrecorded')} / {identity['terrain_grammar']}",
                 f"{viewport['physical_width']}x{viewport['physical_height']} @ {fmt_number(viewport['dpi_percent'], 0)}%",
-                f"{route['route_focus']} / {fmt_number(route['requested_route_distance_m'], 0)} m",
+                route_evidence_text(route),
                 f"n={fmt_number(frame['sample_count'], 0)}; p50 {fmt_number(frame['median_ms'])}; p95 {fmt_number(frame['p95_ms'])}; p99 {fmt_number(frame['p99_ms'])}; max {fmt_number(frame['max_ms'])} ms",
-                f"{planetary['telemetry']['surface_material_mode']} / {planetary['live']['profile']}",
+                f"{planetary['telemetry']['surface_material_mode']} / {planetary['live']['profile']}; Hydro {planetary['telemetry']['hydro_mode']}; cohorts {planetary['telemetry']['semantic_cohort_mode']}",
                 str(len(observations["screenshots"]["referenced_files"])),
+            ]
+        )
+    return rows
+
+
+def generation_identity_rows(evidence: CanonicalEvidence) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for index, run in enumerate(evidence.runs, start=1):
+        observations = run["raw_observations"]
+        identity = observations["run_identity"]
+        edit_store = observations["world_edit_store"]
+        telemetry = observations["planetary_streaming"]["telemetry"]
+        rows.append(
+            [
+                f"Run {index:02d}",
+                generation_identity_text(identity),
+                edit_store_state_text(edit_store),
+                edit_store_identity_text(edit_store),
+                f"desired {telemetry['desired_terrain_grammar']} -> active {telemetry['active_terrain_grammar']}",
+            ]
+        )
+    return rows
+
+
+def route_detail_rows(evidence: CanonicalEvidence) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for index, run in enumerate(evidence.runs, start=1):
+        route = run["raw_observations"]["route"]
+        rows.append(
+            [
+                f"Run {index:02d}",
+                f"{route['requested_route_focus']} -> {route['resolved_route_focus']}",
+                f"available {'yes' if route['route_focus_available'] else 'no'}; reason {route['route_focus_unavailable_reason'] or 'none'}",
+                "not recorded" if route["route_focus_anchor"] is None else str(route["route_focus_anchor"]),
+                f"candidates {fmt_optional_count(route['route_focus_search_visited_candidates'])}/"
+                f"{fmt_number(route['route_focus_search_candidate_cap'], 0)}; classifications "
+                f"{fmt_optional_count(route['route_focus_classification_queries'])}/"
+                f"{fmt_number(route['route_focus_classification_query_cap'], 0)}; exhausted "
+                f"{'yes' if route['route_focus_search_cap_exhausted'] else 'no'}",
+            ]
+        )
+    return rows
+
+
+def layer_evidence_rows(evidence: CanonicalEvidence) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for index, run in enumerate(evidence.runs, start=1):
+        planetary = run["raw_observations"]["planetary_streaming"]
+        live = planetary["live"]
+        budgets = planetary["budgets"]
+        telemetry = planetary["telemetry"]
+        rows.extend(
+            [
+                [
+                    f"Run {index:02d}",
+                    "Far Hydro",
+                    telemetry["hydro_mode"],
+                    f"water {fmt_number(live['resident_water_indices'], 0)}; lava {fmt_number(live['resident_lava_indices'], 0)}; "
+                    f"rings W {live['water_ring_indices']} / L {live['lava_ring_indices']}",
+                    f"{fmt_number(live['resident_fluid_vertices'], 0)} vertices; {fmt_number(live['resident_fluid_indices'], 0)} indices; "
+                    f"{fmt_number(live['resident_fluid_mesh_bytes'], 0)}/{fmt_number(budgets['budget_fluid_mesh_bytes'], 0)} B; "
+                    f"integrity {'Passed' if telemetry['resident_fluid_observation_valid'] and telemetry['resident_fluid_kind_integrity_valid'] else 'Rejected'}",
+                ],
+                [
+                    f"Run {index:02d}",
+                    "Semantic cohorts",
+                    telemetry["semantic_cohort_mode"],
+                    cohort_kind_text(live["resident_semantic_cohort_kind_counts"]),
+                    f"{fmt_number(live['resident_semantic_cohort_count'], 0)} cohorts; {fmt_number(live['resident_semantic_cohort_vertices'], 0)} vertices; "
+                    f"{fmt_number(live['resident_semantic_cohort_indices'], 0)} indices; {fmt_number(live['resident_semantic_cohort_mesh_bytes'], 0)}/"
+                    f"{fmt_number(budgets['budget_semantic_cohort_mesh_bytes'], 0)} B; integrity "
+                    f"{'Passed' if telemetry['resident_semantic_cohort_observation_valid'] and telemetry['resident_semantic_cohort_payload_integrity_valid'] else 'Rejected'}",
+                ],
             ]
         )
     return rows
@@ -533,7 +658,7 @@ def build(evidence: CanonicalEvidence, output: Path, repo_root: Path) -> None:
         [
             paragraph("Evidence boundary", "h1"),
             paragraph(
-                "Every run below uses the current report schema, route-only frame-time quantiles, explicit viewport provenance, planetary live values and hard budgets, and manifest-referenced PNG identities. The aggregate remains Observed because runtime measurements are observations even when integrity and budget checks Passed."
+                "Every run below uses QA report schema 2.5.0 through manifest schema 1.5.0, including immutable terrain grammar, compatible edit-store identity, combined dense-residency proof, route-only frame-time quantiles, explicit viewport provenance, planetary live values and hard budgets, and manifest-referenced PNG identities. The aggregate remains Observed because runtime measurements are observations even when integrity and budget checks Passed."
             ),
             callout(
                 "No fabricated release result",
@@ -546,6 +671,33 @@ def build(evidence: CanonicalEvidence, output: Path, repo_root: Path) -> None:
                 RUN_TABLE_HEADERS,
                 run_rows(evidence),
                 [width * mm for width in RUN_TABLE_WIDTHS_MM],
+            ),
+            paragraph("Generation identity and edit-store compatibility", "h1"),
+            paragraph(
+                "Terrain grammar is part of the immutable world identity. The edit store repeats that exact identity, while far-field desired and active grammar remain separate observations. Compatible is a manifest-validated authority state, not an inference from an empty directory or world name."
+            ),
+            matrix(
+                ["Run", "World generation identity", "Edit-store state", "Edit-store identity", "Far grammar"],
+                generation_identity_rows(evidence),
+                [16 * mm, 42 * mm, 30 * mm, 52 * mm, CONTENT_W - 140 * mm],
+            ),
+            paragraph("Route resolution and bounded search work", "h1"),
+            paragraph(
+                "Requested and resolved focus remain separate. A null actual counter remains not recorded and is never presented as zero."
+            ),
+            matrix(
+                ["Run", "Requested -> resolved", "Availability / reason", "Anchor", "Actual / cap"],
+                route_detail_rows(evidence),
+                [16 * mm, 32 * mm, 38 * mm, 25 * mm, CONTENT_W - 111 * mm],
+            ),
+            paragraph("Far Hydro and semantic-cohort evidence", "h1"),
+            paragraph(
+                "These are serialized post-deferred counts, not a perceptual verdict. Water and lava stay separate; semantic kinds retain the fixed schema order. Passed below means only that observation, scheduler, payload, and budget invariants validated."
+            ),
+            matrix(
+                ["Run", "Layer", "Mode", "Kinds / rings", "Payload / budget / integrity"],
+                layer_evidence_rows(evidence),
+                [16 * mm, 26 * mm, 24 * mm, 50 * mm, CONTENT_W - 116 * mm],
             ),
             *budget_flowables(evidence),
             PageBreak(),

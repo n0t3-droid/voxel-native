@@ -1,6 +1,6 @@
 # Voxel-Native Evidence Manifest Schema
 
-Status: schema `1.0.0`
+Status: schema `1.5.0`
 
 Generator: `tools/artifacts/build_evidence_manifest.py`
 
@@ -18,13 +18,19 @@ performance promise merely because its input files are intact.
 
 ## Input and output contract
 
-Every QA run must be supplied explicitly:
+Every QA run must be supplied explicitly. The path variables below are
+placeholders for newly generated, reviewed runs; the repository does not ship
+the historical local `qa_runs/` tree:
 
 ```powershell
+$runA = '<path to accepted run A>'
+$runB = '<path to accepted run B>'
+$runC = '<path to accepted run C>'
+
 python -B tools/artifacts/build_evidence_manifest.py `
-  --qa-run qa_runs/run_1786329313 `
-  --qa-run qa_runs/run_1786329471 `
-  --qa-run qa_runs/run_1786329490 `
+  --qa-run $runA `
+  --qa-run $runB `
+  --qa-run $runC `
   --output output/evidence/planetary-manifest.json
 ```
 
@@ -107,7 +113,7 @@ runs[]
 |---|---|---|
 | `argument_count` | integer | Number of raw `--qa-run` arguments. |
 | `accepted_run_count` | integer | Canonical, unique, non-`latest`, non-traversing run paths processed. |
-| `qa_run_directories` | string array | Stable list of accepted explicit run paths. |
+| `qa_run_directories` | string array | Stable repository-relative list of accepted explicit run paths. |
 | `selection_policy` | string | Fixed declaration that selection was explicit and non-scanning. |
 
 ### `file_hashes[]`
@@ -117,7 +123,7 @@ Every successfully read evidence file has:
 | Field | Type | Meaning |
 |---|---|---|
 | `kind` | enum | `report`, `screenshot`, or `generator_source`. |
-| `path` | string | Repository-relative when inside the repository, otherwise canonical absolute path. |
+| `path` | string | Repository-relative path. External runs are rejected before inspection so public manifests cannot serialize workstation paths. |
 | `sha256` | string | Lowercase SHA-256 hexadecimal digest. |
 | `size_bytes` | integer | Bytes streamed through the hash calculation. |
 
@@ -172,6 +178,7 @@ claims[]
 issues[]
 raw_observations
   run_identity
+  world_edit_store
   viewport
   route
   route_frame_times
@@ -181,9 +188,15 @@ raw_observations
 
 `report_schema_variant` is:
 
-- `current`: `qa_report_schema_version` is exactly `2.0.0`, route-only
-  frame-time evidence is present, and the derived build profile is present;
-- `legacy`: the report parsed, but one or both current contracts are absent;
+- `current`: `qa_report_schema_version` is exactly `2.5.0`; all missing or
+  contradictory current fields then fail through their own explicit checks;
+- `legacy`: the report has no schema identity or is exactly `2.0.0`, `2.1.0`,
+  `2.2.0`, or `2.3.0`; its
+  historical observations remain inspectable, but every publishable claim is
+  `Blocked` and no 2.4 field is inferred;
+- `unsupported`: the report names any other schema version, including a future
+  version; the run is `Rejected` until the parser and validators are explicitly
+  upgraded;
 - `unavailable`: the report was missing, malformed, oversized, or contained a
   non-finite number.
 
@@ -198,6 +211,7 @@ Known fields are copied without inventing defaults:
 - `world_seed`
 - `world_profile`
 - `scenery_quality`
+- `terrain_grammar`
 - `git_sha`
 - `git_dirty`
 - `source_fingerprint`
@@ -205,12 +219,41 @@ Known fields are copied without inventing defaults:
 - `toolchain`
 - `hardware`
 
-`package_version` and derived `build_profile` are required for the current
-identity claim. The remaining provenance fields are optional, but any value
+`package_version`, derived `build_profile`, and `terrain_grammar` are required
+for the current identity claim. Terrain grammar is exactly `V1`, `V2`, or `V3`
+and is part of the immutable generation identity alongside seed, world profile,
+and scenery quality. The remaining provenance fields are optional, but any value
 that is present must have the serialized type promised by `src/qa.rs`.
 
 A legacy report without `build_profile` is `Blocked`; the generator never
 guesses Debug or Release from FPS, paths, timestamps, or naming conventions.
+
+### `raw_observations.world_edit_store`
+
+QA schema 2.4 records the edited-voxel snapshot authority separately from the
+world metadata. The observation preserves:
+
+- `world_edit_store_status`: exactly `unchecked`, `compatible`, or `blocked`;
+- `world_edit_store_compatible`;
+- `world_edit_store_seed`;
+- `world_edit_store_profile`;
+- `world_edit_store_scenery_quality`;
+- `world_edit_store_terrain_grammar`;
+- `world_edit_store_edited_chunks`;
+- `world_edit_store_block_reason_code`.
+
+A `compatible` store requires `compatible=true`, a non-negative edited-chunk
+count, no block reason, and an exact four-field identity match to
+`run_identity`: seed, profile, scenery quality, and terrain grammar. A
+`blocked` store requires `compatible=false`, no edited-chunk count, one bounded
+reason code, and the same exact identity match. An `unchecked` store is the
+closed empty sentinel: compatibility is false; count and reason are null; and
+all four store-identity fields are null. Contradictory combinations are
+`Rejected`; coherent blocked or unchecked state remains `Blocked`.
+
+Artifact consumers accept only a current `compatible` store and repeat its
+identity and edited-chunk count instead of inferring safety from an empty
+directory, a world name, or a grammar default.
 
 ### `raw_observations.viewport`
 
@@ -235,7 +278,22 @@ full responsive viewport/DPI matrix.
 
 The route observation preserves:
 
-- `route_focus`
+- `requested_route_focus`
+- `resolved_route_focus`
+- `route_focus_available`
+- nullable `route_focus_unavailable_reason`
+- nullable signed-integer `[x, y, z]` `route_focus_anchor`
+- nullable actual `route_focus_search_visited_candidates` and
+  `route_focus_classification_queries`
+- non-negative candidate/classification hard caps
+- `route_focus_search_cap_exhausted`
+- `camera_route_policy` and `camera_route_preflight_applicable`
+- nullable camera plan hash, selected variant, unavailable reason, and minimum
+  clearance
+- camera availability, variant/sample/query limits, actual query work, exact
+  XYZ request-resolution accounting split into loaded, proven-air, and
+  unavailable checks, candidate occlusion diagnostics, selected-clear samples,
+  and work-cap exhaustion
 - `requested_route_distance_m`
 - `max_horizontal_displacement_m`
 - `requested_duration_seconds`
@@ -250,6 +308,62 @@ The route observation preserves:
 All numeric values must be finite and non-negative. `average_fps` and
 `final_smoothed_fps` remain observations. The manifest defines no hidden FPS
 acceptance threshold.
+
+An available requested focus must resolve to itself, have no unavailable
+reason, and report no exhausted search. An unavailable focus is `Blocked`, must
+name a real fallback route and bounded reason, and may claim exhaustion only
+when a known actual counter exactly reached its cap. Optional actual counters
+may be null when the upstream terrain API does not yet expose that work; null
+is preserved rather than replaced by zero. Any known actual count above its
+serialized cap is `Rejected`.
+
+Available `waypoint`, `river`, `lava`, and `near-far` focuses are spatial
+claims and therefore require a non-null three-integer anchor. Their requested
+focus must also agree with `run_identity.world_profile`: `river` requires
+`Natural`; `waypoint` and `lava` require `AstralFrontier`; and `near-far`
+accepts either supported profile. Missing anchors, missing profiles, and
+incompatible profiles are `Rejected`, so a consumer cannot publish an
+otherwise well-shaped but impossible route/world pairing.
+
+Schema 2.4 distinguishes camera-preflight applicability from success. It
+applies exactly to requested `river`, `lava`, and `near-far` routes. For those
+routes, the policy is `preflight-v1`, applicability and availability are true,
+the plan hash is exactly 16 lowercase hexadecimal digits, the selected variant
+is in `0..7`, and v1 is exactly eight variants, sixteen validation samples, and
+a 153,600 voxel-query cap. Actual query work is positive and strictly below
+that cap. Each voxel query checks its exact owning XYZ chunk against the current
+streaming request. The result is either resident
+(`camera_route_loaded_chunk_checks`), scheduler-proven procedural air
+(`camera_route_proven_air_chunk_checks`), or unavailable
+(`camera_route_unloaded_chunk_checks`). Proven air is not reported as resident:
+it requires the streamer's conservative cached column ceiling above the queried
+chunk and no edit override for that exact chunk. The invariant is
+`required == voxel_queries == loaded + proven_air + unloaded`; an available
+route additionally requires `unloaded == 0`. These counters count checks, not
+unique chunk IDs.
+
+`camera_route_selected_clear_samples == camera_route_validation_samples == 16`
+binds the selected plan to all clear samples. Candidate body/LOS occlusion
+counters cover rejected alternatives and are diagnostic unsigned integers;
+each is bounded by `variant_count * validation_samples` (128) but need not be
+zero. Minimum clearance is positive, no unavailable reason exists, and the
+work cap is not exhausted. A coherent unavailable applicable route is
+`Blocked`; contradictory state is `Rejected`.
+
+If focus resolution fails before preflight starts, an applicable route may use
+the closed reason `camera-route-focus-unavailable` with an unavailable focus,
+no plan/index/clearance, the complete zero-work camera sentinel, and no exhausted
+work cap. That state is `Blocked`, never Observed camera evidence.
+
+For `scenic`, `waypoint`, and `streaming`, applicability and availability are
+false, plan hash/index/clearance/reason are null, voxel queries and all four
+required/loaded/proven-air/unloaded counters (as well as the remaining preflight
+counters and caps) are zero, and work-cap exhaustion is false. This exact
+sentinel is valid current Observed evidence, but it is not camera-preflight
+proof. Generic Python and JavaScript consumers accept it without promoting it.
+Obsolete `*_columns`, ambiguous `*_chunks`, and old unqualified
+body/LOS-occlusion field names are rejected rather than silently
+reinterpreted.
 
 Legacy reports that do not separate requested duration and screenshot write-tail
 time are retained but `Blocked` for current route-timing provenance.
@@ -307,10 +421,29 @@ The observation separates:
   sample-cache, and coverage-work limits;
 - `telemetry`: scheduler, rebuild, query, cache, clamp, and camera coordinates.
 
-QA report schema `2.0.0` is the first current contract with Far Hydro evidence.
-Reports without that exact version remain readable but are classified `legacy`
-and `Blocked`; field presence or zero defaults are never used to reinterpret a
-pre-Hydro report as current evidence.
+QA report schema `2.5.0` is the current contract with immutable terrain-grammar
+identity, edit-store compatibility, route-resolution truth, visibility-aware
+camera-plan evidence for applicable Hydro routes, per-kind Far Hydro evidence,
+Far Semantic Cohorts v1, and the exact combined resident-plus-in-flight dense
+chunk budget. Exact `2.4.0`, `2.3.0`, `2.2.0`, `2.1.0`, and `2.0.0`
+reports remain readable historical evidence but are classified `legacy` and
+`Blocked`; field presence or zero defaults never reinterpret them as current.
+Any other named version is unsupported and rejected fail-closed.
+
+`desired_terrain_grammar` must be exactly `V1`, `V2`, or `V3` and equal
+`run_identity.terrain_grammar`. When planetary streaming is enabled,
+`active_terrain_grammar` must equal that desired grammar; when disabled, active
+grammar must be null. The far-field `profile` likewise equals the immutable
+run identity profile. This prevents a worker or cached ring built under one
+grammar from being reported as evidence for another.
+
+Near-field evidence is current only when `dense_chunks` equals
+`loaded_chunks + pending_terrain`, `dense_chunk_budget` is exactly `2400`, the
+current and peak totals remain at or below that limit, and
+`dense_chunk_budget_exceeded` is false. The final frontier must be complete
+with zero pending terrain, pending meshes, and dirty chunks. Independent peak
+component values are not substituted for `peak_dense_chunks`, because their
+maxima may occur on different frames.
 
 The `resident_*` and `ring_*` live fields are post-`apply_deferred` Bevy ECS
 observations. Matching `scheduler_resident_*` and `scheduler_ring_*` fields
@@ -323,22 +456,49 @@ Far Hydro truth is separate from the established terrain truth:
 
 - `hydro_mode` is exactly `Disabled` or `DescriptiveV1`;
 - `resident_fluid_*` and `fluid_ring_*` are post-`apply_deferred` ECS values;
+- `resident_water_indices` plus `resident_lava_indices` must equal total fluid
+  indices; the same identity holds per LOD and for scheduler copies;
+- every water/lava count is divisible by six, proving complete top-face quads;
 - `scheduler_resident_fluid_*` and `scheduler_fluid_ring_*` are independent
   scheduler bookkeeping and must match the observed values exactly;
 - `resident_fluid_observation_valid` must be true, while fluid overflow,
   duplicate-slot, out-of-range, scheduler-mismatch, budget-exceeded and
   rejection counters must all report the clean state;
+- `resident_fluid_kind_integrity_valid` must independently be true;
 - `budget_fluid_*`, `budget_fluid_ring_build_bytes`, and
-  `budget_atomic_ring_build_bytes` retain the separate fluid and paired worker
-  ceilings;
+  `budget_hydro_atomic_ring_build_bytes=653008` retain the Hydro-only worker
+  contract; `budget_atomic_ring_build_bytes=757984` is the larger combined
+  terrain + Hydro + optional-cohort ceiling;
 - `last_fluid_classification_queries`, `last_fluid_biome_queries`,
   `last_fluid_vertices`, and `last_fluid_indices` record bounded latest-work
   observations, not a performance or visual-quality promise.
 
 When `hydro_mode` is `Disabled`, all fluid ECS/scheduler populations, per-ring
-arrays, and latest-work counters must be zero. This fail-closed relationship
+arrays, water/lava categories, and latest-work counters must be zero. This fail-closed relationship
 prevents an off/on transition or stale result from being mislabeled as a clean
 rollback run.
+
+Far Semantic Cohorts are a separately gated render-only L5 layer:
+
+- `semantic_cohort_mode` is `Disabled` or `SilhouettesV1`;
+- the exact v1 budgets are one entity, 81 candidates, 1,944 vertices, 2,916
+  indices, 104,976 mesh bytes, 3,721 hash scans, 81 height queries, and 81 biome
+  queries;
+- six-element kind arrays have the fixed order `NaturalGrove`, `NaturalKarst`,
+  `NaturalMesa`, `AstralCrystal`, `AstralBasalt`, `AstralReef`;
+- kind counts sum exactly to cohort count; each emitted cohort contributes 24
+  vertices and 36 indices; mesh bytes are recomputed as `vertices * 48 +
+  indices * 4`;
+- observed populations and per-kind counts equal scheduler copies exactly;
+- `resident_semantic_cohort_observation_valid` and
+  `resident_semantic_cohort_payload_integrity_valid` must be true, while
+  overflow, mismatch, budget, and rejection indicators remain clean;
+- the latest emitted count cannot exceed latest candidates, and latest work is
+  bounded by its serialized caps;
+- `Disabled` requires every live, scheduler, latest-work, and per-kind value to
+  be zero. `SilhouettesV1` permits a zero latest record before L5 is first
+  built; a completed L5 record scans exactly 3,721 cells and performs one
+  height plus one biome query per candidate.
 
 Material-transition evidence is deliberately redundant and cross-checked:
 
@@ -451,6 +611,21 @@ The suite covers:
 - missing or stale QA report schema version, invalid Hydro modes, Hydro-disabled
   nonzero work, fluid scheduler/ECS mismatches, invalid observations, and fluid
   budget overflow;
+- exact 2.4/2.3/2.2/2.1/2.0 legacy blocking and rejection of unsupported
+  older/future schemas;
+- exact current/peak dense-residency accounting, the fixed 2,400-chunk budget,
+  overflow/rejection truth, and final near-field settlement;
+- required V1/V2/V3 terrain grammar, exact edit-store identity/status invariants,
+  and desired/active far-grammar agreement;
+- contradictory requested/resolved route truth, unavailable-route blocking,
+  optional search work, and cap overflow;
+- schema-2.5 camera applicability, exact non-applicable sentinel acceptance,
+  missing/invalid plan binding, selected-clear-sample truth, exact XYZ
+  chunk-check accounting, candidate-occlusion bounds, and obsolete field
+  rejection;
+- water/lava total and per-ring integrity, cohort kind/geometry/byte integrity,
+  exact v1 budgets, disabled-mode zero work, and Python/JavaScript consumer
+  tamper rejection;
 - inconsistent desired/resident per-LOD material transition state and an
   unsupported surface-material mode;
 - duplicate canonical run inputs;
@@ -475,5 +650,5 @@ DOCX, PDF, workbook, Sites, Visualize, and GitHub release workflows should:
 8. never infer test totals not present in a separately hashed gate transcript;
 9. rerender and visually inspect final artifacts on their delivery surface.
 
-Test and gate transcripts are intentionally not synthesized by schema `1.0.0`.
+Test and gate transcripts are intentionally not synthesized by schema `1.5.0`.
 They require an explicit, hashed input contract in a future schema revision.

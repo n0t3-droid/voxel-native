@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.5.0"
 GENERATOR_NAME = "voxel-native-evidence-manifest"
-GENERATOR_VERSION = "1.0.0"
-SELECTION_POLICY = "explicit_cli_directories_only_no_latest_no_global_scan"
+GENERATOR_VERSION = "1.5.0"
+SELECTION_POLICY = "explicit_repo_contained_directories_only_no_latest_no_global_scan"
 CLASSIFICATIONS = ("Passed", "Observed", "Rejected", "Planned", "Blocked")
 PROTECTED_OUTPUT_DIRS = ("saves", "qa_runs", "agent_runs")
 
@@ -81,6 +81,15 @@ def _bounded_text(value: object, limit: int = 16_384) -> bool:
     return type(value) is str and 0 < len(value) <= limit and all(
         character.isprintable() for character in value
     )
+
+
+def _repository_relative_path(value: object) -> bool:
+    if not _bounded_text(value, 4_096):
+        return False
+    text = str(value)
+    if "\\" in text or text.startswith("/") or re.match(r"^[A-Za-z]:", text):
+        return False
+    return all(part not in {"", ".", ".."} for part in text.split("/"))
 
 
 def _parse_generated_at(value: object) -> dt.datetime:
@@ -195,6 +204,7 @@ def _validate_run(
     assert isinstance(observations, dict)
     for field in (
         "run_identity",
+        "world_edit_store",
         "viewport",
         "route",
         "route_frame_times",
@@ -206,6 +216,35 @@ def _validate_run(
     identity = observations["run_identity"]
     _require(_bounded_text(identity.get("package_version"), 160), f"{scope} package_version is missing")
     _require(identity.get("build_profile") in {"debug", "release"}, f"{scope} build_profile is invalid")
+    _require(
+        identity.get("terrain_grammar") in {"V1", "V2", "V3"},
+        f"{scope} terrain grammar is invalid",
+    )
+
+    edit_store = observations["world_edit_store"]
+    _require(
+        edit_store.get("world_edit_store_status") == "compatible"
+        and edit_store.get("world_edit_store_compatible") is True,
+        f"{scope} world edit store is not compatible",
+    )
+    _require(
+        _is_uint(edit_store.get("world_edit_store_edited_chunks")),
+        f"{scope} world edit-store chunk count is invalid",
+    )
+    _require(
+        edit_store.get("world_edit_store_block_reason_code") is None,
+        f"{scope} compatible world edit store has a block reason",
+    )
+    for field, identity_field in (
+        ("world_edit_store_seed", "world_seed"),
+        ("world_edit_store_profile", "world_profile"),
+        ("world_edit_store_scenery_quality", "scenery_quality"),
+        ("world_edit_store_terrain_grammar", "terrain_grammar"),
+    ):
+        _require(
+            edit_store.get(field) == identity.get(identity_field),
+            f"{scope} world edit-store identity contradicts run identity",
+        )
 
     viewport = observations["viewport"]
     for field in ("logical_width", "logical_height", "scale_factor", "dpi_percent"):
@@ -214,7 +253,105 @@ def _validate_run(
         _require(_is_uint(viewport.get(field)) and viewport[field] > 0, f"{scope} viewport {field} is invalid")
 
     route = observations["route"]
-    _require(_bounded_text(route.get("route_focus"), 160), f"{scope} route_focus is missing")
+    supported_focuses = {"scenic", "waypoint", "streaming", "river", "lava", "near-far"}
+    requested_focus = route.get("requested_route_focus")
+    resolved_focus = route.get("resolved_route_focus")
+    route_available = route.get("route_focus_available")
+    unavailable_reason = route.get("route_focus_unavailable_reason")
+    _require(requested_focus in supported_focuses, f"{scope} requested route focus is invalid")
+    _require(resolved_focus in supported_focuses, f"{scope} resolved route focus is invalid")
+    _require(type(route_available) is bool, f"{scope} route availability is invalid")
+    _require(
+        route_available is True
+        and requested_focus == resolved_focus
+        and unavailable_reason is None
+        and route.get("route_focus_search_cap_exhausted") is False,
+        f"{scope} does not contain an available requested route",
+    )
+    anchor = route.get("route_focus_anchor")
+    _require(
+        anchor is None
+        or (
+            type(anchor) is list
+            and len(anchor) == 3
+            and all(type(value) is int for value in anchor)
+        ),
+        f"{scope} route anchor is invalid",
+    )
+    anchored_focuses = {"waypoint", "river", "lava", "near-far"}
+    compatible_world_profiles = {
+        "waypoint": {"AstralFrontier"},
+        "river": {"Natural"},
+        "lava": {"AstralFrontier"},
+        "near-far": {"Natural", "AstralFrontier"},
+    }
+    if requested_focus in anchored_focuses:
+        _require(anchor is not None, f"{scope} available route focus is missing its anchor")
+    expected_profiles = compatible_world_profiles.get(requested_focus)
+    if expected_profiles is not None:
+        _require(
+            identity.get("world_profile") in expected_profiles,
+            f"{scope} route focus is incompatible with its world profile",
+        )
+    for field in ("route_focus_search_visited_candidates", "route_focus_classification_queries"):
+        _require(route.get(field) is None or _is_uint(route[field]), f"{scope} route {field} is invalid")
+    for field in ("route_focus_search_candidate_cap", "route_focus_classification_query_cap"):
+        _require(_is_uint(route.get(field)), f"{scope} route {field} is invalid")
+    if route.get("route_focus_search_visited_candidates") is not None:
+        _require(
+            route["route_focus_search_visited_candidates"] <= route["route_focus_search_candidate_cap"],
+            f"{scope} route candidate work exceeds its cap",
+        )
+    if route.get("route_focus_classification_queries") is not None:
+        _require(
+            route["route_focus_classification_queries"] <= route["route_focus_classification_query_cap"],
+            f"{scope} route classification work exceeds its cap",
+        )
+    _require(route.get("camera_route_policy") == "preflight-v1", f"{scope} camera policy is not preflight-v1")
+    applicable = route.get("camera_route_preflight_applicable")
+    _require(type(applicable) is bool, f"{scope} camera applicability is invalid")
+    _require(applicable is (requested_focus in {"river", "lava", "near-far"}), f"{scope} camera applicability contradicts focus")
+    counter_fields = (
+        "camera_route_variant_count", "camera_route_validation_samples",
+        "camera_route_voxel_queries", "camera_route_voxel_query_cap",
+        "camera_route_required_chunk_checks", "camera_route_loaded_chunk_checks",
+        "camera_route_proven_air_chunk_checks", "camera_route_unloaded_chunk_checks",
+        "camera_route_candidate_body_occlusions",
+        "camera_route_candidate_los_occlusions", "camera_route_selected_clear_samples",
+    )
+    if applicable:
+        _require(route.get("camera_route_available") is True, f"{scope} camera route is unavailable")
+        _require(route.get("camera_route_unavailable_reason") is None, f"{scope} camera route has an unavailable reason")
+        _require(type(route.get("camera_route_plan_hash")) is str and re.fullmatch(r"[0-9a-f]{16}", route["camera_route_plan_hash"]) is not None, f"{scope} camera plan hash is invalid")
+        _require(route.get("camera_route_variant_count") == 8 and route.get("camera_route_validation_samples") == 16, f"{scope} camera validation contract is invalid")
+        _require(route.get("camera_route_voxel_query_cap") == 153_600, f"{scope} camera query cap is invalid")
+        variant = route.get("camera_route_variant_index")
+        _require(_is_uint(variant) and variant < 8, f"{scope} selected camera variant is invalid")
+        queries = route.get("camera_route_voxel_queries")
+        required = route.get("camera_route_required_chunk_checks")
+        loaded = route.get("camera_route_loaded_chunk_checks")
+        proven_air = route.get("camera_route_proven_air_chunk_checks")
+        unloaded = route.get("camera_route_unloaded_chunk_checks")
+        _require(_is_uint(queries) and 0 < queries < 153_600, f"{scope} camera query work is invalid")
+        _require(
+            all(_is_uint(value) for value in (required, loaded, proven_air, unloaded)),
+            f"{scope} camera chunk-check counters are invalid",
+        )
+        _require(
+            required == queries == loaded + proven_air + unloaded,
+            f"{scope} camera chunk-check accounting is inconsistent",
+        )
+        _require(unloaded == 0, f"{scope} camera route has unloaded chunk checks")
+        for field in ("camera_route_candidate_body_occlusions", "camera_route_candidate_los_occlusions"):
+            _require(_is_uint(route.get(field)) and route[field] <= 128, f"{scope} camera candidate diagnostic is invalid")
+        _require(route.get("camera_route_selected_clear_samples") == 16, f"{scope} selected camera plan is not fully clear")
+        _require(_is_uint(route.get("camera_route_minimum_clearance_voxels")) and route["camera_route_minimum_clearance_voxels"] > 0, f"{scope} camera route lacks positive clearance")
+    else:
+        _require(route.get("camera_route_available") is False and route.get("camera_route_unavailable_reason") is None, f"{scope} non-applicable camera state is invalid")
+        _require(route.get("camera_route_plan_hash") is None and route.get("camera_route_variant_index") is None, f"{scope} non-applicable camera state has a plan")
+        _require(all(route.get(field) == 0 for field in counter_fields), f"{scope} non-applicable camera counters are not zero")
+        _require(route.get("camera_route_minimum_clearance_voxels") is None, f"{scope} non-applicable camera state has clearance")
+    _require(route.get("camera_route_work_cap_exhausted") is False, f"{scope} camera route exhausted its work cap")
     for field in (
         "requested_route_distance_m",
         "max_horizontal_displacement_m",
@@ -243,25 +380,36 @@ def _validate_run(
     budgets = planetary["budgets"]
     telemetry = planetary["telemetry"]
     _require(live.get("enabled") is True, f"{scope} planetary streaming is disabled")
-    _require(_bounded_text(live.get("profile"), 160), f"{scope} planetary profile is missing")
+    _require(live.get("profile") in {"Natural", "AstralFrontier"}, f"{scope} planetary profile is invalid")
+    _require(live.get("profile") == identity.get("world_profile"), f"{scope} planetary profile contradicts run identity")
+    _require(
+        telemetry.get("desired_terrain_grammar") == identity.get("terrain_grammar")
+        and telemetry.get("active_terrain_grammar") == identity.get("terrain_grammar"),
+        f"{scope} far-field grammar contradicts run identity",
+    )
     for field in (
-        "resident_entities",
-        "resident_vertices",
-        "resident_indices",
-        "resident_mesh_bytes",
-        "live_sample_cache_windows",
-        "live_sample_cache_bytes",
+        "resident_entities", "resident_vertices", "resident_indices", "resident_mesh_bytes",
+        "resident_fluid_entities", "resident_fluid_vertices", "resident_fluid_indices",
+        "resident_fluid_mesh_bytes", "resident_water_indices", "resident_lava_indices",
+        "resident_semantic_cohort_entities", "resident_semantic_cohort_vertices",
+        "resident_semantic_cohort_indices", "resident_semantic_cohort_mesh_bytes",
+        "resident_semantic_cohort_count", "live_sample_cache_windows", "live_sample_cache_bytes",
     ):
         _require(_is_uint(live.get(field)), f"{scope} planetary live {field} is invalid")
     for field in (
-        "budget_entities",
-        "budget_vertices",
-        "budget_indices",
-        "budget_mesh_bytes",
-        "budget_sample_cache_bytes",
+        "budget_entities", "budget_vertices", "budget_indices", "budget_mesh_bytes",
+        "budget_sample_cache_bytes", "budget_fluid_entities", "budget_fluid_vertices",
+        "budget_fluid_indices", "budget_fluid_mesh_bytes", "budget_hydro_atomic_ring_build_bytes",
+        "budget_atomic_ring_build_bytes", "budget_semantic_cohort_entities",
+        "budget_semantic_cohort_vertices", "budget_semantic_cohort_indices",
+        "budget_semantic_cohort_mesh_bytes", "budget_semantic_cohort_hash_scans",
+        "budget_semantic_cohort_height_queries", "budget_semantic_cohort_biome_queries",
     ):
         _require(_is_uint(budgets.get(field)), f"{scope} planetary budget {field} is invalid")
-    for field in ("ring_vertices", "ring_indices"):
+    for field in (
+        "ring_vertices", "ring_indices", "fluid_ring_vertices", "fluid_ring_indices",
+        "water_ring_indices", "lava_ring_indices",
+    ):
         values = live.get(field)
         _require(
             type(values) is list and len(values) == 6 and all(_is_uint(value) for value in values),
@@ -271,6 +419,101 @@ def _validate_run(
         telemetry.get("surface_material_mode") in {"LegacyPalette", "BridgeV1", "BridgeV2"},
         f"{scope} surface material mode is invalid",
     )
+    _require(telemetry.get("hydro_mode") in {"Disabled", "DescriptiveV1"}, f"{scope} hydro mode is invalid")
+    _require(telemetry.get("semantic_cohort_mode") in {"Disabled", "SilhouettesV1"}, f"{scope} semantic cohort mode is invalid")
+    for field in (
+        "resident_fluid_observation_valid", "resident_fluid_kind_integrity_valid",
+        "resident_semantic_cohort_observation_valid",
+        "resident_semantic_cohort_payload_integrity_valid",
+    ):
+        _require(telemetry.get(field) is True, f"{scope} planetary {field} is invalid")
+    for field in (
+        "resident_fluid_entity_count_overflow", "resident_fluid_scheduler_mismatch",
+        "resident_fluid_budget_exceeded", "resident_semantic_cohort_entity_count_overflow",
+        "resident_semantic_cohort_scheduler_mismatch", "resident_semantic_cohort_budget_exceeded",
+    ):
+        _require(telemetry.get(field) is False, f"{scope} planetary {field} is invalid")
+    for field in (
+        "last_fluid_indices", "last_water_indices", "last_lava_indices",
+        "scheduler_resident_water_indices", "scheduler_resident_lava_indices",
+        "scheduler_resident_semantic_cohort_entities",
+        "scheduler_resident_semantic_cohort_vertices",
+        "scheduler_resident_semantic_cohort_indices",
+        "scheduler_resident_semantic_cohort_mesh_bytes",
+        "scheduler_resident_semantic_cohort_count",
+        "last_semantic_cohort_candidates", "last_semantic_cohort_emitted",
+        "last_semantic_cohort_vertices", "last_semantic_cohort_indices",
+    ):
+        _require(_is_uint(telemetry.get(field)), f"{scope} planetary {field} is invalid")
+    for field in (
+        "resident_semantic_cohort_kind_counts",
+    ):
+        _require(
+            type(live.get(field)) is list and len(live[field]) == 6 and all(_is_uint(value) for value in live[field]),
+            f"{scope} planetary {field} is not a six-kind population",
+        )
+    for field in (
+        "scheduler_water_ring_indices", "scheduler_lava_ring_indices",
+        "scheduler_resident_semantic_cohort_kind_counts", "last_semantic_cohort_kind_counts",
+    ):
+        _require(
+            type(telemetry.get(field)) is list and len(telemetry[field]) == 6 and all(_is_uint(value) for value in telemetry[field]),
+            f"{scope} planetary {field} is not a six-entry population",
+        )
+    _require(live["resident_water_indices"] + live["resident_lava_indices"] == live["resident_fluid_indices"], f"{scope} Hydro kind totals disagree")
+    _require(live["resident_water_indices"] % 6 == live["resident_lava_indices"] % 6 == 0, f"{scope} Hydro kinds are not complete quads")
+    _require(telemetry["last_water_indices"] + telemetry["last_lava_indices"] == telemetry["last_fluid_indices"], f"{scope} latest Hydro kind totals disagree")
+    _require(telemetry["last_water_indices"] % 6 == telemetry["last_lava_indices"] % 6 == 0, f"{scope} latest Hydro kinds are not complete quads")
+    for index in range(6):
+        _require(live["water_ring_indices"][index] + live["lava_ring_indices"][index] == live["fluid_ring_indices"][index], f"{scope} Hydro ring kinds disagree")
+        _require(live["water_ring_indices"][index] % 6 == live["lava_ring_indices"][index] % 6 == 0, f"{scope} Hydro ring kinds are not complete quads")
+    cohort_count = live["resident_semantic_cohort_count"]
+    _require(sum(live["resident_semantic_cohort_kind_counts"]) == cohort_count, f"{scope} cohort kinds disagree")
+    _require(live["resident_semantic_cohort_vertices"] == cohort_count * 24, f"{scope} cohort vertices disagree")
+    _require(live["resident_semantic_cohort_indices"] == cohort_count * 36, f"{scope} cohort indices disagree")
+    _require(live["resident_semantic_cohort_mesh_bytes"] == cohort_count * (24 * 48 + 36 * 4), f"{scope} cohort bytes disagree")
+    _require(live["resident_semantic_cohort_entities"] == int(cohort_count > 0), f"{scope} cohort entity population disagrees")
+    _require(cohort_count <= 81, f"{scope} cohort count exceeds the fixed candidate cap")
+    if live["profile"] == "Natural":
+        _require(not any(live["resident_semantic_cohort_kind_counts"][3:]), f"{scope} Natural profile contains Astral cohort kinds")
+        _require(not any(telemetry["last_semantic_cohort_kind_counts"][3:]), f"{scope} Natural latest work contains Astral cohort kinds")
+    else:
+        _require(not any(live["resident_semantic_cohort_kind_counts"][:3]), f"{scope} Astral profile contains Natural cohort kinds")
+        _require(not any(telemetry["last_semantic_cohort_kind_counts"][:3]), f"{scope} Astral latest work contains Natural cohort kinds")
+    _require(budgets["budget_hydro_atomic_ring_build_bytes"] == 653_008, f"{scope} Hydro atomic byte budget changed")
+    _require(budgets["budget_atomic_ring_build_bytes"] == 757_984, f"{scope} combined atomic byte budget changed")
+    expected_cohort_budgets = {
+        "budget_semantic_cohort_entities": 1,
+        "budget_semantic_cohort_vertices": 1_944,
+        "budget_semantic_cohort_indices": 2_916,
+        "budget_semantic_cohort_mesh_bytes": 104_976,
+        "budget_semantic_cohort_hash_scans": 3_721,
+        "budget_semantic_cohort_height_queries": 81,
+        "budget_semantic_cohort_biome_queries": 81,
+    }
+    for field, expected in expected_cohort_budgets.items():
+        _require(budgets[field] == expected, f"{scope} planetary {field} changed")
+    scheduler_pairs = (
+        ("resident_water_indices", "scheduler_resident_water_indices"),
+        ("resident_lava_indices", "scheduler_resident_lava_indices"),
+        ("water_ring_indices", "scheduler_water_ring_indices"),
+        ("lava_ring_indices", "scheduler_lava_ring_indices"),
+        ("resident_semantic_cohort_entities", "scheduler_resident_semantic_cohort_entities"),
+        ("resident_semantic_cohort_vertices", "scheduler_resident_semantic_cohort_vertices"),
+        ("resident_semantic_cohort_indices", "scheduler_resident_semantic_cohort_indices"),
+        ("resident_semantic_cohort_mesh_bytes", "scheduler_resident_semantic_cohort_mesh_bytes"),
+        ("resident_semantic_cohort_count", "scheduler_resident_semantic_cohort_count"),
+        ("resident_semantic_cohort_kind_counts", "scheduler_resident_semantic_cohort_kind_counts"),
+    )
+    for live_field, telemetry_field in scheduler_pairs:
+        _require(live[live_field] == telemetry[telemetry_field], f"{scope} scheduler {telemetry_field} disagrees")
+    for live_field, budget_field in (
+        ("resident_semantic_cohort_entities", "budget_semantic_cohort_entities"),
+        ("resident_semantic_cohort_vertices", "budget_semantic_cohort_vertices"),
+        ("resident_semantic_cohort_indices", "budget_semantic_cohort_indices"),
+        ("resident_semantic_cohort_mesh_bytes", "budget_semantic_cohort_mesh_bytes"),
+    ):
+        _require(live[live_field] <= budgets[budget_field], f"{scope} {live_field} exceeds budget")
     for field in (
         "desired_material_detail",
         "resident_material_detail",
@@ -357,7 +600,7 @@ def load_canonical_evidence(path: Path | str) -> CanonicalEvidence:
     assert isinstance(generator, dict)
     _require(generator.get("name") == GENERATOR_NAME, "unexpected manifest generator")
     _require(generator.get("version") == GENERATOR_VERSION, "unsupported manifest generator version")
-    _require(_bounded_text(generator.get("source_path"), 4_096), "generator source path is invalid")
+    _require(_repository_relative_path(generator.get("source_path")), "generator source path is invalid")
     _require(SHA256_RE.fullmatch(str(generator.get("source_sha256", ""))) is not None, "generator source hash is invalid")
 
     inputs = data.get("inputs")
@@ -368,7 +611,7 @@ def load_canonical_evidence(path: Path | str) -> CanonicalEvidence:
     _require(_is_uint(inputs.get("accepted_run_count")), "manifest accepted_run_count is invalid")
     directories = inputs.get("qa_run_directories")
     _require(type(directories) is list and len(directories) <= MAX_RUNS, "manifest run directory list is invalid")
-    _require(all(_bounded_text(item, 4_096) for item in directories), "manifest contains an invalid run path")
+    _require(all(_repository_relative_path(item) for item in directories), "manifest contains an invalid run path")
 
     hashes = data.get("file_hashes")
     _require(type(hashes) is list and len(hashes) <= MAX_FILE_HASHES, "manifest file_hashes exceed the fixed cap")
@@ -380,7 +623,7 @@ def load_canonical_evidence(path: Path | str) -> CanonicalEvidence:
         kind = record.get("kind")
         record_path = record.get("path")
         _require(kind in {"report", "screenshot", "generator_source"}, f"file_hashes[{index}].kind is invalid")
-        _require(_bounded_text(record_path, 4_096), f"file_hashes[{index}].path is invalid")
+        _require(_repository_relative_path(record_path), f"file_hashes[{index}].path is invalid")
         _require(SHA256_RE.fullmatch(str(record.get("sha256", ""))) is not None, f"file_hashes[{index}].sha256 is invalid")
         _require(_is_uint(record.get("size_bytes")), f"file_hashes[{index}].size_bytes is invalid")
         key = (str(kind), str(record_path))

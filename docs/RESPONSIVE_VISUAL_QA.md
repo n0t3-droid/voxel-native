@@ -75,7 +75,7 @@ For shader, terrain, vegetation, water, weather, or animation changes:
 ## Causal cross-system inspection loop
 
 Every visual flight is also a broad engine inspection. Do not stop at the
-feature named in the current task, and do not cosmetically hide an anomaly
+feature under review, and do not cosmetically hide an anomaly
 before identifying which state is authoritative. For each suspicious object,
 motion, gap, UI element, or timing event, record:
 
@@ -147,21 +147,26 @@ Record the tested resolutions, world seed, camera/route, tool states exercised,
 capture paths, average/max frame time, stall count, shader/log error state, and
 known visual limits. If a matrix cell was not tested, state that directly.
 
-### Current release evidence - 2026-08-09
+### Historical local-run boundary - 2026-08-09
 
-| Viewport | Release evidence | Capture completion | Result |
-| --- | --- | --- | --- |
-| 320 x 480 | `qa_runs/run_1786291828/shot_0000.png` | 3 report paths = 3 terminal-IEND PNG files | compact dock clears the toolbox rail; core controls remain visible |
-| 800 x 600 | `qa_runs/run_1786291220/shot_0000.png` | 4 report paths = 4 terminal-IEND PNG files | stacked status remains readable and clear of the toolbar |
-| 960 x 540 | not captured in this pass | no evidence claimed | outstanding |
-| 1280 x 720 | `qa_runs/run_1786291899/shot_0000.png` | 4 report paths = 4 terminal-IEND PNG files | wide mountain-river route and status presentation accepted |
-| 1920 x 1080 | not captured in this pass | no evidence claimed | outstanding |
-| 2560 x 1440 | not captured in this pass | no evidence claimed | outstanding |
-| 3440 x 1440 | not captured in this pass | no evidence claimed | outstanding |
-| adverse portrait/narrow size | not captured in this pass | no evidence claimed | outstanding |
+A development checkpoint exercised 320 x 480, 800 x 600, and 1280 x 720.
+Those captures live under the intentionally excluded `qa_runs/` tree and are
+not distributed with the repository. This contract therefore does not present
+their local paths, layout observations, test total, or visual verdict as current
+release evidence.
 
-The 100%, 150%, and 200% OS/text-scale cells also remain outstanding. The
-layout metrics and safe window bounds are regression proof, but they are not a
-substitute for those visual captures. The final 1280 x 720 route recorded 920
-passing binary tests and a successful release build separately from descriptive
-runtime telemetry; average FPS from this single route is not a causal benchmark.
+A publishable viewport result requires an explicitly named current run,
+terminal-PNG validation, matching report/source/executable identity, and manual
+inspection under the active evidence schema. The 960 x 540, 1920 x 1080,
+2560 x 1440, 3440 x 1440, adverse portrait/narrow, and 100%, 150%, and 200%
+OS/text-scale cells were not covered by that historical checkpoint and remain
+open until fresh evidence says otherwise. Layout metrics and safe window bounds
+are regression proof, but they are not substitutes for visual captures.
+
+QA report schema 2.5 also binds near-field memory truth to each run. It records
+`dense_chunks = loaded_chunks + pending_terrain`, the exact 2,400-chunk limit,
+an independent `peak_dense_chunks`, and a sticky overflow flag. Successful
+completion requires a complete frontier, zero terrain/mesh/dirty queues, no
+observed budget violation, and a peak at or below the declared ceiling. Peaks
+of the two components are not added after the fact because they may occur on
+different frames.
