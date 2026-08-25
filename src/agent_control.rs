@@ -23,16 +23,22 @@ use crate::icons::Icon;
 use crate::menu::{GameState, PendingWorldLoad};
 use crate::mode::{ActiveMode, ModeContext};
 use crate::player::Player;
-use crate::settings::{ActiveWorld, TimeMode, WorldMeta, WorldProfile, WorldSettings};
+use crate::settings::{
+    ActiveWorld, SceneryQuality, TerrainGrammarVersion, TimeMode, WorldGenerationIdentity,
+    WorldMeta, WorldProfile, WorldSettings,
+};
 use crate::sketch_model::{SketchDocument, ToolController};
 use crate::toolbelt::{
     apply_toolbox_selection, BuildWorkflowPreset, ToolbeltState, ToolbeltTool, ToolboxSelection,
 };
 use crate::weapons::ActiveWeapon;
-use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
+use crate::world::{ChunkStreamer, PendingEditedOverrideStore, StreamingGovernor, VoxelWorld};
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 pub struct AgentControlPlugin;
 
@@ -48,6 +54,7 @@ impl Plugin for AgentControlPlugin {
                     apply_agent_bot_command,
                     agent_control_handoff,
                     apply_agent_build_mode,
+                    apply_agent_camera_pose,
                     apply_agent_inputs,
                 )
                     .chain()
@@ -74,6 +81,7 @@ impl Plugin for AgentControlPlugin {
 }
 
 #[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AgentControlState {
     pub runtime_enabled: bool,
     pub enabled: bool,
@@ -89,6 +97,8 @@ pub struct AgentControlState {
     pub look_y: f32,
     pub yaw: Option<f32>,
     pub pitch: Option<f32>,
+    pub view_label: String,
+    camera_pose: Option<AgentCameraPoseRequest>,
     pub fire: bool,
     pub scope: bool,
     pub keys: Vec<String>,
@@ -121,6 +131,8 @@ impl Default for AgentControlState {
             look_y: 0.0,
             yaw: None,
             pitch: None,
+            view_label: String::new(),
+            camera_pose: None,
             fire: false,
             scope: false,
             keys: Vec::new(),
@@ -172,6 +184,7 @@ struct AgentControlRuntime {
     runtime_enabled: bool,
     auto_enter: bool,
     poll_timer: f32,
+    bridge_timer: f32,
     status_timer: f32,
     screenshot_timer: f32,
     screenshot_interval: f32,
@@ -180,6 +193,9 @@ struct AgentControlRuntime {
     last_sequence_for_exit: u64,
     last_handoff_sequence: u64,
     last_build_sequence: Option<u64>,
+    last_camera_command_sequence: Option<u64>,
+    last_camera_command_pose: Option<AgentCameraPoseRequest>,
+    last_camera_pose_sequence: Option<u64>,
     screenshot_index: usize,
     frames: u64,
     total_dt: f32,
@@ -189,6 +205,9 @@ struct AgentControlRuntime {
     stall_threshold_ms: f32,
     last_command_seconds: f32,
     last_error: Option<String>,
+    last_observed_control_text: Option<String>,
+    last_accepted_control_text: Option<String>,
+    last_control_sequence: Option<u64>,
     last_applied_bot_request: Option<AgentBotCommandRequest>,
     in_game_frames: u32,
     mission_feed_enabled: bool,
@@ -206,6 +225,64 @@ struct AgentControlRuntime {
     control_path: PathBuf,
     #[cfg(not(target_arch = "wasm32"))]
     session_dir: PathBuf,
+    #[cfg(not(target_arch = "wasm32"))]
+    capture_ledger: Arc<Mutex<AgentCaptureLedger>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default)]
+struct AgentCaptureLedger {
+    successful_count: usize,
+    highest_success: Option<(usize, PathBuf)>,
+    latest_outcome_index: Option<usize>,
+    latest_error: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentCaptureSnapshot {
+    successful_count: usize,
+    last_screenshot: Option<PathBuf>,
+    latest_error: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AgentCaptureLedger {
+    fn record_success(&mut self, index: usize, path: PathBuf) {
+        self.successful_count = self.successful_count.saturating_add(1);
+        if self
+            .highest_success
+            .as_ref()
+            .is_none_or(|(highest, _)| index > *highest)
+        {
+            self.highest_success = Some((index, path));
+        }
+        if self
+            .latest_outcome_index
+            .is_none_or(|latest| index >= latest)
+        {
+            self.latest_outcome_index = Some(index);
+            self.latest_error = None;
+        }
+    }
+
+    fn record_failure(&mut self, index: usize, error: impl std::fmt::Display) {
+        if self
+            .latest_outcome_index
+            .is_none_or(|latest| index >= latest)
+        {
+            self.latest_outcome_index = Some(index);
+            self.latest_error = Some(bounded_agent_screenshot_error(index, error));
+        }
+    }
+
+    fn snapshot(&self) -> AgentCaptureSnapshot {
+        AgentCaptureSnapshot {
+            successful_count: self.successful_count,
+            last_screenshot: self.highest_success.as_ref().map(|(_, path)| path.clone()),
+            latest_error: self.latest_error.clone(),
+        }
+    }
 }
 
 impl AgentControlRuntime {
@@ -253,6 +330,7 @@ impl AgentControlRuntime {
             auto_enter: !env_flag("VOXEL_NATIVE_AGENT_NO_AUTO_ENTER")
                 && !std::env::args().any(|arg| arg == "--agent-no-auto-enter"),
             poll_timer: 0.0,
+            bridge_timer: AGENT_BRIDGE_HEARTBEAT_SECONDS,
             status_timer: 0.0,
             screenshot_timer: 0.0,
             screenshot_interval: env_f32("VOXEL_NATIVE_AGENT_SCREENSHOT_INTERVAL")
@@ -269,6 +347,9 @@ impl AgentControlRuntime {
             last_sequence_for_exit: 0,
             last_handoff_sequence: 0,
             last_build_sequence: None,
+            last_camera_command_sequence: None,
+            last_camera_command_pose: None,
+            last_camera_pose_sequence: None,
             screenshot_index: 0,
             frames: 0,
             total_dt: 0.0,
@@ -278,6 +359,9 @@ impl AgentControlRuntime {
             stall_threshold_ms: env_f32("VOXEL_NATIVE_AGENT_STALL_MS").unwrap_or(100.0),
             last_command_seconds: 0.0,
             last_error: None,
+            last_observed_control_text: None,
+            last_accepted_control_text: None,
+            last_control_sequence: None,
             last_applied_bot_request: None,
             in_game_frames: 0,
             mission_feed_enabled,
@@ -295,8 +379,65 @@ impl AgentControlRuntime {
             control_path,
             #[cfg(not(target_arch = "wasm32"))]
             session_dir,
+            #[cfg(not(target_arch = "wasm32"))]
+            capture_ledger: Arc::new(Mutex::new(AgentCaptureLedger::default())),
         }
     }
+}
+
+const AGENT_CAMERA_SAFE_COORDINATE_LIMIT: f32 = 16_777_216.0;
+const AGENT_CAMERA_SAFE_Y_LIMIT: f32 = 1_048_576.0;
+const AGENT_CAMERA_PITCH_LIMIT: f32 = 1.54;
+const AGENT_VIEW_LABEL_MAX_CHARS: usize = 96;
+const AGENT_CAMERA_POSE_ERROR_PREFIX: &str = "camera pose: ";
+const AGENT_CONTROL_MAX_BYTES: usize = 64 * 1024;
+const AGENT_CONTROL_MAX_INPUT_NAMES: usize = 64;
+const AGENT_CONTROL_MAX_INPUT_NAME_CHARS: usize = 32;
+const AGENT_CONTROL_MAX_COMMAND_CHARS: usize = 64;
+const AGENT_CONTROL_MAX_BOT_POINTS: usize = 4_096;
+const AGENT_CONTROL_MAX_BOT_RECIPIENTS: usize = 4_096;
+const AGENT_BRIDGE_HEARTBEAT_SECONDS: f32 = 1.0;
+pub(crate) const LIVE_OBSERVER_PROTOCOL_VERSION: &str = "live-observer-v1";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+struct AgentCameraPoseRequest {
+    position: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+}
+
+impl Default for AgentCameraPoseRequest {
+    fn default() -> Self {
+        Self {
+            position: [0.0, 140.0, 0.0],
+            yaw: 0.0,
+            pitch: -0.2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ValidatedAgentCameraPose {
+    position: Vec3,
+    yaw: f32,
+    pitch: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentCameraCommandObservation {
+    Fresh,
+    Repeat,
+    Stale,
+    ReusedWithDifferentPose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentControlPayloadDecision {
+    Apply,
+    Identical,
+    Stale,
+    ReusedWithDifferentPayload,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -313,6 +454,8 @@ struct AgentControlCommand {
     look_y: f32,
     yaw: Option<f32>,
     pitch: Option<f32>,
+    view_label: String,
+    camera_pose: Option<AgentCameraPoseRequest>,
     fire: bool,
     scope: bool,
     keys: Vec<String>,
@@ -340,6 +483,8 @@ impl Default for AgentControlCommand {
             look_y: 0.0,
             yaw: None,
             pitch: None,
+            view_label: String::new(),
+            camera_pose: None,
             fire: false,
             scope: false,
             keys: Vec::new(),
@@ -414,6 +559,10 @@ struct AgentLiveStatus {
     game_state: String,
     command_sequence: u64,
     command_status: String,
+    command_view_label: String,
+    command_camera_pose_requested: bool,
+    camera_command_sequence_cursor: Option<u64>,
+    camera_pose_handled_sequence: Option<u64>,
     command_forward: f32,
     command_right: f32,
     command_up: f32,
@@ -480,6 +629,7 @@ struct AgentLiveStatus {
     control_enabled: bool,
     last_command_seconds: f32,
     last_error: Option<String>,
+    last_screenshot_error: Option<String>,
     screenshot_count: usize,
     in_game_frames: u32,
     last_screenshot: Option<String>,
@@ -489,13 +639,32 @@ struct AgentLiveStatus {
 #[derive(Debug, Serialize)]
 struct AgentBridgeStatus<'a> {
     stage: &'a str,
+    observer_protocol_version: &'static str,
+    isolated_observer: bool,
     runtime_enabled: bool,
     enabled: bool,
     sequence: u64,
     status: &'a str,
+    view_label: &'a str,
     last_error: Option<&'a str>,
     control_path: String,
     session_dir: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ObserverBridgeContract {
+    protocol_version: &'static str,
+    isolated_observer: bool,
+}
+
+fn observer_bridge_contract(
+    runtime_enabled: bool,
+    isolated_requested: bool,
+) -> ObserverBridgeContract {
+    ObserverBridgeContract {
+        protocol_version: LIVE_OBSERVER_PROTOCOL_VERSION,
+        isolated_observer: isolated_observer_from_flags(runtime_enabled, isolated_requested),
+    }
 }
 
 fn agent_control_runtime_enabled(state: Res<AgentControlState>) -> bool {
@@ -537,28 +706,41 @@ fn write_boot_status(
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Err(e) = std::fs::create_dir_all(&runtime.session_dir) {
+        if let Err(e) = prepare_safe_agent_directory(&runtime.session_dir) {
             warn!(
                 "agent control: could not create {}: {e}",
                 runtime.session_dir.display()
             );
             return;
         }
+        let observer_contract = observer_bridge_contract(
+            state.runtime_enabled,
+            env_flag("VOXEL_NATIVE_AGENT_ISOLATED"),
+        );
         let status = AgentBridgeStatus {
             stage,
+            observer_protocol_version: observer_contract.protocol_version,
+            isolated_observer: observer_contract.isolated_observer,
             runtime_enabled: state.runtime_enabled,
             enabled: state.enabled,
             sequence: state.sequence,
             status: &state.status,
+            view_label: &state.view_label,
             last_error: runtime.last_error.as_deref(),
             control_path: runtime_control_path(runtime),
             session_dir: runtime_session_dir(runtime),
         };
         if let Ok(text) = ron::ser::to_string_pretty(&status, ron::ser::PrettyConfig::default()) {
-            let _ = std::fs::write(runtime.session_dir.join("bridge.ron"), text);
+            let path = runtime.session_dir.join("bridge.ron");
+            if let Err(error) = atomic_replace_agent_telemetry_text(&path, &text) {
+                warn!(
+                    "agent control: could not atomically write {}: {error}",
+                    path.display()
+                );
+            }
         }
         if stage == "startup" {
-            if let Err(error) = crate::agent_capabilities::write_agent_capability_manifest(
+            if let Err(error) = write_agent_capability_manifest_safely(
                 &runtime.session_dir,
                 &runtime.mission_agent_id,
                 &runtime.mission_fleet_id,
@@ -586,43 +768,123 @@ fn poll_agent_control_file(
     #[cfg(not(target_arch = "wasm32"))]
     {
         ensure_control_file(&runtime.control_path);
-        let Ok(text) = std::fs::read_to_string(&runtime.control_path) else {
-            state.status = format!("cannot read {}", runtime.control_path.display());
-            return;
+        let text = match read_bounded_control_file(&runtime.control_path) {
+            Ok(text) => text,
+            Err(error) => {
+                runtime.last_error = Some(format!(
+                    "control file: cannot read {}: {error}",
+                    runtime.control_path.display()
+                ));
+                return;
+            }
         };
-        match ron::from_str::<AgentControlCommand>(&text) {
-            Ok(command) => {
-                runtime.last_command_seconds = time.elapsed_seconds();
-                if runtime
-                    .last_error
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("control parse error"))
-                {
-                    runtime.last_error = None;
-                }
-                apply_command(&mut state, command);
+        if runtime.last_observed_control_text.as_deref() == Some(text.as_str()) {
+            if repeated_payload_matches_accepted_identity(
+                &text,
+                runtime.last_accepted_control_text.as_deref(),
+            ) {
+                clear_owned_control_boundary_error(&mut runtime.last_error);
             }
-            Err(e) => {
-                let error = format!("control parse error: {e}");
-                runtime.last_error = Some(error.clone());
-                state.status = error;
-            }
+            return;
         }
+        runtime.last_observed_control_text = Some(text.clone());
+
+        let mut command = match ron::from_str::<AgentControlCommand>(&text) {
+            Ok(command) => command,
+            Err(error) => {
+                runtime.last_error = Some(format!("control parse error: {error}"));
+                return;
+            }
+        };
+        match agent_control_payload_decision(
+            command.sequence,
+            &text,
+            runtime.last_control_sequence,
+            runtime.last_accepted_control_text.as_deref(),
+        ) {
+            AgentControlPayloadDecision::Identical => {
+                clear_owned_control_boundary_error(&mut runtime.last_error);
+                return;
+            }
+            AgentControlPayloadDecision::Stale => {
+                runtime.last_error = Some(format!(
+                    "control command: stale sequence {}; cursor is {}",
+                    command.sequence,
+                    runtime
+                        .last_control_sequence
+                        .map(|sequence| sequence.to_string())
+                        .unwrap_or_else(|| "none".into())
+                ));
+                return;
+            }
+            AgentControlPayloadDecision::ReusedWithDifferentPayload => {
+                runtime.last_error = Some(format!(
+                    "control command: sequence {} was reused with a different payload",
+                    command.sequence
+                ));
+                return;
+            }
+            AgentControlPayloadDecision::Apply => {}
+        }
+        if let Err(error) = sanitize_agent_control_command(&mut command) {
+            runtime.last_error = Some(format!("control command: {error}"));
+            return;
+        }
+
+        runtime.last_control_sequence = Some(command.sequence);
+        runtime.last_accepted_control_text = Some(text);
+        runtime.last_command_seconds = time.elapsed_seconds();
+        clear_owned_control_boundary_error(&mut runtime.last_error);
+        apply_command(&mut state, command);
+    }
+}
+
+fn repeated_payload_matches_accepted_identity(
+    payload: &str,
+    accepted_payload: Option<&str>,
+) -> bool {
+    accepted_payload == Some(payload)
+}
+
+fn agent_control_payload_decision(
+    sequence: u64,
+    payload: &str,
+    last_sequence: Option<u64>,
+    last_payload: Option<&str>,
+) -> AgentControlPayloadDecision {
+    match last_sequence {
+        None => AgentControlPayloadDecision::Apply,
+        Some(last) if sequence > last => AgentControlPayloadDecision::Apply,
+        Some(last) if sequence < last => AgentControlPayloadDecision::Stale,
+        Some(_) if last_payload == Some(payload) => AgentControlPayloadDecision::Identical,
+        Some(_) => AgentControlPayloadDecision::ReusedWithDifferentPayload,
+    }
+}
+
+fn clear_owned_control_boundary_error(last_error: &mut Option<String>) {
+    if last_error.as_deref().is_some_and(|error| {
+        error.starts_with("control file:")
+            || error.starts_with("control parse error:")
+            || error.starts_with("control command:")
+    }) {
+        *last_error = None;
     }
 }
 
 fn apply_command(state: &mut AgentControlState, command: AgentControlCommand) {
     state.enabled = command.enabled;
     state.sequence = command.sequence;
-    state.forward = command.forward.clamp(-1.0, 1.0);
-    state.right = command.right.clamp(-1.0, 1.0);
-    state.up = command.up.clamp(-1.0, 1.0);
+    state.forward = finite_clamped_or_zero(command.forward, -1.0, 1.0);
+    state.right = finite_clamped_or_zero(command.right, -1.0, 1.0);
+    state.up = finite_clamped_or_zero(command.up, -1.0, 1.0);
     state.sprint = command.sprint;
     state.fly = command.fly;
-    state.look_x = command.look_x.clamp(-4.0, 4.0);
-    state.look_y = command.look_y.clamp(-4.0, 4.0);
-    state.yaw = command.yaw;
-    state.pitch = command.pitch.map(|p| p.clamp(-1.54, 1.54));
+    state.look_x = finite_clamped_or_zero(command.look_x, -4.0, 4.0);
+    state.look_y = finite_clamped_or_zero(command.look_y, -4.0, 4.0);
+    state.yaw = finite_optional(command.yaw);
+    state.pitch = finite_optional(command.pitch).map(|pitch| pitch.clamp(-1.54, 1.54));
+    state.view_label = sanitize_view_label(&command.view_label);
+    state.camera_pose = command.camera_pose;
     state.fire = command.fire;
     state.scope = command.scope;
     state.keys = command.keys;
@@ -642,6 +904,321 @@ fn apply_command(state: &mut AgentControlState, command: AgentControlCommand) {
     } else {
         "agent paused".into()
     };
+}
+
+fn finite_clamped_or_zero(value: f32, min: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        0.0
+    }
+}
+
+fn finite_optional(value: Option<f32>) -> Option<f32> {
+    value.filter(|value| value.is_finite())
+}
+
+fn sanitize_view_label(label: &str) -> String {
+    sanitize_bounded_control_text(label, AGENT_VIEW_LABEL_MAX_CHARS)
+}
+
+fn sanitize_bounded_control_text(text: &str, max_chars: usize) -> String {
+    let mut sanitized = String::with_capacity(text.len().min(max_chars));
+    let mut pending_space = false;
+    let mut character_count = 0;
+
+    for character in text.trim().chars() {
+        if character.is_control() || character.is_whitespace() {
+            pending_space = !sanitized.is_empty();
+            continue;
+        }
+        if pending_space {
+            if character_count >= max_chars {
+                break;
+            }
+            sanitized.push(' ');
+            character_count += 1;
+            pending_space = false;
+        }
+        if character_count >= max_chars {
+            break;
+        }
+        sanitized.push(character);
+        character_count += 1;
+    }
+
+    sanitized
+}
+
+fn sanitize_agent_control_command(command: &mut AgentControlCommand) -> Result<(), String> {
+    command.keys =
+        bounded_unique_input_names(std::mem::take(&mut command.keys), AgentInputNameKind::Key);
+    command.mouse_buttons = bounded_unique_input_names(
+        std::mem::take(&mut command.mouse_buttons),
+        AgentInputNameKind::MouseButton,
+    );
+    command.game_state =
+        sanitize_bounded_control_text(&command.game_state, AGENT_CONTROL_MAX_COMMAND_CHARS);
+    command.build_mode =
+        sanitize_bounded_control_text(&command.build_mode, AGENT_CONTROL_MAX_COMMAND_CHARS);
+    command.build_tool =
+        sanitize_bounded_control_text(&command.build_tool, AGENT_CONTROL_MAX_COMMAND_CHARS);
+    command.view_label = sanitize_view_label(&command.view_label);
+
+    let Some(bot) = command.bot_command.as_mut() else {
+        return Ok(());
+    };
+    bot.action = sanitize_bounded_control_text(&bot.action, AGENT_CONTROL_MAX_COMMAND_CHARS);
+    bot.operation = sanitize_bounded_control_text(&bot.operation, AGENT_CONTROL_MAX_COMMAND_CHARS);
+    bot.block_reason =
+        sanitize_bounded_control_text(&bot.block_reason, AGENT_CONTROL_MAX_COMMAND_CHARS);
+    match &mut bot.target {
+        AgentBotTargetRequest::Path(points) => {
+            deduplicate_bounded_values(points, AGENT_CONTROL_MAX_BOT_POINTS, "bot path")?;
+        }
+        AgentBotTargetRequest::Selection(points) => {
+            deduplicate_bounded_values(points, AGENT_CONTROL_MAX_BOT_POINTS, "bot selection")?;
+        }
+        AgentBotTargetRequest::Point(_) | AgentBotTargetRequest::Area { .. } => {}
+    }
+    if let AgentBotRecipientsRequest::Selected(recipients) = &mut bot.recipients {
+        deduplicate_bounded_values(
+            recipients,
+            AGENT_CONTROL_MAX_BOT_RECIPIENTS,
+            "bot recipients",
+        )?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AgentInputNameKind {
+    Key,
+    MouseButton,
+}
+
+fn bounded_unique_input_names(values: Vec<String>, kind: AgentInputNameKind) -> Vec<String> {
+    let mut identities = std::collections::BTreeSet::new();
+    let mut bounded = Vec::with_capacity(values.len().min(AGENT_CONTROL_MAX_INPUT_NAMES));
+    for value in values {
+        if bounded.len() >= AGENT_CONTROL_MAX_INPUT_NAMES {
+            break;
+        }
+        let value = sanitize_bounded_control_text(&value, AGENT_CONTROL_MAX_INPUT_NAME_CHARS);
+        let normalized = normalized_input_name(&value);
+        let identity = match kind {
+            AgentInputNameKind::Key => parse_key_code(&value)
+                .map(|key| format!("KEY:{key:?}"))
+                .unwrap_or(normalized),
+            AgentInputNameKind::MouseButton => parse_mouse_button(&value)
+                .map(|button| format!("MOUSE:{button:?}"))
+                .unwrap_or(normalized),
+        };
+        if !identity.is_empty() && identities.insert(identity) {
+            bounded.push(value);
+        }
+    }
+    bounded
+}
+
+fn deduplicate_bounded_values<T: Copy + Ord>(
+    values: &mut Vec<T>,
+    max_values: usize,
+    label: &str,
+) -> Result<(), String> {
+    if values.len() > max_values {
+        return Err(format!(
+            "{label} has {} entries; limit is {max_values}",
+            values.len()
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    values.retain(|value| seen.insert(*value));
+    Ok(())
+}
+
+fn validate_agent_camera_pose(
+    request: AgentCameraPoseRequest,
+) -> Result<ValidatedAgentCameraPose, &'static str> {
+    let position = Vec3::new(
+        request.position[0],
+        request.position[1],
+        request.position[2],
+    );
+    if !position.is_finite() || !request.yaw.is_finite() || !request.pitch.is_finite() {
+        return Err("position, yaw, and pitch must all be finite");
+    }
+    if position.x.abs() > AGENT_CAMERA_SAFE_COORDINATE_LIMIT
+        || position.z.abs() > AGENT_CAMERA_SAFE_COORDINATE_LIMIT
+    {
+        return Err("horizontal position exceeds the f32 exact-integer range");
+    }
+    if position.y.abs() > AGENT_CAMERA_SAFE_Y_LIMIT {
+        return Err("vertical position exceeds the observer safety bound");
+    }
+    if request.pitch.abs() > AGENT_CAMERA_PITCH_LIMIT {
+        return Err("pitch exceeds the observer look bound");
+    }
+
+    let yaw = (request.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI;
+    Ok(ValidatedAgentCameraPose {
+        position,
+        yaw,
+        pitch: request.pitch,
+    })
+}
+
+fn agent_camera_pose_identity_matches(
+    left: Option<AgentCameraPoseRequest>,
+    right: Option<AgentCameraPoseRequest>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.position
+                .into_iter()
+                .zip(right.position)
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+                && left.yaw.to_bits() == right.yaw.to_bits()
+                && left.pitch.to_bits() == right.pitch.to_bits()
+        }
+        _ => false,
+    }
+}
+
+fn observe_agent_camera_command(
+    sequence: u64,
+    pose: Option<AgentCameraPoseRequest>,
+    last_sequence: &mut Option<u64>,
+    last_pose: &mut Option<AgentCameraPoseRequest>,
+) -> AgentCameraCommandObservation {
+    match *last_sequence {
+        None => {
+            *last_sequence = Some(sequence);
+            *last_pose = pose;
+            AgentCameraCommandObservation::Fresh
+        }
+        Some(last) if sequence > last => {
+            *last_sequence = Some(sequence);
+            *last_pose = pose;
+            AgentCameraCommandObservation::Fresh
+        }
+        Some(last) if sequence < last => AgentCameraCommandObservation::Stale,
+        Some(_) if agent_camera_pose_identity_matches(pose, *last_pose) => {
+            AgentCameraCommandObservation::Repeat
+        }
+        Some(_) => AgentCameraCommandObservation::ReusedWithDifferentPose,
+    }
+}
+
+fn agent_camera_pose_pending(
+    state: &AgentControlState,
+    game: &GameState,
+    last_handled_sequence: Option<u64>,
+) -> bool {
+    state.active()
+        && *game == GameState::InGame
+        && state.camera_pose.is_some()
+        && last_handled_sequence.is_none_or(|last| state.sequence > last)
+}
+
+fn apply_validated_agent_camera_pose(
+    pose: ValidatedAgentCameraPose,
+    transform: &mut Transform,
+    player: &mut Player,
+) {
+    transform.translation = pose.position;
+    transform.rotation =
+        Quat::from_axis_angle(Vec3::Y, pose.yaw) * Quat::from_axis_angle(Vec3::X, pose.pitch);
+    player.yaw = pose.yaw;
+    player.pitch = pose.pitch;
+    player.velocity = Vec3::ZERO;
+    player.on_ground = false;
+    player.flying = true;
+    player.placed_on_surface = true;
+}
+
+fn clear_owned_camera_pose_error(last_error: &mut Option<String>) {
+    if last_error
+        .as_deref()
+        .is_some_and(|error| error.starts_with(AGENT_CAMERA_POSE_ERROR_PREFIX))
+    {
+        *last_error = None;
+    }
+}
+
+fn apply_agent_camera_pose(
+    game: Res<State<GameState>>,
+    state: Res<AgentControlState>,
+    mut runtime: ResMut<AgentControlRuntime>,
+    mut player: Query<(&mut Transform, &mut Player)>,
+) {
+    let observation = {
+        let runtime = &mut *runtime;
+        observe_agent_camera_command(
+            state.sequence,
+            state.camera_pose,
+            &mut runtime.last_camera_command_sequence,
+            &mut runtime.last_camera_command_pose,
+        )
+    };
+    match observation {
+        AgentCameraCommandObservation::Fresh => {
+            clear_owned_camera_pose_error(&mut runtime.last_error);
+        }
+        AgentCameraCommandObservation::Repeat => {}
+        AgentCameraCommandObservation::Stale => {
+            runtime.last_error = Some(format!(
+                "{AGENT_CAMERA_POSE_ERROR_PREFIX}stale command sequence {}; cursor is {}",
+                state.sequence,
+                runtime
+                    .last_camera_command_sequence
+                    .map(|sequence| sequence.to_string())
+                    .unwrap_or_else(|| "none".into())
+            ));
+            return;
+        }
+        AgentCameraCommandObservation::ReusedWithDifferentPose => {
+            if runtime
+                .last_camera_pose_sequence
+                .is_none_or(|last| state.sequence > last)
+            {
+                runtime.last_camera_pose_sequence = Some(state.sequence);
+            }
+            runtime.last_error = Some(format!(
+                "{AGENT_CAMERA_POSE_ERROR_PREFIX}sequence {} was reused with a different camera_pose",
+                state.sequence
+            ));
+            return;
+        }
+    }
+
+    let Some(request) = state.camera_pose else {
+        clear_owned_camera_pose_error(&mut runtime.last_error);
+        return;
+    };
+    if !agent_camera_pose_pending(&state, game.get(), runtime.last_camera_pose_sequence) {
+        return;
+    }
+    let Ok((mut transform, mut player)) = player.get_single_mut() else {
+        return;
+    };
+
+    // Whether valid or rejected, this sequence is consumed exactly once. A
+    // corrected request must use a strictly newer sequence so observers cannot
+    // oscillate between payloads that claim the same command identity or
+    // replay a stale teleport after a later view was shown.
+    runtime.last_camera_pose_sequence = Some(state.sequence);
+    match validate_agent_camera_pose(request) {
+        Ok(pose) => {
+            apply_validated_agent_camera_pose(pose, &mut transform, &mut player);
+            clear_owned_camera_pose_error(&mut runtime.last_error);
+        }
+        Err(error) => {
+            runtime.last_error = Some(format!("{AGENT_CAMERA_POSE_ERROR_PREFIX}{error}"));
+        }
+    }
 }
 
 fn apply_agent_bot_command(
@@ -985,6 +1562,7 @@ fn agent_control_enter_game(
     game: Res<State<GameState>>,
     mut next: ResMut<NextState<GameState>>,
     mut pending: ResMut<PendingWorldLoad>,
+    mut pending_edits: ResMut<PendingEditedOverrideStore>,
     mut settings: ResMut<WorldSettings>,
     mut commands: Commands,
     active: Option<Res<ActiveWorld>>,
@@ -1002,18 +1580,28 @@ fn agent_control_enter_game(
                 _ => None,
             })
             .unwrap_or(settings.world_profile);
+        let scenery_quality = std::env::var("VOXEL_NATIVE_AGENT_SCENERY")
+            .ok()
+            .as_deref()
+            .and_then(parse_agent_scenery_quality)
+            .unwrap_or(settings.scenery_quality);
         let world_name = std::env::var("VOXEL_NATIVE_AGENT_WORLD")
             .ok()
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "agent_control".into());
-        let mut meta = WorldMeta::new_with_profile(world_name, seed, world_profile);
+        let identity = WorldGenerationIdentity {
+            seed,
+            world_profile,
+            scenery_quality,
+            terrain_grammar: TerrainGrammarVersion::CURRENT,
+        };
+        let mut meta = WorldMeta::new_with_identity(world_name, identity);
         if std::env::var("VOXEL_NATIVE_AGENT_FOCUS")
             .map(|value| value.trim().eq_ignore_ascii_case("river"))
             .unwrap_or(false)
         {
-            let generator =
-                crate::terrain::TerrainGenerator::new(seed).with_world_profile(world_profile);
+            let generator = crate::terrain::TerrainGenerator::from_identity(identity);
             if let Some(focus) = generator.find_hydrographic_focus(0, 0, 4096) {
                 meta.player_pos = [
                     focus.x as f32 + 0.5,
@@ -1028,8 +1616,23 @@ fn agent_control_enter_game(
         meta.time_of_day = env_f32("VOXEL_NATIVE_AGENT_HOUR")
             .unwrap_or(10.8)
             .clamp(0.0, 24.0);
+        let allow_existing_exact =
+            agent_world_entry_allows_existing_exact(isolated_observer_enabled());
+        let meta = match crate::world::prepare_programmatic_world_entry(
+            &meta,
+            allow_existing_exact,
+            &mut pending_edits,
+        ) {
+            Ok(meta) => meta,
+            Err(reason) => {
+                warn!("agent control: refused world entry: {reason}");
+                return;
+            }
+        };
         settings.seed = seed;
         settings.world_profile = world_profile;
+        settings.scenery_quality = identity.scenery_quality;
+        settings.terrain_grammar = identity.terrain_grammar;
         settings.time_mode = meta.time_mode;
         settings.time_of_day = meta.time_of_day;
         commands.insert_resource(ActiveWorld { meta });
@@ -1051,10 +1654,28 @@ fn agent_control_startup_marker(runtime: Res<AgentControlRuntime>, state: Res<Ag
     write_boot_status(&runtime, &state, "startup");
 }
 
-fn agent_control_heartbeat(runtime: Res<AgentControlRuntime>, state: Res<AgentControlState>) {
-    if state.is_changed() {
+fn agent_control_heartbeat(
+    time: Res<Time>,
+    mut runtime: ResMut<AgentControlRuntime>,
+    state: Res<AgentControlState>,
+) {
+    if advance_agent_bridge_heartbeat(&mut runtime.bridge_timer, time.delta_seconds()) {
         write_boot_status(&runtime, &state, "heartbeat");
     }
+}
+
+fn advance_agent_bridge_heartbeat(timer: &mut f32, delta_seconds: f32) -> bool {
+    let delta_seconds = if delta_seconds.is_finite() {
+        delta_seconds.clamp(0.0, AGENT_BRIDGE_HEARTBEAT_SECONDS)
+    } else {
+        0.0
+    };
+    *timer -= delta_seconds;
+    if *timer > 0.0 {
+        return false;
+    }
+    *timer = AGENT_BRIDGE_HEARTBEAT_SECONDS;
+    true
 }
 
 fn apply_agent_build_mode(
@@ -1410,8 +2031,11 @@ fn set_agent_control_enabled(state: &mut AgentControlState, next_enabled: bool) 
     if state.enabled == next_enabled {
         return false;
     }
+    let Some(next_sequence) = state.sequence.checked_add(1) else {
+        return false;
+    };
 
-    state.sequence = state.sequence.saturating_add(1);
+    state.sequence = next_sequence;
     state.enabled = next_enabled;
     state.handoff = !next_enabled;
     state.forward = 0.0;
@@ -1423,6 +2047,7 @@ fn set_agent_control_enabled(state: &mut AgentControlState, next_enabled: bool) 
     state.look_y = 0.0;
     state.yaw = None;
     state.pitch = None;
+    state.camera_pose = None;
     state.fire = false;
     state.scope = false;
     state.keys.clear();
@@ -1457,6 +2082,9 @@ fn agent_control_toggle_panel(
     let theme = settings.theme;
     let colors = theme.semantic();
     let control_available = state.runtime_enabled && runtime.runtime_enabled;
+    let isolated_observer = isolated_observer_enabled();
+    let control_mutable =
+        control_available && agent_control_file_rewrite_allowed(isolated_observer);
     let visual = agent_control_visual_state(
         control_available,
         state.enabled,
@@ -1464,15 +2092,20 @@ fn agent_control_toggle_panel(
     );
     let control_owner = if !control_available {
         "UNAVAILABLE"
+    } else if isolated_observer {
+        "EXTERNAL"
     } else if state.enabled {
         "AGENT"
     } else {
         "PLAYER"
     };
-    let status_message = runtime
-        .last_error
-        .clone()
-        .unwrap_or_else(|| state.status.clone());
+    let status_message = runtime.last_error.clone().unwrap_or_else(|| {
+        if isolated_observer {
+            "isolated observer: external control file is authoritative".into()
+        } else {
+            state.status.clone()
+        }
+    });
     let status_color = if runtime.last_error.is_some() {
         colors.danger
     } else if visual.status_active {
@@ -1500,7 +2133,7 @@ fn agent_control_toggle_panel(
                         agent_control_status_signal(ui, visual.status_active, theme);
                         crate::ui_kit::status_chip(ui, Icon::Hud, "CONTROL", control_owner, theme);
                         let response =
-                            agent_control_action(ui, state.enabled, control_available, theme);
+                            agent_control_action(ui, state.enabled, control_mutable, theme);
                         if response.clicked() {
                             let next_enabled = !state.enabled;
                             if set_agent_control_enabled(&mut state, next_enabled) {
@@ -1596,6 +2229,16 @@ fn agent_control_overlay(
                             );
                         });
                     });
+                    if !state.view_label.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(format!("VIEW // {}", state.view_label))
+                                .color(colors.accent)
+                                .size(15.0)
+                                .strong()
+                                .monospace(),
+                        );
+                    }
                     ui.add_space(7.0);
                     ui.horizontal_wrapped(|ui| {
                         crate::ui_kit::status_chip(
@@ -1722,6 +2365,13 @@ fn agent_control_overlay(
                         .color(ocr_color)
                         .size(14.0),
                     );
+                    if !state.view_label.is_empty() {
+                        ui.monospace(
+                            egui::RichText::new(format!("OCR_VIEW={}", state.view_label))
+                                .color(ocr_color)
+                                .size(14.0),
+                        );
+                    }
                     ui.monospace(
                         egui::RichText::new(format!(
                             "OCR_POS={:.1},{:.1},{:.1} OCR_YAW={:.2} OCR_PITCH={:.2}",
@@ -1839,6 +2489,52 @@ fn agent_control_overlay(
 }
 
 const AGENT_CAPTURE_SETTLE_FRAMES: u8 = 2;
+const AGENT_SCREENSHOT_MAX_PIXELS: u64 = 16_777_216;
+const AGENT_SCREENSHOT_MAX_ENCODED_BYTES: usize = 64 * 1024 * 1024;
+const AGENT_SCREENSHOT_ERROR_MAX_CHARS: usize = 256;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn bounded_agent_screenshot_error(index: usize, error: impl std::fmt::Display) -> String {
+    let message = format!("screenshot: capture {index:04} failed: {error}");
+    message
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(AGENT_SCREENSHOT_ERROR_MAX_CHARS)
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_agent_capture_ledger(
+    ledger: &Arc<Mutex<AgentCaptureLedger>>,
+) -> std::sync::MutexGuard<'_, AgentCaptureLedger> {
+    ledger.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn agent_capture_snapshot(ledger: &Arc<Mutex<AgentCaptureLedger>>) -> AgentCaptureSnapshot {
+    lock_agent_capture_ledger(ledger).snapshot()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn agent_status_error_projection(
+    runtime_last_error: &Option<String>,
+    capture_snapshot: &AgentCaptureSnapshot,
+) -> (Option<String>, Option<String>) {
+    (
+        runtime_last_error.clone(),
+        capture_snapshot.latest_error.clone(),
+    )
+}
+
+fn mission_feed_error_count(
+    bot_error_count: usize,
+    runtime_error: &Option<String>,
+    screenshot_error: &Option<String>,
+) -> usize {
+    bot_error_count
+        .saturating_add(usize::from(runtime_error.is_some()))
+        .saturating_add(usize::from(screenshot_error.is_some()))
+}
 
 fn advance_sequence_screenshot(requested: bool, pending_frames: &mut Option<u8>) -> bool {
     if requested {
@@ -1882,32 +2578,135 @@ fn agent_control_capture(
         return;
     }
     if runtime.in_game_frames < 3 {
+        #[cfg(not(target_arch = "wasm32"))]
+        lock_agent_capture_ledger(&runtime.capture_ledger).record_failure(
+            runtime.screenshot_index,
+            "capture rejected before the game rendered three complete frames",
+        );
         return;
     }
     runtime.screenshot_timer = runtime.screenshot_interval;
 
-    let Ok(window) = windows.get_single() else {
-        return;
+    let window = match windows.get_single() {
+        Ok(window) => window,
+        Err(error) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            lock_agent_capture_ledger(&runtime.capture_ledger).record_failure(
+                runtime.screenshot_index,
+                format!("primary window unavailable or ambiguous: {error}"),
+            );
+            return;
+        }
     };
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Err(e) = std::fs::create_dir_all(&runtime.session_dir) {
+        if let Err(e) = prepare_safe_agent_directory(&runtime.session_dir) {
+            lock_agent_capture_ledger(&runtime.capture_ledger).record_failure(
+                runtime.screenshot_index,
+                format!("session directory rejected: {e}"),
+            );
             warn!(
                 "agent control: could not create {}: {e}",
                 runtime.session_dir.display()
             );
             return;
         }
+        let capture_index = runtime.screenshot_index;
+        let Some(next_capture_index) = capture_index.checked_add(1) else {
+            lock_agent_capture_ledger(&runtime.capture_ledger)
+                .record_failure(capture_index, "filename cursor overflow");
+            warn!("agent control: screenshot filename cursor exhausted");
+            return;
+        };
         let path = runtime
             .session_dir
-            .join(format!("live_{:04}.png", runtime.screenshot_index));
-        runtime.screenshot_index += 1;
-        match screenshots.save_screenshot_to_disk(window, &path) {
-            Ok(_) => info!("agent control: screenshot saved to {}", path.display()),
-            Err(e) => warn!("agent control: screenshot failed: {e}"),
+            .join(format!("live_{capture_index:04}.png"));
+        let callback_path = path.clone();
+        let capture_ledger = Arc::clone(&runtime.capture_ledger);
+        match screenshots.take_screenshot(
+            window,
+            move |captured| match encode_agent_screenshot_png(captured)
+                .and_then(|bytes| write_agent_screenshot_png(&callback_path, &bytes))
+            {
+                Ok(()) => {
+                    lock_agent_capture_ledger(&capture_ledger)
+                        .record_success(capture_index, callback_path.clone());
+                    info!(
+                        "agent control: screenshot saved safely to {}",
+                        callback_path.display()
+                    );
+                }
+                Err(error) => {
+                    lock_agent_capture_ledger(&capture_ledger)
+                        .record_failure(capture_index, &error);
+                    warn!(
+                        "agent control: screenshot write rejected for {}: {error}",
+                        callback_path.display()
+                    );
+                }
+            },
+        ) {
+            Ok(_) => {
+                runtime.screenshot_index = next_capture_index;
+                info!("agent control: screenshot requested for {}", path.display());
+            }
+            Err(error) => {
+                lock_agent_capture_ledger(&runtime.capture_ledger)
+                    .record_failure(capture_index, &error);
+                warn!("agent control: screenshot request failed: {error}");
+            }
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn encode_agent_screenshot_png(captured: Image) -> std::io::Result<Vec<u8>> {
+    let extent = captured.texture_descriptor.size;
+    let pixels = u64::from(extent.width)
+        .checked_mul(u64::from(extent.height))
+        .and_then(|count| count.checked_mul(u64::from(extent.depth_or_array_layers)))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "agent screenshot dimensions overflow their fixed work budget",
+            )
+        })?;
+    if pixels == 0 || pixels > AGENT_SCREENSHOT_MAX_PIXELS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "agent screenshot contains {pixels} pixels; limit is {AGENT_SCREENSHOT_MAX_PIXELS}"
+            ),
+        ));
+    }
+
+    let dynamic = captured.try_into_dynamic().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("agent screenshot texture conversion failed: {error}"),
+        )
+    })?;
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(dynamic.to_rgb8())
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("agent screenshot PNG encoding failed: {error}"),
+            )
+        })?;
+    let encoded = encoded.into_inner();
+    if encoded.len() > AGENT_SCREENSHOT_MAX_ENCODED_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "agent screenshot encodes to {} bytes; limit is {AGENT_SCREENSHOT_MAX_ENCODED_BYTES}",
+                encoded.len()
+            ),
+        ));
+    }
+    Ok(encoded)
 }
 
 fn agent_control_status(
@@ -1964,18 +2763,22 @@ fn agent_control_status(
             "{:?}",
             world.generator.biome_at(environment_x, environment_z)
         );
-        let last_screenshot = runtime.screenshot_index.checked_sub(1).map(|idx| {
-            runtime
-                .session_dir
-                .join(format!("live_{idx:04}.png"))
-                .to_string_lossy()
-                .to_string()
-        });
+        let capture_snapshot = agent_capture_snapshot(&runtime.capture_ledger);
+        let last_screenshot = capture_snapshot
+            .last_screenshot
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string());
+        let (reported_error, last_screenshot_error) =
+            agent_status_error_projection(&runtime.last_error, &capture_snapshot);
         let status = AgentLiveStatus {
             seconds: time.elapsed_seconds(),
             game_state: format!("{:?}", game.get()),
             command_sequence: state.sequence,
             command_status: state.status.clone(),
+            command_view_label: state.view_label.clone(),
+            command_camera_pose_requested: state.camera_pose.is_some(),
+            camera_command_sequence_cursor: runtime.last_camera_command_sequence,
+            camera_pose_handled_sequence: runtime.last_camera_pose_sequence,
             command_forward: state.forward,
             command_right: state.right,
             command_up: state.up,
@@ -2074,13 +2877,14 @@ fn agent_control_status(
             render_distance: governor.effective_render_distance,
             control_enabled: state.enabled,
             last_command_seconds: runtime.last_command_seconds,
-            last_error: runtime.last_error.clone(),
-            screenshot_count: runtime.screenshot_index,
+            last_error: reported_error,
+            last_screenshot_error,
+            screenshot_count: capture_snapshot.successful_count,
             in_game_frames: runtime.in_game_frames,
             last_screenshot,
             session_dir: runtime_session_dir(&runtime),
         };
-        if let Err(e) = std::fs::create_dir_all(&runtime.session_dir) {
+        if let Err(e) = prepare_safe_agent_directory(&runtime.session_dir) {
             warn!(
                 "agent control: could not create {}: {e}",
                 runtime.session_dir.display()
@@ -2089,7 +2893,12 @@ fn agent_control_status(
         }
         let path = runtime.session_dir.join("status.ron");
         if let Ok(text) = ron::ser::to_string_pretty(&status, ron::ser::PrettyConfig::default()) {
-            let _ = std::fs::write(path, text);
+            if let Err(error) = atomic_replace_agent_telemetry_text(&path, &text) {
+                warn!(
+                    "agent control: could not atomically write {}: {error}",
+                    path.display()
+                );
+            }
         }
         if runtime.mission_feed_enabled {
             let (world_name, world_profile, world_seed, time_of_day) = active_world
@@ -2138,7 +2947,11 @@ fn agent_control_status(
                 loaded_chunks: status.loaded_chunks,
                 pending_work: status.pending_terrain + status.pending_meshes + status.dirty_chunks,
                 warning_count: status.bot_warning_count,
-                error_count: status.bot_error_count + usize::from(status.last_error.is_some()),
+                error_count: mission_feed_error_count(
+                    status.bot_error_count,
+                    &status.last_error,
+                    &status.last_screenshot_error,
+                ),
                 control_enabled: status.control_enabled,
                 capability_schema_version:
                     crate::agent_capabilities::AGENT_CAPABILITY_SCHEMA_VERSION,
@@ -2154,7 +2967,12 @@ fn agent_control_status(
             };
             let feed_path = runtime.session_dir.join("mission_feed.ron");
             if let Ok(text) = ron::ser::to_string_pretty(&feed, ron::ser::PrettyConfig::default()) {
-                let _ = std::fs::write(feed_path, text);
+                if let Err(error) = atomic_replace_agent_telemetry_text(&feed_path, &text) {
+                    warn!(
+                        "agent control: could not atomically write {}: {error}",
+                        feed_path.display()
+                    );
+                }
             }
         }
     }
@@ -2172,10 +2990,83 @@ fn agent_control_exit(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn ensure_control_file(path: &std::path::Path) {
-    if path.exists() {
-        return;
+fn read_bounded_control_file(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+
+    let path = rooted_agent_path(path)?;
+    if let Some(parent) = path.parent() {
+        ensure_safe_agent_directory_chain(parent)?;
     }
+    let path_metadata = std::fs::symlink_metadata(&path)?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.file_type().is_symlink()
+        || agent_native_metadata_is_reparse_point(&path_metadata)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "control path is not a safe regular file",
+        ));
+    }
+    if path_metadata.len() > AGENT_CONTROL_MAX_BYTES as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("control file exceeds the {AGENT_CONTROL_MAX_BYTES}-byte limit"),
+        ));
+    }
+
+    let file = std::fs::OpenOptions::new().read(true).open(&path)?;
+    if let Some(parent) = path.parent() {
+        ensure_safe_agent_directory_chain(parent)?;
+    }
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.file_type().is_file()
+        || agent_native_metadata_is_reparse_point(&opened_metadata)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "opened control handle is not a safe regular file",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(opened_metadata.len())
+            .unwrap_or(AGENT_CONTROL_MAX_BYTES)
+            .min(AGENT_CONTROL_MAX_BYTES),
+    );
+    file.take((AGENT_CONTROL_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    decode_bounded_control_bytes(bytes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_bounded_control_bytes(bytes: Vec<u8>) -> std::io::Result<String> {
+    if bytes.len() > AGENT_CONTROL_MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("control file exceeds the {AGENT_CONTROL_MAX_BYTES}-byte limit"),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("control file is not UTF-8: {error}"),
+        )
+    })
+}
+
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+fn agent_native_metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(windows)))]
+fn agent_native_metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_control_file(path: &std::path::Path) {
     let template = r#"(
     enabled: true,
     sequence: 0,
@@ -2186,6 +3077,9 @@ fn ensure_control_file(path: &std::path::Path) {
     fly: true,
     look_x: 0.0,
     look_y: 0.0,
+    view_label: "",
+    // Example: Some((position: (120.0, 90.0, -64.0), yaw: 0.5, pitch: -0.25))
+    camera_pose: None,
     fire: false,
     scope: false,
     keys: [],
@@ -2198,12 +3092,69 @@ fn ensure_control_file(path: &std::path::Path) {
     screenshot: false,
     exit: false,
 )"#;
-    let _ = std::fs::write(path, template);
+    if let Err(error) = create_agent_control_file_if_missing(path, template) {
+        warn!(
+            "agent control: could not safely create control file {}: {error}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn create_agent_control_file_if_missing(
+    path: &std::path::Path,
+    text: &str,
+) -> std::io::Result<bool> {
+    use std::io::Write;
+
+    let path = rooted_agent_path(path)?;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    prepare_safe_agent_directory(parent)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            ensure_safe_agent_regular_file(&path)?;
+            return Ok(false);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    ensure_safe_agent_directory_chain(parent)?;
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            ensure_safe_agent_regular_file(&path)?;
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    let write_result = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        if ensure_safe_agent_directory_chain(parent).is_ok()
+            && ensure_safe_agent_regular_file(&path).is_ok()
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+        return Err(error);
+    }
+    ensure_safe_agent_directory_chain(parent)?;
+    ensure_safe_agent_regular_file(&path)?;
+    Ok(true)
 }
 
 fn write_agent_control_file(runtime: &AgentControlRuntime, state: &AgentControlState) {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        if !agent_control_file_rewrite_allowed(isolated_observer_enabled()) {
+            return;
+        }
         let command = AgentControlCommand {
             enabled: state.enabled,
             sequence: state.sequence,
@@ -2216,6 +3167,8 @@ fn write_agent_control_file(runtime: &AgentControlRuntime, state: &AgentControlS
             look_y: 0.0,
             yaw: None,
             pitch: None,
+            view_label: state.view_label.clone(),
+            camera_pose: None,
             fire: false,
             scope: false,
             keys: Vec::new(),
@@ -2229,7 +3182,12 @@ fn write_agent_control_file(runtime: &AgentControlRuntime, state: &AgentControlS
             exit: false,
         };
         if let Ok(text) = ron::ser::to_string_pretty(&command, ron::ser::PrettyConfig::default()) {
-            let _ = std::fs::write(&runtime.control_path, text);
+            if let Err(error) = atomic_write_agent_text(&runtime.control_path, &text) {
+                warn!(
+                    "agent control: could not atomically rewrite {}: {error}",
+                    runtime.control_path.display()
+                );
+            }
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -2238,11 +3196,297 @@ fn write_agent_control_file(runtime: &AgentControlRuntime, state: &AgentControlS
     }
 }
 
+fn agent_control_file_rewrite_allowed(isolated_observer: bool) -> bool {
+    !isolated_observer
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn atomic_write_agent_text(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    atomic_replace_agent_bytes(path, text.as_bytes(), true)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rooted_agent_path_from(
+    path: &std::path::Path,
+    current_dir: &std::path::Path,
+) -> std::io::Result<PathBuf> {
+    let rooted = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        if !current_dir.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "current directory is not absolute",
+            ));
+        }
+        current_dir.join(path)
+    };
+    if !rooted.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "agent path did not resolve to an absolute path",
+        ));
+    }
+    Ok(rooted)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rooted_agent_path(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    rooted_agent_path_from(path, &std::env::current_dir()?)
+}
+
+/// Atomically replaces observer telemetry without a durable `sync_all` on the
+/// render thread. Telemetry is reconstructible and prioritizes a hitch-free
+/// persistent view; control/capability authority requests durability below.
+#[cfg(not(target_arch = "wasm32"))]
+fn atomic_replace_agent_telemetry_text(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    atomic_replace_agent_bytes(path, text.as_bytes(), false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_agent_capability_manifest_safely(
+    session_dir: &std::path::Path,
+    agent_id: &str,
+    fleet_id: &str,
+) -> std::io::Result<PathBuf> {
+    let text = crate::agent_capabilities::agent_capability_manifest_text(agent_id, fleet_id)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let path = session_dir.join("capabilities.ron");
+    atomic_replace_agent_bytes(&path, text.as_bytes(), true)?;
+    Ok(path)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_agent_screenshot_png(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    const PNG_IEND: &[u8; 12] = b"\0\0\0\0IEND\xaeB`\x82";
+    if bytes.len() > AGENT_SCREENSHOT_MAX_ENCODED_BYTES
+        || !bytes.starts_with(PNG_SIGNATURE)
+        || !bytes.ends_with(PNG_IEND)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "agent screenshot is not one complete bounded PNG",
+        ));
+    }
+    atomic_replace_agent_bytes(path, bytes, false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn atomic_replace_agent_bytes(
+    path: &std::path::Path,
+    bytes: &[u8],
+    durable: bool,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if bytes.len() > AGENT_SCREENSHOT_MAX_ENCODED_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "agent output exceeds the fixed 64 MiB byte budget",
+        ));
+    }
+    let path = rooted_agent_path(path)?;
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    prepare_safe_agent_directory(parent)?;
+    ensure_safe_agent_regular_file_or_missing(&path)?;
+    let temp_path = path.with_file_name(format!(
+        ".{}.agent-tmp-{}-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("agent-output"),
+        std::process::id(),
+        crate::platform::now_nanos_seed()
+    ));
+    let result = (|| {
+        ensure_safe_agent_directory_chain(parent)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(bytes)?;
+        if durable {
+            file.sync_all()?;
+        }
+        drop(file);
+        ensure_safe_agent_directory_chain(parent)?;
+        ensure_safe_agent_regular_file(&temp_path)?;
+        ensure_safe_agent_regular_file_or_missing(&path)?;
+        if let Err(rename_error) = std::fs::rename(&temp_path, &path) {
+            ensure_safe_agent_regular_file_or_missing(&path)?;
+            #[cfg(windows)]
+            replace_existing_agent_file_windows(&path, &temp_path).map_err(|replace_error| {
+                    std::io::Error::new(
+                        replace_error.kind(),
+                        format!(
+                            "atomic agent-output rename failed ({rename_error}); ReplaceFileW failed ({replace_error})"
+                        ),
+                    )
+                })?;
+            #[cfg(not(windows))]
+            return Err(rename_error);
+        }
+        ensure_safe_agent_directory_chain(parent)?;
+        ensure_safe_agent_regular_file_or_missing(&path)?;
+        Ok(())
+    })();
+    if result.is_err()
+        && ensure_safe_agent_directory_chain(parent).is_ok()
+        && ensure_safe_agent_regular_file(&temp_path).is_ok()
+    {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare_safe_agent_directory(path: &std::path::Path) -> std::io::Result<()> {
+    let path = rooted_agent_path(path)?;
+    ensure_safe_agent_directory_ancestors_or_missing(&path)?;
+    std::fs::create_dir_all(&path)?;
+    ensure_safe_agent_directory_chain(&path)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_safe_agent_directory_ancestors_or_missing(path: &std::path::Path) -> std::io::Result<()> {
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if candidate.as_os_str().is_empty() {
+            break;
+        }
+        match std::fs::symlink_metadata(candidate) {
+            Ok(metadata) => ensure_safe_agent_directory_metadata(candidate, &metadata)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        cursor = candidate.parent();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_safe_agent_directory_chain(path: &std::path::Path) -> std::io::Result<()> {
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        if candidate.as_os_str().is_empty() {
+            break;
+        }
+        let metadata = std::fs::symlink_metadata(candidate)?;
+        ensure_safe_agent_directory_metadata(candidate, &metadata)?;
+        cursor = candidate.parent();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_safe_agent_directory_metadata(
+    path: &std::path::Path,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<()> {
+    if metadata.file_type().is_dir()
+        && !metadata.file_type().is_symlink()
+        && !agent_native_metadata_is_reparse_point(metadata)
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{}' is not a safe regular directory", path.display()),
+        ))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_safe_agent_regular_file_or_missing(path: &std::path::Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_file()
+        && !metadata.file_type().is_symlink()
+        && !agent_native_metadata_is_reparse_point(&metadata)
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{}' is not a safe regular file", path.display()),
+        ))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_safe_agent_regular_file(path: &std::path::Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_file()
+        && !metadata.file_type().is_symlink()
+        && !agent_native_metadata_is_reparse_point(&metadata)
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{}' is not a safe regular file", path.display()),
+        ))
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+fn replace_existing_agent_file_windows(
+    final_path: &std::path::Path,
+    replacement_path: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let final_wide = final_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let replacement_wide = replacement_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both owned UTF-16 buffers are NUL-terminated and live for the
+    // complete synchronous call. Optional backup/exclusion pointers are null.
+    let replaced = unsafe {
+        ReplaceFileW(
+            final_wide.as_ptr(),
+            replacement_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 fn normalized_input_name(name: &str) -> String {
     name.chars()
         .filter(|c| !matches!(c, '_' | '-' | ' '))
         .flat_map(|c| c.to_uppercase())
         .collect()
+}
+
+fn parse_agent_scenery_quality(value: &str) -> Option<SceneryQuality> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "minimal" => Some(SceneryQuality::Off),
+        "lean" | "efficient" => Some(SceneryQuality::Lean),
+        "balanced" => Some(SceneryQuality::Balanced),
+        "lush" | "immersive" => Some(SceneryQuality::Lush),
+        _ => None,
+    }
 }
 
 fn parse_mouse_button(name: &str) -> Option<MouseButton> {
@@ -2391,6 +3635,27 @@ fn agent_runtime_enabled() -> bool {
         || std::env::args().any(|arg| matches!(arg.as_str(), "--agent-control" | "--agent"))
 }
 
+fn isolated_observer_from_flags(runtime_enabled: bool, isolated_requested: bool) -> bool {
+    runtime_enabled && isolated_requested
+}
+
+fn agent_world_entry_allows_existing_exact(isolated_observer: bool) -> bool {
+    !isolated_observer
+}
+
+/// Returns true only for an explicitly isolated agent-control session.
+///
+/// Agent control on its own preserves the normal persistence contract. The
+/// additional environment flag lets long-lived visual observers opt out of
+/// reading or writing the user's normal settings without changing other agent
+/// workflows.
+pub(crate) fn isolated_observer_enabled() -> bool {
+    isolated_observer_from_flags(
+        agent_runtime_enabled(),
+        env_flag("VOXEL_NATIVE_AGENT_ISOLATED"),
+    )
+}
+
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -2434,6 +3699,75 @@ fn env_u32(name: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct AgentPathTestRoot(std::path::PathBuf);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl AgentPathTestRoot {
+        fn new(label: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "voxel-native-agent-path-{label}-{}-{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).expect("create isolated agent-path test root");
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for AgentPathTestRoot {
+        fn drop(&mut self) {
+            let temp = std::env::temp_dir();
+            assert!(
+                self.0.starts_with(&temp)
+                    && self
+                        .0
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("voxel-native-agent-path-")),
+                "refuse broad agent-path test cleanup"
+            );
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tiny_agent_png() -> Vec<u8> {
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .expect("encode tiny agent screenshot fixture");
+        encoded.into_inner()
+    }
+
+    fn test_player() -> Player {
+        Player {
+            yaw: 0.75,
+            pitch: 0.25,
+            velocity: Vec3::new(3.0, -2.0, 1.0),
+            on_ground: true,
+            flying: false,
+            walk_speed: 5.5,
+            fly_speed: 24.0,
+            sensitivity: 0.0025,
+            placed_on_surface: false,
+            jump_buffer: 0.1,
+            coyote_time: 0.1,
+            fov_bonus: 2.0,
+            space_tap_timer: 0.1,
+            w_tap_timer: 0.1,
+            sprint_latched: true,
+            current_eye_height: 1.62,
+            current_height: 1.8,
+        }
+    }
 
     fn expect_applied(outcome: AgentBotRequestOutcome) -> CommandId {
         match outcome {
@@ -2517,6 +3851,100 @@ mod tests {
         assert!(advance_sequence_screenshot(false, &mut pending_frames));
         assert_eq!(pending_frames, None);
         assert!(!advance_sequence_screenshot(false, &mut pending_frames));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn capture_ledger_never_publishes_rejected_or_failed_requests() {
+        let mut ledger = AgentCaptureLedger::default();
+        ledger.record_failure(0, "renderer already has a pending request");
+        let rejected = ledger.snapshot();
+        assert_eq!(rejected.successful_count, 0);
+        assert_eq!(rejected.last_screenshot, None);
+        assert!(rejected
+            .latest_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("screenshot: capture 0000 failed:")));
+
+        let root = AgentPathTestRoot::new("capture-failure-ledger");
+        let invalid_path = root.path().join("live_0000.png");
+        let write_error = write_agent_screenshot_png(&invalid_path, b"not a PNG")
+            .expect_err("invalid PNG must be rejected before publication");
+        ledger.record_failure(0, write_error);
+        let failed = ledger.snapshot();
+        assert_eq!(failed.successful_count, 0);
+        assert_eq!(failed.last_screenshot, None);
+        assert!(!invalid_path.exists());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn capture_ledger_counts_real_successes_and_keeps_highest_out_of_order_index() {
+        let root = AgentPathTestRoot::new("capture-success-ledger");
+        let session = root.path().join("agent_runs").join("session");
+        prepare_safe_agent_directory(&session).expect("prepare capture-ledger session");
+        let png = tiny_agent_png();
+        let path_two = session.join("live_0002.png");
+        let path_one = session.join("live_0001.png");
+        write_agent_screenshot_png(&path_two, &png).expect("publish capture two");
+        write_agent_screenshot_png(&path_one, &png).expect("publish capture one");
+
+        let mut ledger = AgentCaptureLedger::default();
+        ledger.record_failure(2, "pending failure before successful retry");
+        ledger.record_success(2, path_two.clone());
+        let first_success = ledger.snapshot();
+        assert_eq!(first_success.successful_count, 1);
+        assert_eq!(first_success.last_screenshot, Some(path_two.clone()));
+        assert_eq!(first_success.latest_error, None);
+
+        ledger.record_success(1, path_one);
+        ledger.record_failure(0, "late failure from an older request");
+        let out_of_order = ledger.snapshot();
+        assert_eq!(out_of_order.successful_count, 2);
+        assert_eq!(out_of_order.last_screenshot, Some(path_two));
+        assert_eq!(out_of_order.latest_error, None);
+
+        ledger.record_failure(3, "newest request failed");
+        let newest_failure = ledger.snapshot();
+        assert_eq!(newest_failure.successful_count, 2);
+        assert!(newest_failure.last_screenshot.is_some());
+        assert!(newest_failure
+            .latest_error
+            .as_deref()
+            .is_some_and(|error| error.contains("capture 0003 failed")));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn status_projection_keeps_runtime_and_screenshot_errors_independent() {
+        let mut ledger = AgentCaptureLedger::default();
+        ledger.record_failure(4, "PNG publication failed");
+        let capture_snapshot = ledger.snapshot();
+        let runtime_error = Some("control command: stale sequence 8; cursor is 9".to_owned());
+
+        let (last_error, last_screenshot_error) =
+            agent_status_error_projection(&runtime_error, &capture_snapshot);
+
+        assert_eq!(last_error, runtime_error);
+        assert!(last_screenshot_error
+            .as_deref()
+            .is_some_and(|error| error.contains("capture 0004 failed")));
+    }
+
+    #[test]
+    fn mission_feed_counts_runtime_and_screenshot_errors_independently() {
+        let runtime_error = Some("control command: stale sequence".to_owned());
+        let screenshot_error = Some("screenshot: capture 0004 failed".to_owned());
+
+        assert_eq!(
+            mission_feed_error_count(2, &runtime_error, &screenshot_error),
+            4
+        );
+        assert_eq!(
+            mission_feed_error_count(usize::MAX, &runtime_error, &screenshot_error),
+            usize::MAX,
+            "optional mission telemetry must not wrap its aggregate"
+        );
     }
 
     #[test]
@@ -2634,11 +4062,11 @@ mod tests {
     }
 
     #[test]
-    fn resuming_agent_control_is_idempotent_and_saturates_sequence() {
+    fn ui_control_sequence_reaches_max_then_fails_closed_without_wraparound() {
         let mut state = AgentControlState {
             runtime_enabled: true,
             enabled: false,
-            sequence: u64::MAX,
+            sequence: u64::MAX - 1,
             handoff: true,
             build_mode: "combat".into(),
             build_tool: "road".into(),
@@ -2657,6 +4085,9 @@ mod tests {
         assert_eq!(state.status, "agent live");
 
         assert!(!set_agent_control_enabled(&mut state, true));
+        assert_eq!(state.sequence, u64::MAX);
+        assert!(!set_agent_control_enabled(&mut state, false));
+        assert!(state.enabled);
         assert_eq!(state.sequence, u64::MAX);
     }
 
@@ -2821,7 +4252,733 @@ mod tests {
 
         assert!(command.enabled);
         assert_eq!(command.sequence, 5);
+        assert!(command.view_label.is_empty());
+        assert!(command.camera_pose.is_none());
         assert!(command.bot_command.is_none());
+    }
+
+    #[test]
+    fn global_control_cursor_rejects_stale_exit_and_same_sequence_mutation() {
+        let accepted = "(enabled:true,sequence:10,exit:false)";
+        let identical = accepted;
+        let reused = "(enabled:true,sequence:10,exit:true)";
+        let stale_exit = "(enabled:true,sequence:9,exit:true)";
+
+        assert_eq!(
+            agent_control_payload_decision(10, accepted, None, None),
+            AgentControlPayloadDecision::Apply
+        );
+        assert_eq!(
+            agent_control_payload_decision(10, identical, Some(10), Some(accepted)),
+            AgentControlPayloadDecision::Identical,
+            "an identical poll is a true no-op"
+        );
+        assert_eq!(
+            agent_control_payload_decision(10, reused, Some(10), Some(accepted)),
+            AgentControlPayloadDecision::ReusedWithDifferentPayload,
+            "exit cannot be armed by changing an accepted sequence"
+        );
+        assert_eq!(
+            agent_control_payload_decision(9, stale_exit, Some(10), Some(accepted)),
+            AgentControlPayloadDecision::Stale,
+            "a stale exit command cannot apply"
+        );
+        assert_eq!(
+            agent_control_payload_decision(
+                u64::MAX,
+                "(sequence:18446744073709551615)",
+                Some(10),
+                Some(accepted)
+            ),
+            AgentControlPayloadDecision::Apply
+        );
+        assert_eq!(
+            agent_control_payload_decision(0, "(sequence:0)", Some(u64::MAX), None),
+            AgentControlPayloadDecision::Stale,
+            "wraparound remains fail-closed for every command action"
+        );
+    }
+
+    #[test]
+    fn accepted_repeat_clears_transient_boundary_error_without_reapplication() {
+        let payload = "(enabled:true,sequence:10)";
+        assert!(repeated_payload_matches_accepted_identity(
+            payload,
+            Some(payload)
+        ));
+        assert!(!repeated_payload_matches_accepted_identity(
+            payload,
+            Some("(enabled:false,sequence:10)")
+        ));
+
+        let mut error = Some("control file: transient sharing violation".to_string());
+        if repeated_payload_matches_accepted_identity(payload, Some(payload)) {
+            clear_owned_control_boundary_error(&mut error);
+        }
+        assert_eq!(error, None);
+        assert_eq!(
+            agent_control_payload_decision(10, payload, Some(10), Some(payload)),
+            AgentControlPayloadDecision::Identical
+        );
+    }
+
+    #[test]
+    fn bridge_heartbeat_is_capped_at_one_hertz_and_ignores_non_finite_time() {
+        let mut timer = AGENT_BRIDGE_HEARTBEAT_SECONDS;
+        for _ in 0..3 {
+            assert!(!advance_agent_bridge_heartbeat(&mut timer, 0.25));
+        }
+        assert!(advance_agent_bridge_heartbeat(&mut timer, 0.25));
+        assert_eq!(timer, AGENT_BRIDGE_HEARTBEAT_SECONDS);
+        assert!(!advance_agent_bridge_heartbeat(&mut timer, f32::NAN));
+        assert_eq!(timer, AGENT_BRIDGE_HEARTBEAT_SECONDS);
+        assert!(advance_agent_bridge_heartbeat(&mut timer, 99.0));
+        assert_eq!(timer, AGENT_BRIDGE_HEARTBEAT_SECONDS);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oversized_control_payload_is_rejected_before_ron_deserialization() {
+        let error = decode_bounded_control_bytes(vec![b' '; AGENT_CONTROL_MAX_BYTES + 1])
+            .expect_err("oversized control payload");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("byte limit"));
+
+        let exact = decode_bounded_control_bytes(vec![b' '; AGENT_CONTROL_MAX_BYTES])
+            .expect("exact byte ceiling remains readable");
+        assert_eq!(exact.len(), AGENT_CONTROL_MAX_BYTES);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn relative_agent_paths_are_rooted_before_safety_validation() {
+        let root = AgentPathTestRoot::new("relative-root");
+        let relative = std::path::Path::new("agent_runs")
+            .join("session")
+            .join("status.ron");
+        let rooted = rooted_agent_path_from(&relative, root.path())
+            .expect("absolute test root must resolve a relative endpoint");
+
+        assert!(rooted.is_absolute());
+        assert_eq!(rooted, root.path().join(relative));
+        assert_eq!(
+            rooted_agent_path_from(
+                std::path::Path::new("status.ron"),
+                std::path::Path::new("relative-cwd")
+            )
+            .expect_err("a relative current directory must fail closed")
+            .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn safe_agent_paths_support_normal_nested_session_io() {
+        let root = AgentPathTestRoot::new("normal-chain");
+        let session = root.path().join("agent_runs").join("session");
+        prepare_safe_agent_directory(&session).expect("prepare ordinary session chain");
+
+        let control = session.join("agent_control.ron");
+        assert!(
+            create_agent_control_file_if_missing(&control, "(enabled:true,sequence:1)")
+                .expect("write ordinary control fixture")
+        );
+        assert_eq!(
+            read_bounded_control_file(&control).expect("read ordinary control path"),
+            "(enabled:true,sequence:1)"
+        );
+        atomic_write_agent_text(&control, "(enabled:false,sequence:2)")
+            .expect("durably replace ordinary control fixture");
+        assert_eq!(
+            read_bounded_control_file(&control).expect("read replaced control path"),
+            "(enabled:false,sequence:2)"
+        );
+
+        let status = session.join("status.ron");
+        atomic_replace_agent_telemetry_text(&status, "(status:\"ready\")")
+            .expect("write ordinary telemetry path");
+        assert_eq!(
+            std::fs::read_to_string(status).expect("read ordinary telemetry fixture"),
+            "(status:\"ready\")"
+        );
+
+        let capability_path =
+            write_agent_capability_manifest_safely(&session, "observer-fixture", "fleet-fixture")
+                .expect("write ordinary capability manifest");
+        let capability_text =
+            std::fs::read_to_string(capability_path).expect("read ordinary capability manifest");
+        assert!(capability_text.contains("observer-fixture"));
+
+        let screenshot = session.join("live_0000.png");
+        let png = tiny_agent_png();
+        write_agent_screenshot_png(&screenshot, &png).expect("write ordinary agent screenshot");
+        assert_eq!(
+            std::fs::read(screenshot).expect("read ordinary agent screenshot"),
+            png
+        );
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), any(unix, windows)))]
+    #[test]
+    fn agent_io_rejects_a_symlink_or_junction_ancestor() {
+        let root = AgentPathTestRoot::new("linked-ancestor");
+        let target = root.path().join("outside");
+        let linked = root.path().join("agent_runs");
+        std::fs::create_dir(&target).expect("create linked target fixture");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &linked).expect("create directory symlink fixture");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&target, &linked)
+            .expect("create directory symlink fixture");
+
+        let escaped_session = linked.join("session");
+        let prepare_error = prepare_safe_agent_directory(&escaped_session)
+            .expect_err("linked ancestor must block session preparation");
+        assert_eq!(prepare_error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!target.join("session").exists());
+
+        std::fs::create_dir(target.join("existing")).expect("create target session fixture");
+        let relative_from_linked_cwd = rooted_agent_path_from(
+            &std::path::Path::new("existing").join("relative_status.ron"),
+            &linked,
+        )
+        .expect("relative endpoint must become absolute before validation");
+        assert_eq!(
+            atomic_replace_agent_telemetry_text(
+                &relative_from_linked_cwd,
+                "(status:\"unsafe-relative\")"
+            )
+            .expect_err("a junction in the supplied current-directory chain must be rejected")
+            .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!target.join("existing").join("relative_status.ron").exists());
+
+        let escaped_control = linked.join("existing").join("agent_control.ron");
+        std::fs::write(
+            target.join("existing").join("agent_control.ron"),
+            "(sequence:1)",
+        )
+        .expect("write target control fixture");
+        assert_eq!(
+            read_bounded_control_file(&escaped_control)
+                .expect_err("linked ancestor must block control reads")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+
+        let escaped_status = linked.join("existing").join("status.ron");
+        assert_eq!(
+            atomic_replace_agent_telemetry_text(&escaped_status, "(status:\"unsafe\")")
+                .expect_err("linked ancestor must block telemetry writes")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!target.join("existing").join("status.ron").exists());
+
+        let escaped_capability_session = linked.join("existing");
+        assert_eq!(
+            write_agent_capability_manifest_safely(
+                &escaped_capability_session,
+                "observer-fixture",
+                "fleet-fixture"
+            )
+            .expect_err("linked ancestor must block capability writes")
+            .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!target.join("existing").join("capabilities.ron").exists());
+
+        let escaped_screenshot = linked.join("existing").join("live_0000.png");
+        assert_eq!(
+            write_agent_screenshot_png(&escaped_screenshot, &tiny_agent_png())
+                .expect_err("linked ancestor must block screenshot writes")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!target.join("existing").join("live_0000.png").exists());
+
+        let escaped_new_control = linked.join("existing").join("new_control.ron");
+        assert_eq!(
+            create_agent_control_file_if_missing(&escaped_new_control, "(sequence:0)")
+                .expect_err("linked ancestor must block control creation")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!target.join("existing").join("new_control.ron").exists());
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), any(unix, windows)))]
+    #[test]
+    fn agent_output_endpoints_reject_symlink_or_reparse_leaves() {
+        let root = AgentPathTestRoot::new("linked-leaves");
+        let session = root.path().join("agent_runs").join("session");
+        let targets = root.path().join("outside");
+        prepare_safe_agent_directory(&session).expect("prepare safe session fixture");
+        std::fs::create_dir(&targets).expect("create linked-leaf target directory");
+
+        let cases = [
+            ("agent_control.ron", b"original-control".as_slice()),
+            ("capabilities.ron", b"original-capability".as_slice()),
+            ("live_0000.png", b"original-screenshot".as_slice()),
+            ("status.ron", b"original-status".as_slice()),
+        ];
+        for (name, original) in cases {
+            let target = targets.join(name);
+            let linked = session.join(name);
+            std::fs::write(&target, original).expect("write linked-leaf target fixture");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &linked).expect("create file symlink fixture");
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(&target, &linked)
+                .expect("create file symlink fixture");
+
+            let error = match name {
+                "agent_control.ron" => {
+                    let create_error =
+                        create_agent_control_file_if_missing(&linked, "(sequence:0)")
+                            .expect_err("control creation must reject linked leaf");
+                    assert_eq!(create_error.kind(), std::io::ErrorKind::InvalidInput);
+                    atomic_write_agent_text(&linked, "(sequence:1)")
+                        .expect_err("control replacement must reject linked leaf")
+                }
+                "capabilities.ron" => write_agent_capability_manifest_safely(
+                    &session,
+                    "observer-fixture",
+                    "fleet-fixture",
+                )
+                .expect_err("capability write must reject linked leaf"),
+                "live_0000.png" => write_agent_screenshot_png(&linked, &tiny_agent_png())
+                    .expect_err("screenshot write must reject linked leaf"),
+                "status.ron" => atomic_replace_agent_telemetry_text(&linked, "(status:\"unsafe\")")
+                    .expect_err("telemetry replacement must reject linked leaf"),
+                _ => unreachable!(),
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                std::fs::read(&target).expect("read preserved linked-leaf target"),
+                original
+            );
+            std::fs::remove_file(&linked).expect("remove linked-leaf fixture");
+        }
+    }
+
+    #[test]
+    fn command_vectors_and_strings_are_deduplicated_and_bounded_before_use() {
+        let mut command = AgentControlCommand {
+            keys: (0..(AGENT_CONTROL_MAX_INPUT_NAMES + 20))
+                .flat_map(|index| [format!(" key_{index} "), format!("KEY-{index}")])
+                .collect(),
+            mouse_buttons: vec![
+                "left".into(),
+                "MOUSE_LEFT".into(),
+                "right".into(),
+                "right".into(),
+            ],
+            game_state: "g".repeat(AGENT_CONTROL_MAX_COMMAND_CHARS + 20),
+            build_mode: "b".repeat(AGENT_CONTROL_MAX_COMMAND_CHARS + 20),
+            build_tool: "t".repeat(AGENT_CONTROL_MAX_COMMAND_CHARS + 20),
+            bot_command: Some(AgentBotCommandRequest {
+                action: "a".repeat(AGENT_CONTROL_MAX_COMMAND_CHARS + 20),
+                operation: "o".repeat(AGENT_CONTROL_MAX_COMMAND_CHARS + 20),
+                block_reason: "r".repeat(AGENT_CONTROL_MAX_COMMAND_CHARS + 20),
+                target: AgentBotTargetRequest::Path(vec![[1, 2, 3], [1, 2, 3], [4, 5, 6]]),
+                recipients: AgentBotRecipientsRequest::Selected(vec![7, 7, 9]),
+                ..default()
+            }),
+            ..default()
+        };
+
+        sanitize_agent_control_command(&mut command).expect("bounded command");
+
+        assert!(command.keys.len() <= AGENT_CONTROL_MAX_INPUT_NAMES);
+        let key_identities = command
+            .keys
+            .iter()
+            .map(|key| normalized_input_name(key))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(key_identities.len(), command.keys.len());
+        assert!(command
+            .keys
+            .iter()
+            .all(|key| key.chars().count() <= AGENT_CONTROL_MAX_INPUT_NAME_CHARS));
+        assert_eq!(command.mouse_buttons, vec!["left", "right"]);
+        assert_eq!(
+            command.game_state.chars().count(),
+            AGENT_CONTROL_MAX_COMMAND_CHARS
+        );
+        assert_eq!(
+            command.build_mode.chars().count(),
+            AGENT_CONTROL_MAX_COMMAND_CHARS
+        );
+        assert_eq!(
+            command.build_tool.chars().count(),
+            AGENT_CONTROL_MAX_COMMAND_CHARS
+        );
+
+        let bot = command.bot_command.expect("bot command");
+        assert_eq!(bot.action.chars().count(), AGENT_CONTROL_MAX_COMMAND_CHARS);
+        assert_eq!(
+            bot.operation.chars().count(),
+            AGENT_CONTROL_MAX_COMMAND_CHARS
+        );
+        assert_eq!(
+            bot.block_reason.chars().count(),
+            AGENT_CONTROL_MAX_COMMAND_CHARS
+        );
+        assert_eq!(
+            bot.target,
+            AgentBotTargetRequest::Path(vec![[1, 2, 3], [4, 5, 6]])
+        );
+        assert_eq!(
+            bot.recipients,
+            AgentBotRecipientsRequest::Selected(vec![7, 9])
+        );
+
+        let mut oversized = AgentControlCommand {
+            bot_command: Some(AgentBotCommandRequest {
+                target: AgentBotTargetRequest::Selection(vec![
+                    [0, 0, 0];
+                    AGENT_CONTROL_MAX_BOT_POINTS + 1
+                ]),
+                ..default()
+            }),
+            ..default()
+        };
+        assert!(sanitize_agent_control_command(&mut oversized)
+            .expect_err("oversized bot selection")
+            .contains("limit"));
+    }
+
+    #[test]
+    fn non_finite_legacy_command_floats_are_sanitized_at_the_boundary() {
+        let command: AgentControlCommand = ron::from_str(
+            r#"(
+                enabled: true,
+                sequence: 9,
+                forward: NaN,
+                right: inf,
+                up: -inf,
+                look_x: inf,
+                look_y: NaN,
+                yaw: Some(-inf),
+                pitch: Some(NaN),
+            )"#,
+        )
+        .expect("RON 0.8 accepts explicit non-finite floats");
+        let mut state = AgentControlState::default();
+
+        apply_command(&mut state, command);
+
+        assert_eq!((state.forward, state.right, state.up), (0.0, 0.0, 0.0));
+        assert_eq!((state.look_x, state.look_y), (0.0, 0.0));
+        assert_eq!(state.yaw, None);
+        assert_eq!(state.pitch, None);
+        assert!(state.forward.is_finite());
+        assert!(state.right.is_finite());
+        assert!(state.up.is_finite());
+        assert!(state.look_x.is_finite());
+        assert!(state.look_y.is_finite());
+    }
+
+    #[test]
+    fn finite_legacy_command_floats_keep_their_existing_clamp_contract() {
+        let mut state = AgentControlState::default();
+        apply_command(
+            &mut state,
+            AgentControlCommand {
+                forward: 2.0,
+                right: -2.0,
+                up: 0.25,
+                look_x: 8.0,
+                look_y: -8.0,
+                yaw: Some(12.0),
+                pitch: Some(2.0),
+                ..default()
+            },
+        );
+
+        assert_eq!((state.forward, state.right, state.up), (1.0, -1.0, 0.25));
+        assert_eq!((state.look_x, state.look_y), (4.0, -4.0));
+        assert_eq!(state.yaw, Some(12.0));
+        assert_eq!(state.pitch, Some(1.54));
+    }
+
+    #[test]
+    fn camera_pose_command_remains_ron_serializable_with_tuple_position() {
+        let command: AgentControlCommand = ron::from_str(
+            r#"(
+                enabled: true,
+                sequence: 6,
+                view_label: "Near/far seam",
+                camera_pose: Some((
+                    position: (12.5, 96.0, -24.25),
+                    yaw: 0.5,
+                    pitch: -0.25,
+                )),
+            )"#,
+        )
+        .expect("observer camera command");
+
+        assert_eq!(command.view_label, "Near/far seam");
+        assert_eq!(
+            command.camera_pose,
+            Some(AgentCameraPoseRequest {
+                position: [12.5, 96.0, -24.25],
+                yaw: 0.5,
+                pitch: -0.25,
+            })
+        );
+    }
+
+    #[test]
+    fn view_labels_are_single_line_control_free_and_character_bounded() {
+        assert_eq!(
+            sanitize_view_label("  Near\n/ far\t seam\u{0000} inspection  "),
+            "Near / far seam inspection"
+        );
+        assert_eq!(sanitize_view_label("\r\n\t"), "");
+
+        let multibyte = sanitize_view_label(&"é".repeat(AGENT_VIEW_LABEL_MAX_CHARS + 8));
+        assert_eq!(multibyte.chars().count(), AGENT_VIEW_LABEL_MAX_CHARS);
+        assert!(multibyte.chars().all(|character| character == 'é'));
+    }
+
+    #[test]
+    fn observer_camera_validation_rejects_non_finite_and_out_of_range_values() {
+        let valid = AgentCameraPoseRequest {
+            position: [
+                AGENT_CAMERA_SAFE_COORDINATE_LIMIT,
+                AGENT_CAMERA_SAFE_Y_LIMIT,
+                -AGENT_CAMERA_SAFE_COORDINATE_LIMIT,
+            ],
+            yaw: 7.0,
+            pitch: AGENT_CAMERA_PITCH_LIMIT,
+        };
+        let pose = validate_agent_camera_pose(valid).expect("inclusive safety boundaries");
+        assert_eq!(pose.position, Vec3::from_array(valid.position));
+        assert!(pose.yaw >= -std::f32::consts::PI && pose.yaw < std::f32::consts::PI);
+        assert_eq!(pose.pitch, AGENT_CAMERA_PITCH_LIMIT);
+
+        for invalid in [
+            AgentCameraPoseRequest {
+                position: [f32::NAN, 0.0, 0.0],
+                ..valid
+            },
+            AgentCameraPoseRequest {
+                position: [AGENT_CAMERA_SAFE_COORDINATE_LIMIT + 2.0, 0.0, 0.0],
+                ..valid
+            },
+            AgentCameraPoseRequest {
+                position: [0.0, 0.0, -AGENT_CAMERA_SAFE_COORDINATE_LIMIT - 2.0],
+                ..valid
+            },
+            AgentCameraPoseRequest {
+                position: [0.0, AGENT_CAMERA_SAFE_Y_LIMIT + 1.0, 0.0],
+                ..valid
+            },
+            AgentCameraPoseRequest {
+                yaw: f32::INFINITY,
+                ..valid
+            },
+            AgentCameraPoseRequest {
+                pitch: AGENT_CAMERA_PITCH_LIMIT + 0.01,
+                ..valid
+            },
+        ] {
+            assert!(validate_agent_camera_pose(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn observer_camera_application_sets_an_exact_stable_flying_pose() {
+        let pose = validate_agent_camera_pose(AgentCameraPoseRequest {
+            position: [124.5, 88.0, -450.25],
+            yaw: 0.75,
+            pitch: -0.35,
+        })
+        .expect("valid observer pose");
+        let mut transform = Transform::from_translation(Vec3::splat(4.0));
+        let mut player = test_player();
+
+        apply_validated_agent_camera_pose(pose, &mut transform, &mut player);
+
+        assert_eq!(transform.translation, pose.position);
+        let expected_rotation =
+            Quat::from_axis_angle(Vec3::Y, pose.yaw) * Quat::from_axis_angle(Vec3::X, pose.pitch);
+        assert!((transform.rotation.dot(expected_rotation).abs() - 1.0).abs() < 1.0e-6);
+        assert_eq!(player.yaw, pose.yaw);
+        assert_eq!(player.pitch, pose.pitch);
+        assert_eq!(player.velocity, Vec3::ZERO);
+        assert!(!player.on_ground);
+        assert!(player.flying);
+        assert!(player.placed_on_surface);
+    }
+
+    #[test]
+    fn observer_camera_pose_sequence_is_strictly_monotonic_and_fail_closed() {
+        let mut state = AgentControlState {
+            runtime_enabled: true,
+            enabled: true,
+            sequence: 41,
+            camera_pose: Some(AgentCameraPoseRequest::default()),
+            ..default()
+        };
+
+        assert!(agent_camera_pose_pending(&state, &GameState::InGame, None));
+        assert!(!agent_camera_pose_pending(
+            &state,
+            &GameState::InGame,
+            Some(41)
+        ));
+        state.camera_pose = Some(AgentCameraPoseRequest {
+            position: [900.0, 300.0, -700.0],
+            ..default()
+        });
+        assert!(
+            !agent_camera_pose_pending(&state, &GameState::InGame, Some(41)),
+            "a changed payload cannot reuse an already handled sequence"
+        );
+        assert!(!agent_camera_pose_pending(&state, &GameState::Paused, None));
+
+        state.sequence = 40;
+        assert!(
+            !agent_camera_pose_pending(&state, &GameState::InGame, Some(41)),
+            "a stale sequence cannot replay a teleport"
+        );
+        state.sequence = 42;
+        assert!(agent_camera_pose_pending(
+            &state,
+            &GameState::InGame,
+            Some(41)
+        ));
+        state.sequence = u64::MAX;
+        assert!(agent_camera_pose_pending(
+            &state,
+            &GameState::InGame,
+            Some(u64::MAX - 1)
+        ));
+        assert!(
+            !agent_camera_pose_pending(&state, &GameState::InGame, Some(u64::MAX)),
+            "the sequence cursor must fail closed after u64::MAX"
+        );
+        state.sequence = 0;
+        assert!(
+            !agent_camera_pose_pending(&state, &GameState::InGame, Some(u64::MAX)),
+            "overflow-style wraparound cannot reopen the cursor"
+        );
+        state.sequence = 42;
+        state.enabled = false;
+        assert!(!agent_camera_pose_pending(
+            &state,
+            &GameState::InGame,
+            Some(41)
+        ));
+    }
+
+    #[test]
+    fn camera_command_cursor_consumes_pose_less_sequences_and_rejects_identity_reuse() {
+        let mut last_sequence = None;
+        let mut last_pose = None;
+        let original = AgentCameraPoseRequest::default();
+        let changed = AgentCameraPoseRequest {
+            position: [10.0, 20.0, 30.0],
+            ..original
+        };
+
+        assert_eq!(
+            observe_agent_camera_command(41, None, &mut last_sequence, &mut last_pose),
+            AgentCameraCommandObservation::Fresh
+        );
+        assert_eq!(last_sequence, Some(41));
+        assert_eq!(last_pose, None);
+        assert_eq!(
+            observe_agent_camera_command(41, Some(original), &mut last_sequence, &mut last_pose),
+            AgentCameraCommandObservation::ReusedWithDifferentPose,
+            "a sequence first observed without a pose cannot gain one later"
+        );
+        assert_eq!(
+            observe_agent_camera_command(40, Some(original), &mut last_sequence, &mut last_pose),
+            AgentCameraCommandObservation::Stale
+        );
+        assert_eq!(
+            observe_agent_camera_command(42, Some(original), &mut last_sequence, &mut last_pose),
+            AgentCameraCommandObservation::Fresh
+        );
+        assert_eq!(
+            observe_agent_camera_command(42, Some(original), &mut last_sequence, &mut last_pose),
+            AgentCameraCommandObservation::Repeat
+        );
+        assert_eq!(
+            observe_agent_camera_command(42, Some(changed), &mut last_sequence, &mut last_pose),
+            AgentCameraCommandObservation::ReusedWithDifferentPose
+        );
+        assert_eq!(
+            observe_agent_camera_command(
+                u64::MAX,
+                Some(changed),
+                &mut last_sequence,
+                &mut last_pose
+            ),
+            AgentCameraCommandObservation::Fresh
+        );
+        assert_eq!(
+            observe_agent_camera_command(0, None, &mut last_sequence, &mut last_pose),
+            AgentCameraCommandObservation::Stale,
+            "sequence wraparound remains fail-closed"
+        );
+    }
+
+    #[test]
+    fn isolated_observer_requires_both_runtime_and_explicit_isolation() {
+        assert!(!isolated_observer_from_flags(false, false));
+        assert!(!isolated_observer_from_flags(true, false));
+        assert!(!isolated_observer_from_flags(false, true));
+        assert!(isolated_observer_from_flags(true, true));
+    }
+
+    #[test]
+    fn bridge_contract_has_a_stable_marker_and_explicit_isolation_truth_table() {
+        assert_eq!(LIVE_OBSERVER_PROTOCOL_VERSION, "live-observer-v1");
+        for (runtime_enabled, isolated_requested, expected_isolated) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            let contract = observer_bridge_contract(runtime_enabled, isolated_requested);
+            assert_eq!(contract.protocol_version, "live-observer-v1");
+            assert_eq!(contract.isolated_observer, expected_isolated);
+        }
+    }
+
+    #[test]
+    fn isolated_observer_requires_a_fresh_world_and_external_control_authority() {
+        assert!(agent_world_entry_allows_existing_exact(false));
+        assert!(!agent_world_entry_allows_existing_exact(true));
+        assert!(agent_control_file_rewrite_allowed(false));
+        assert!(!agent_control_file_rewrite_allowed(true));
+    }
+
+    #[test]
+    fn observer_scenery_parser_accepts_public_and_ui_tier_names() {
+        for (name, expected) in [
+            ("off", SceneryQuality::Off),
+            ("minimal", SceneryQuality::Off),
+            ("lean", SceneryQuality::Lean),
+            ("efficient", SceneryQuality::Lean),
+            ("balanced", SceneryQuality::Balanced),
+            ("lush", SceneryQuality::Lush),
+            ("immersive", SceneryQuality::Lush),
+        ] {
+            assert_eq!(parse_agent_scenery_quality(name), Some(expected));
+            assert_eq!(
+                parse_agent_scenery_quality(&name.to_ascii_uppercase()),
+                Some(expected)
+            );
+        }
+        assert_eq!(parse_agent_scenery_quality("unknown"), None);
     }
 
     #[test]

@@ -216,8 +216,8 @@ through the human tool/history path.
 
 ## Test evidence
 
-Standalone compilation is intentional because root integration is withheld
-until transport proof. Command used:
+Standalone compilation isolates the Phase 1 protocol core until transport
+proof is available. Reproduce the focused checks with:
 
 ```text
 rustc --edition 2021 --test src\agent_direct_bridge.rs -o target\agent_direct_bridge_tests_debug.exe
@@ -233,12 +233,7 @@ Additional repository evidence from the same checkpoint:
 - `wasm32-unknown-unknown` standalone library compile with `-D warnings`: pass;
 - `cargo check --bin voxel-native`: pass with pre-existing dead-code warnings;
 - `cargo check --target wasm32-unknown-unknown --bin voxel-native`: pass with
-  pre-existing target-specific warnings;
-- registered full suite: **979 passed, 0 failed, 1 ignored**. The new module is
-  intentionally not registered in that count, so its 15 focused tests are a
-  separate proof;
-- repository-wide `cargo fmt --all -- --check`: blocked by an unrelated existing
-  formatting diff at `src/terrain.rs:3090`; no ownership-violating edit was made.
+  pre-existing target-specific warnings.
 
 Coverage includes:
 
@@ -302,7 +297,7 @@ frame visibility, or behavior under renderer pressure.
 | Level 2, boundedness | compile-time region/slot/payload/drain caps; current + peak occupancy; distribution benchmark | pass for isolated core |
 | Level 7, agent parity | nonce/epoch/sequence/expiry, fixed command/event/telemetry contracts | partial: no capability manifest or engine parity yet |
 | Level 8, adversarial state | 100k concurrent command + telemetry soak, saturation, wrap, malformed bytes, counters | partial: no process crash/device/focus/engine soak yet |
-| Level 9, release evidence | scoped fmt, warning-denied native + WASM compile, optimized benchmark, native/WASM cargo checks, full registered suite, path audit | partial: not registered and no real-engine run; global fmt is blocked by unrelated terrain formatting |
+| Level 9, release evidence | scoped fmt, warning-denied native + WASM compile, optimized benchmark, native/WASM cargo checks, full registered suite, path audit | partial: the core is compile-registered but has no OS transport, live consumer, or real-engine route |
 
 ## Honest transport and integration gap
 

@@ -538,6 +538,25 @@ fn cursor_policy_for(
     }
 }
 
+fn automation_cursor_release_requested(
+    qa_enabled: bool,
+    isolated_observer_enabled: bool,
+    agent_control: Option<&crate::agent_control::AgentControlState>,
+) -> bool {
+    qa_enabled
+        || isolated_observer_enabled
+        || agent_control.is_some_and(crate::agent_control::AgentControlState::active)
+}
+
+fn apply_automation_cursor_release(window: &mut Window, requested: bool) -> bool {
+    if !requested {
+        return false;
+    }
+    window.cursor.grab_mode = CursorGrabMode::None;
+    window.cursor.visible = true;
+    true
+}
+
 pub fn gameplay_cursor_grab_mode() -> CursorGrabMode {
     // Bevy 0.14 / winit do not support locked cursor grab on Windows.
     // Asking for the supported mode directly avoids a failed lock attempt
@@ -567,11 +586,29 @@ fn mode_cursor_guard(
     command_palette: Option<Res<CommandPaletteState>>,
     ui_focus: Option<Res<SketchEditorUiFocus>>,
     tool_controller: Option<Res<crate::sketch_model::ToolController>>,
+    agent_control: Option<Res<crate::agent_control::AgentControlState>>,
+    mut cached_automation_environment: Local<Option<(bool, bool)>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else {
         return;
     };
+
+    let (qa_enabled, isolated_observer_enabled) = *cached_automation_environment
+        .get_or_insert_with(|| {
+            (
+                crate::qa::qa_enabled(),
+                crate::agent_control::isolated_observer_enabled(),
+            )
+        });
+    let release_for_automation = automation_cursor_release_requested(
+        qa_enabled,
+        isolated_observer_enabled,
+        agent_control.as_deref(),
+    );
+    if apply_automation_cursor_release(&mut window, release_for_automation) {
+        return;
+    }
 
     let pointer_editor_tool = mode.is_build_live()
         && tool_controller
@@ -808,6 +845,83 @@ mod tests {
             ),
             CursorPolicy::ReleasedVisible
         );
+    }
+
+    #[test]
+    fn automation_override_releases_an_already_confined_hidden_cursor() {
+        let mut window = Window::default();
+        window.cursor.grab_mode = CursorGrabMode::Confined;
+        window.cursor.visible = false;
+
+        assert!(apply_automation_cursor_release(&mut window, true));
+        assert_eq!(window.cursor.grab_mode, CursorGrabMode::None);
+        assert!(window.cursor.visible);
+
+        window.cursor.grab_mode = CursorGrabMode::Confined;
+        window.cursor.visible = false;
+        assert!(!apply_automation_cursor_release(&mut window, false));
+        assert_eq!(window.cursor.grab_mode, CursorGrabMode::Confined);
+        assert!(!window.cursor.visible);
+    }
+
+    #[test]
+    fn qa_or_active_non_isolated_agent_requests_cursor_release() {
+        assert!(automation_cursor_release_requested(true, false, None));
+        assert!(!automation_cursor_release_requested(false, false, None));
+
+        let mut agent = crate::agent_control::AgentControlState::default();
+        agent.runtime_enabled = true;
+        agent.enabled = true;
+        assert!(agent.active());
+        assert!(automation_cursor_release_requested(
+            false,
+            false,
+            Some(&agent)
+        ));
+    }
+
+    #[test]
+    fn isolated_observer_stays_released_while_disabled_or_suppressed() {
+        let mut agent = crate::agent_control::AgentControlState::default();
+        agent.runtime_enabled = true;
+        agent.enabled = false;
+        assert!(!agent.active());
+        assert!(automation_cursor_release_requested(
+            false,
+            true,
+            Some(&agent)
+        ));
+
+        agent.enabled = true;
+        assert!(agent.set_live_link_suppressed(true));
+        assert!(!agent.active());
+        assert!(automation_cursor_release_requested(
+            false,
+            true,
+            Some(&agent)
+        ));
+    }
+
+    #[test]
+    fn non_isolated_disabled_or_suppressed_agent_resumes_gameplay_policy() {
+        let mut agent = crate::agent_control::AgentControlState::default();
+        agent.runtime_enabled = true;
+        agent.enabled = false;
+        assert!(!agent.active());
+        assert!(!automation_cursor_release_requested(
+            false,
+            false,
+            Some(&agent)
+        ));
+
+        agent.enabled = true;
+        assert!(agent.set_live_link_suppressed(true));
+        assert!(!agent.active());
+        assert!(!automation_cursor_release_requested(
+            false,
+            false,
+            Some(&agent)
+        ));
     }
 
     #[test]

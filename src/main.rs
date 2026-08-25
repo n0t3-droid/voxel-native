@@ -1,5 +1,4 @@
-//! Voxel-Native - native voxel engine, Rust + Bevy + wgpu.
-//! Successor to R93G (https://github.com/n0t3-droid/N5).
+//! Voxel Native - a Rust, Bevy, and wgpu voxel engine engineered with Codex.
 
 mod agent_capabilities;
 pub mod agent_control;
@@ -67,7 +66,7 @@ use bevy::winit::{UpdateMode, WinitSettings};
 const MENU_LOW_POWER_INTERVAL: Duration = Duration::from_millis(250);
 const PAUSED_LOW_POWER_INTERVAL: Duration = Duration::from_millis(125);
 const UNFOCUSED_LOW_POWER_INTERVAL: Duration = Duration::from_millis(500);
-const DEFAULT_WINDOW_TITLE: &str = "Voxel-Native (R93G successor)";
+const DEFAULT_WINDOW_TITLE: &str = "Voxel Native // Codex Engineering";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopPolicy {
@@ -89,7 +88,7 @@ fn instance_window_title(label: Option<&str>) -> String {
         .filter(|label| !label.is_empty());
     label.map_or_else(
         || DEFAULT_WINDOW_TITLE.to_owned(),
-        |label| format!("Voxel-Native [{label}] (R93G successor)"),
+        |label| format!("Voxel Native [{label}] // Codex Engineering"),
     )
 }
 
@@ -136,7 +135,7 @@ fn configured_window_resolution() -> (f32, f32) {
     }
 }
 
-fn main() {
+fn main() -> AppExit {
     configure_render_environment();
 
     // Install a panic hook that logs the panic location and message
@@ -248,7 +247,7 @@ fn main() {
         .add_plugins(sculpt::SculptPlugin)
         .add_systems(Update, sync_winit_loop_with_game_state)
         .add_systems(Startup, print_controls)
-        .run();
+        .run()
 }
 
 fn loop_policy_for_game_state(state: &menu::GameState) -> LoopPolicy {
@@ -427,11 +426,11 @@ mod tests {
         assert_eq!(instance_window_title(None), DEFAULT_WINDOW_TITLE);
         assert_eq!(
             instance_window_title(Some("CODEX QA")),
-            "Voxel-Native [CODEX QA] (R93G successor)"
+            "Voxel Native [CODEX QA] // Codex Engineering"
         );
         assert_eq!(
             instance_window_title(Some("  LIVE SPECTATOR  ")),
-            "Voxel-Native [LIVE SPECTATOR] (R93G successor)"
+            "Voxel Native [LIVE SPECTATOR] // Codex Engineering"
         );
     }
 
@@ -440,7 +439,7 @@ mod tests {
         let title = instance_window_title(Some("12345678901234567890123456789012EXTRA\nINVISIBLE"));
         assert_eq!(
             title,
-            "Voxel-Native [12345678901234567890123456789012] (R93G successor)"
+            "Voxel Native [12345678901234567890123456789012] // Codex Engineering"
         );
         assert!(!title.contains('\n'));
     }

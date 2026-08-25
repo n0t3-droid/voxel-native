@@ -1,8 +1,10 @@
-# Direct Agent-Engine Bridge
+# Agent-Engine Bridge Design Contract
 
-Status: implementation contract, August 2026. This replaces OCR and periodic
-filesystem polling as the normal agent work path while preserving both as
-diagnostic fallbacks.
+Status: design target, August 2026. The direct operating-system transport and
+engine integration are not implemented. The current integrated work path is the
+bounded RON/visual Live Observer; the fixed-region Phase 1 core is a separate,
+runtime-disconnected proof. This document specifies the gates required before a
+direct transport may replace periodic filesystem polling.
 
 ## Outcome
 
@@ -186,7 +188,7 @@ The bridge supports an evidence loop rather than uncontrolled activity:
 7. capture pixels only when appearance or human usability is the question;
 8. accept, undo, revise or record a concrete unresolved risk.
 
-Subagents publish this loop to Mission Control so the user can see which world,
+Codex work units publish this loop to Mission Control so the user can see which world,
 hypothesis, command, evidence and result each mini-screen represents. A feed
 that merely says "working" is insufficient.
 

@@ -1177,6 +1177,14 @@ mod tests {
     }
 
     #[test]
+    fn resume_hint_visibility_respects_cursor_capture_and_qa_policy() {
+        assert!(!resume_hint_visible(true, true, false));
+        assert!(resume_hint_visible(true, false, false));
+        assert!(!resume_hint_visible(true, false, true));
+        assert!(!resume_hint_visible(false, false, false));
+    }
+
+    #[test]
     fn compact_layout_stacks_fixed_panels_inside_the_viewport() {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 360.0));
         let layout = play_hud_layout(screen, true);
@@ -1460,6 +1468,14 @@ fn mix_theme_colors(from: egui::Color32, to: egui::Color32, amount: f32, alpha: 
 #[derive(Component)]
 pub struct HintBanner;
 
+fn resume_hint_visible(
+    product_hud_visible: bool,
+    cursor_is_captured: bool,
+    qa_enabled: bool,
+) -> bool {
+    product_hud_visible && !cursor_is_captured && !qa_enabled
+}
+
 fn spawn_hint(mut commands: Commands, settings: Res<WorldSettings>) {
     let colors = settings.theme.semantic();
     let mut bundle = TextBundle::from_section(
@@ -1512,17 +1528,24 @@ fn update_hint(
         background.0 = bevy_theme_color(settings.theme.panel_fill(0.74), 0.74);
     }
     let surface = current_hud_surface(&state, mode.as_deref());
-    if !product_hud_visible(surface, debug.visible) {
+    let product_hud_visible = product_hud_visible(surface, debug.visible);
+    let qa_enabled = crate::qa::qa_enabled();
+    if !product_hud_visible || qa_enabled {
         *vis = Visibility::Hidden;
         return;
     }
     let Ok(window) = windows.get_single() else {
+        *vis = Visibility::Hidden;
         return;
     };
-    *vis = if crate::mode::cursor_is_captured(window) {
-        Visibility::Hidden
-    } else {
+    *vis = if resume_hint_visible(
+        product_hud_visible,
+        crate::mode::cursor_is_captured(window),
+        qa_enabled,
+    ) {
         Visibility::Visible
+    } else {
+        Visibility::Hidden
     };
 }
 

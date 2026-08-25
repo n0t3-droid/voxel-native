@@ -6,9 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::{Path, PathBuf};
-
 pub(crate) const AGENT_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 pub(crate) const SHARED_POWER_PROFILE_ID: &str = "voxel-native/shared-agent-power/v1";
 pub(crate) const DIRECT_BRIDGE_READY: bool = false;
@@ -101,19 +98,13 @@ impl AgentCapabilityManifest {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn write_agent_capability_manifest(
-    session_dir: &Path,
+pub(crate) fn agent_capability_manifest_text(
     agent_id: &str,
     fleet_id: &str,
-) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(session_dir).map_err(|error| error.to_string())?;
+) -> Result<String, String> {
     let manifest = AgentCapabilityManifest::new(agent_id, fleet_id);
-    let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
-        .map_err(|error| error.to_string())?;
-    let path = session_dir.join("capabilities.ron");
-    std::fs::write(&path, text).map_err(|error| error.to_string())?;
-    Ok(path)
+    ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -142,5 +133,17 @@ mod tests {
         assert!(!power.direct_bridge_ready);
         assert!(power.ron_fallback_ready);
         assert!(power.visual_capture_ready);
+    }
+
+    #[test]
+    fn capability_manifest_serialization_contains_exact_identity_and_power_profile() {
+        let text = agent_capability_manifest_text("observer-7", "fleet-a")
+            .expect("serialize capability contract");
+        let decoded: AgentCapabilityManifest =
+            ron::from_str(&text).expect("decode serialized capability contract");
+        assert_eq!(decoded.agent_id, "observer-7");
+        assert_eq!(decoded.fleet_id, "fleet-a");
+        assert_eq!(decoded.power.profile_id, SHARED_POWER_PROFILE_ID);
+        assert!(!decoded.power.direct_bridge_ready);
     }
 }
