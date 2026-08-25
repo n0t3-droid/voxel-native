@@ -1,18 +1,19 @@
 # Continuum Morphogenesis v1
 
-Status: pure, compile-registered but runtime-unregistered prototype and
-acceptance record, 2026-08-09.
+Status: pure, compile-registered grammar and acceptance record, with no ECS or
+renderer registration, 2026-08-09.
 
 Implementation: `src/continuum_morphogenesis.rs`
 
 Invariant and benchmark harness: `tests/continuum_morphogenesis.rs`
 
 This module is part of the ordinary crate build so API drift cannot silently
-rot it. No ECS system calls it at runtime, it does not read or write a save, and
-it does not replace terrain, collision, edits, fluids, or semantic object
-authority. It is a bounded macro-world grammar whose output can become a
-reconstructible cache after a separate integration gate. It intentionally does
-not allocate dense microvoxels.
+rot it, and the pure `world_continuum` adapter consumes its output in registered
+source. No ECS system or renderer calls it at runtime, it does not read or write
+a save, and it does not replace terrain, collision, edits, fluids, or semantic
+object authority. It is a bounded macro-world grammar whose output can become
+a reconstructible cache after a separate runtime integration gate. It
+intentionally does not allocate dense microvoxels.
 
 ## Outcome and present baseline
 
@@ -367,8 +368,9 @@ Against `docs/ELITE_WORLD_SYSTEMS_STANDARD.md`:
 - Level 8: partial adversarial evidence for extreme coordinates, request order,
   NaN avoidance, and route length. No async cancellation, device pressure,
   corrupt persistence, or live recovery exists here.
-- Level 9: not claimed. No GUI/GPU QA was launched, no Natural/Astral flight was
-  recorded, and the file remains deliberately unregistered.
+- Level 9: not claimed. No GUI/GPU QA was launched and no Natural/Astral flight
+  was recorded for this isolated grammar. The source is compile-registered, but
+  it still has no ECS, renderer, or save-authority route.
 
 ## Known limits and invalidating assumptions
 
@@ -399,7 +401,7 @@ Against `docs/ELITE_WORLD_SYSTEMS_STANDARD.md`:
 - [Geometry clipmaps](https://hhoppe.com/proj/geomclipmap/): primary project/paper page for nested regular-grid LOD, visual continuity, throttling, and graceful degradation. Used for the future representation contract, not for macro causality.
 - [VDB: High-resolution sparse volumes with dynamic topology](https://museth.org/Ken/Publications_files/Museth_TOG13.pdf): primary paper showing why dense volume memory grows with embedding volume and how sparse topology changes that relationship. VDB is a deferred cache candidate, not part of v1 and never edit authority.
 
-The supplied discovery graph was used only to route research. Its 8,129 link
+The recorded discovery graph was used only to route research. Its 8,129 link
 rows are not independent evidence: universal voxel links and large medical and
 botanical fan-outs bias degree counts, four duplicate pairs exist, and link
 degree does not measure relevance or scientific quality. Claims above therefore
@@ -407,9 +409,9 @@ point to primary sources rather than treating the graph as an authority.
 
 ## Rollback and next gate
 
-Rollback is deletion of these three new, unregistered prototype files; no save
-or engine format depends on them. Integration should begin with a separate
-adapter that:
+Rollback requires removing the compile registrations together with the grammar,
+pure adapter, tests, and documentation; no save format depends on them. Runtime
+integration should begin with an ECS/renderer boundary that:
 
 1. requests versioned macro tiles through a bounded, epoch-aware queue;
 2. materializes conservative Mid/Far reducers and tests parent-first coverage;

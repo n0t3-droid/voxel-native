@@ -281,10 +281,10 @@ cold-cache behaviour must be measured separately after runtime integration.
 | `rustfmt --edition 2021 --check src\virtual_voxel_hierarchy.rs` | pass |
 | `rustc --edition=2021 -D warnings --crate-type lib src\virtual_voxel_hierarchy.rs` | pass |
 | `rustc --edition=2021 -D warnings --test -O src\virtual_voxel_hierarchy.rs` followed by `--nocapture --test-threads=1` | 18 passed, 0 failed |
-| `cargo test --bin voxel-native virtual_voxel_hierarchy::tests --quiet` | 18 passed, 0 failed; 1,019 filtered out in the current registered binary |
-| `cargo check --bin voxel-native` | pass; 31 pre-existing/unrelated warnings |
-| `cargo check --target wasm32-unknown-unknown --bin voxel-native` | pass; 90 pre-existing/unrelated warnings |
-| `cargo test --workspace --quiet` | pending Root's integrated full-suite run after concurrent owned patches merge; no stale total is claimed here |
+| `cargo test --bin voxel-native virtual_voxel_hierarchy::tests --quiet` | 18 passed, 0 failed; remaining tests filtered |
+| `cargo check --bin voxel-native` | pass; known repository dead-code warnings remain |
+| `cargo check --target wasm32-unknown-unknown --bin voxel-native` | pass; known target-specific warnings remain |
+| `cargo test --workspace --quiet` | pass at the documented local verification checkpoint; a long-lived total is deliberately not pinned here |
 
 Native and Wasm Cargo checks prove that the public module compiles as part of
 the application. They do not prove runtime scheduling, renderer consumption,
@@ -293,8 +293,8 @@ visual continuity, save compatibility, or a Level-9 engine route.
 ## Explicit integration gaps
 
 The pure data layer is compile-registered but intentionally runtime-disconnected
-because this task did not permit edits to world, streaming, terrain, rendering,
-save or QA authority. Remaining work is therefore visible and bounded:
+until the rollout, authority, and evidence gates below are implemented.
+Remaining work is therefore visible and bounded:
 
 1. Wire the module behind an Astral-first runtime feature/rollout gate.
 2. Add a near-chunk reduction worker and connect its authoritative grammar

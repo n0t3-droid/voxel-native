@@ -65,7 +65,7 @@ they are fixed in live play, not only in unit tests.
   SketchUp-like chained drawing from a previous point.
 - Added tests proving picking does not let snap/inference bias override raw hit
   distance, and inference is applied only after a raw hit is chosen.
-- Added Phase-1 math from the user's system specification: view-projection
+- Added Phase-1 math from the authored system contract: view-projection
   screen-space snapping, sticky candidate priority, skew-line axis locking, and
   dynamic Rectangle drawing planes.
 - Wired the first live Pencil/Sketch Draw input-point path: endpoint/midpoint/

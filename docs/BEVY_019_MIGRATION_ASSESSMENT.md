@@ -15,7 +15,7 @@ project warns that releases contain breaking changes. The official migration
 guides show successive changes to rendering bundles, entity relationships,
 fallible query access, events/messages, state transitions, camera targets,
 materials, text, bloom, resource storage and the render graph. Migrating all of
-those while the world-continuum worktree is active would make regressions hard
+those alongside active world-continuum changes would make regressions hard
 to attribute and would put save/UI/visual evidence at risk.
 
 ## Measured local migration surface
@@ -151,8 +151,8 @@ cannot hide a performance or style change.
 
 ## Decision
 
-Do not change `Cargo.toml` in the current shared world-continuum integration.
-First close the new pure-module tests and real-engine baseline. Then open a
-dedicated sequential migration lane. Being current is part of the elite target;
-keeping the current engine runnable and the user's worlds intact is the first
-gate of reaching it.
+Do not combine the Bevy migration with world-continuum integration. First
+establish the pure-module tests and real-engine baseline, then perform the
+sequential migration separately. Being current is part of the elite target;
+keeping the engine runnable and persisted worlds intact is the first gate of
+reaching it.

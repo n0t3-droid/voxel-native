@@ -2,38 +2,23 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug Voxel-Native (LLDB)",
+      "name": "Debug Voxel Native",
       "type": "lldb",
       "request": "launch",
-      "program": "${workspaceFolder}\\target\\release\\voxel-native.exe",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin",
+          "voxel-native"
+        ],
+        "filter": {
+          "name": "voxel-native",
+          "kind": "bin"
+        }
+      },
       "args": [],
       "cwd": "${workspaceFolder}",
-      "stopOnEntry": false,
-      "preLaunchTask": "Cargo: Build Release"
-    }
-  ]
-}
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "C/C++ Runner: Debug Session",
-      "type": "cppdbg",
-      "request": "launch",
-      "args": [],
-      "stopAtEntry": false,
-      "externalConsole": true,
-      "cwd": "c:/Users/ylber/Downloads/Deepmind/voxel-native",
-      "program": "c:/Users/ylber/Downloads/Deepmind/voxel-native/build/Debug/outDebug",
-      "MIMode": "gdb",
-      "miDebuggerPath": "gdb",
-      "setupCommands": [
-        {
-          "description": "Enable pretty-printing for gdb",
-          "text": "-enable-pretty-printing",
-          "ignoreFailures": true
-        }
-      ]
+      "stopOnEntry": false
     }
   ]
 }

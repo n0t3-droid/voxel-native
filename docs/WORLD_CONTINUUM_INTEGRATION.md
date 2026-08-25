@@ -292,10 +292,8 @@ block, or persist the feature.
 
 ## Focused verification and benchmark
 
-The optimized focused harness runs the real Morphogenesis, VVH and implicit
-modules plus the adapter. A temporary four-type VVH stub was used only while an
-independently owned safety patch was mid-edit; after that checkpoint stabilized,
-all results below were repeated against the real VVH module.
+The optimized focused harness and every result below use the real
+Morphogenesis, VVH, and implicit modules plus the adapter.
 
 Focused result:
 
@@ -343,13 +341,13 @@ Verification commands and outcomes:
 | real-module Wasm standalone library, `-D warnings` | pass |
 | optimized real-module focused tests | 42 passed, 0 failed, 1 ignored |
 | five consecutive optimized benchmark runs | pass; distribution above |
-| current registered native and Wasm Cargo checks | pass; pre-existing/unrelated warnings remain |
-| current registered workspace tests | binary 1,034 passed, 0 failed, 4 ignored; integration 11 passed, 0 failed |
+| checkpoint registered native and Wasm Cargo checks | pass; compiler warnings remained |
+| checkpoint registered workspace tests | pass; long-lived totals are deliberately not pinned here |
 
-The adapter remains intentionally unregistered, so the current Cargo binary
-checks and workspace tests do not yet prove its module declaration; the
-standalone real-module harness is the adapter evidence. Minimal registration
-and then repeated full native/Wasm Cargo gates belong to the integration owner.
+Native and Wasm Cargo checks prove compile registration and target
+compatibility; they do not prove plugin installation or live consumption. The
+standalone real-module harness is the adapter evidence. Runtime integration,
+followed by repeated full native/Wasm Cargo gates, remains future work.
 
 ## Elite-standard position
 

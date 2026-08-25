@@ -51,26 +51,24 @@ Levels 4 and 8:
 - **Level 9, scoped only:** the focused tests, warning-denied standalone build,
   registered native application check, and registered Wasm application check
   pass. `main.rs` compile-registers the module, but no runtime system consumes
-  it. The integrated full-suite result belongs to the Root verification pass
-  after all concurrent work lands; real-engine routes remain a later release
-  gate.
+  it. The repository-wide format, native, Wasm, and workspace-test gates passed
+  on 2026-08-23; real-engine routes remain a separate release gate.
 
 This is an evidence boundary, not a claim that the feature is already shipped.
 
-## Evidence policy and supplied graph audit
+## Evidence policy and recorded graph audit
 
 The German Wikipedia pages for
 [Kugel](https://de.wikipedia.org/wiki/Kugel),
 [Ellipsoid](https://de.wikipedia.org/wiki/Ellipsoid), and
 [Voxel](https://de.wikipedia.org/wiki/Voxel) were used as vocabulary and
-discovery entry points, not as implementation authority. The wider supplied
-graph was parsed in full from:
+discovery entry points, not as implementation authority. The wider graph was
+parsed from a recorded external research snapshot. Its source bytes are not
+distributed as a repository artifact, so the measurements below cannot be
+reproduced from a clean checkout alone; reproduction requires the same external
+corpus. This is discovery provenance, not release evidence.
 
-```text
-C:\Users\ylber\.codex\attachments\cf64a876-6452-4b6b-bd70-887f8f891608\pasted-text.txt
-```
-
-Its observed data shape is:
+The external snapshot's observed data shape is:
 
 | Measurement | Observed value |
 | --- | ---: |
@@ -611,9 +609,9 @@ should be refreshed after integration and compiler/profile changes.
 
 ### Verification transcript and release boundary
 
-The final scoped audit on 2026-08-09 used the following commands. Build output
-is reconstructible; no save, QA world, personal media, or user-owned dirty path
-was read as an input or changed by this work.
+The focused audit was repeated within the repository-wide gate on 2026-08-23.
+Each command below is reproducible from a clean checkout with the documented
+toolchain and Wasm target.
 
 | Command | Result |
 | --- | --- |
@@ -621,25 +619,25 @@ was read as an input or changed by this work.
 | `rustc --edition=2021 -D warnings --crate-type lib src\implicit_voxels.rs` | pass |
 | `rustc --edition=2021 -D warnings --test -O src\implicit_voxels.rs` followed by `--nocapture --test-threads=1` | 14 passed, 0 failed |
 | `rustc --edition=2021 -D warnings --target wasm32-unknown-unknown --crate-type lib src\implicit_voxels.rs` | pass |
-| `cargo test --bin voxel-native implicit_voxels::tests --quiet` | 14 passed, 0 failed; 1,023 filtered out in the current registered binary |
-| `cargo check --bin voxel-native` | pass; 31 pre-existing/unrelated warnings |
-| `cargo check --target wasm32-unknown-unknown --bin voxel-native` | pass; 90 pre-existing/unrelated warnings |
-| `cargo test --workspace --quiet` | pending Root's integrated full-suite run after concurrent owned patches merge; no stale total is claimed here |
-| `cargo fmt --all -- --check` | pending Root's repository-wide gate; the owned Rust file passes the scoped rustfmt check |
+| `cargo test --bin voxel-native implicit_voxels::tests --quiet` | 14 passed, 0 failed |
+| `cargo check --bin voxel-native` | pass |
+| `cargo check --target wasm32-unknown-unknown --bin voxel-native` | pass |
+| `cargo test --workspace --quiet` | pass |
+| `cargo fmt --all -- --check` | pass |
 
 The standalone Wasm command compiles the module itself. The Cargo Wasm command
 proves compile registration in the application target, not runtime scheduling,
 rendering, or a visual route. Neither fact is presented as live Level-9 route
 evidence. A clean repository-wide native suite, Natural/Astral engine routes,
-and path-curated staging remain explicit release work.
+and accepted Natural/Astral engine routes remain explicit release work.
 
-The owned paths comply with the root `AGENTS.md` contract: they use checked
-arithmetic and signed coordinates, deterministic ordering, compile-time work
-and memory caps, a baseline/candidate/reject record, repeated measurements, and
-fail-closed uncertainty. They do not register engine systems, alter authority,
-touch saves, launch GPU QA, or claim a fallback as a completed live feature.
+The implementation uses checked arithmetic and signed coordinates,
+deterministic ordering, compile-time work and memory caps, a
+baseline/candidate/reject record, repeated measurements, and fail-closed
+uncertainty. It does not register engine systems, alter voxel authority, or
+claim a fallback as a completed live feature.
 
-## Integration handoff and gates
+## Integration gates
 
 No live integration is proposed until the pure contract is reviewed. When it
 is accepted, a reversible first integration should follow this order:
@@ -652,7 +650,7 @@ is accepted, a reversible first integration should follow this order:
 | Far | macro feature seed, bounds, material family, shape id | analytic sphere/ellipsoid bound or impostor input | no caves, collision, edit, or exact shell thickness authority; a valid far parent remains while Near/Mid data changes |
 | Celestial | double/integer world anchor plus analytic body parameters | direct analytic body/shell evaluation at local render coordinates | never instantiate planet-scale dense cells; interaction patches resolve only near a landing/edit region |
 
-The integration owner must add `world_epoch`, stable shape identity, monotonic
+Runtime integration must add `world_epoch`, stable shape identity, monotonic
 shape/source version, task nonce, and stale-result rejection around this pure
 API. Those concepts are intentionally not faked inside a geometry value type.
 Near authored edits override regenerated analytic material, and their sparse
@@ -746,7 +744,7 @@ primary papers or official documents:
   Segmentation of Medical Images*:
   https://pubmed.ncbi.nlm.nih.gov/19768123/
 - Adam Runions et al., *Modeling and Visualization of Leaf Venation Patterns*:
-  https://citeseerx.ist.psu.edu/document?doi=66403382a0ac4be8076c6b67fbce73cf1edfb691&repid=rep1&type=pdf
+  https://algorithmicbotany.org/papers/venation.sig2005.html
 - Bruno Moulia, *Leaves as Shell Structures*:
   https://doi.org/10.1007/s003440000004
 - Deborah Fowler, Hans Meinhardt, and Przemyslaw Prusinkiewicz, *Modeling
@@ -759,4 +757,4 @@ primary papers or official documents:
   https://doi.org/10.1016/S0167-739X(02)00033-X
 - G. M. Morton, *A Computer Oriented Geodetic Data Base and a New Technique in
   File Sequencing*:
-  https://dominoweb.draco.res.ibm.com/0dabf9473b9c86d48525779800566a39.html
+  https://books.google.com/books/about/A_Computer_Oriented_Geodetic_Data_Base_a.html?id=9FFdHAAACAAJ

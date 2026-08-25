@@ -2,7 +2,7 @@
 
 Date: 2026-08-09
 
-Purpose: decide whether the user's Wikipedia parent/subtopic corpus is safe to
+Purpose: decide whether the project Wikipedia parent/subtopic corpus is safe to
 use for Voxel-Native research routing. It is not used as technical proof.
 
 ## Dataset and grain

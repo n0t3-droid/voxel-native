@@ -1,6 +1,7 @@
 # Rendering Research Notes
 
-These notes translate the user's rendering references into voxel-native work.
+These notes translate selected public rendering references into Voxel Native
+engineering questions.
 They are not implementation-complete and should not be treated as current
 engine behavior.
 
@@ -85,7 +86,7 @@ daytime star cards, squared/doubled albedo, checker or contour bands, regular
 tree spacing, sealed cubic crowns, repeated cross-shaped shrubs, floating
 foliage, or an attractive result at only one viewing distance.
 
-### Run-8 rejection and derived contracts
+### Rejected same-seed visual baseline and derived contracts
 
 The same seed at 10.8 hours exposed three coupled failures that unit tests had
 not represented: alternating bright top and dark side faces turned voxel
@@ -106,15 +107,15 @@ The replacement separates scale and ownership:
   fixed 3x3 root halo and clips signed writes, allowing one connected crown to
   cross horizontal chunk seams without shared mutable generation state.
 
-These hypotheses then passed the isolated Run-9 near/play/horizon review on the
-same seed and late-morning light. The accepted frames show organic grove
-placement, living gentle slopes, readable limestone masses, softer terrace
-faces, and a stable daytime sky. The result is a strong coherent voxel
-landscape; it is not presented as photorealistic botany. No causal performance
-claim is inferred from that flight because camera path, streaming state, and
-adaptive render distance were not controlled.
+A replacement near/play/horizon inspection used the same seed and late-morning
+light. Within that scoped historical review, the retained frames showed organic
+grove placement, living gentle slopes, readable limestone masses, softer
+terrace faces, and a stable daytime sky. The result was a coherent voxel
+landscape; it is not presented as photorealistic botany or current release
+evidence. No causal performance claim is inferred from that flight because
+camera path, streaming state, and adaptive render distance were not controlled.
 
-Run-9 also exposed a capture-state loophole: the Agent Control handoff/pause
+The replacement inspection also exposed a capture-state loophole: the Agent Control handoff/pause
 state eventually returns to combat presentation, which can make the held item
 reappear in a delayed screenshot. Hero evidence must therefore record the
 capture timing and visible gameplay state, not merely the final file name.
@@ -179,10 +180,11 @@ curve plus a bounded remote speed envelope. These are causal fixes for visible
 holes and unusably aggressive analog flight; neither changes manual player nor
 shuttle speed contracts.
 
-Current evidence is deliberately split by question: `qa_runs/run_1786291899`
-is the 1280 x 720 mountain-river release route; `qa_runs/run_1786291220` and
-`qa_runs/run_1786291828` exercise 800 x 600 and 320 x 480 UI densities; and
-`qa_runs/run_1786290273` proves fresh companion grounding around Y=48 instead
-of the stale Y=87 bootstrap surface. The binary suite finished with 920 passing
-tests and no failures. The visually captured size matrix still excludes 1920,
-ultrawide, and OS/text scaling, so those cells remain open rather than inferred.
+Historical local runs from 2026-08-09 exercised the 1280 x 720 mountain-river
+route, 800 x 600 and 320 x 480 UI densities, and fresh companion grounding.
+Their `qa_runs/` captures are intentionally excluded from the repository and
+are not current release evidence. The checkpoint also omitted 1920-class,
+ultrawide, and OS/text-scale captures. Those cells therefore remain open until
+fresh reports and screenshots are explicitly selected, validated, and
+inspected under the current evidence contract; no long-lived test total or
+visual acceptance verdict is inferred from that historical run set.

@@ -2,7 +2,7 @@
   "recommendations": [
     "rust-lang.rust-analyzer",
     "vadimcn.vscode-lldb",
-    "serayuzgur.crates",
-    "bungcip.better-toml"
+    "fill-labs.dependi",
+    "tamasfe.even-better-toml"
   ]
 }
