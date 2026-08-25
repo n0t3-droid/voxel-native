@@ -1016,6 +1016,86 @@ function ConvertTo-RonStringContent {
     return $builder.ToString()
 }
 
+function Get-QaRonRootFieldDeclarationOffsets {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ReportText,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z_][A-Za-z0-9_]*$')]
+        [string]$FieldName
+    )
+
+    $tokenPattern = '"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''|//[^\r\n]*|/\*[\s\S]*?\*/|[()\[\]{},:]|[A-Za-z_][A-Za-z0-9_]*|\S'
+    $tokens = [regex]::Matches($ReportText, $tokenPattern)
+    $delimiterStack = [System.Collections.Generic.Stack[string]]::new()
+    $declarationOffsets = [System.Collections.Generic.List[int]]::new()
+    $rootStarted = $false
+    $rootClosed = $false
+
+    for ($tokenIndex = 0; $tokenIndex -lt $tokens.Count; $tokenIndex++) {
+        $token = $tokens[$tokenIndex]
+        $value = $token.Value
+        if ($value.StartsWith('//', [StringComparison]::Ordinal) -or
+            $value.StartsWith('/*', [StringComparison]::Ordinal) -or
+            $value -eq '/') {
+            throw 'Selected QA report contains non-canonical RON comments.'
+        }
+        if ($rootClosed) {
+            throw 'Selected QA report contains non-trivia content after its root RON tuple.'
+        }
+        if (-not $rootStarted) {
+            if ($value -ne '(') {
+                throw 'Selected QA report must be one outer RON tuple.'
+            }
+            $delimiterStack.Push($value)
+            $rootStarted = $true
+            continue
+        }
+
+        $atRoot = $delimiterStack.Count -eq 1
+        if ($value[0] -eq '"' -or $value[0] -eq "'") {
+            if ($value.Length -lt 2 -or $value[$value.Length - 1] -ne $value[0]) {
+                throw 'Selected QA report contains a malformed RON string or character literal.'
+            }
+            continue
+        }
+        if ($atRoot -and $value -ceq $FieldName) {
+            if ($tokenIndex + 1 -ge $tokens.Count -or
+                $tokens[$tokenIndex + 1].Value -ne ':') {
+                throw "Selected QA report root field '$FieldName' is missing its colon."
+            }
+            $declarationOffsets.Add($token.Index)
+        }
+        if ($value -in @('(', '[', '{')) {
+            $delimiterStack.Push($value)
+            continue
+        }
+        if ($value -in @(')', ']', '}')) {
+            $expectedOpening = switch ($value) {
+                ')' { '(' }
+                ']' { '[' }
+                '}' { '{' }
+            }
+            if ($delimiterStack.Count -eq 0 -or
+                $delimiterStack.Peek() -ne $expectedOpening) {
+                throw 'Selected QA report contains unbalanced RON delimiters.'
+            }
+            [void]$delimiterStack.Pop()
+            if ($delimiterStack.Count -eq 0) {
+                $rootClosed = $true
+            }
+            continue
+        }
+    }
+
+    if (-not $rootStarted -or -not $rootClosed -or
+        $delimiterStack.Count -ne 0) {
+        throw 'Selected QA report does not contain one complete outer RON tuple.'
+    }
+    return $declarationOffsets.ToArray()
+}
+
 function Get-QaUniqueUnsignedFieldValue {
     param(
         [Parameter(Mandatory = $true)]
@@ -2120,27 +2200,51 @@ function Assert-QaReportTextIdentity {
     # identityPatterns above; it belongs to QaPlanetaryStreaming and must not
     # be inserted into this top-level block. Binding frontier_complete between
     # dirty_chunks and render_distance detects report-layout drift explicitly.
-    $settledNearFieldPattern = '(?ms)^\s*loaded_chunks:\s*[0-9]+,?\s*\r?\n' +
-        '\s*mesh_entities:\s*[0-9]+,?\s*\r?\n' +
-        '\s*pending_terrain:\s*0,?\s*\r?\n' +
-        '\s*pending_meshes:\s*0,?\s*\r?\n' +
-        '\s*dirty_chunks:\s*0,?\s*\r?\n' +
-        '\s*dense_chunks:\s*[0-9]+,?\s*\r?\n' +
-        '\s*dense_chunk_budget:\s*2400,?\s*\r?\n' +
-        '\s*dense_chunk_budget_exceeded:\s*false,?\s*\r?\n' +
-        '\s*frontier_complete:\s*true,?\s*\r?\n' +
-        '\s*render_distance:'
-    if ([regex]::Matches($ReportText, $settledNearFieldPattern).Count -ne 1) {
+    # Root-field offsets come from a delimiter-aware RON scan so formatting
+    # whitespace cannot disguise duplicate fields or turn nested stall samples
+    # into root declarations.
+    $rootPendingTerrainOffsets = @(
+        Get-QaRonRootFieldDeclarationOffsets `
+            -ReportText $ReportText `
+            -FieldName 'pending_terrain'
+    )
+    if ($rootPendingTerrainOffsets.Count -ne 1) {
+        throw "Selected QA report contains $($rootPendingTerrainOffsets.Count) root pending_terrain field declarations; exactly one is required."
+    }
+    $settledNearFieldPattern = '(?m)^(?<indent>[ \t]*)loaded_chunks:[ \t]*[0-9]+,?[ \t]*\r?\n' +
+        '^\k<indent>mesh_entities:[ \t]*[0-9]+,?[ \t]*\r?\n' +
+        '^\k<indent>(?<pendingTerrainField>pending_terrain):[ \t]*(?<pendingTerrain>[0-9]+),?[ \t]*\r?\n' +
+        '^\k<indent>pending_meshes:[ \t]*0,?[ \t]*\r?\n' +
+        '^\k<indent>dirty_chunks:[ \t]*0,?[ \t]*\r?\n' +
+        '^\k<indent>dense_chunks:[ \t]*[0-9]+,?[ \t]*\r?\n' +
+        '^\k<indent>dense_chunk_budget:[ \t]*2400,?[ \t]*\r?\n' +
+        '^\k<indent>dense_chunk_budget_exceeded:[ \t]*false,?[ \t]*\r?\n' +
+        '^\k<indent>frontier_complete:[ \t]*true,?[ \t]*\r?\n' +
+        '^\k<indent>render_distance:'
+    $settledNearFieldMatches = [regex]::Matches($ReportText, $settledNearFieldPattern)
+    if ($settledNearFieldMatches.Count -ne 1) {
         throw 'Selected QA report did not finish with settled near-field queues and a complete top-level frontier.'
+    }
+    $settledNearFieldMatch = $settledNearFieldMatches[0]
+    if ([int]$rootPendingTerrainOffsets[0] -ne
+        $settledNearFieldMatch.Groups['pendingTerrainField'].Index) {
+        throw 'Selected QA report settled near-field block is not the authoritative root pending_terrain declaration.'
     }
     $loadedChunks = Get-QaUniqueUnsignedFieldValue `
         -ReportText $ReportText `
         -FieldName 'loaded_chunks' `
         -Maximum 2400
-    $pendingTerrain = Get-QaUniqueUnsignedFieldValue `
-        -ReportText $ReportText `
-        -FieldName 'pending_terrain' `
-        -Maximum 2400
+    $pendingTerrain = [uint64]0
+    if (-not [uint64]::TryParse(
+            $settledNearFieldMatch.Groups['pendingTerrain'].Value,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$pendingTerrain) -or $pendingTerrain -gt 2400) {
+        throw 'Selected QA report top-level pending_terrain exceeds its 2400 bound.'
+    }
+    if ($pendingTerrain -ne 0) {
+        throw 'Selected QA report did not finish with a settled top-level terrain queue.'
+    }
     $denseChunks = Get-QaUniqueUnsignedFieldValue `
         -ReportText $ReportText `
         -FieldName 'dense_chunks' `
@@ -2873,7 +2977,7 @@ function Assert-QaReportParserFixtures {
         # A resident L0 may install entirely from an unchanged sample cache. Its
         # truthful `last_*` query counters are then zero; resident mode identity,
         # not a cumulative interpretation of those counters, proves completion.
-        $reusedPoint16Report = @'
+        $reusedPoint16ReportBody = @'
 qa_report_schema_version: "2.5.0",
 evidence_disposition: "canonical-candidate",
 build_profile: "release",
@@ -3014,7 +3118,32 @@ screenshot_observations: [
         player_camera_rotation_xyzw: (0.0, 0.0, 0.0, 1.0),
     ),
 ],
+stalls: [
+    (
+        at_seconds: 0.25,
+        stage: route,
+        route_seconds: Some(0.25),
+        frame_ms: 150.0,
+        pos: (1.0, 2.0, 3.0),
+        pending_terrain: 2,
+        pending_meshes: 0,
+        dirty_chunks: 0,
+    ),
+    (
+        at_seconds: 0.5,
+        stage: route,
+        route_seconds: Some(0.5),
+        frame_ms: 175.0,
+        pos: (4.0, 5.0, 6.0),
+        pending_terrain: 2,
+        pending_meshes: 0,
+        dirty_chunks: 0,
+    ),
+],
 '@
+        $reusedPoint16Report = "(`n" +
+            (($reusedPoint16ReportBody -split '\r?\n' | ForEach-Object { "    $_" }) -join "`n") +
+            "`n)"
     $assertPointFixture = {
         param([string]$FixtureText, [string]$SelectedReportPath)
         if ([string]::IsNullOrWhiteSpace($SelectedReportPath)) {
@@ -3043,6 +3172,25 @@ screenshot_observations: [
             -ExpectedExecutableHash 'sha256:executable-fixture' `
             -ExpectedToolchain 'rustc fixture' `
             -ExpectedHardware 'GPU "fixture" C:\Device'
+    }
+    if (-not $reusedPoint16Report.StartsWith(
+            "(`n    qa_report_schema_version:",
+            [StringComparison]::Ordinal) -or
+        -not $reusedPoint16Report.EndsWith("`n)", [StringComparison]::Ordinal)) {
+        throw 'QA report parser fixture is not shaped like a serializer-emitted outer RON tuple.'
+    }
+    $fixtureRootPendingTerrainOffsets = @(
+        Get-QaRonRootFieldDeclarationOffsets `
+            -ReportText $reusedPoint16Report `
+            -FieldName 'pending_terrain'
+    )
+    $fixtureAllPendingTerrainDeclarations = [regex]::Matches(
+        $reusedPoint16Report,
+        '(?m)^[ \t]*pending_terrain[ \t]*:'
+    )
+    if ($fixtureRootPendingTerrainOffsets.Count -ne 1 -or
+        $fixtureAllPendingTerrainDeclarations.Count -ne 3) {
+        throw 'QA report parser fixture must contain one root and two nested pending_terrain declarations.'
     }
     & $assertPointFixture $reusedPoint16Report
     $incrementalPoint16Report = $reusedPoint16Report.Replace(
@@ -3077,6 +3225,100 @@ screenshot_observations: [
     }
     if (-not $rejected) {
         throw 'QA report parser accepted a selected report path other than canonical report.ron.'
+    }
+
+    $pendingTerrainRootLinePattern = '(?m)^ {4}pending_terrain:[^\r\n]*'
+    $pendingTerrainMissingReport = [regex]::Replace(
+        $reusedPoint16Report,
+        $pendingTerrainRootLinePattern + '\r?\n',
+        ''
+    )
+    $pendingTerrainDuplicateAlternateIndentReport = $reusedPoint16Report.Replace(
+        '    screenshots: [',
+        "            pending_terrain: 0,`n    screenshots: ["
+    )
+    $pendingTerrainDuplicateMissingCommaReport = $reusedPoint16Report.Replace(
+        '    peak_pending_terrain: 0,',
+        "    peak_pending_terrain: 0`n            pending_terrain: 0,"
+    )
+    $pendingTerrainMalformedValueAlternateIndentReport = $reusedPoint16Report.Replace(
+        '    screenshots: [',
+        "            pending_terrain: invalid,`n    screenshots: ["
+    )
+    $pendingTerrainMalformedColonAlternateIndentReport = $reusedPoint16Report.Replace(
+        '    screenshots: [',
+        "            pending_terrain = 0,`n    screenshots: ["
+    )
+    $pendingTerrainMalformedRootReport = [regex]::Replace(
+        $reusedPoint16Report,
+        $pendingTerrainRootLinePattern,
+        '    pending_terrain: invalid,'
+    )
+    $pendingTerrainNonzeroReport = [regex]::Replace(
+        $reusedPoint16Report,
+        $pendingTerrainRootLinePattern,
+        '    pending_terrain: 1,'
+    )
+    $nestedPendingCannotSpoofDenseTotalReport = [regex]::Replace(
+        [regex]::Replace(
+            $reusedPoint16Report,
+            '(?m)^ {4}dense_chunks:[^\r\n]*',
+            '    dense_chunks: 3,'
+        ),
+        '(?m)^ {4}peak_dense_chunks:[^\r\n]*',
+        '    peak_dense_chunks: 3,'
+    )
+    $pendingTerrainRejectionFixtures = [ordered]@{
+        pending_terrain_missing = [pscustomobject]@{
+            Report = $pendingTerrainMissingReport
+            Error = 'contains 0 root pending_terrain field declarations'
+        }
+        pending_terrain_duplicate_alternate_indent = [pscustomobject]@{
+            Report = $pendingTerrainDuplicateAlternateIndentReport
+            Error = 'contains 2 root pending_terrain field declarations'
+        }
+        pending_terrain_duplicate_missing_preceding_comma = [pscustomobject]@{
+            Report = $pendingTerrainDuplicateMissingCommaReport
+            Error = 'contains 2 root pending_terrain field declarations'
+        }
+        pending_terrain_malformed_value_alternate_indent = [pscustomobject]@{
+            Report = $pendingTerrainMalformedValueAlternateIndentReport
+            Error = 'contains 2 root pending_terrain field declarations'
+        }
+        pending_terrain_malformed_colon_alternate_indent = [pscustomobject]@{
+            Report = $pendingTerrainMalformedColonAlternateIndentReport
+            Error = "root field 'pending_terrain' is missing its colon"
+        }
+        pending_terrain_malformed_root_value = [pscustomobject]@{
+            Report = $pendingTerrainMalformedRootReport
+            Error = 'did not finish with settled near-field queues'
+        }
+        pending_terrain_nonzero = [pscustomobject]@{
+            Report = $pendingTerrainNonzeroReport
+            Error = 'did not finish with a settled top-level terrain queue'
+        }
+        nested_pending_cannot_spoof_dense_total = [pscustomobject]@{
+            Report = $nestedPendingCannotSpoofDenseTotalReport
+            Error = 'dense_chunks does not equal loaded_chunks plus pending_terrain'
+        }
+    }
+    foreach ($fixtureName in $pendingTerrainRejectionFixtures.Keys) {
+        $fixture = $pendingTerrainRejectionFixtures[$fixtureName]
+        $rejected = $false
+        try {
+            & $assertPointFixture $fixture.Report
+        }
+        catch {
+            $rejected = $true
+            if ($_.Exception.Message.IndexOf(
+                    $fixture.Error,
+                    [StringComparison]::Ordinal) -lt 0) {
+                throw "QA report parser rejection fixture '$fixtureName' failed for an unexpected reason: $($_.Exception.Message)"
+            }
+        }
+        if (-not $rejected) {
+            throw "QA report parser rejection fixture '$fixtureName' was unexpectedly accepted."
+        }
     }
 
     $rejectionFixtures = [ordered]@{
