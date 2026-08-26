@@ -519,6 +519,7 @@ fn update_stats_text(
     player_q: Query<(&Transform, &Player)>,
     pause: Option<Res<crate::editor::SimPause>>,
     director: Option<Res<SimulationDirector>>,
+    brain: Option<Res<crate::bots::FriendlyWorldBrain>>,
     overlay: Res<DebugOverlay>,
     state: Res<State<crate::menu::GameState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
@@ -569,6 +570,10 @@ fn update_stats_text(
         .map(|d| d.cockpit_line())
         .unwrap_or_else(|| "No active mission".into());
     let director_line = compact_hud_line(&director_line, 56);
+    let civic_line = brain
+        .as_deref()
+        .map(|brain| brain.save.civic_population.telemetry_line())
+        .unwrap_or_else(|| "not loaded".into());
 
     // Keep the opt-in diagnostic compact and update its existing buffer.
     use std::fmt::Write as _;
@@ -576,7 +581,7 @@ fn update_stats_text(
     buf.clear();
     let _ = write!(
         buf,
-        "DEBUG  {sim_mode}\nFRAME  FPS {fps:>3.0}/{:>3.0}  PRESS {:>2.0}%  QUEUE {:>2.0}%  {} {} {}\nPOS    {:>7.1}  {:>6.1}  {:>7.1}  {:?}  {}\nWORLD  {hour:02}:{minute:02} {:?}  FOV {:.0}\nSTREAM RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nMISSION {}",
+        "DEBUG  {sim_mode}\nFRAME  FPS {fps:>3.0}/{:>3.0}  PRESS {:>2.0}%  QUEUE {:>2.0}%  {} {} {}\nPOS    {:>7.1}  {:>6.1}  {:>7.1}  {:?}  {}\nWORLD  {hour:02}:{minute:02} {:?}  FOV {:.0}\nSTREAM RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nCIVIC  {}\nMISSION {}",
         settings.target_fps,
         governor.frame_pressure * 100.0,
         governor.queue_pressure * 100.0,
@@ -600,6 +605,7 @@ fn update_stats_text(
         governor.shadow_radius,
         governor.status,
         weather_line,
+        civic_line,
         director_line,
     );
 }

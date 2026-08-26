@@ -38,6 +38,7 @@ use crate::settings::SAVES_DIR;
 use crate::settings::{ActiveWorld, WorldEditManifest, WorldGenerationIdentity, WorldSettings};
 use crate::ships::ShipInstance;
 use crate::terrain::TerrainGenerator;
+use crate::villagers::CivicPopulation;
 use crate::world::{
     capture_edited_overrides_for_world, capture_existing_edited_override_authority,
     commit_edited_override_capture_with, EditedOverrideSaveCapture,
@@ -133,7 +134,7 @@ enum BotSaveEnqueueOutcome {
 }
 
 fn bot_save_version() -> u32 {
-    2
+    3
 }
 
 fn default_next_id() -> u64 {
@@ -550,6 +551,10 @@ pub struct BotWorldSave {
     pub last_blocked_reason: String,
     #[serde(default)]
     pub companion_preview: Option<CompanionBuildPreview>,
+    /// Persistent, bounded settlement life. Construction droids remain a
+    /// separate authority; this population contains no trading or economy.
+    #[serde(default)]
+    pub civic_population: CivicPopulation,
 }
 
 impl Default for BotWorldSave {
@@ -576,6 +581,7 @@ impl Default for BotWorldSave {
             autonomy: BotAutonomySettings::default(),
             last_blocked_reason: String::new(),
             companion_preview: None,
+            civic_population: CivicPopulation::default(),
         }
     }
 }
@@ -683,6 +689,8 @@ impl BotWorldSave {
                 .max_active_projects
                 .clamp(1, BOT_ACTIVE_AREA_HARD_LIMIT);
         }
+        self.civic_population
+            .normalize(self.settlements.iter().map(|settlement| settlement.id));
         ensure_city_districts(self);
         if legacy_version < 2 {
             normalize_legacy_companions(self);
@@ -13082,7 +13090,7 @@ fn autosave_bot_world(
     }
 }
 
-fn save_bot_world_on_world_unload(
+pub(crate) fn save_bot_world_on_world_unload(
     active: Option<Res<ActiveWorld>>,
     mut brain: ResMut<FriendlyWorldBrain>,
     mut world: ResMut<VoxelWorld>,
@@ -15793,7 +15801,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_bot_world_loads_with_v2_defaults() {
+    fn legacy_v1_bot_world_loads_with_v3_defaults() {
         let text = r#"(
             version: 1,
             next_bot_id: 2,
@@ -15830,7 +15838,7 @@ mod tests {
         )"#;
         let mut save: BotWorldSave = ron::from_str(text).unwrap();
         save.normalize();
-        assert_eq!(save.version, 2);
+        assert_eq!(save.version, 3);
         assert_eq!(save.settlements[0].radius, MEGA_CITY_RADIUS);
         assert_eq!(save.settlements[0].bounds.radius, MEGA_CITY_RADIUS);
         assert!(!save.districts.is_empty());
@@ -15842,6 +15850,44 @@ mod tests {
         assert_eq!(save.agents[0].crew_id, None);
         assert_eq!(save.agents[0].memory.curiosity, default_curiosity());
         assert_eq!(save.agents[0].memory.work_focus, default_work_focus());
+        assert!(save.civic_population.residents.is_empty());
+        assert_eq!(
+            save.civic_population.authority,
+            crate::villagers::CivicAuthorityState::Uninitialized
+        );
+        assert!(save.civic_population.generation_identity.is_none());
+    }
+
+    #[test]
+    fn legacy_v2_bot_world_defaults_civic_population_and_migrates_to_v3() {
+        let text = r#"(
+            version: 2,
+            settlements: [(
+                id: 77,
+                name: "Legacy Settlement",
+                hub: (0.0, 90.0, 0.0),
+                theme: CyanAlloy,
+            )],
+        )"#;
+        let mut save: BotWorldSave = ron::from_str(text).unwrap();
+        assert_eq!(save.version, 2);
+        assert_eq!(save.civic_population.schema_version, 1);
+        assert!(save.civic_population.residents.is_empty());
+        assert_eq!(
+            save.civic_population.authority,
+            crate::villagers::CivicAuthorityState::Uninitialized
+        );
+        assert!(save.civic_population.generation_identity.is_none());
+
+        save.normalize();
+
+        assert_eq!(save.version, 3);
+        assert_eq!(save.civic_population.schema_version, 1);
+        assert!(save.civic_population.residents.is_empty());
+        assert_eq!(
+            save.civic_population.authority,
+            crate::villagers::CivicAuthorityState::Uninitialized
+        );
     }
 
     #[test]

@@ -2448,6 +2448,12 @@ impl VoxelWorld {
         self.generator.biome_at(wx, wz)
     }
 
+    /// Shared continuous ecology sample for bounded simulation and visual
+    /// presentation systems. This is deterministic and never mutates terrain.
+    pub fn environment_sample_at(&self, wx: i32, wz: i32) -> crate::terrain::EnvironmentSample {
+        self.generator.environment_sample_at(wx, wz)
+    }
+
     /// Is at least one chunk in the vertical column at (wx, wz) loaded?
     /// Used by the player to know when physics can safely take over.
     pub fn is_column_loaded(&self, wx: i32, wz: i32) -> bool {

@@ -48,6 +48,7 @@ mod theme;
 mod toolbelt;
 mod ui_kit;
 mod vegetation;
+mod villagers;
 pub mod virtual_voxel_hierarchy;
 mod voxel_budget;
 mod water;
@@ -298,6 +299,7 @@ fn main() -> AppExit {
         .add_plugins(city::CityPlugin)
         .add_plugins(planetary_streaming::PlanetaryStreamingPlugin)
         .add_plugins(bots::BotsPlugin)
+        .add_plugins(villagers::VillagersPlugin)
         .add_plugins(feedback_audio::FeedbackAudioPlugin)
         .add_plugins(ships::ShipPlugin)
         .add_plugins(creator_library::CreatorLibraryPlugin)

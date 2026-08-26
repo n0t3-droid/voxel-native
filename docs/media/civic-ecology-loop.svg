@@ -1,0 +1,240 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Voxel Native Civic Ecology V1 bounded intelligence architecture</title>
+  <desc id="desc">A dark technical architecture diagram for Voxel Native's original non-economic Civic Ecology. Persistent world identity and saved resident records feed fixed-point needs, schedule and weather-aware utility selection, sparse social memory, loaded-voxel endpoint reconciliation and bounded A-star navigation. Exact population, route, rendering and retry budgets surround the loop. A hard boundary excludes trade, currency, offers, markets, inventories and voxel mutation.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#061117"/>
+      <stop offset="0.54" stop-color="#0a1a22"/>
+      <stop offset="1" stop-color="#0b121c"/>
+    </linearGradient>
+    <linearGradient id="authorityFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#12383a"/>
+      <stop offset="1" stop-color="#0b242b"/>
+    </linearGradient>
+    <linearGradient id="mindFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#152c3e"/>
+      <stop offset="1" stop-color="#111f31"/>
+    </linearGradient>
+    <linearGradient id="worldFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#282240"/>
+      <stop offset="1" stop-color="#171b30"/>
+    </linearGradient>
+    <linearGradient id="routeLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#69e5c8"/>
+      <stop offset="0.5" stop-color="#74c8ee"/>
+      <stop offset="1" stop-color="#b79df7"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#8bb6c4" stroke-opacity="0.045"/>
+    </pattern>
+    <filter id="shadow" x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+    <marker id="arrowMint" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#69e5c8"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#74c8ee"/>
+    </marker>
+    <marker id="arrowViolet" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#b79df7"/>
+    </marker>
+    <style>
+      .kicker { font: 700 15px Helvetica, Arial, sans-serif; letter-spacing: 3.1px; fill: #69e5c8; }
+      .heading { font: 700 38px Helvetica, Arial, sans-serif; fill: #eff9fc; }
+      .subhead { font: 400 18px Helvetica, Arial, sans-serif; fill: #9bb9c4; }
+      .cardTitle { font: 700 21px Helvetica, Arial, sans-serif; fill: #edf8fb; }
+      .cardKicker { font: 700 12px Helvetica, Arial, sans-serif; letter-spacing: 1.8px; }
+      .body { font: 400 15px Helvetica, Arial, sans-serif; fill: #a7c1ca; }
+      .bodyStrong { font: 700 15px Helvetica, Arial, sans-serif; fill: #e6f3f6; }
+      .micro { font: 400 12px Helvetica, Arial, sans-serif; fill: #7d9ba6; }
+      .mono { font: 400 14px "Courier New", monospace; fill: #d5ebf1; }
+      .monoStrong { font: 700 15px "Courier New", monospace; fill: #f0d28d; }
+      .metric { font: 700 24px "Courier New", monospace; fill: #f0f8fa; }
+      .chip { font: 700 12px Helvetica, Arial, sans-serif; letter-spacing: 1px; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" rx="26" fill="url(#background)"/>
+  <rect width="1600" height="900" rx="26" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1598" height="898" rx="25" fill="none" stroke="#385762" stroke-opacity="0.7" stroke-width="2"/>
+
+  <g transform="translate(64 46)">
+    <text class="kicker">CIVIC ECOLOGY V1 · BOUNDED WORLD INTELLIGENCE</text>
+    <text class="heading" y="50">Residents are persistent decisions—not decorative traffic.</text>
+    <text class="subhead" y="89">Original non-economic inhabitants coupled to world identity, loaded voxels, ecology, time and weather.</text>
+  </g>
+
+  <g transform="translate(1194 34)" filter="url(#shadow)">
+    <rect width="340" height="112" rx="18" fill="#0c2027" stroke="#4a6974"/>
+    <text x="22" y="28" class="cardKicker" fill="#efc77a">IMPLEMENTED SOURCE · QA NEXT</text>
+    <text x="22" y="60" class="metric">22</text>
+    <text x="72" y="58" class="bodyStrong">focused civic tests</text>
+    <text x="22" y="85" class="micro">Runtime frame + telemetry still require the fresh observer gate.</text>
+  </g>
+
+  <!-- Main causal flow. -->
+  <g fill="none" stroke-width="2.5" stroke-opacity="0.9">
+    <path d="M382 355H431" stroke="#69e5c8" marker-end="url(#arrowMint)"/>
+    <path d="M816 355H865" stroke="#74c8ee" marker-end="url(#arrowBlue)"/>
+    <path d="M1248 355H1290" stroke="#b79df7" marker-end="url(#arrowViolet)"/>
+    <path d="M1070 518V568" stroke="#74c8ee" marker-end="url(#arrowBlue)"/>
+    <path d="M668 518V568" stroke="#69e5c8" marker-end="url(#arrowMint)"/>
+    <path d="M432 695H382V475" stroke="#69e5c8" stroke-opacity="0.55" marker-end="url(#arrowMint)"/>
+  </g>
+
+  <!-- Persistent authority. -->
+  <g transform="translate(64 190)" filter="url(#shadow)">
+    <rect width="318" height="328" rx="21" fill="url(#authorityFill)" stroke="#69e5c8" stroke-width="2"/>
+    <rect x="20" y="18" width="132" height="26" rx="13" fill="#67e3c7"/>
+    <text x="86" y="36" class="chip" text-anchor="middle" fill="#062019">SAVE AUTHORITY</text>
+    <text x="22" y="80" class="cardTitle">BotWorldSave · schema v3</text>
+    <text x="22" y="108" class="body">CivicPopulation is the persistent source.</text>
+
+    <g transform="translate(22 136)">
+      <text class="cardKicker" fill="#8fe1d2">EXACT IDENTITY BINDING</text>
+      <text y="29" class="mono">I = (seed, profile, scenery,</text>
+      <text y="50" class="mono">     terrain grammar)</text>
+      <text y="77" class="body">mismatch → IdentityBlocked</text>
+      <text y="102" class="body">matching identity returns → Active</text>
+      <text y="127" class="body">missing world/settlement → hard suspend</text>
+    </g>
+
+    <path d="M22 276H296" stroke="#3f6870"/>
+    <g transform="translate(22 288)">
+      <text class="micro">Disposable ECS visuals never own resident truth.</text>
+      <text y="19" class="micro">Rollback: VOXEL_NATIVE_CIVIC_ECOLOGY=0</text>
+    </g>
+  </g>
+
+  <!-- Fixed-point cognition. -->
+  <g transform="translate(432 190)" filter="url(#shadow)">
+    <rect width="384" height="328" rx="21" fill="url(#mindFill)" stroke="#74c8ee" stroke-width="2"/>
+    <rect x="20" y="18" width="143" height="26" rx="13" fill="#6fc4e9"/>
+    <text x="91" y="36" class="chip" text-anchor="middle" fill="#071a25">FIXED-POINT MIND</text>
+    <text x="22" y="80" class="cardTitle">Deterministic utility argmax</text>
+    <text x="22" y="108" class="body">Five deficits ∈ [0, 1000] · stable tie-break.</text>
+
+    <g transform="translate(22 135)">
+      <rect width="340" height="91" rx="12" fill="#0b1825" stroke="#466b82"/>
+      <text x="16" y="27" class="monoStrong">U(a) = 1000 S(a) + Σ wₖ(a)Nₖ</text>
+      <text x="16" y="52" class="mono">+ 256000·𝟙[a=a₋₁] − 8000·d₁(p,gₐ)</text>
+      <text x="16" y="77" class="mono">− 1250·P·𝟙[a is outdoors]</text>
+    </g>
+
+    <g transform="translate(22 249)">
+      <text class="body">schedule · life stage · weather preemption</text>
+      <text y="24" class="body">purpose · belonging · safety · curiosity · energy</text>
+      <text y="48" class="body">10 activity candidates · bounded hysteresis</text>
+    </g>
+  </g>
+
+  <!-- Sparse society. -->
+  <g transform="translate(866 190)" filter="url(#shadow)">
+    <rect width="382" height="328" rx="21" fill="#112733" stroke="#82cee8" stroke-width="2"/>
+    <rect x="20" y="18" width="133" height="26" rx="13" fill="#79cde7"/>
+    <text x="86" y="36" class="chip" text-anchor="middle" fill="#071b25">SPARSE SOCIETY</text>
+    <text x="22" y="80" class="cardTitle">Memory without quadratic state</text>
+    <text x="22" y="108" class="body">Rotating pairs update only near their commons.</text>
+
+    <g transform="translate(22 137)">
+      <circle cx="40" cy="40" r="23" fill="#1c4650" stroke="#75dfc9"/>
+      <circle cx="128" cy="26" r="19" fill="#223e56" stroke="#7ecdf0"/>
+      <circle cx="124" cy="91" r="20" fill="#2b3454" stroke="#b39cf5"/>
+      <circle cx="213" cy="50" r="22" fill="#1c4650" stroke="#75dfc9"/>
+      <circle cx="292" cy="89" r="18" fill="#223e56" stroke="#7ecdf0"/>
+      <path d="M62 36L109 28M60 52L105 81M147 35L192 46M145 84L193 58M235 59L276 81" fill="none" stroke="#89bdc9" stroke-width="2"/>
+      <text x="40" y="45" text-anchor="middle" class="bodyStrong">A</text>
+      <text x="128" y="31" text-anchor="middle" class="bodyStrong">B</text>
+      <text x="124" y="96" text-anchor="middle" class="bodyStrong">C</text>
+      <text x="213" y="55" text-anchor="middle" class="bodyStrong">D</text>
+      <text x="292" y="94" text-anchor="middle" class="bodyStrong">E</text>
+    </g>
+
+    <g transform="translate(22 265)">
+      <text class="monoStrong">≤ 12 memories · ≤ 12 relationships</text>
+      <text y="25" class="body">≤ 4 pairs / social tick · no all-pairs scan</text>
+    </g>
+  </g>
+
+  <!-- World projection. -->
+  <g transform="translate(1290 190)" filter="url(#shadow)">
+    <rect width="246" height="328" rx="21" fill="url(#worldFill)" stroke="#b79df7" stroke-width="2"/>
+    <rect x="18" y="18" width="116" height="26" rx="13" fill="#ad98ee"/>
+    <text x="76" y="36" class="chip" text-anchor="middle" fill="#171126">WORLD FORM</text>
+    <text x="20" y="80" class="cardTitle">Six cultures</text>
+    <text x="20" y="108" class="body">profile + biome + fields</text>
+    <text x="20" y="133" class="body">Riverglass · Canopy</text>
+    <text x="20" y="157" class="body">Sunstone · Highland</text>
+    <text x="20" y="181" class="body">Frostweave · Astral</text>
+    <path d="M20 207H226" stroke="#544a72"/>
+    <text x="20" y="236" class="monoStrong">3 meshes</text>
+    <text x="20" y="260" class="monoStrong">25 materials max</text>
+    <text x="20" y="286" class="body">weather-aware motion</text>
+    <text x="20" y="308" class="micro">original procedural silhouette</text>
+  </g>
+
+  <!-- Navigation loop. -->
+  <g transform="translate(432 568)" filter="url(#shadow)">
+    <rect width="816" height="196" rx="21" fill="#0c2029" stroke="url(#routeLine)" stroke-width="2"/>
+    <text x="22" y="35" class="cardKicker" fill="#79d8d0">LOADED-VOXEL NAVIGATION · FAIL CLOSED</text>
+    <text x="22" y="68" class="cardTitle">Bounded correction → deterministic A* → validated movement</text>
+
+    <g transform="translate(22 91)">
+      <rect width="154" height="66" rx="12" fill="#102d31" stroke="#65d8bd"/>
+      <text x="77" y="26" text-anchor="middle" class="bodyStrong">9 candidate columns</text>
+      <text x="77" y="48" text-anchor="middle" class="micro">× 9 height probes</text>
+
+      <path d="M164 33H202" stroke="#69e5c8" stroke-width="2" marker-end="url(#arrowMint)"/>
+      <rect x="212" width="168" height="66" rx="12" fill="#102736" stroke="#70c7ec"/>
+      <text x="296" y="26" text-anchor="middle" class="bodyStrong">A* ≤ 768 expands</text>
+      <text x="296" y="48" text-anchor="middle" class="micro">route ≤ 96 cells · radius 48</text>
+
+      <path d="M390 33H428" stroke="#74c8ee" stroke-width="2" marker-end="url(#arrowBlue)"/>
+      <rect x="438" width="150" height="66" rx="12" fill="#1d2239" stroke="#ad99ef"/>
+      <text x="513" y="26" text-anchor="middle" class="bodyStrong">1.4 m s⁻¹</text>
+      <text x="513" y="48" text-anchor="middle" class="micro">revalidate every step</text>
+
+      <path d="M598 33H636" stroke="#b79df7" stroke-width="2" marker-end="url(#arrowViolet)"/>
+      <rect x="646" width="126" height="66" rx="12" fill="#28213b" stroke="#b79df7"/>
+      <text x="709" y="26" text-anchor="middle" class="bodyStrong">persist</text>
+      <text x="709" y="48" text-anchor="middle" class="micro">cell + memory</text>
+    </g>
+  </g>
+
+  <!-- Population and retry budgets. -->
+  <g transform="translate(64 568)" filter="url(#shadow)">
+    <rect width="318" height="196" rx="21" fill="#0f2728" stroke="#63d6bb"/>
+    <text x="20" y="35" class="cardKicker" fill="#79ddc7">EXACT POPULATION CEILINGS</text>
+    <g transform="translate(20 57)">
+      <text class="metric">12</text><text x="54" y="-1" class="micro">seeded</text>
+      <text x="170" class="metric">32</text><text x="218" y="-1" class="micro">/ settlement</text>
+      <text y="39" class="metric">128</text><text x="67" y="38" class="micro">persisted world</text>
+      <text x="170" y="39" class="metric">64</text><text x="218" y="38" class="micro">logical active</text>
+      <text y="80" class="metric">24</text><text x="52" y="79" class="micro">visible roots</text>
+      <text x="170" y="80" class="metric">8</text><text x="198" y="79" class="micro">live detailed max</text>
+      <text y="116" class="micro">2 builds · 4 removals · 16 root sync / update</text>
+    </g>
+  </g>
+
+  <g transform="translate(1290 568)" filter="url(#shadow)">
+    <rect width="246" height="196" rx="21" fill="#191f31" stroke="#a793e9"/>
+    <text x="18" y="35" class="cardKicker" fill="#b7a5f2">DETERMINISTIC BACKOFF</text>
+    <text x="18" y="67" class="monoStrong">τ = b · 2^min(f−1,4)</text>
+    <text x="18" y="96" class="body">coverage: 10 → 160 ticks</text>
+    <text x="18" y="121" class="body">route/budget: 40 → 640</text>
+    <text x="18" y="146" class="body">due tick saturates at u64::MAX</text>
+    <text x="18" y="172" class="micro">failure state persists · success clears</text>
+  </g>
+
+  <!-- Hard excluded scope. -->
+  <g transform="translate(64 798)">
+    <rect width="1472" height="64" rx="17" fill="#241b1e" stroke="#e08b6f" stroke-width="1.5"/>
+    <rect x="18" y="16" width="166" height="32" rx="16" fill="#d77f64"/>
+    <text x="101" y="37" class="chip" text-anchor="middle" fill="#2b1210">HARD NON-ECONOMIC</text>
+    <text x="208" y="29" class="bodyStrong">NO trade · currency · prices · offers · merchants · markets · commerce UI</text>
+    <text x="208" y="49" class="micro">NO villager asset copying · profession outfits · structure templates · voxel edits · fluid or global far simulation authority</text>
+    <text x="1438" y="38" class="cardKicker" text-anchor="end" fill="#efb49f">ORIGINAL SYSTEM</text>
+  </g>
+</svg>

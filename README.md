@@ -16,6 +16,7 @@
   <a href="docs/CODEX_ENGINEERING_ATLAS.md">Engineering atlas</a> ·
   <a href="docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf">Technical atlas PDF</a> ·
   <a href="docs/WORLD_LOOK_CONTINUUM_V1.md">World-look continuum</a> ·
+  <a href="docs/CIVIC_ECOLOGY_CONTRACT_V1.md">Civic ecology</a> ·
   <a href="docs/PLANETARY_STREAMING_PHASE1.md">Planetary streaming</a> ·
   <a href="docs/LIVE_OBSERVER_WORKFLOW.md">Live observer</a> ·
   <a href="docs/VOXEL_DISCOVERY_ATLAS.md">Research atlas</a> ·
@@ -50,6 +51,7 @@ pending its separate visual gate.
 | Near/Far water optics | Near evaluates four exact integer-lattice modes; Far copies the two longest modes and the same bounded CPU phase. Optical response remains opaque, render-only, category-safe, and independent of fluid authority. | [World-look continuum](docs/WORLD_LOOK_CONTINUUM_V1.md), [`src/water.rs`](src/water.rs) |
 | Vegetation and atmosphere | Four existing foliage families receive bounded species signatures and analytic normal correction. Sky, fog, lighting, and Natural/Astral grading use a controlled linear-light path. | [World-look continuum](docs/WORLD_LOOK_CONTINUUM_V1.md), [`src/vegetation.rs`](src/vegetation.rs), [`src/daynight.rs`](src/daynight.rs) |
 | Autonomous construction | Road-first bot planning uses bounded candidate scoring, footprint reservations, frontage bindings, and smooth deck grades. | [City planner math](docs/CITY_PLANNER_MATH.md) |
+| Civic ecology | Twelve original, non-economic residents are persisted inside world authority, coupled to profile/biome fields, scheduled by fixed-point utility, routed only across loaded voxels, and projected through strict simulation and visual LOD ceilings. | [Civic Ecology V1](docs/CIVIC_ECOLOGY_CONTRACT_V1.md), [`src/villagers.rs`](src/villagers.rs) |
 | Middle-LOD research layer | A fixed-memory virtual voxel hierarchy is implemented and compile-registered as a pure data layer. It is **not** connected to live rendering, physics, or saves yet. | [Virtual hierarchy status](docs/VIRTUAL_VOXEL_HIERARCHY.md) |
 | Evidence tooling | Native routes emit provenance-bound screenshots and RON telemetry. Separately, a typed graph compiler validates explicitly authored JSON evidence candidates; the report/manifest-to-graph adapter is not implemented yet. | [Evidence graph contract](docs/EVIDENCE_GRAPH_CONTRACT.md) |
 
@@ -192,6 +194,53 @@ separate gate.
 <p align="center">
   <a href="docs/media/river-bank-v3-cross-section.svg"><img src="docs/media/river-bank-v3-cross-section.svg" alt="Natural River Bank V3 authored cross-section showing bed, sediment shelf, living cap, smooth channel thresholds, and the explicit non-physical-simulation boundary" width="100%"></a>
 </p>
+
+## Civic ecology, not a marketplace
+
+Settlement life is modeled as bounded world intelligence rather than an economy
+or a crowd effect. `CivicPopulation` is persisted with the world, bound to its
+exact generation identity, and projected into disposable ECS visuals. A world
+identity mismatch freezes the simulation without deleting or reinterpreting its
+residents; returning to the matching identity restores authority.
+
+Every activity is chosen from schedule, life stage, weather, five fixed-point
+needs, spatial cost, and commitment hysteresis. For candidate activity `a`:
+
+```text
+U(a) = 1000 S(a) + Σk wk(a) Nk
+       + 256000 · 𝟙[a = aprevious]
+       − 8000 · d₁(position, goal(a))
+       − 1250 · precipitation · 𝟙[a is outdoors]
+```
+
+Navigation never asks unloaded terrain to pretend it is authoritative. A
+bounded endpoint correction probes nine nearby columns and nine vertical
+offsets; deterministic A* then admits at most `768` expansions, `96` route
+cells, a `48`-voxel route radius, `32` queued requests, and `64` cached paths.
+Unresolved coverage and blocked routes enter saturating exponential backoff:
+
+```text
+retry_delay(failure, n) = base(failure) · 2^min(n − 1, 4)
+base(coverage) = 10 ticks       base(route or budget) = 40 ticks
+```
+
+The population is equally explicit: `12` seeded residents, at most `32` per
+settlement and `128` per world, `64` logically active, `24` visible, and only
+`8` full rigs. Social state remains sparse at `12` memories and `12`
+relationships per resident. Six culture palettes are caused by world profile,
+biome, temperature, mineral resonance, and flowering resonance—not by copied
+assets or profession skins.
+
+<p align="center">
+  <a href="docs/media/civic-ecology-loop.svg"><img src="docs/media/civic-ecology-loop.svg" alt="Civic Ecology V1 architecture: identity-bound persistence, fixed-point utility cognition, sparse social memory, exact loaded-voxel navigation, deterministic retry backoff, strict population and rendering ceilings, and a hard non-economic boundary" width="100%"></a>
+</p>
+
+Trading, currency, prices, offers, markets, merchant inventories, and commerce
+UI are intentionally absent. Civic residents also cannot mutate voxels; the
+construction fleet retains that separate authority. The complete
+[Civic Ecology V1 contract](docs/CIVIC_ECOLOGY_CONTRACT_V1.md) records the
+equations, constants, failure states, rollback boundary, deterministic tests,
+research provenance, and the still-pending fresh native visual gate.
 
 ## Codex engineering loop
 
