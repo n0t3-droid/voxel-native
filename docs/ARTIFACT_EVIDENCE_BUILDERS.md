@@ -12,7 +12,7 @@ the manifest-backed builders below. It produces the project-authored technical
 atlas from immutable single-read snapshots of a bounded allowlist: documentation
 contracts, the authoritative chunk/city/bot/Agent Control Rust sources, its own
 generator identity, and eight original SVG diagrams. The current declaration is
-29 unique files. It does not inspect `qa_runs/`, select runtime screenshots,
+30 unique files. It does not inspect `qa_runs/`, select runtime screenshots,
 consume a canonical manifest, or emit a runtime release verdict. Its runtime
 gallery remains explicitly pending the separate visual acceptance route.
 

@@ -11,11 +11,11 @@ captures complete the repository's visual-acceptance contract.
 
 ## Frozen artifact identity
 
-- PDF SHA-256: `bfff95e72999456d280b0637001356b7bbe9e44dc891770308f1a561cf4bea3b`
-- Size: `87,475` bytes
+- PDF SHA-256: `c30880b24966a3e4d415497c6c52fd6dc0d6a9bb902a0e222de67a0910ed5b00`
+- Size: `87,479` bytes
 - Layout: `15` strict A4 pages, PDF 1.4, zero page rotation
-- Document ID: `95519471C8CA18F54FAEEA1E1557C5CF` in both trailer slots
-- Aggregate 30-input fingerprint: `61403b99156294794e433245e3156d4894f87bc1535999bea250b1cf240343ea`
+- Document ID: `373B5C65838FD2B03091FB3A9AF7DF47` in both trailer slots
+- Aggregate 30-input fingerprint: `007b5ef8c059543e1c6915f6654430957b51a8345a514d65a59b62f645cc8cbe`
 - Builder SHA-256: `c357f17281f96aa65aa758c8a46549f9b16272fc87e3360f04cee892ee733349`
 
 Codex produced two byte-identical deterministic builds, rendered all 15 final

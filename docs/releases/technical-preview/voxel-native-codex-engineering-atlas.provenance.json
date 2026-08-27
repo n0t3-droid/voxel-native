@@ -4,16 +4,16 @@
     "path": "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf",
     "media_type": "application/pdf",
     "pdf_version": "1.4",
-    "sha256": "bfff95e72999456d280b0637001356b7bbe9e44dc891770308f1a561cf4bea3b",
-    "bytes": 87475,
+    "sha256": "c30880b24966a3e4d415497c6c52fd6dc0d6a9bb902a0e222de67a0910ed5b00",
+    "bytes": 87479,
     "pages": 15,
     "page_size": "A4",
-    "document_id": "95519471C8CA18F54FAEEA1E1557C5CF"
+    "document_id": "373B5C65838FD2B03091FB3A9AF7DF47"
   },
   "source_identity": {
     "immutable_inputs": 30,
     "passive_svg_assets": 8,
-    "aggregate_fingerprint_sha256": "61403b99156294794e433245e3156d4894f87bc1535999bea250b1cf240343ea",
+    "aggregate_fingerprint_sha256": "007b5ef8c059543e1c6915f6654430957b51a8345a514d65a59b62f645cc8cbe",
     "builder_sha256": "c357f17281f96aa65aa758c8a46549f9b16272fc87e3360f04cee892ee733349"
   },
   "toolchain": {

@@ -1030,6 +1030,43 @@ Direct primary/official links:
   Graphics Forum, *Real-Time Underwater Spectral Rendering*:
   <https://diglib.eg.org/items/1316f247-e9a8-48fe-8754-f3276191e6b5>
 
+### 13.1 Non-normative world-look survey from the supplied site
+
+The supplied German Minecraft Wiki was surveyed only as a vocabulary of visual
+problems. It is an unofficial, secondary reference and is not an engine
+specification. The survey contributes no Minecraft code, values, textures,
+colormaps, screenshots, structures, models, sounds, resident silhouettes, or
+gameplay rules to Voxel Native.
+
+| General observation | Voxel Native research question | Current boundary |
+| --- | --- | --- |
+| Broad temperature and moisture fields can organize regions more coherently than isolated random patches. | Can the existing deterministic biome/environment samples drive a continuous linear-light regional tint without changing material or voxel identity? | Research question only. Any prototype must publish cell size, interpolation rule, query/uniform ceilings, transition derivatives, and a same-binary rollback. |
+| Plants read as ecosystems when species, scale, and density form local groups rather than uniform noise. | Can project-authored macrocell motifs cluster the four existing foliage families while keeping exact candidate, entity, draw, and wind-update caps? | Research question only. No new vegetation population or generator is claimed by V1. |
+| A neutral material basis can receive climate-dependent colour while retaining one material category. | Can the future unified look profile tint existing authored swatches without copying an external colormap or hiding biome seams? | The linear-light palette path exists; the unified profile and matched visual gate remain unimplemented. |
+| Vertical underground regions become legible through their own material rhythm, sparse light anchors, and restrained colour range. | Can cave depth, moisture, and geology produce an original bounded cave palette without turning presentation into cave-generation authority? | Deferred to a separate cave-look contract and native route. |
+| Shore and ocean character is more coherent when neighbouring land climate constrains the transition. | Can the current Near/Far water continuum expose a bounded coast palette derived from both shoreline and water categories? | Research question only. No new coastal optics, refraction, or fluid simulation is claimed. |
+
+Survey pages:
+
+- [Biome before Beta 1.8](https://de.minecraft.wiki/w/Biom/Vor_Beta_1.8)
+  for the historical temperature/moisture-field framing;
+- [Temperate biomes](https://de.minecraft.wiki/w/Biom/Gem%C3%A4%C3%9Figte_Biome)
+  and [plants](https://de.minecraft.wiki/w/Gew%C3%A4chs) for qualitative
+  differences in density, grouping, and silhouette;
+- [texture data](https://de.minecraft.wiki/w/Texturdaten) for the distinction
+  between a base texture and climate-dependent display colour;
+- [light](https://de.minecraft.wiki/w/Licht) and
+  [Deep Dark](https://de.minecraft.wiki/w/Tiefes_Dunkel) for underground
+  visibility and sparse-light composition; and
+- [release 1.18](https://de.minecraft.wiki/w/Versionen/Vollversion_1.18) for
+  the qualitative coexistence of mountain, cave, and climate-adjacent ocean
+  regions.
+
+These observations are translated into bounded Voxel Native questions, not
+copied features. Each future candidate still needs an original formula,
+fixed-cost envelope, adversarial tests, native visual comparison, failure mode,
+and rollback boundary before it can enter an implementation claim.
+
 These sources provide transfer principles and ground-truth boundaries. They do
 not establish Voxel Native's performance, correctness, or visual acceptance;
 only this repository's tests and matched native evidence can do that.
