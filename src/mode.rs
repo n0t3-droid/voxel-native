@@ -15,7 +15,7 @@ use crate::editor::{EditorState, EditorTab};
 use crate::menu::{GameState, PauseScreen};
 use crate::player::Player;
 use crate::ships::ShipKind;
-use crate::toolbelt::{ToolbeltState, ToolbeltTool};
+use crate::toolbelt::{SketchEditorUiFocus, ToolbeltState, ToolbeltTool};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveMode {
@@ -271,63 +271,15 @@ fn set_external_mode_owned(mode: &mut ModeContext, next: ActiveMode, status: Str
 fn mode_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     game_state: Res<State<GameState>>,
-    gesture_lock: Res<BuildGestureLock>,
+    _gesture_lock: Res<BuildGestureLock>,
     mut mode: ResMut<ModeContext>,
     mut toolbelt: ResMut<ToolbeltState>,
-    player_q: Query<(&Transform, &Player)>,
-    mut continuity: ResMut<ModeContinuityGuard>,
 ) {
     if *game_state.get() != GameState::InGame {
         return;
     }
 
     if mode.is_ship() {
-        return;
-    }
-
-    if keys.just_pressed(KeyCode::F3) {
-        capture_player_continuity(&player_q, &mut continuity);
-        let tool = normalized_build_tool(mode.build_tool().unwrap_or(toolbelt.tool));
-        toolbelt.tool = tool;
-        mode.set(
-            ActiveMode::BuildLive { tool },
-            format!(
-                "Creative Build: {}. Sketch LMB draws floors and opens vertical walls, RMB orbits, Ctrl+LMB cuts, Shift+LMB hollows, Ctrl+Z undo.",
-                tool.label()
-            ),
-        );
-        return;
-    }
-
-    if keys.just_pressed(KeyCode::F8) {
-        capture_player_continuity(&player_q, &mut continuity);
-        let (next, status) =
-            next_mode_for_f8_with_history(mode.mode, mode.last_mode, toolbelt.tool);
-        if let Some(tool) = next.build_tool() {
-            toolbelt.tool = tool;
-        }
-        mode.set(next, status);
-        return;
-    }
-
-    if keys.just_pressed(KeyCode::F7) {
-        capture_player_continuity(&player_q, &mut continuity);
-        let (next, status) =
-            next_mode_for_f7_with_history(mode.mode, mode.last_mode, toolbelt.tool);
-        if let Some(tool) = next.build_tool() {
-            toolbelt.tool = tool;
-        }
-        mode.set(next, status);
-        return;
-    }
-
-    if keys.just_pressed(KeyCode::Tab) {
-        capture_player_continuity(&player_q, &mut continuity);
-        let (next, status) = next_mode_for_tab(mode.mode, toolbelt.tool);
-        if let Some(tool) = next.build_tool() {
-            toolbelt.tool = tool;
-        }
-        mode.set(next, status);
         return;
     }
 
@@ -340,25 +292,6 @@ fn mode_hotkeys(
             changed = true;
             force_live = true;
         }
-        if keys.just_pressed(KeyCode::KeyQ) {
-            tool = tool.stepped(-1);
-            changed = true;
-        }
-        if keys.just_pressed(KeyCode::KeyE) {
-            tool = tool.stepped(1);
-            changed = true;
-        }
-        if keys.just_pressed(KeyCode::KeyG)
-            && !gesture_lock.active
-            && matches!(tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
-        {
-            tool = if tool == ToolbeltTool::DrawRect {
-                ToolbeltTool::Sculpt
-            } else {
-                ToolbeltTool::DrawRect
-            };
-            changed = true;
-        }
         if changed {
             tool = normalized_build_tool(tool);
             toolbelt.tool = tool;
@@ -370,26 +303,9 @@ fn mode_hotkeys(
                 ActiveMode::BuildLive { tool }
             };
             let status = if force_live {
-                format!(
-                    "Build Live: [{}] {}. {}",
-                    tool.quick_slot_label(),
-                    tool.label(),
-                    tool.hint()
-                )
-            } else if keys.just_pressed(KeyCode::KeyG)
-                && matches!(tool, ToolbeltTool::DrawRect | ToolbeltTool::Sculpt)
-            {
-                format!(
-                    "Shape swapped to {}. Alt+LMB uses {} temporarily.",
-                    tool.label(),
-                    if tool == ToolbeltTool::DrawRect {
-                        "Push Pull"
-                    } else {
-                        "Sketch Draw"
-                    }
-                )
+                format!("Sketch Editor: {}. {}", tool.label(), tool.hint())
             } else {
-                format!("Build Live: {}. {}", tool.label(), tool.hint())
+                format!("Sketch Editor: {}. {}", tool.label(), tool.hint())
             };
             mode.set(next, status);
             return;
@@ -399,31 +315,16 @@ fn mode_hotkeys(
             if mode.is_build_picker() {
                 mode.set(
                     ActiveMode::BuildLive { tool },
-                    format!("Picker hidden. Build Live: {}.", tool.label()),
+                    format!("Drawer hidden. Sketch Editor: {}.", tool.label()),
                 );
             } else {
                 mode.set(
                     ActiveMode::BuildLive { tool },
-                    "Build Live stays active. Sketch LMB draws floors and opens walls, RMB orbit, Ctrl+LMB cut, Shift+LMB hollow, Ctrl+Z undo.",
+                    "Sketch Editor stays active. Click start, move to a snapped endpoint, click finish; RMB orbits; toolbox picks Room and Opening.",
                 );
             }
         }
     }
-}
-
-fn capture_player_continuity(
-    player_q: &Query<(&Transform, &Player)>,
-    continuity: &mut ModeContinuityGuard,
-) {
-    let Ok((tf, player)) = player_q.get_single() else {
-        return;
-    };
-    continuity.position = tf.translation;
-    continuity.yaw = player.yaw;
-    continuity.pitch = player.pitch;
-    continuity.velocity = player.velocity;
-    continuity.flying = player.flying;
-    continuity.guard_t = 0.45;
 }
 
 fn preserve_player_after_quick_switch(
@@ -448,7 +349,7 @@ fn preserve_player_after_quick_switch(
 }
 
 fn quick_tool_key(keys: &ButtonInput<KeyCode>) -> Option<ToolbeltTool> {
-    for (key, slot) in [
+    for key in [
         (KeyCode::Digit1, 1),
         (KeyCode::Digit2, 2),
         (KeyCode::Digit3, 3),
@@ -460,8 +361,8 @@ fn quick_tool_key(keys: &ButtonInput<KeyCode>) -> Option<ToolbeltTool> {
         (KeyCode::Digit9, 9),
         (KeyCode::Digit0, 0),
     ] {
-        if keys.just_pressed(key) {
-            return ToolbeltTool::quick_slot(slot);
+        if keys.just_pressed(key.0) {
+            return None;
         }
     }
     None
@@ -475,70 +376,39 @@ fn normalized_build_tool(tool: ToolbeltTool) -> ToolbeltTool {
     }
 }
 
-fn active_or_fallback_build_tool(mode: ActiveMode, fallback_tool: ToolbeltTool) -> ToolbeltTool {
-    normalized_build_tool(mode.build_tool().unwrap_or(fallback_tool))
-}
-
-fn remembered_or_fallback_build_tool(
-    current_mode: ActiveMode,
-    last_mode: ActiveMode,
-    fallback_tool: ToolbeltTool,
-) -> ToolbeltTool {
-    normalized_build_tool(
-        current_mode
-            .build_tool()
-            .or_else(|| last_mode.build_tool())
-            .unwrap_or(fallback_tool),
-    )
-}
-
+#[cfg(test)]
 fn next_mode_for_f8_with_history(
     current_mode: ActiveMode,
-    last_mode: ActiveMode,
-    fallback_tool: ToolbeltTool,
+    _last_mode: ActiveMode,
+    _fallback_tool: ToolbeltTool,
 ) -> (ActiveMode, String) {
-    if current_mode.allows_weapons() {
-        let tool = remembered_or_fallback_build_tool(current_mode, last_mode, fallback_tool);
-        (
-            ActiveMode::BuildLive { tool },
-            format!("Weapons holstered. Creative Build: {}.", tool.label()),
-        )
-    } else {
-        (
-            ActiveMode::Combat,
-            "Weapons armed explicitly. F8 holsters them back to Creative Build.".into(),
-        )
-    }
-}
-
-fn next_mode_for_f7_with_history(
-    current_mode: ActiveMode,
-    last_mode: ActiveMode,
-    fallback_tool: ToolbeltTool,
-) -> (ActiveMode, String) {
-    let tool = remembered_or_fallback_build_tool(current_mode, last_mode, fallback_tool);
     (
-        ActiveMode::BuildLive { tool },
-        format!("Build Live: {}. {}", tool.label(), tool.hint()),
+        current_mode,
+        "Function-key workflow disabled. Use the Sketch Editor toolbox or Play button.".into(),
     )
 }
 
+#[cfg(test)]
+fn next_mode_for_f7_with_history(
+    current_mode: ActiveMode,
+    _last_mode: ActiveMode,
+    _fallback_tool: ToolbeltTool,
+) -> (ActiveMode, String) {
+    (
+        current_mode,
+        "Function-key workflow disabled. Pick tools from the Sketch Editor toolbox.".into(),
+    )
+}
+
+#[cfg(test)]
 fn next_mode_for_tab(
     current_mode: ActiveMode,
-    fallback_tool: ToolbeltTool,
+    _fallback_tool: ToolbeltTool,
 ) -> (ActiveMode, String) {
-    let tool = active_or_fallback_build_tool(current_mode, fallback_tool);
-    if current_mode.is_build_picker() {
-        (
-            ActiveMode::BuildLive { tool },
-            format!("Build Live: {}. {}", tool.label(), tool.hint()),
-        )
-    } else {
-        (
-            ActiveMode::BuildPicker { tool },
-            "Build Studio picker visible. Pick a tool or press Tab to hide it.".into(),
-        )
-    }
+    (
+        current_mode,
+        "Toolbox handles editor drawers; keyboard drawer toggle disabled.".into(),
+    )
 }
 
 fn default_creative_mode() -> ActiveMode {
@@ -548,7 +418,7 @@ fn default_creative_mode() -> ActiveMode {
 }
 
 fn default_creative_status() -> &'static str {
-    "Creative Sketch Builder active. LMB draws floors and opens vertical walls; RMB orbits; Ctrl+LMB cuts; Shift+LMB hollows room depth; Ctrl+Z undo."
+    "Creative Sketch Builder active. Click start, move to a snapped endpoint, click finish; RMB orbits; toolbox picks Pencil, Rectangle, Room, Opening, and Push/Pull."
 }
 
 fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {
@@ -568,10 +438,10 @@ fn resume_mode_after_overlay(last_mode: ActiveMode) -> ActiveMode {
 fn resume_status(mode: ActiveMode) -> String {
     match mode {
         ActiveMode::Combat => {
-            "Weapons still armed from before pause. F8 holsters to Creative Build.".into()
+            "Weapons still armed from before pause. Open Sketch Editor to build.".into()
         }
         ActiveMode::BuildPicker { tool } => {
-            format!("Build picker restored: {}. Tab hides picker.", tool.label())
+            format!("Sketch Editor drawer restored: {}.", tool.label())
         }
         ActiveMode::BuildLive { tool } => {
             format!("Creative Build restored: {}. {}", tool.label(), tool.hint())
@@ -592,8 +462,10 @@ fn sync_legacy_toolbelt(mut toolbelt: ResMut<ToolbeltState>, mode: Res<ModeConte
 
     toolbelt.live = mode.mode.is_build();
     toolbelt.palette_open = mode.mode.is_build_picker();
-    if !toolbelt.live || toolbelt.tool != ToolbeltTool::DrawRect {
+    if !toolbelt.live {
         toolbelt.clear_contextual_workflow();
+    } else {
+        toolbelt.sync_workflow_to_tool();
     }
 
     if mode.is_changed() && !mode.status.is_empty() {
@@ -638,31 +510,51 @@ fn cursor_policy_for(
     mode: ActiveMode,
     editor_open: bool,
     command_palette_open: bool,
+    pointer_editor_tool: bool,
     sketch_orbiting: bool,
+    pointer_over_editor_ui: bool,
 ) -> CursorPolicy {
     if game_state != GameState::InGame || editor_open || command_palette_open {
         return CursorPolicy::ReleasedVisible;
     }
+    let sketch_orbiting_in_world = sketch_orbiting && !pointer_over_editor_ui;
     match mode {
         ActiveMode::BuildPicker { .. }
         | ActiveMode::Editor { .. }
         | ActiveMode::Inventory
+        | ActiveMode::ShipPlacement { .. }
         | ActiveMode::Paused
         | ActiveMode::CommandPalette => CursorPolicy::ReleasedVisible,
-        ActiveMode::BuildLive {
-            tool: ToolbeltTool::DrawRect,
-        } => {
-            if sketch_orbiting {
+        ActiveMode::BuildLive { .. } if pointer_editor_tool => {
+            if sketch_orbiting_in_world {
                 CursorPolicy::LockedHidden
             } else {
                 CursorPolicy::ReleasedVisible
             }
         }
-        ActiveMode::BuildLive { .. }
-        | ActiveMode::Combat
-        | ActiveMode::ShipPlacement { .. }
-        | ActiveMode::ShipFlight { .. } => CursorPolicy::LockedHidden,
+        ActiveMode::BuildLive { .. } | ActiveMode::Combat | ActiveMode::ShipFlight { .. } => {
+            CursorPolicy::LockedHidden
+        }
     }
+}
+
+fn automation_cursor_release_requested(
+    qa_enabled: bool,
+    isolated_observer_enabled: bool,
+    agent_control: Option<&crate::agent_control::AgentControlState>,
+) -> bool {
+    qa_enabled
+        || isolated_observer_enabled
+        || agent_control.is_some_and(crate::agent_control::AgentControlState::active)
+}
+
+fn apply_automation_cursor_release(window: &mut Window, requested: bool) -> bool {
+    if !requested {
+        return false;
+    }
+    window.cursor.grab_mode = CursorGrabMode::None;
+    window.cursor.visible = true;
+    true
 }
 
 pub fn gameplay_cursor_grab_mode() -> CursorGrabMode {
@@ -692,18 +584,46 @@ fn mode_cursor_guard(
     mode: Res<ModeContext>,
     editor: Res<EditorState>,
     command_palette: Option<Res<CommandPaletteState>>,
+    ui_focus: Option<Res<SketchEditorUiFocus>>,
+    tool_controller: Option<Res<crate::sketch_model::ToolController>>,
+    agent_control: Option<Res<crate::agent_control::AgentControlState>>,
+    mut cached_automation_environment: Local<Option<(bool, bool)>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else {
         return;
     };
 
+    let (qa_enabled, isolated_observer_enabled) = *cached_automation_environment
+        .get_or_insert_with(|| {
+            (
+                crate::qa::qa_enabled(),
+                crate::agent_control::isolated_observer_enabled(),
+            )
+        });
+    let release_for_automation = automation_cursor_release_requested(
+        qa_enabled,
+        isolated_observer_enabled,
+        agent_control.as_deref(),
+    );
+    if apply_automation_cursor_release(&mut window, release_for_automation) {
+        return;
+    }
+
+    let pointer_editor_tool = mode.is_build_live()
+        && tool_controller
+            .as_deref()
+            .is_some_and(|controller| controller.active_tool().uses_pointer_surface());
     match cursor_policy_for(
         game_state.get().clone(),
         mode.mode,
         editor.open,
         command_palette.as_deref().map(|p| p.open).unwrap_or(false),
+        pointer_editor_tool,
         mouse.pressed(MouseButton::Right),
+        ui_focus
+            .as_deref()
+            .is_some_and(|focus| focus.pointer_over_editor_ui),
     ) {
         CursorPolicy::ReleasedVisible => {
             window.cursor.grab_mode = CursorGrabMode::None;
@@ -750,18 +670,13 @@ mod tests {
     }
 
     #[test]
-    fn f7_enters_build_live_without_opening_picker() {
+    fn function_keys_no_longer_switch_or_arm_editor_modes() {
         let (next, _) = next_mode_for_f7_with_history(
             ActiveMode::Combat,
             ActiveMode::Combat,
             ToolbeltTool::CityRoad,
         );
-        assert_eq!(
-            next,
-            ActiveMode::BuildLive {
-                tool: ToolbeltTool::CityRoad
-            }
-        );
+        assert_eq!(next, ActiveMode::Combat);
 
         let (next, _) = next_mode_for_f7_with_history(
             ActiveMode::BuildPicker {
@@ -774,22 +689,34 @@ mod tests {
         );
         assert_eq!(
             next,
-            ActiveMode::BuildLive {
+            ActiveMode::BuildPicker {
                 tool: ToolbeltTool::CityBuilding
+            }
+        );
+
+        let (next, _) = next_mode_for_f8_with_history(
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::Sculpt,
+            },
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::Sculpt,
+            },
+            ToolbeltTool::DrawRect,
+        );
+        assert_eq!(
+            next,
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::Sculpt
             }
         );
     }
 
     #[test]
-    fn tab_remains_the_picker_toggle() {
+    fn tab_no_longer_opens_editor_drawer() {
         let (next, status) = next_mode_for_tab(ActiveMode::Combat, ToolbeltTool::CityRoad);
-        assert_eq!(
-            next,
-            ActiveMode::BuildPicker {
-                tool: ToolbeltTool::CityRoad
-            }
-        );
-        assert!(status.contains("Tab"));
+        assert_eq!(next, ActiveMode::Combat);
+        assert!(status.contains("Toolbox"));
+        assert!(!status.contains("Tab"));
 
         let (next, _) = next_mode_for_tab(
             ActiveMode::BuildPicker {
@@ -799,40 +726,85 @@ mod tests {
         );
         assert_eq!(
             next,
-            ActiveMode::BuildLive {
+            ActiveMode::BuildPicker {
                 tool: ToolbeltTool::CityRoad
             }
         );
     }
 
     #[test]
-    fn f8_only_toggles_combat_and_build_modes() {
-        let (next, _) = next_mode_for_f8_with_history(
-            ActiveMode::BuildLive {
-                tool: ToolbeltTool::Sculpt,
-            },
-            ActiveMode::BuildLive {
-                tool: ToolbeltTool::Sculpt,
-            },
-            ToolbeltTool::DrawRect,
-        );
-        assert_eq!(next, ActiveMode::Combat);
+    fn number_keys_no_longer_switch_editor_tools() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::Digit6);
 
-        let (next, _) = next_mode_for_f8_with_history(
-            ActiveMode::Combat,
-            ActiveMode::Combat,
-            ToolbeltTool::CityBuilding,
-        );
+        assert_eq!(quick_tool_key(&keys), None);
+    }
+
+    #[test]
+    fn legacy_sync_preserves_mouse_selected_workflow_for_matching_tool() {
+        let mut toolbelt = ToolbeltState::default();
+        toolbelt.select_workflow_for_test(crate::toolbelt::BuildWorkflowPreset::PushPull);
+        let mode = ModeContext {
+            mode: ActiveMode::BuildLive {
+                tool: ToolbeltTool::Sculpt,
+            },
+            last_mode: ActiveMode::BuildLive {
+                tool: ToolbeltTool::DrawRect,
+            },
+            status: "Push/Pull selected from toolbox.".into(),
+            transition_hint_t: 0.0,
+        };
+        let mut app = App::new();
+        app.insert_resource(toolbelt);
+        app.insert_resource(mode);
+        app.add_systems(Update, sync_legacy_toolbelt);
+
+        app.update();
+
+        let toolbelt = app.world().resource::<ToolbeltState>();
+        assert_eq!(toolbelt.tool, ToolbeltTool::Sculpt);
         assert_eq!(
-            next,
-            ActiveMode::BuildLive {
-                tool: ToolbeltTool::CityBuilding
-            }
+            toolbelt.active_workflow(),
+            Some(crate::toolbelt::BuildWorkflowPreset::PushPull),
+            "toolbox workflow should not disappear one frame after clicking Push/Pull"
         );
     }
 
     #[test]
-    fn f8_holsters_to_last_build_tool_when_toolbelt_fallback_is_stale() {
+    fn visible_editor_statuses_do_not_name_function_key_workflows() {
+        let statuses = [
+            default_creative_status().to_owned(),
+            next_mode_for_f8_with_history(
+                ActiveMode::BuildLive {
+                    tool: ToolbeltTool::DrawRect,
+                },
+                ActiveMode::BuildLive {
+                    tool: ToolbeltTool::DrawRect,
+                },
+                ToolbeltTool::DrawRect,
+            )
+            .1,
+            next_mode_for_f7_with_history(
+                ActiveMode::Combat,
+                ActiveMode::Combat,
+                ToolbeltTool::DrawRect,
+            )
+            .1,
+            next_mode_for_tab(ActiveMode::Combat, ToolbeltTool::DrawRect).1,
+        ];
+
+        for status in statuses {
+            assert!(
+                !["F1", "F5", "F7", "F8", "6-9"]
+                    .iter()
+                    .any(|token| status.contains(token)),
+                "status still advertises keyboard workflow: {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn f8_does_not_restore_build_tool_from_stale_history() {
         let (next, _) = next_mode_for_f8_with_history(
             ActiveMode::Combat,
             ActiveMode::BuildLive {
@@ -841,17 +813,11 @@ mod tests {
             ToolbeltTool::BrushPlace,
         );
 
-        assert_eq!(
-            next,
-            ActiveMode::BuildLive {
-                tool: ToolbeltTool::CityRoad
-            },
-            "F8 should restore the exact build tool that was active before combat"
-        );
+        assert_eq!(next, ActiveMode::Combat);
     }
 
     #[test]
-    fn f7_enters_last_live_build_tool_when_toolbelt_fallback_is_stale() {
+    fn f7_does_not_restore_build_tool_from_stale_history() {
         let (next, _) = next_mode_for_f7_with_history(
             ActiveMode::Combat,
             ActiveMode::BuildLive {
@@ -860,13 +826,7 @@ mod tests {
             ToolbeltTool::BrushPlace,
         );
 
-        assert_eq!(
-            next,
-            ActiveMode::BuildLive {
-                tool: ToolbeltTool::CityBuilding
-            },
-            "F7 should be a direct return to the remembered Build Live tool"
-        );
+        assert_eq!(next, ActiveMode::Combat);
     }
 
     #[test]
@@ -880,72 +840,245 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
+                false,
             ),
             CursorPolicy::ReleasedVisible
         );
     }
 
     #[test]
-    fn cursor_policy_locks_live_navigation_and_combat_immediately() {
+    fn automation_override_releases_an_already_confined_hidden_cursor() {
+        let mut window = Window::default();
+        window.cursor.grab_mode = CursorGrabMode::Confined;
+        window.cursor.visible = false;
+
+        assert!(apply_automation_cursor_release(&mut window, true));
+        assert_eq!(window.cursor.grab_mode, CursorGrabMode::None);
+        assert!(window.cursor.visible);
+
+        window.cursor.grab_mode = CursorGrabMode::Confined;
+        window.cursor.visible = false;
+        assert!(!apply_automation_cursor_release(&mut window, false));
+        assert_eq!(window.cursor.grab_mode, CursorGrabMode::Confined);
+        assert!(!window.cursor.visible);
+    }
+
+    #[test]
+    fn qa_or_active_non_isolated_agent_requests_cursor_release() {
+        assert!(automation_cursor_release_requested(true, false, None));
+        assert!(!automation_cursor_release_requested(false, false, None));
+
+        let mut agent = crate::agent_control::AgentControlState::default();
+        agent.runtime_enabled = true;
+        agent.enabled = true;
+        assert!(agent.active());
+        assert!(automation_cursor_release_requested(
+            false,
+            false,
+            Some(&agent)
+        ));
+    }
+
+    #[test]
+    fn isolated_observer_stays_released_while_disabled_or_suppressed() {
+        let mut agent = crate::agent_control::AgentControlState::default();
+        agent.runtime_enabled = true;
+        agent.enabled = false;
+        assert!(!agent.active());
+        assert!(automation_cursor_release_requested(
+            false,
+            true,
+            Some(&agent)
+        ));
+
+        agent.enabled = true;
+        assert!(agent.set_live_link_suppressed(true));
+        assert!(!agent.active());
+        assert!(automation_cursor_release_requested(
+            false,
+            true,
+            Some(&agent)
+        ));
+    }
+
+    #[test]
+    fn non_isolated_disabled_or_suppressed_agent_resumes_gameplay_policy() {
+        let mut agent = crate::agent_control::AgentControlState::default();
+        agent.runtime_enabled = true;
+        agent.enabled = false;
+        assert!(!agent.active());
+        assert!(!automation_cursor_release_requested(
+            false,
+            false,
+            Some(&agent)
+        ));
+
+        agent.enabled = true;
+        assert!(agent.set_live_link_suppressed(true));
+        assert!(!agent.active());
+        assert!(!automation_cursor_release_requested(
+            false,
+            false,
+            Some(&agent)
+        ));
+    }
+
+    #[test]
+    fn cursor_policy_locks_direct_control_modes_immediately() {
+        for mode in [
+            ActiveMode::Combat,
+            ActiveMode::ShipFlight {
+                entity: Entity::from_raw(1),
+            },
+        ] {
+            assert_eq!(
+                cursor_policy_for(GameState::InGame, mode, false, false, false, false, true),
+                CursorPolicy::LockedHidden,
+                "{mode:?} must keep direct-control capture despite stale editor UI focus"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_policy_releases_for_ship_placement() {
         assert_eq!(
             cursor_policy_for(
                 GameState::InGame,
-                ActiveMode::BuildLive {
-                    tool: ToolbeltTool::BrushPlace,
+                ActiveMode::ShipPlacement {
+                    kind: ShipKind::ScoutShuttle,
                 },
                 false,
                 false,
                 false,
+                false,
+                false,
             ),
-            CursorPolicy::LockedHidden
+            CursorPolicy::ReleasedVisible
+        );
+    }
+
+    #[test]
+    fn cursor_policy_releases_for_pointer_editor_tools_until_right_orbit() {
+        for tool in ToolbeltTool::ALL {
+            assert_eq!(
+                cursor_policy_for(
+                    GameState::InGame,
+                    ActiveMode::BuildLive { tool },
+                    false,
+                    false,
+                    true,
+                    false,
+                    false,
+                ),
+                CursorPolicy::ReleasedVisible,
+                "{tool:?} needs a real visible cursor for mouse-first editing"
+            );
+            assert_eq!(
+                cursor_policy_for(
+                    GameState::InGame,
+                    ActiveMode::BuildLive { tool },
+                    false,
+                    false,
+                    true,
+                    true,
+                    false,
+                ),
+                CursorPolicy::LockedHidden,
+                "Holding RMB in {tool:?} should immediately become camera orbit"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_policy_uses_canonical_editor_ownership_not_stale_mode_tool() {
+        let stale_mode = ActiveMode::BuildLive {
+            tool: ToolbeltTool::BrushPlace,
+        };
+
+        assert_eq!(
+            cursor_policy_for(
+                GameState::InGame,
+                stale_mode,
+                false,
+                false,
+                true,
+                false,
+                false,
+            ),
+            CursorPolicy::ReleasedVisible
         );
         assert_eq!(
-            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, false, false),
+            cursor_policy_for(
+                GameState::InGame,
+                stale_mode,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             CursorPolicy::LockedHidden
         );
     }
 
     #[test]
-    fn cursor_policy_releases_for_sketch_draw_pointer_until_right_orbit() {
-        assert_eq!(
-            cursor_policy_for(
-                GameState::InGame,
-                ActiveMode::BuildLive {
-                    tool: ToolbeltTool::DrawRect,
-                },
-                false,
-                false,
-                false,
-            ),
-            CursorPolicy::ReleasedVisible,
-            "Sketch Draw needs a real visible cursor for endpoint picking"
-        );
-        assert_eq!(
-            cursor_policy_for(
-                GameState::InGame,
-                ActiveMode::BuildLive {
-                    tool: ToolbeltTool::DrawRect,
-                },
-                false,
-                false,
+    fn cursor_policy_keeps_toolbox_mouse_visible_during_right_click() {
+        for tool in ToolbeltTool::ALL {
+            assert_eq!(
+                cursor_policy_for(
+                    GameState::InGame,
+                    ActiveMode::BuildLive { tool },
+                    false,
+                    false,
+                    true,
+                    true,
+                    true,
+                ),
+                CursorPolicy::ReleasedVisible,
+                "right mouse over the Sketch Editor UI must not make {tool:?} steal the cursor"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_policy_follows_editor_orbit_transition_sequence() {
+        let mode = ActiveMode::BuildLive {
+            tool: ToolbeltTool::BrushPlace,
+        };
+        let transitions = [
+            (false, false, CursorPolicy::ReleasedVisible, "editing"),
+            (true, false, CursorPolicy::LockedHidden, "orbit started"),
+            (
                 true,
+                true,
+                CursorPolicy::ReleasedVisible,
+                "pointer crossed onto UI",
             ),
-            CursorPolicy::LockedHidden,
-            "Holding RMB in Sketch Draw should immediately become camera orbit"
-        );
-        assert_eq!(
-            cursor_policy_for(
-                GameState::InGame,
-                ActiveMode::BuildLive {
-                    tool: ToolbeltTool::BrushPlace,
-                },
+            (
+                true,
                 false,
-                false,
-                false,
+                CursorPolicy::LockedHidden,
+                "pointer returned to world",
             ),
-            CursorPolicy::LockedHidden,
-            "FPS brush tools should keep mouse-look capture"
-        );
+            (false, false, CursorPolicy::ReleasedVisible, "orbit ended"),
+        ];
+
+        for (right_mouse_held, pointer_over_editor_ui, expected, phase) in transitions {
+            assert_eq!(
+                cursor_policy_for(
+                    GameState::InGame,
+                    mode,
+                    false,
+                    false,
+                    true,
+                    right_mouse_held,
+                    pointer_over_editor_ui,
+                ),
+                expected,
+                "unexpected cursor policy when {phase}"
+            );
+        }
     }
 
     #[test]
@@ -959,11 +1092,21 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
+                false,
             ),
             CursorPolicy::ReleasedVisible
         );
         assert_eq!(
-            cursor_policy_for(GameState::InGame, ActiveMode::Combat, false, true, false),
+            cursor_policy_for(
+                GameState::InGame,
+                ActiveMode::Combat,
+                false,
+                true,
+                false,
+                false,
+                false
+            ),
             CursorPolicy::ReleasedVisible
         );
     }

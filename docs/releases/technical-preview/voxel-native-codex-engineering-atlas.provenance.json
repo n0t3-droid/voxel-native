@@ -1,0 +1,86 @@
+{
+  "schema": "voxel-native.codex-engineering-atlas-provenance/1.0.0",
+  "artifact": {
+    "path": "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf",
+    "media_type": "application/pdf",
+    "pdf_version": "1.4",
+    "sha256": "c30880b24966a3e4d415497c6c52fd6dc0d6a9bb902a0e222de67a0910ed5b00",
+    "bytes": 87479,
+    "pages": 15,
+    "page_size": "A4",
+    "document_id": "373B5C65838FD2B03091FB3A9AF7DF47"
+  },
+  "source_identity": {
+    "immutable_inputs": 30,
+    "passive_svg_assets": 8,
+    "aggregate_fingerprint_sha256": "007b5ef8c059543e1c6915f6654430957b51a8345a514d65a59b62f645cc8cbe",
+    "builder_sha256": "c357f17281f96aa65aa758c8a46549f9b16272fc87e3360f04cee892ee733349"
+  },
+  "toolchain": {
+    "python": "3.12.13",
+    "reportlab": "4.4.9",
+    "svglib": "2.2.0",
+    "pypdf": "6.10.0",
+    "lxml": "6.1.1",
+    "cssselect2": "0.9.0",
+    "tinycss2": "1.5.1",
+    "libxml2_compiled": "2.11.9",
+    "libxml2_runtime": "2.11.9",
+    "libxslt_compiled": "1.1.45",
+    "libxslt_runtime": "1.1.45",
+    "zlib_compiled": "1.3.2",
+    "zlib_runtime": "1.3.2"
+  },
+  "determinism": {
+    "separate_process_builds": 2,
+    "byte_identical": true
+  },
+  "structural_review": {
+    "strict_reopen": true,
+    "a4_pages_with_zero_rotation": 15,
+    "encrypted": false,
+    "javascript": false,
+    "forms": false,
+    "embedded_files": false,
+    "embedded_font_programs": false,
+    "font_resources": [
+      "Courier-Bold / Type1 / WinAnsiEncoding",
+      "Helvetica / Type1 / WinAnsiEncoding",
+      "Helvetica-Bold / Type1 / WinAnsiEncoding",
+      "Times-Roman / Type1 / WinAnsiEncoding"
+    ],
+    "uri_annotations": 10,
+    "unique_allowlisted_uris": 9,
+    "replacement_glyphs": 0,
+    "non_ascii_extracted_codepoints": 0,
+    "workstation_path_leaks": 0
+  },
+  "visual_review": {
+    "renderer": "Poppler pdftoppm 26.05.0",
+    "dpi": 150,
+    "rendered_png_width": 1241,
+    "rendered_png_height": 1754,
+    "pages_rendered": 15,
+    "pages_reviewed_full_size": 15,
+    "independent_sensitive_page_review": true,
+    "atlas_stderr_sha256": "6b76dedf9fefb6759a7c6ef6ed89ea38f6b993e297a0acdcbd6c6c84b47b8b17",
+    "base14_control_stderr_sha256": "6b76dedf9fefb6759a7c6ef6ed89ea38f6b993e297a0acdcbd6c6c84b47b8b17",
+    "stderr_byte_identical": true,
+    "shared_renderer_startup_diagnostics": [
+      "Syntax Error: No display font for 'Symbol'",
+      "Syntax Error: No display font for 'ArialUnicode'"
+    ],
+    "atlas_contains_named_font_resources": false,
+    "visual_defects_found": 0
+  },
+  "scope": {
+    "technical_atlas": "reviewed",
+    "runtime_gallery": "pending",
+    "runtime_release_verdict": "not encoded",
+    "license": "no reuse license declared"
+  },
+  "operator": {
+    "system": "OpenAI Codex",
+    "workflow": "deterministic build, structural validation, full-size rendered-page review"
+  }
+}

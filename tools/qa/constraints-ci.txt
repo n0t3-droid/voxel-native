@@ -1,0 +1,5 @@
+# Exact CI resolution for Python 3.12 evidence-analysis dependencies.
+# Keep the human-facing compatibility ranges in requirements.txt.
+Pillow==12.1.1
+numpy==1.26.4
+scipy==1.15.3

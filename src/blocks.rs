@@ -7,6 +7,8 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::voxel_budget::EmissionBudget;
+
 /// Packed voxel value. `0` = air; everything else is a block id.
 /// `u16` gives plenty of room for future blocks without another migration.
 pub type Voxel = u16;
@@ -118,6 +120,24 @@ pub enum BlockType {
     MagnetiteOre = 34,
     /// Deep purple rare vein — reference "Iridium".
     IridiumVein = 35,
+    /// Pale pink sakura / rose foliage for zen-garden and lush forest silhouettes.
+    BlossomLeaves = 36,
+    /// Smooth pale garden stone for zen paths, courtyards and modern walls.
+    ZenStone = 37,
+    /// Tall green bamboo cane / plant block for gardens and groves.
+    Bamboo = 38,
+    /// Soft pink fallen petals / flower mass for sakura ground detail.
+    SakuraPetals = 39,
+    /// Warm translucent paper wall for shoji screens and interior panels.
+    ShojiPaper = 40,
+    /// Charcoal ceramic roof tile for Japanese roofs and modern dark trim.
+    RoofTile = 41,
+    /// Warm woven floor block for tatami rooms and calm interiors.
+    TatamiMat = 42,
+    /// Cyan transparent neon glass for sci-fi windows and railings.
+    NeonGlass = 43,
+    /// Warm emissive lantern block for zen streets and interiors.
+    ShojiLamp = 44,
 }
 
 /// Voxel ids for the three mineable neon resources (HUD + telemetry).
@@ -128,7 +148,16 @@ pub const VOXEL_IRIDIUM: Voxel = BlockType::IridiumVein as Voxel;
 impl BlockType {
     #[inline]
     pub fn is_solid(self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water)
+        !matches!(
+            self,
+            BlockType::Air
+                | BlockType::Water
+                | BlockType::Lava
+                | BlockType::Leaves
+                | BlockType::JungleLeaves
+                | BlockType::BlossomLeaves
+                | BlockType::SakuraPetals
+        )
     }
 
     #[inline]
@@ -139,8 +168,12 @@ impl BlockType {
                 | BlockType::Water
                 | BlockType::Leaves
                 | BlockType::JungleLeaves
+                | BlockType::BlossomLeaves
+                | BlockType::SakuraPetals
                 | BlockType::Ice
                 | BlockType::CockpitGlass
+                | BlockType::ShojiPaper
+                | BlockType::NeonGlass
         )
     }
 
@@ -154,8 +187,6 @@ impl BlockType {
             self,
             BlockType::Lava
                 | BlockType::Crystal
-                | BlockType::AlienMoss
-                | BlockType::GlowSand
                 | BlockType::NeonCyan
                 | BlockType::NeonMagenta
                 | BlockType::NeonAmber
@@ -163,6 +194,8 @@ impl BlockType {
                 | BlockType::LuminiteCrystal
                 | BlockType::MagnetiteOre
                 | BlockType::IridiumVein
+                | BlockType::NeonGlass
+                | BlockType::ShojiLamp
         )
     }
 
@@ -170,20 +203,24 @@ impl BlockType {
     pub fn color(self) -> Color {
         match self {
             BlockType::Air => Color::NONE,
-            BlockType::Stone => Color::srgb(0.34, 0.36, 0.44),
-            BlockType::Dirt => Color::srgb(0.24, 0.15, 0.11),
-            BlockType::Grass => Color::srgb(0.11, 0.40, 0.15),
-            BlockType::Sand => Color::srgb(0.76, 0.67, 0.45),
-            // Turquoise energy-water read (concept underground river).
-            BlockType::Water => Color::srgba(0.06, 0.78, 0.92, 0.62),
-            BlockType::Wood => Color::srgb(0.24, 0.14, 0.08),
-            BlockType::Leaves => Color::srgb(0.06, 0.32, 0.11),
-            BlockType::Snow => Color::srgb(0.96, 0.97, 0.99),
+            BlockType::Stone => Color::srgb(0.42, 0.43, 0.42),
+            BlockType::Dirt => Color::srgb(0.38, 0.25, 0.16),
+            // Warm meadow green keeps the ground distinct from the cooler
+            // tree canopy. The previous almost-pure green collapsed a whole
+            // forest into one saturated plane at flight distance.
+            BlockType::Grass => Color::srgb(0.32, 0.42, 0.24),
+            BlockType::Sand => Color::srgb(0.73, 0.65, 0.46),
+            // Clear mineral water: saturated enough to read from flight, but
+            // no longer clips to electric cyan under the noon key light.
+            BlockType::Water => Color::srgba(0.08, 0.50, 0.62, 0.72),
+            BlockType::Wood => Color::srgb(0.38, 0.26, 0.16),
+            BlockType::Leaves => Color::srgb(0.25, 0.42, 0.27),
+            BlockType::Snow => Color::srgb(0.90, 0.92, 0.95),
             BlockType::Ice => Color::srgba(0.70, 0.88, 0.98, 0.85),
             BlockType::TundraGrass => Color::srgb(0.62, 0.76, 0.55),
-            BlockType::JungleLeaves => Color::srgb(0.03, 0.38, 0.13),
-            BlockType::SavannaGrass => Color::srgb(0.46, 0.50, 0.20),
-            BlockType::Gravel => Color::srgb(0.42, 0.40, 0.45),
+            BlockType::JungleLeaves => Color::srgb(0.24, 0.40, 0.30),
+            BlockType::SavannaGrass => Color::srgb(0.58, 0.54, 0.28),
+            BlockType::Gravel => Color::srgb(0.45, 0.44, 0.43),
             BlockType::Bedrock => Color::srgb(0.12, 0.12, 0.14),
             // Sedona red — saturated rust-orange surface dust.
             BlockType::RedSand => Color::srgb(0.92, 0.46, 0.24),
@@ -191,10 +228,13 @@ impl BlockType {
             BlockType::RedStone => Color::srgb(0.76, 0.32, 0.20),
             // Pale yellow mesa cap, the bright stripe between reds.
             BlockType::MesaClay => Color::srgb(0.94, 0.76, 0.48),
-            // Dark mossy limestone — wet karst pillar bodies.
-            BlockType::MossStone => Color::srgb(0.20, 0.31, 0.25),
-            // Bright pale limestone — sun-lit karst sides.
-            BlockType::Limestone => Color::srgb(0.86, 0.84, 0.76),
+            // Mossy limestone is still rock: a muted slate/olive midtone
+            // keeps it separate from living foliage at eye level.
+            BlockType::MossStone => Color::srgb(0.35, 0.39, 0.31),
+            // Warm weathered limestone. The former near-white albedo clipped
+            // under the daylight key and turned whole karst valleys into an
+            // empty white plane, erasing their shape.
+            BlockType::Limestone => Color::srgb(0.59, 0.57, 0.51),
             // Alien crystal — saturated cyan-violet, slightly translucent.
             BlockType::Crystal => Color::srgba(0.18, 0.72, 1.00, 0.70),
             // Volcanic basalt — dark, but not unreadable black. Keeping
@@ -220,6 +260,15 @@ impl BlockType {
             BlockType::LuminiteCrystal => Color::srgba(0.12, 0.82, 1.00, 0.68),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
+            BlockType::BlossomLeaves => Color::srgba(0.88, 0.52, 0.67, 0.90),
+            BlockType::ZenStone => Color::srgb(0.68, 0.68, 0.62),
+            BlockType::Bamboo => Color::srgb(0.47, 0.68, 0.26),
+            BlockType::SakuraPetals => Color::srgba(0.88, 0.48, 0.62, 0.86),
+            BlockType::ShojiPaper => Color::srgba(1.00, 0.88, 0.68, 0.70),
+            BlockType::RoofTile => Color::srgb(0.10, 0.13, 0.16),
+            BlockType::TatamiMat => Color::srgb(0.72, 0.62, 0.34),
+            BlockType::NeonGlass => Color::srgba(0.18, 0.92, 1.00, 0.48),
+            BlockType::ShojiLamp => Color::srgb(1.00, 0.62, 0.24),
         }
     }
 
@@ -260,6 +309,15 @@ impl BlockType {
             33 => BlockType::LuminiteCrystal,
             34 => BlockType::MagnetiteOre,
             35 => BlockType::IridiumVein,
+            36 => BlockType::BlossomLeaves,
+            37 => BlockType::ZenStone,
+            38 => BlockType::Bamboo,
+            39 => BlockType::SakuraPetals,
+            40 => BlockType::ShojiPaper,
+            41 => BlockType::RoofTile,
+            42 => BlockType::TatamiMat,
+            43 => BlockType::NeonGlass,
+            44 => BlockType::ShojiLamp,
             _ => BlockType::Air,
         }
     }
@@ -272,7 +330,7 @@ impl From<BlockType> for Voxel {
     }
 }
 
-pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
+pub const BUILDABLE_BLOCKS: [BlockType; 44] = [
     BlockType::Stone,
     BlockType::Dirt,
     BlockType::Grass,
@@ -308,6 +366,15 @@ pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
     BlockType::LuminiteCrystal,
     BlockType::MagnetiteOre,
     BlockType::IridiumVein,
+    BlockType::BlossomLeaves,
+    BlockType::ZenStone,
+    BlockType::Bamboo,
+    BlockType::SakuraPetals,
+    BlockType::ShojiPaper,
+    BlockType::RoofTile,
+    BlockType::TatamiMat,
+    BlockType::NeonGlass,
+    BlockType::ShojiLamp,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +406,11 @@ const ASPHALT_CONCRETE: &[BlockPaletteEntry] = &[
         block: BlockType::Bedrock,
         label: "Bedrock",
         role: "dark foundation",
+    },
+    BlockPaletteEntry {
+        block: BlockType::ZenStone,
+        label: "Zen Stone",
+        role: "smooth garden concrete",
     },
 ];
 
@@ -386,6 +458,11 @@ const GLASS: &[BlockPaletteEntry] = &[
         label: "Iridium",
         role: "violet rare-glass vein",
     },
+    BlockPaletteEntry {
+        block: BlockType::NeonGlass,
+        label: "Neon Glass",
+        role: "cyan sci-fi window",
+    },
 ];
 
 const GROUND: &[BlockPaletteEntry] = &[
@@ -413,6 +490,16 @@ const GROUND: &[BlockPaletteEntry] = &[
         block: BlockType::JungleLeaves,
         label: "Jungle",
         role: "dense planting",
+    },
+    BlockPaletteEntry {
+        block: BlockType::BlossomLeaves,
+        label: "Blossom",
+        role: "sakura canopy",
+    },
+    BlockPaletteEntry {
+        block: BlockType::SakuraPetals,
+        label: "Petals",
+        role: "sakura ground",
     },
     BlockPaletteEntry {
         block: BlockType::SavannaGrass,
@@ -470,9 +557,24 @@ const PLASTER_LIGHT: &[BlockPaletteEntry] = &[
         label: "White",
         role: "bright paint",
     },
+    BlockPaletteEntry {
+        block: BlockType::ShojiPaper,
+        label: "Shoji Paper",
+        role: "warm paper wall",
+    },
+    BlockPaletteEntry {
+        block: BlockType::TatamiMat,
+        label: "Tatami",
+        role: "woven interior floor",
+    },
 ];
 
 const PATTERN_TILE_ROOFING: &[BlockPaletteEntry] = &[
+    BlockPaletteEntry {
+        block: BlockType::RoofTile,
+        label: "Roof Tile",
+        role: "charcoal ceramic roof",
+    },
     BlockPaletteEntry {
         block: BlockType::Basalt,
         label: "Basalt",
@@ -501,6 +603,11 @@ const SOLID_COLORS: &[BlockPaletteEntry] = &[
         label: "Neon Amber",
         role: "amber color/accent",
     },
+    BlockPaletteEntry {
+        block: BlockType::ShojiLamp,
+        label: "Lantern",
+        role: "warm emissive light",
+    },
 ];
 
 const WOOD_NATURE: &[BlockPaletteEntry] = &[
@@ -513,6 +620,11 @@ const WOOD_NATURE: &[BlockPaletteEntry] = &[
         block: BlockType::Leaves,
         label: "Leaves",
         role: "foliage",
+    },
+    BlockPaletteEntry {
+        block: BlockType::Bamboo,
+        label: "Bamboo",
+        role: "bamboo posts/plants",
     },
 ];
 
@@ -611,10 +723,12 @@ pub fn block_label(block: BlockType) -> &'static str {
 }
 
 /// Fast voxel → solid? (without converting through the enum).
-/// AIR (0), Water (5) and Lava (22) are non-solid for collision.
+/// Fluid and foliage/detail blocks are non-solid for collision so sakura
+/// petals, leaves and future half-height details do not behave like full
+/// hard cubes.
 #[inline]
 pub fn voxel_is_solid(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 22)
+    !matches!(v, 0 | 5 | 7 | 11 | 22 | 36 | 39)
 }
 
 /// Fast voxel -> can weapons intentionally hit and destroy this block?
@@ -628,10 +742,15 @@ pub fn voxel_is_weapon_target(v: Voxel) -> bool {
 
 /// Fast voxel → opaque? (used for face-culling).
 /// Air (0), water (5), leaves (7), ice (9), jungle leaves (11),
-/// crystal (20), lava (22), cockpit (28), luminite/iridium glass are non-opaque.
+/// blossom leaves (36), sakura petals (39), shoji paper (40), neon glass
+/// (43), crystal (20), lava (22), cockpit (28), luminite/iridium glass are
+/// non-opaque.
 #[inline]
 pub fn voxel_is_opaque(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35)
+    !matches!(
+        v,
+        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 36 | 39 | 40 | 43
+    )
 }
 
 /// Fast voxel → is this block bioluminescent? Emissive blocks get
@@ -640,13 +759,24 @@ pub fn voxel_is_opaque(v: Voxel) -> bool {
 /// alien moss, glow-sand).
 #[inline]
 pub fn voxel_is_emissive(v: Voxel) -> bool {
-    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9.
+    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35,
+    // NeonGlass=43, ShojiLamp=44, Ice=9.
     // Ice gets a whisper of glow so glacier biomes shimmer at night.
-    matches!(v, 9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35)
+    matches!(v, 20 | 22 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 43 | 44)
 }
 
 #[inline]
 pub fn voxel_color(v: Voxel) -> [f32; 4] {
+    voxel_color_with_emission_budget(v, EmissionBudget::Balanced)
+}
+
+/// Resolve a linear vertex color under an explicit HDR budget.
+///
+/// Atmospheric color and scene emission are separate concepts. Actual
+/// emitters receive their material gain, then one hue-preserving scale clamps
+/// both peak channel and Rec.709 luminance.
+#[inline]
+pub fn voxel_color_with_emission_budget(v: Voxel, emission_budget: EmissionBudget) -> [f32; 4] {
     // Convert the block's designer sRGB colour to linear and then, for
     // emissive blocks, multiply the linear RGB by a generous scalar so
     // values exceed 1.0. With the world camera running HDR + bloom,
@@ -654,6 +784,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
     // crystal, alien moss and glow-sand a true neon halo without any
     // custom shader work.
     let mut c = BlockType::from_voxel(v).color().to_linear().to_f32_array();
+    if !voxel_is_emissive(v) {
+        return c;
+    }
     match v {
         5 => {
             // Water — soft turquoise bloom (concept energy river / cavern pool).
@@ -732,8 +865,29 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[1] *= 0.9;
             c[2] *= 4.6;
         }
+        43 => {
+            // Neon glass — transparent cyan architecture accent.
+            c[0] *= 1.2;
+            c[1] *= 3.4;
+            c[2] *= 4.2;
+        }
+        44 => {
+            // Shoji lamp — warm lantern glow for streets/interiors.
+            c[0] *= 3.4;
+            c[1] *= 2.0;
+            c[2] *= 0.7;
+        }
         _ => {}
     }
+
+    let peak = c[0].max(c[1]).max(c[2]);
+    let luminance = c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;
+    let peak_scale = emission_budget.max_peak_channel() / peak.max(f32::EPSILON);
+    let luminance_scale = emission_budget.max_luminance() / luminance.max(f32::EPSILON);
+    let scale = peak_scale.min(luminance_scale).min(1.0);
+    c[0] *= scale;
+    c[1] *= scale;
+    c[2] *= scale;
     c
 }
 
@@ -760,17 +914,167 @@ mod tests {
     }
 
     #[test]
+    fn foliage_and_petal_details_do_not_collide_like_full_cubes() {
+        for block in [
+            BlockType::Leaves,
+            BlockType::JungleLeaves,
+            BlockType::BlossomLeaves,
+            BlockType::SakuraPetals,
+        ] {
+            assert!(
+                !block.is_solid(),
+                "{block:?} should be a soft detail block, not a full collision cube"
+            );
+            assert!(
+                !voxel_is_solid(block.into()),
+                "{block:?} should be non-solid in the fast collision path"
+            );
+            assert!(
+                !block.is_opaque(),
+                "{block:?} should not occlude a neighbouring natural material like stone"
+            );
+            assert!(
+                !voxel_is_opaque(block.into()),
+                "{block:?} should also be non-opaque in the fast meshing path"
+            );
+        }
+    }
+
+    #[test]
+    fn natural_palette_keeps_grass_and_foliage_readable() {
+        let grass = voxel_color(BlockType::Grass.into());
+        let leaves = voxel_color(BlockType::Leaves.into());
+        let jungle = voxel_color(BlockType::JungleLeaves.into());
+
+        assert!(
+            grass[1] >= 0.13,
+            "grass green channel is too dark for scenic worlds"
+        );
+        assert!(
+            leaves[1] >= 0.11,
+            "tree leaves should not collapse into black silhouettes"
+        );
+        assert!(
+            jungle[1] >= 0.13,
+            "jungle/bonsai leaves need a visible midtone under fog and dusk light"
+        );
+        let canopy_distance = grass[..3]
+            .iter()
+            .zip(&leaves[..3])
+            .map(|(ground, canopy)| (ground - canopy).powi(2))
+            .sum::<f32>();
+        assert!(
+            canopy_distance > 0.001,
+            "grass and tree crowns need separate colour planes at flight distance"
+        );
+        for (label, color) in [("leaves", leaves), ("jungle", jungle)] {
+            let green_dominance = color[1] / (color[0] + color[2]).max(1e-5);
+            assert!(
+                green_dominance < 2.5,
+                "{label} is too spectrally narrow and will read as neon green"
+            );
+        }
+    }
+
+    #[test]
+    fn atmospheric_terrain_blocks_do_not_emit_light() {
+        for block in [
+            BlockType::Water,
+            BlockType::Ice,
+            BlockType::AlienMoss,
+            BlockType::GlowSand,
+        ] {
+            let voxel = block.into();
+            let color = voxel_color_with_emission_budget(voxel, EmissionBudget::Cinematic);
+            assert!(!voxel_is_emissive(voxel), "{block:?} must receive AO");
+            assert!(
+                color[..3].iter().all(|channel| *channel <= 1.0),
+                "{block:?} unexpectedly contains HDR terrain color: {color:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn emissive_color_is_bounded_and_monotonic_across_profiles() {
+        let voxel = BlockType::LuminiteCrystal.into();
+        let low = voxel_color_with_emission_budget(voxel, EmissionBudget::Low);
+        let balanced = voxel_color_with_emission_budget(voxel, EmissionBudget::Balanced);
+        let cinematic = voxel_color_with_emission_budget(voxel, EmissionBudget::Cinematic);
+
+        let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+        assert!(luminance(low) <= EmissionBudget::Low.max_luminance() + 1e-5);
+        assert!(luminance(balanced) <= EmissionBudget::Balanced.max_luminance() + 1e-5);
+        assert!(luminance(cinematic) <= EmissionBudget::Cinematic.max_luminance() + 1e-5);
+        assert!(luminance(low) <= luminance(balanced));
+        assert!(luminance(balanced) <= luminance(cinematic));
+    }
+
+    #[test]
+    fn lava_vertex_emission_is_finite_hdr_and_within_every_budget() {
+        let lava = BlockType::Lava.into();
+        assert!(voxel_is_emissive(lava));
+
+        for budget in [
+            EmissionBudget::Low,
+            EmissionBudget::Balanced,
+            EmissionBudget::Cinematic,
+        ] {
+            let color = voxel_color_with_emission_budget(lava, budget);
+            assert!(color.iter().all(|channel| channel.is_finite()));
+            let peak = color[0].max(color[1]).max(color[2]);
+            let luminance = color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+            assert!(
+                peak > 1.0,
+                "Lava lost its HDR vertex authority in {budget:?}"
+            );
+            assert!(peak <= budget.max_peak_channel() + 1e-5);
+            assert!(luminance.is_finite());
+            assert!(luminance <= budget.max_luminance() + 1e-5);
+            assert!((0.0..=1.0).contains(&color[3]));
+        }
+    }
+
+    #[test]
     fn shuttle_blocks_map_from_voxel_ids() {
         assert_eq!(BlockType::from_voxel(26), BlockType::ShipHullDark);
         assert_eq!(BlockType::from_voxel(28), BlockType::CockpitGlass);
         assert_eq!(BlockType::from_voxel(32), BlockType::EngineCore);
         assert_eq!(BlockType::from_voxel(33), BlockType::LuminiteCrystal);
         assert_eq!(BlockType::from_voxel(35), BlockType::IridiumVein);
+        assert_eq!(BlockType::from_voxel(38), BlockType::Bamboo);
+        assert_eq!(BlockType::from_voxel(40), BlockType::ShojiPaper);
+        assert_eq!(BlockType::from_voxel(44), BlockType::ShojiLamp);
         assert!(voxel_is_emissive(BlockType::NeonCyan.into()));
+        assert!(voxel_is_emissive(BlockType::ShojiLamp.into()));
         assert!(!voxel_is_opaque(BlockType::CockpitGlass.into()));
         assert!(!voxel_is_opaque(BlockType::LuminiteCrystal.into()));
+        assert!(!voxel_is_opaque(BlockType::NeonGlass.into()));
+        assert!(!voxel_is_opaque(BlockType::ShojiPaper.into()));
         assert!(voxel_is_opaque(BlockType::MagnetiteOre.into()));
         assert!(ore_units_for_mined_voxel(VOXEL_LUMINITE) > 0);
+    }
+
+    #[test]
+    fn zen_builder_inventory_exposes_plants_and_architecture_blocks() {
+        for block in [
+            BlockType::ZenStone,
+            BlockType::Bamboo,
+            BlockType::SakuraPetals,
+            BlockType::ShojiPaper,
+            BlockType::RoofTile,
+            BlockType::TatamiMat,
+            BlockType::NeonGlass,
+            BlockType::ShojiLamp,
+        ] {
+            assert!(
+                BUILDABLE_BLOCKS.contains(&block),
+                "{block:?} should be directly buildable"
+            );
+            assert!(
+                block_palette_entry(block).is_some(),
+                "{block:?} should be visible in the material catalog"
+            );
+        }
     }
 
     #[test]

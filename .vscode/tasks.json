@@ -3,35 +3,63 @@
   "tasks": [
     {
       "label": "Cargo: Build Release",
-      "type": "shell",
-      "command": "cargo build --release",
-      "group": "build",
-      "problemMatcher": ["$rustc"]
+      "type": "process",
+      "command": "cargo",
+      "args": [
+        "build",
+        "--release",
+        "--bin",
+        "voxel-native"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$rustc"
+      ]
     },
     {
       "label": "Run Voxel Native Release",
-      "type": "shell",
-      "command": "${workspaceFolder}\\target\\release\\voxel-native.exe",
+      "type": "process",
+      "command": "cargo",
+      "args": [
+        "run",
+        "--release",
+        "--bin",
+        "voxel-native"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "group": "test",
-      "isBackground": true
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
     },
     {
       "label": "Build Web (wasm)",
-      "type": "shell",
-      "command": "powershell -ExecutionPolicy Bypass -File scripts\\build-web.ps1",
-      "group": "build"
+      "type": "process",
+      "command": "pwsh",
+      "args": [
+        "-NoProfile",
+        "-File",
+        "${workspaceFolder}/scripts/build-web.ps1"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": [
+        "$rustc"
+      ]
     }
   ]
-}
-{
-	"version": "2.0.0",
-	"tasks": [
-		{
-			"label": "Run Voxel Native Release",
-			"type": "shell",
-			"command": ".\\target\\release\\voxel-native.exe",
-			"isBackground": true,
-			"group": "test"
-		}
-	]
 }

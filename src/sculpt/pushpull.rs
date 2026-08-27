@@ -7,19 +7,19 @@
 //!    coplanar face under the crosshair (see [`super::face`]). The face
 //!    boundary is drawn as a pulse-coloured outline via `Gizmos`.
 //!
-//! 2. On left-mouse-down, locks that face into a [`PushPullDrag`] and
-//!    records the screen-space direction the surface normal projects
-//!    to. From then until release, mouse-motion delta is projected onto
-//!    that direction, divided by [`PIXELS_PER_VOXEL`], and rounded to an
+//! 2. On first click, locks that face into a [`PushPullDrag`] and records
+//!    the screen-space direction the surface normal projects to. Until
+//!    the second click, mouse-motion delta is projected onto that
+//!    direction, divided by [`PIXELS_PER_VOXEL`], and rounded to an
 //!    integer "extrusion distance" `d`.
 //!
-//! 3. Each frame while dragging, if `d` changed, the previous preview
+//! 3. Each frame while active, if `d` changed, the previous preview
 //!    is reverted (write `before` voxels back) and a new preview is
 //!    applied — extrude with `d > 0`, intrude (delete) with `d < 0`. We
 //!    use [`VoxelWorld::edit_set_voxel_batched`] which only touches the
 //!    voxel slot, leaving material data intact so revert is exact.
 //!
-//! 4. On left-mouse-up, the accumulated `(pos, before, after)` list is
+//! 4. On the second click, the accumulated `(pos, before, after)` list is
 //!    pushed onto the same undo timeline as the Classic builder via
 //!    [`BuilderHistory::record_external`]. Ctrl+Z then rewinds the
 //!    extrusion as a single batch.
@@ -30,17 +30,20 @@
 //! pulled 32 voxels would stamp 131 072 voxels — well within the
 //! existing batch system's working set.
 
+use std::collections::{BTreeMap, VecDeque};
+
 use ahash::{AHashMap, AHashSet};
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 
-use crate::blocks::{voxel_is_solid, Voxel, AIR};
-use crate::builder::BuilderHistory;
+use crate::blocks::{voxel_is_solid, BlockType, Voxel, AIR};
+use crate::builder::{BuilderHistory, BuilderHistorySketchMeta};
 use crate::mode::{BuildGestureLock, ModeContext};
 use crate::player::Player;
 use crate::sculpt::face::{collect_face, FaceRegion};
-use crate::sculpt::raycast::dda_voxel;
+use crate::sculpt::raycast::{dda_object_voxel, dda_voxel};
 use crate::sculpt::state::{HoverHit, SculptMode, SculptState};
+use crate::sketch_model::{EditorToolId, ToolController};
 use crate::toolbelt::{ToolbeltState, ToolbeltTool};
 use crate::world::{VoxelWorld, WorldEditBatch};
 
@@ -58,6 +61,21 @@ const REFERENCE_POINT_SIZE: f32 = 0.16;
 const HOVER_POINT_SIZE: f32 = 0.08;
 const TAP_CLEANUP_FACE_CAP: usize = 768;
 const TAP_CLEANUP_MAX_MOTION_PX: f32 = 4.0;
+const OBJECT_SELECTION_CELL_CAP: usize = 64_000;
+const OBJECT_EDIT_DOUBLE_CLICK_SECONDS: f32 = 0.42;
+const NATURAL_TREE_WOOD_CAP: usize = 4_096;
+const NATURAL_TREE_CELL_CAP: usize = 20_000;
+const NATURAL_TREE_CANOPY_REACH: i32 = 7;
+const NATURAL_TREE_CANOPY_PATH_CAP: u16 = 12;
+const NATURAL_TREE_SCAN_VOLUME_CAP: i64 = 120_000;
+const NATURAL_TREE_NEIGHBORS: [IVec3; 6] = [
+    IVec3::X,
+    IVec3::NEG_X,
+    IVec3::Y,
+    IVec3::NEG_Y,
+    IVec3::Z,
+    IVec3::NEG_Z,
+];
 
 /// Floor for the screen-space normal projection magnitude: when the
 /// camera looks edge-on at a face, the projected normal can collapse to
@@ -89,6 +107,13 @@ pub struct PushPullDrag {
     /// "remove this leftover face/layer" while a failed drag still
     /// cancels safely.
     pub motion_len: f32,
+    /// SketchUp-style click-move-click operation. The first LMB click locks
+    /// the face; releasing it does not finish. The next LMB click commits.
+    pub click_finish: bool,
+    /// Toolbox selection generation that started this operation. If the
+    /// mouse-first editor picks another tool, the live preview must revert
+    /// instead of keeping ownership of clicks.
+    pub tool_generation: u64,
     /// Most recently applied integer distance. `0` means the preview is
     /// empty and nothing has been written yet.
     pub last_d: i32,
@@ -101,6 +126,21 @@ pub struct PushPullDrag {
     pub preview: AHashMap<IVec3, Voxel>,
 }
 
+#[derive(Resource, Debug, Clone)]
+pub struct SemanticSelectionInteraction {
+    last_object: Option<crate::sketch_model::SketchId>,
+    last_click_seconds: f32,
+}
+
+impl Default for SemanticSelectionInteraction {
+    fn default() -> Self {
+        Self {
+            last_object: None,
+            last_click_seconds: f32::NEG_INFINITY,
+        }
+    }
+}
+
 impl PushPullDrag {
     fn clear(&mut self) {
         self.active = false;
@@ -108,6 +148,8 @@ impl PushPullDrag {
         self.preview.clear();
         self.motion_accum = Vec2::ZERO;
         self.motion_len = 0.0;
+        self.click_finish = false;
+        self.tool_generation = 0;
         self.last_d = 0;
         self.reference_d = None;
     }
@@ -122,11 +164,15 @@ pub enum InferenceSnapKind {
 
 impl InferenceSnapKind {
     fn label(self) -> &'static str {
-        match self {
-            Self::Endpoint => "endpoint",
-            Self::Midpoint => "midpoint",
-            Self::FaceCenter => "face center",
-        }
+        pushpull_inference_kind(self).tooltip()
+    }
+}
+
+fn pushpull_inference_kind(kind: InferenceSnapKind) -> crate::sketch_model::InferenceKind {
+    match kind {
+        InferenceSnapKind::Endpoint => crate::sketch_model::InferenceKind::Endpoint,
+        InferenceSnapKind::Midpoint => crate::sketch_model::InferenceKind::Midpoint,
+        InferenceSnapKind::FaceCenter => crate::sketch_model::InferenceKind::FaceCenter,
     }
 }
 
@@ -171,33 +217,94 @@ impl PushPullReference {
     }
 }
 
-fn shape_alt_pressed(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
+fn sculpt_active(mode: &ModeContext, active_editor_tool: EditorToolId) -> bool {
+    mode.is_build_live() && active_editor_tool == EditorToolId::PushPull
 }
 
-/// Returns `true` while Push/Pull owns the current Shape gesture. Fill
-/// and Push/Pull are paired: the selected tool is the default, while
-/// Alt temporarily invokes the other one without changing toolbelt state.
-fn sculpt_active(mode: &ModeContext, keys: &ButtonInput<KeyCode>, drag_active: bool) -> bool {
-    if !mode.is_build_live() {
-        return false;
+fn legacy_crosshair_tool(tool: Option<ToolbeltTool>) -> bool {
+    matches!(
+        tool,
+        Some(ToolbeltTool::BrushPlace | ToolbeltTool::BrushCut)
+    )
+}
+
+fn editor_tool_needs_semantic_hover(active_editor_tool: EditorToolId) -> bool {
+    active_editor_tool.uses_pointer_surface()
+}
+
+fn semantic_hover_active(mode: &ModeContext, active_editor_tool: EditorToolId) -> bool {
+    mode.is_build_live()
+        && (legacy_crosshair_tool(mode.build_tool())
+            || editor_tool_needs_semantic_hover(active_editor_tool))
+}
+
+fn semantic_hover_requires_pointer(
+    build_tool: Option<ToolbeltTool>,
+    active_editor_tool: EditorToolId,
+) -> bool {
+    !legacy_crosshair_tool(build_tool) && editor_tool_needs_semantic_hover(active_editor_tool)
+}
+
+#[cfg(test)]
+fn semantic_hover_uses_pointer_ray(
+    build_tool: Option<ToolbeltTool>,
+    active_editor_tool: EditorToolId,
+    _cursor_locked: bool,
+) -> bool {
+    semantic_hover_requires_pointer(build_tool, active_editor_tool)
+}
+
+fn semantic_hover_allows_crosshair_fallback(
+    build_tool: Option<ToolbeltTool>,
+    _active_editor_tool: EditorToolId,
+    _cursor_locked: bool,
+) -> bool {
+    legacy_crosshair_tool(build_tool)
+}
+
+fn semantic_hover_ray(
+    mode: &ModeContext,
+    active_editor_tool: EditorToolId,
+    window: Option<&bevy::window::Window>,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+) -> Option<(Vec3, Vec3)> {
+    let cursor_locked = window.map(crate::mode::cursor_is_captured).unwrap_or(false);
+    if semantic_hover_requires_pointer(mode.build_tool(), active_editor_tool) {
+        let Some(window) = window else {
+            return None;
+        };
+        if !window.cursor.visible {
+            return None;
+        }
+        let Some(ray) = window
+            .cursor_position()
+            .and_then(|cursor| camera.viewport_to_world(cam_tf, cursor))
+        else {
+            return None;
+        };
+        return Some((ray.origin, *ray.direction));
     }
-    match mode.build_tool() {
-        Some(ToolbeltTool::Sculpt) => drag_active || !shape_alt_pressed(keys),
-        Some(ToolbeltTool::DrawRect) => drag_active || shape_alt_pressed(keys),
-        _ => false,
+    if !semantic_hover_allows_crosshair_fallback(
+        mode.build_tool(),
+        active_editor_tool,
+        cursor_locked,
+    ) {
+        return None;
     }
+    Some((cam_tf.translation(), cam_tf.forward().as_vec3()))
 }
 
 /// Update [`SculptState::hover`] each frame from the camera ray. Runs
 /// only when the sculpt tool is live; resets hover to `None` otherwise
 /// so stale highlights don't bleed into other tools.
 pub fn update_hover(
-    keys: Res<ButtonInput<KeyCode>>,
     mode: Res<ModeContext>,
     drag: Res<PushPullDrag>,
+    tool_controller: Res<ToolController>,
     world: Res<VoxelWorld>,
-    cam_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
+    windows: Query<&bevy::window::Window, With<bevy::window::PrimaryWindow>>,
+    cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
     mut state: ResMut<SculptState>,
 ) {
     // Don't re-flood while a drag is locked — the face cells are pinned
@@ -205,21 +312,31 @@ pub fn update_hover(
     if drag.active {
         return;
     }
-    if !sculpt_active(&mode, &keys, drag.active) {
+    if !semantic_hover_active(&mode, tool_controller.active_tool()) {
         if state.hover.is_some() {
             state.hover = None;
             state.mode = SculptMode::Idle;
         }
         return;
     }
-    let Ok(cam_tf) = cam_q.get_single() else {
+    let Ok((camera, cam_tf)) = cam_q.get_single() else {
         state.hover = None;
         return;
     };
 
-    let origin = cam_tf.translation();
-    let dir = cam_tf.forward().as_vec3();
-    if let Some((hit, prev)) = dda_voxel(&world, origin, dir, SCULPT_RAY_REACH) {
+    let window = windows.get_single().ok();
+    let Some((origin, dir)) =
+        semantic_hover_ray(&mode, tool_controller.active_tool(), window, camera, cam_tf)
+    else {
+        state.hover = None;
+        return;
+    };
+    let hit = if tool_controller.active_tool() == EditorToolId::Select {
+        dda_object_voxel(&world, origin, dir, SCULPT_RAY_REACH)
+    } else {
+        dda_voxel(&world, origin, dir, SCULPT_RAY_REACH)
+    };
+    if let Some((hit, prev)) = hit {
         state.hover = Some(HoverHit { voxel: hit, prev });
         state.mode = SculptMode::PushPull;
     } else {
@@ -238,25 +355,616 @@ pub fn resolve_hover_face(
     state: Res<SculptState>,
     drag: Res<PushPullDrag>,
     world: Res<VoxelWorld>,
+    sketch_links: Res<crate::sketch_model::SketchVoxelLinkIndex>,
     mut hover_face: ResMut<HoverFace>,
+    mut semantic_hover: ResMut<crate::sketch_model::SemanticHoverHit>,
 ) {
     if drag.active {
         // Build a synthetic FaceRegion from the locked drag so the gizmo
         // keeps highlighting the same surface during extrusion.
-        hover_face.0 = Some(FaceRegion {
+        let region = FaceRegion {
             cells: drag.face_cells.clone(),
             voxel: drag.voxel,
             normal: drag.normal,
             clipped: false,
-        });
+        };
+        semantic_hover.0 = semantic_hover_hit_from_region(&region, &sketch_links);
+        hover_face.0 = Some(region);
         return;
     }
     let Some(hit) = state.hover else {
         hover_face.0 = None;
+        semantic_hover.0 = None;
         return;
     };
     let normal = hit.normal();
+    let hit_voxel = world.voxel_at(hit.voxel.x, hit.voxel.y, hit.voxel.z);
+    if natural_tree_foliage(hit_voxel) {
+        let region = FaceRegion {
+            cells: vec![hit.voxel],
+            voxel: hit_voxel,
+            normal,
+            clipped: false,
+        };
+        semantic_hover.0 = semantic_hover_hit_from_region(&region, &sketch_links);
+        hover_face.0 = Some(region);
+        return;
+    }
     hover_face.0 = collect_face(&world, hit.voxel, normal);
+    semantic_hover.0 = hover_face
+        .0
+        .as_ref()
+        .and_then(|region| semantic_hover_hit_from_region_cell(region, &sketch_links, hit.voxel));
+}
+
+fn semantic_hover_hit_from_region(
+    region: &FaceRegion,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+) -> Option<crate::sketch_model::HitRecord> {
+    let cell = *region.cells.first()?;
+    semantic_hover_hit_from_region_cell(region, sketch_links, cell)
+}
+
+fn semantic_hover_hit_from_region_cell(
+    region: &FaceRegion,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    preferred_cell: IVec3,
+) -> Option<crate::sketch_model::HitRecord> {
+    if region.cells.contains(&preferred_cell) {
+        let world_point = Vec3::new(
+            preferred_cell.x as f32 + 0.5,
+            preferred_cell.y as f32 + 0.5,
+            preferred_cell.z as f32 + 0.5,
+        );
+        if let Some(hit) =
+            sketch_links.hit_for_face(preferred_cell, region.normal, world_point, 0.0)
+        {
+            return Some(hit);
+        }
+        if let Some(hit) = sketch_links.hit_for_cell(preferred_cell, world_point, 0.0) {
+            return Some(hit);
+        }
+    }
+    let cell = *region.cells.first()?;
+    let world_point = Vec3::new(
+        cell.x as f32 + 0.5,
+        cell.y as f32 + 0.5,
+        cell.z as f32 + 0.5,
+    );
+    sketch_links
+        .hit_for_face(cell, region.normal, world_point, 0.0)
+        .or_else(|| {
+            region.cells.iter().copied().find_map(|cell| {
+                sketch_links.hit_for_cell(
+                    cell,
+                    Vec3::new(
+                        cell.x as f32 + 0.5,
+                        cell.y as f32 + 0.5,
+                        cell.z as f32 + 0.5,
+                    ),
+                    0.0,
+                )
+            })
+        })
+}
+
+pub fn semantic_select_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
+    mode: Res<ModeContext>,
+    ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
+    semantic_hover: Res<crate::sketch_model::SemanticHoverHit>,
+    state: Res<SculptState>,
+    world: Res<VoxelWorld>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
+    mut interaction: ResMut<SemanticSelectionInteraction>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut toolbelt: ResMut<ToolbeltState>,
+) {
+    let pointer_over_ui = ui_focus
+        .as_deref()
+        .is_some_and(|focus| focus.pointer_over_editor_ui);
+    if !mode.is_build_live()
+        || pointer_over_ui
+        || tool_controller.active_tool() != EditorToolId::Select
+    {
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Escape) && tool_controller.edit_object_active() {
+        tool_controller.exit_edit_object();
+        toolbelt.status =
+            "Object selected as one unit. Move, Rotate, or Scale it; Enter edits its parts.".into();
+        interaction.last_object = None;
+        return;
+    }
+    if keys.just_pressed(KeyCode::Enter) && !tool_controller.edit_object_active() {
+        if !matches!(
+            tool_controller.enter_edit_object(),
+            crate::sketch_model::SelectionUpdate::Ignored
+        ) {
+            toolbelt.status =
+                "EDIT OBJECT: click one part, Shift-click adds parts, Delete removes them, Escape returns to the whole object."
+                    .into();
+        }
+        return;
+    }
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let additive = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let mut hit = semantic_hover.0.clone();
+    if hit.is_none() {
+        if let Some(hover) = state.hover {
+            hit = register_natural_tree_object(
+                &world,
+                &mut sketch_doc,
+                &mut sketch_links,
+                hover.voxel,
+            );
+        }
+    }
+
+    let Some(hit) = hit else {
+        interaction.last_object = None;
+        if !additive {
+            tool_controller.clear_selection();
+            toolbelt.status = if tool_controller.edit_object_active() {
+                "EDIT OBJECT: part selection cleared; Escape returns to the whole object.".into()
+            } else {
+                "Select: object selection cleared.".into()
+            };
+        }
+        return;
+    };
+
+    let update = if tool_controller.edit_object_active() {
+        let part_hit = edit_part_hit_at_cell(
+            &tool_controller,
+            &sketch_links,
+            &hit,
+            state.hover.map(|hover| hover.voxel),
+        );
+        interaction.last_object = None;
+        part_hit
+            .as_ref()
+            .map(|part| tool_controller.select_edit_part(part, additive))
+            .unwrap_or(crate::sketch_model::SelectionUpdate::Ignored)
+    } else {
+        let members = object_members_for_hit(&sketch_doc, &sketch_links, &hit);
+        let object_key = members.first().copied().unwrap_or(hit.entity);
+        let now = time.elapsed_seconds();
+        let double_click = interaction.last_object == Some(object_key)
+            && now - interaction.last_click_seconds <= OBJECT_EDIT_DOUBLE_CLICK_SECONDS;
+        interaction.last_object = Some(object_key);
+        interaction.last_click_seconds = now;
+        let update = tool_controller.select_object_members(members, additive);
+        if double_click && !additive {
+            tool_controller.enter_edit_object();
+            toolbelt.status =
+                "EDIT OBJECT: double-click entered part editing. Select a part and press Delete; Escape selects the whole object again."
+                    .into();
+        }
+        update
+    };
+
+    match update {
+        crate::sketch_model::SelectionUpdate::Selected(id) => {
+            if tool_controller.edit_object_active() {
+                if !toolbelt.status.starts_with("EDIT OBJECT: double-click") {
+                    toolbelt.status = format!(
+                        "EDIT OBJECT: part {} selected. Shift-click adds parts; Delete removes them; Escape exits.",
+                        id.raw()
+                    );
+                }
+            } else {
+                toolbelt.status = format!(
+                    "Object selected: {} linked part{}. Move, Rotate, and Scale affect all of it; Enter or double-click edits parts.",
+                    tool_controller.selection().len(),
+                    if tool_controller.selection().len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                );
+            }
+        }
+        crate::sketch_model::SelectionUpdate::Cleared => {
+            toolbelt.status = "Select: semantic selection cleared.".into();
+        }
+        crate::sketch_model::SelectionUpdate::Ignored => {}
+    }
+}
+
+fn object_members_for_hit(
+    sketch_doc: &crate::sketch_model::SketchDocument,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    hit: &crate::sketch_model::HitRecord,
+) -> Vec<crate::sketch_model::SketchId> {
+    if let Some(instance) = hit.instance_path.first().copied() {
+        return vec![instance];
+    }
+    if sketch_doc
+        .entity_attribute(hit.entity, "voxel_native", "object_id")
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return sketch_doc
+            .object_members_for_entity(hit.entity)
+            .into_iter()
+            .filter(|entity| !sketch_links.cells_for_entity(*entity).is_empty())
+            .collect();
+    }
+    sketch_links.connected_entities_for_entity(hit.entity, OBJECT_SELECTION_CELL_CAP)
+}
+
+fn edit_part_hit_at_cell(
+    tool_controller: &crate::sketch_model::ToolController,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    fallback: &crate::sketch_model::HitRecord,
+    cell: Option<IVec3>,
+) -> Option<crate::sketch_model::HitRecord> {
+    let members = tool_controller.edit_object_members()?;
+    if let Some(cell) = cell {
+        if let Some(link) = sketch_links
+            .links_for_cell(cell)
+            .into_iter()
+            .find(|link| members.contains(link.entity))
+        {
+            return Some(
+                crate::sketch_model::HitRecord::new(
+                    link.entity,
+                    std::iter::empty::<crate::sketch_model::SketchId>(),
+                    crate::sketch_model::HitKind::Face,
+                    cell.as_vec3() + Vec3::splat(0.5),
+                    0.0,
+                )
+                .with_normal(fallback.normal.unwrap_or(Vec3::Y)),
+            );
+        }
+    }
+    members.contains(fallback.entity).then(|| fallback.clone())
+}
+
+fn register_natural_tree_object(
+    world: &VoxelWorld,
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+    hit: IVec3,
+) -> Option<crate::sketch_model::HitRecord> {
+    if let Some(link) = sketch_links.links_for_cell(hit).into_iter().next() {
+        return Some(crate::sketch_model::HitRecord::new(
+            link.entity,
+            std::iter::empty::<crate::sketch_model::SketchId>(),
+            crate::sketch_model::HitKind::Face,
+            hit.as_vec3() + Vec3::splat(0.5),
+            0.0,
+        ));
+    }
+
+    let parts = collect_natural_tree_parts(world, sketch_links, hit)?;
+    let root = parts
+        .values()
+        .flatten()
+        .min_by_key(|cell| (cell.y, cell.x, cell.z))
+        .copied()?;
+    let object_id = format!("natural-tree/{}/{}/{}", root.x, root.y, root.z);
+    let context = sketch_doc.active_context();
+    let hit_voxel = world.voxel_at(hit.x, hit.y, hit.z);
+    let mut hit_entity = None;
+
+    for (voxel, cells) in parts {
+        if cells.is_empty() {
+            continue;
+        }
+        let centroid = cells.iter().fold(Vec3::ZERO, |sum, cell| {
+            sum + cell.as_vec3() + Vec3::splat(0.5)
+        }) / cells.len() as f32;
+        let entity = sketch_doc
+            .add_entity_to_active(crate::sketch_model::SketchEntityKind::Vertex { point: centroid })
+            .ok()?;
+        sketch_doc
+            .set_entity_attribute(entity, "voxel_native", "object_id", object_id.clone())
+            .ok()?;
+        sketch_doc
+            .set_entity_attribute(
+                entity,
+                "voxel_native",
+                "part",
+                format!("{:?}", BlockType::from_voxel(voxel)),
+            )
+            .ok()?;
+        let link = crate::sketch_model::SketchVoxelLink::new(
+            entity,
+            context,
+            crate::sketch_model::SketchVoxelLinkRole::Shape,
+        );
+        sketch_links.link_cells(cells.iter().copied(), link);
+        if voxel == hit_voxel && cells.contains(&hit) {
+            hit_entity = Some(entity);
+        }
+    }
+
+    let entity = hit_entity?;
+    Some(crate::sketch_model::HitRecord::new(
+        entity,
+        std::iter::empty::<crate::sketch_model::SketchId>(),
+        crate::sketch_model::HitKind::Face,
+        hit.as_vec3() + Vec3::splat(0.5),
+        0.0,
+    ))
+}
+
+fn collect_natural_tree_parts(
+    world: &VoxelWorld,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    hit: IVec3,
+) -> Option<BTreeMap<Voxel, Vec<IVec3>>> {
+    let hit_voxel = world.voxel_at(hit.x, hit.y, hit.z);
+    let wood = if natural_tree_wood(hit_voxel) {
+        natural_tree_wood_component(world, sketch_links, hit)?
+    } else if natural_tree_foliage(hit_voxel) {
+        natural_tree_wood_from_foliage(world, sketch_links, hit, hit_voxel)?
+    } else {
+        return None;
+    };
+    if wood.len() < 2 {
+        return None;
+    }
+    let wood_cells: AHashSet<_> = wood.iter().copied().collect();
+    if !wood.iter().copied().any(|cell| {
+        checked_tree_cell_add(cell, IVec3::Y).is_some_and(|above| wood_cells.contains(&above))
+    }) {
+        return None;
+    }
+    let wood_voxel = world.voxel_at(wood[0].x, wood[0].y, wood[0].z);
+
+    let mut min = wood[0];
+    let mut max = wood[0];
+    for cell in wood.iter().copied().skip(1) {
+        min = min.min(cell);
+        max = max.max(cell);
+    }
+    let competition_reach = NATURAL_TREE_CANOPY_REACH * 2;
+    let scan_min = checked_tree_cell_sub(min, IVec3::new(competition_reach, 2, competition_reach))?;
+    let scan_max = checked_tree_cell_add(max, IVec3::new(competition_reach, 6, competition_reach))?;
+    let scan_size = [
+        i64::from(scan_max.x) - i64::from(scan_min.x) + 1,
+        i64::from(scan_max.y) - i64::from(scan_min.y) + 1,
+        i64::from(scan_max.z) - i64::from(scan_min.z) + 1,
+    ];
+    let scan_volume = scan_size[0]
+        .checked_mul(scan_size[1])?
+        .checked_mul(scan_size[2])?;
+    if scan_volume <= 0 || scan_volume > NATURAL_TREE_SCAN_VOLUME_CAP {
+        return None;
+    }
+
+    let target_wood: AHashSet<_> = wood.iter().copied().collect();
+    let mut target_sources = Vec::with_capacity(wood.len());
+    let mut foreign_sources = Vec::new();
+    let mut foliage = AHashMap::<IVec3, Voxel>::new();
+    for y in scan_min.y..=scan_max.y {
+        for z in scan_min.z..=scan_max.z {
+            for x in scan_min.x..=scan_max.x {
+                let cell = IVec3::new(x, y, z);
+                let voxel = world.voxel_at(x, y, z);
+                if target_wood.contains(&cell) {
+                    target_sources.push(cell);
+                } else if natural_tree_wood(voxel) {
+                    // Authored/registered wood is a competitor rather than a
+                    // candidate: semantic ownership is a hard object boundary.
+                    foreign_sources.push(cell);
+                } else if natural_tree_foliage(voxel)
+                    && sketch_links.links_for_cell(cell).is_empty()
+                {
+                    foliage.insert(cell, voxel);
+                }
+            }
+        }
+    }
+
+    let target_distance = foliage_distances(&foliage, &target_sources);
+    let foreign_distance = foliage_distances(&foliage, &foreign_sources);
+    let mut parts = BTreeMap::<Voxel, Vec<IVec3>>::new();
+    parts.insert(wood_voxel, wood.clone());
+
+    for (cell, distance) in target_distance {
+        let foreign_wins_or_ties = foreign_distance
+            .get(&cell)
+            .is_some_and(|foreign| *foreign <= distance);
+        if !foreign_wins_or_ties {
+            parts.entry(foliage[&cell]).or_default().push(cell);
+        }
+    }
+    let foliage_count = parts
+        .iter()
+        .filter(|(voxel, _)| natural_tree_foliage(**voxel))
+        .map(|(_, cells)| cells.len())
+        .sum::<usize>();
+    if parts.values().map(Vec::len).sum::<usize>() > NATURAL_TREE_CELL_CAP
+        || (BlockType::from_voxel(wood_voxel) != BlockType::Bamboo && foliage_count == 0)
+        || (natural_tree_foliage(hit_voxel)
+            && !parts
+                .get(&hit_voxel)
+                .is_some_and(|cells| cells.contains(&hit)))
+    {
+        return None;
+    }
+    for cells in parts.values_mut() {
+        cells.sort_unstable_by_key(|cell| (cell.x, cell.y, cell.z));
+    }
+    Some(parts)
+}
+
+fn natural_tree_wood_component(
+    world: &VoxelWorld,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    seed: IVec3,
+) -> Option<Vec<IVec3>> {
+    let wood_voxel = world.voxel_at(seed.x, seed.y, seed.z);
+    if !natural_tree_wood(wood_voxel) || !sketch_links.links_for_cell(seed).is_empty() {
+        return None;
+    }
+    let mut component = Vec::new();
+    let mut visited = AHashSet::from_iter([seed]);
+    let mut frontier = VecDeque::from([seed]);
+    while let Some(cell) = frontier.pop_front() {
+        if component.len() >= NATURAL_TREE_WOOD_CAP {
+            return None;
+        }
+        component.push(cell);
+        for delta in NATURAL_TREE_NEIGHBORS {
+            let Some(neighbor) = checked_tree_cell_add(cell, delta) else {
+                continue;
+            };
+            if visited.insert(neighbor)
+                && world.voxel_at(neighbor.x, neighbor.y, neighbor.z) == wood_voxel
+                && sketch_links.links_for_cell(neighbor).is_empty()
+            {
+                frontier.push_back(neighbor);
+            }
+        }
+    }
+    component.sort_unstable_by_key(|cell| (cell.x, cell.y, cell.z));
+    Some(component)
+}
+
+fn natural_tree_wood_from_foliage(
+    world: &VoxelWorld,
+    sketch_links: &crate::sketch_model::SketchVoxelLinkIndex,
+    hit: IVec3,
+    foliage_voxel: Voxel,
+) -> Option<Vec<IVec3>> {
+    if !natural_tree_foliage(foliage_voxel) || !sketch_links.links_for_cell(hit).is_empty() {
+        return None;
+    }
+    let mut visited = AHashSet::from_iter([hit]);
+    let mut frontier = VecDeque::from([(hit, 0_u16)]);
+    let mut contact_distance = None;
+    let mut wood_contacts = AHashSet::new();
+    while let Some((cell, distance)) = frontier.pop_front() {
+        if contact_distance.is_some_and(|contact| distance >= contact) {
+            continue;
+        }
+        if visited.len() > NATURAL_TREE_CELL_CAP || distance >= NATURAL_TREE_CANOPY_PATH_CAP {
+            continue;
+        }
+        for delta in NATURAL_TREE_NEIGHBORS {
+            let Some(neighbor) = checked_tree_cell_add(cell, delta) else {
+                continue;
+            };
+            let voxel = world.voxel_at(neighbor.x, neighbor.y, neighbor.z);
+            if natural_tree_wood(voxel) && sketch_links.links_for_cell(neighbor).is_empty() {
+                contact_distance = Some(distance + 1);
+                wood_contacts.insert(neighbor);
+            } else if voxel == foliage_voxel
+                && sketch_links.links_for_cell(neighbor).is_empty()
+                && visited.insert(neighbor)
+            {
+                frontier.push_back((neighbor, distance + 1));
+            }
+        }
+    }
+    let first = wood_contacts
+        .iter()
+        .copied()
+        .min_by_key(|cell| (cell.x, cell.y, cell.z))?;
+    let component = natural_tree_wood_component(world, sketch_links, first)?;
+    let component_set: AHashSet<_> = component.iter().copied().collect();
+    wood_contacts
+        .iter()
+        .all(|contact| component_set.contains(contact))
+        .then_some(component)
+}
+
+fn foliage_distances(foliage: &AHashMap<IVec3, Voxel>, sources: &[IVec3]) -> AHashMap<IVec3, u16> {
+    let mut distances = AHashMap::new();
+    let mut frontier = VecDeque::new();
+    for source in sources.iter().copied() {
+        frontier.push_back((source, 0_u16));
+    }
+    while let Some((cell, distance)) = frontier.pop_front() {
+        if distance >= NATURAL_TREE_CANOPY_PATH_CAP {
+            continue;
+        }
+        let next_distance = distance + 1;
+        for delta in NATURAL_TREE_NEIGHBORS {
+            let Some(neighbor) = checked_tree_cell_add(cell, delta) else {
+                continue;
+            };
+            if !foliage.contains_key(&neighbor)
+                || distances
+                    .get(&neighbor)
+                    .is_some_and(|known| *known <= next_distance)
+            {
+                continue;
+            }
+            distances.insert(neighbor, next_distance);
+            frontier.push_back((neighbor, next_distance));
+        }
+    }
+    distances
+}
+
+fn natural_tree_wood(voxel: Voxel) -> bool {
+    matches!(
+        BlockType::from_voxel(voxel),
+        BlockType::Wood | BlockType::Bamboo
+    )
+}
+
+fn checked_tree_cell_add(cell: IVec3, delta: IVec3) -> Option<IVec3> {
+    Some(IVec3::new(
+        cell.x.checked_add(delta.x)?,
+        cell.y.checked_add(delta.y)?,
+        cell.z.checked_add(delta.z)?,
+    ))
+}
+
+fn checked_tree_cell_sub(cell: IVec3, delta: IVec3) -> Option<IVec3> {
+    Some(IVec3::new(
+        cell.x.checked_sub(delta.x)?,
+        cell.y.checked_sub(delta.y)?,
+        cell.z.checked_sub(delta.z)?,
+    ))
+}
+
+fn natural_tree_foliage(voxel: Voxel) -> bool {
+    matches!(
+        BlockType::from_voxel(voxel),
+        BlockType::Leaves | BlockType::JungleLeaves | BlockType::BlossomLeaves
+    )
+}
+
+fn semantic_select_input_active(
+    build_live: bool,
+    active_editor_tool: EditorToolId,
+    left_just_pressed: bool,
+    pointer_over_editor_ui: bool,
+) -> bool {
+    build_live
+        && left_just_pressed
+        && !pointer_over_editor_ui
+        && active_editor_tool == EditorToolId::Select
+}
+
+fn apply_semantic_selection_click(
+    tool_controller: &mut crate::sketch_model::ToolController,
+    hover: Option<&crate::sketch_model::HitRecord>,
+    additive: bool,
+) -> crate::sketch_model::SelectionUpdate {
+    if let Some(hit) = hover {
+        tool_controller.select_hit(hit, additive)
+    } else if additive {
+        crate::sketch_model::SelectionUpdate::Ignored
+    } else {
+        tool_controller.clear_selection()
+    }
 }
 
 pub fn reference_input(
@@ -264,23 +972,25 @@ pub fn reference_input(
     mouse: Res<ButtonInput<MouseButton>>,
     mode: Res<ModeContext>,
     drag: Res<PushPullDrag>,
+    tool_controller: Res<ToolController>,
     world: Res<VoxelWorld>,
     cam_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
     mut reference: ResMut<PushPullReference>,
     mut toolbelt: ResMut<ToolbeltState>,
 ) {
-    if !sculpt_active(&mode, &keys, drag.active) || drag.active {
+    if !sculpt_active(&mode, tool_controller.active_tool()) || drag.active {
         return;
     }
 
     if keys.just_pressed(KeyCode::Escape) && reference.start.is_some() {
         reference.clear();
         toolbelt.status =
-            "Push reference cleared. RMB sets corner A, RMB again sets target corner B.".into();
+            "Push reference cleared. Ctrl+MMB sets A, then B; RMB always orbits.".into();
         return;
     }
 
-    if !mouse.just_pressed(MouseButton::Right) {
+    let ctrl_held = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    if !(ctrl_held && mouse.just_pressed(MouseButton::Middle)) {
         return;
     }
 
@@ -305,7 +1015,7 @@ pub fn reference_input(
         reference.start = Some(point);
         reference.end = None;
         toolbelt.status = format!(
-            "Push reference A set at {} {}. RMB another endpoint/midpoint/face center for B.",
+            "Push reference A set at {} {}. Ctrl+MMB another endpoint/midpoint/face center for B.",
             point.kind.label(),
             fmt_point(point.point)
         );
@@ -472,7 +1182,6 @@ fn project_screen_dir(
 /// click anchor, and the screen-space normal.
 #[allow(clippy::too_many_arguments)]
 pub fn begin_drag(
-    keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mode: Res<ModeContext>,
     mut toolbelt: ResMut<ToolbeltState>,
@@ -482,11 +1191,12 @@ pub fn begin_drag(
     cam_q: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<Player>)>,
     mut gesture_lock: ResMut<BuildGestureLock>,
     mut drag: ResMut<PushPullDrag>,
+    mut tool_controller: ResMut<ToolController>,
 ) {
     if drag.active {
         return;
     }
-    if !sculpt_active(&mode, &keys, drag.active) {
+    if !sculpt_active(&mode, tool_controller.active_tool()) {
         return;
     }
     if !mouse.just_pressed(MouseButton::Left) {
@@ -543,33 +1253,31 @@ pub fn begin_drag(
         .map(|d| screen_dir.normalize_or_zero() * d as f32 * PIXELS_PER_VOXEL)
         .unwrap_or(Vec2::ZERO);
     drag.motion_len = 0.0;
+    drag.click_finish = true;
+    drag.tool_generation = tool_controller.tool_generation();
     drag.last_d = 0;
     drag.reference_d = reference_d;
     drag.preview.clear();
     gesture_lock.lock(PUSH_PULL_OWNER);
-    toolbelt.status = if mode.build_tool() == Some(ToolbeltTool::DrawRect) {
-        format!(
-            "Quick Push/Pull started: {} cells locked. Hold RMB to orbit without changing depth; LMB release commits.",
-            drag.face_cells.len()
-        )
-    } else if let Some(d) = reference_d {
+    tool_controller.begin_transaction("Push/Pull preview");
+    toolbelt.status = if let Some(d) = reference_d {
         if reference_raw != reference_d {
             format!(
-                "Push Pull Face started with reference snap {d:+} layers (capped at {max_d}). Drag to tune or release to commit."
+                "Push Pull Face started with reference snap {d:+} layers (capped at {max_d}). Move to tune; click to commit."
             )
         } else {
             format!(
-                "Push Pull Face started with reference snap {d:+} layers. Drag to tune or release to commit."
+                "Push Pull Face started with reference snap {d:+} layers. Move to tune; click to commit."
             )
         }
     } else if face.clipped {
         format!(
-            "Push Pull Face started: {} cells locked (face capped). Drag LMB to extrude/cut; hold RMB to orbit; Esc cancels.",
+            "Push Pull Face started: {} cells locked (face capped). Move to extrude/cut; click to commit; RMB orbits; Esc cancels.",
             drag.face_cells.len()
         )
     } else {
         format!(
-            "Push Pull Face started: {} cells locked. Drag LMB to extrude/cut; hold RMB to orbit; Esc cancels.",
+            "Push Pull Face started: {} cells locked. Move to extrude/cut; click to commit; RMB orbits; Esc cancels.",
             drag.face_cells.len()
         )
     };
@@ -587,6 +1295,7 @@ pub fn update_drag(
     mut state: ResMut<SculptState>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut gesture_lock: ResMut<BuildGestureLock>,
+    mut tool_controller: ResMut<ToolController>,
 ) {
     if !drag.active {
         // Drain the queue so events don't pile up between drags.
@@ -596,10 +1305,25 @@ pub fn update_drag(
     }
 
     gesture_lock.lock(PUSH_PULL_OWNER);
-    if !sculpt_active(&mode, &keys, drag.active) {
+    if pushpull_should_cancel_for_tool_selection(&drag, tool_controller.tool_generation()) {
+        revert_preview(&mut world, &mut drag);
+        state.status = "Sculpt: cancelled by toolbox switch.".into();
+        toolbelt.status =
+            "Push Pull Face cancelled. Toolbox switched tools; preview reverted.".into();
+        tool_controller
+            .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolboxClick);
+        drag.clear();
+        gesture_lock.release(PUSH_PULL_OWNER);
+        motion_evr.clear();
+        return;
+    }
+
+    if !sculpt_active(&mode, tool_controller.active_tool()) {
         revert_preview(&mut world, &mut drag);
         state.status = "Sculpt: cancelled by tool switch.".into();
         toolbelt.status = "Push Pull Face cancelled by tool switch. Preview reverted.".into();
+        tool_controller
+            .cancel_active_operation(crate::sketch_model::EditorCancelReason::ToolSwitch);
         drag.clear();
         gesture_lock.release(PUSH_PULL_OWNER);
         motion_evr.clear();
@@ -613,6 +1337,7 @@ pub fn update_drag(
         revert_preview(&mut world, &mut drag);
         state.status = "Sculpt: cancelled.".into();
         toolbelt.status = "Push Pull Face cancelled. Preview reverted.".into();
+        tool_controller.cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
         drag.clear();
         gesture_lock.release(PUSH_PULL_OWNER);
         motion_evr.clear();
@@ -622,7 +1347,7 @@ pub fn update_drag(
     if !pushpull_drag_accepts_motion(mouse.pressed(MouseButton::Right)) {
         state.status = "Sculpt: orbiting; Push/Pull depth held.".into();
         toolbelt.status =
-            "Push Pull Face held while orbiting. Release RMB to keep tuning, release LMB to commit."
+            "Push Pull Face held while orbiting. Release RMB to keep tuning; click to commit."
                 .into();
         motion_evr.clear();
         return;
@@ -685,13 +1410,16 @@ pub fn update_drag(
     };
     toolbelt.status = if capped {
         format!(
-            "Push Pull Face preview capped at {} layers: {}. Release LMB to commit.",
-            max_d, state.status
+            "Push Pull Face preview capped at {} layers: {}. {}",
+            max_d,
+            state.status,
+            pushpull_commit_hint(drag.click_finish)
         )
     } else {
         format!(
-            "Push Pull Face preview: {}. Release LMB to commit.",
-            state.status
+            "Push Pull Face preview: {}. {}",
+            state.status,
+            pushpull_commit_hint(drag.click_finish)
         )
     };
 }
@@ -702,6 +1430,30 @@ fn pushpull_drag_cancel_requested(escape_just: bool, _right_just: bool) -> bool 
 
 fn pushpull_drag_accepts_motion(right_held: bool) -> bool {
     !right_held
+}
+
+fn pushpull_should_cancel_for_tool_selection(drag: &PushPullDrag, current_generation: u64) -> bool {
+    drag.active && drag.tool_generation != current_generation
+}
+
+fn pushpull_commit_requested(
+    click_finish: bool,
+    left_just_pressed: bool,
+    left_just_released: bool,
+) -> bool {
+    if click_finish {
+        left_just_pressed
+    } else {
+        left_just_released
+    }
+}
+
+fn pushpull_commit_hint(click_finish: bool) -> &'static str {
+    if click_finish {
+        "Click again to commit."
+    } else {
+        "Release LMB to commit."
+    }
 }
 
 fn preview_distance_cap(face_cells: usize) -> i32 {
@@ -781,22 +1533,30 @@ pub fn end_drag(
     mut state: ResMut<SculptState>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut gesture_lock: ResMut<BuildGestureLock>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
 ) {
     if !drag.active {
         return;
     }
-    if !mouse.just_released(MouseButton::Left) {
+    if !pushpull_commit_requested(
+        drag.click_finish,
+        mouse.just_pressed(MouseButton::Left),
+        mouse.just_released(MouseButton::Left),
+    ) {
         return;
     }
 
     if drag.preview.is_empty() || drag.last_d == 0 {
-        if drag.motion_len <= TAP_CLEANUP_MAX_MOTION_PX {
+        if !drag.click_finish && drag.motion_len <= TAP_CLEANUP_MAX_MOTION_PX {
             if commit_tap_cleanup(
                 &mut world,
                 &mut drag,
                 &mut history,
                 &mut state,
                 &mut toolbelt,
+                &mut tool_controller,
             ) {
                 gesture_lock.release(PUSH_PULL_OWNER);
                 return;
@@ -804,6 +1564,7 @@ pub fn end_drag(
         }
         drag.clear();
         gesture_lock.release(PUSH_PULL_OWNER);
+        tool_controller.cancel_active_operation(crate::sketch_model::EditorCancelReason::Escape);
         state.status = "Sculpt: cancelled.".into();
         toolbelt.status =
             "Push Pull Face cancelled: no extrusion distance. Tap small leftovers to clean them."
@@ -829,11 +1590,156 @@ pub fn end_drag(
         }
     }
     let n = changes.len();
-    history.record_external(&label, changes);
+    let changed_cells: Vec<_> = changes.iter().map(|(pos, _, _)| *pos).collect();
+    let sketch_meta = if n > 0 {
+        record_pushpull_semantics_for_history(
+            &drag,
+            &changed_cells,
+            &mut sketch_doc,
+            &mut sketch_links,
+        )
+    } else {
+        None
+    };
+    history.record_external_with_sketch_meta(&label, changes, sketch_meta);
+    if n > 0 {
+        tool_controller.begin_transaction(label.clone());
+        let _ = tool_controller.commit_transaction();
+    }
     state.status = format!("{label}: {n} Voxel committed.");
     toolbelt.status = state.status.clone();
     drag.clear();
     gesture_lock.release(PUSH_PULL_OWNER);
+}
+
+fn record_pushpull_semantics_for_history(
+    drag: &PushPullDrag,
+    changed_cells: &[IVec3],
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+) -> Option<BuilderHistorySketchMeta> {
+    let undo_count_before = sketch_doc.undo_count();
+    let records = match record_pushpull_semantics(drag, sketch_doc) {
+        Ok(records) => records,
+        Err(error) => {
+            warn!("sketch model: could not record push/pull semantic extrusion: {error}");
+            return None;
+        }
+    };
+    if records.is_empty() {
+        return None;
+    }
+    let document_steps = sketch_doc.undo_count().saturating_sub(undo_count_before);
+    if document_steps == 0 {
+        return None;
+    }
+    register_pushpull_semantic_links(
+        drag,
+        changed_cells,
+        sketch_doc.active_context(),
+        &records,
+        sketch_links,
+    );
+    Some(BuilderHistorySketchMeta::SketchCreated {
+        link_snapshots: sketch_links.snapshot_entities(records.iter().map(|(entity, _)| *entity)),
+        document_steps,
+    })
+}
+
+fn record_pushpull_semantics(
+    drag: &PushPullDrag,
+    sketch_doc: &mut crate::sketch_model::SketchDocument,
+) -> Result<
+    Vec<(
+        crate::sketch_model::SketchId,
+        crate::sketch_model::SketchVoxelLinkRole,
+    )>,
+    crate::sketch_model::SketchModelError,
+> {
+    if drag.face_cells.is_empty() || drag.last_d == 0 {
+        return Ok(Vec::new());
+    }
+    let Some((origin, axis_u, axis_v)) = pushpull_semantic_face_axes(drag) else {
+        return Ok(Vec::new());
+    };
+    let (face, extrusion) = sketch_doc.record_push_pull_face(
+        sketch_doc.active_context(),
+        origin,
+        axis_u,
+        axis_v,
+        drag.last_d as f32,
+        "Push/Pull semantic",
+    )?;
+    Ok(vec![
+        (face, crate::sketch_model::SketchVoxelLinkRole::Face),
+        (
+            extrusion,
+            crate::sketch_model::SketchVoxelLinkRole::Extrusion,
+        ),
+    ])
+}
+
+fn register_pushpull_semantic_links(
+    drag: &PushPullDrag,
+    changed_cells: &[IVec3],
+    context: crate::sketch_model::SketchId,
+    records: &[(
+        crate::sketch_model::SketchId,
+        crate::sketch_model::SketchVoxelLinkRole,
+    )],
+    sketch_links: &mut crate::sketch_model::SketchVoxelLinkIndex,
+) {
+    for (entity, role) in records {
+        let link = crate::sketch_model::SketchVoxelLink::new(*entity, context, *role);
+        match role {
+            crate::sketch_model::SketchVoxelLinkRole::Face => {
+                sketch_links.link_face_cells(drag.face_cells.iter().copied(), drag.normal, link);
+            }
+            crate::sketch_model::SketchVoxelLinkRole::Extrusion => {
+                sketch_links.link_cells(changed_cells.iter().copied(), link);
+            }
+            _ => {
+                sketch_links.link_cells(changed_cells.iter().copied(), link);
+            }
+        }
+    }
+}
+
+fn pushpull_semantic_face_axes(drag: &PushPullDrag) -> Option<(Vec3, Vec3, Vec3)> {
+    let normal_axis = normal_axis(drag.normal)?;
+    let plane_axes: Vec<_> = (0..3).filter(|axis| *axis != normal_axis).collect();
+    let u_axis = plane_axes[0];
+    let v_axis = plane_axes[1];
+    let normal_sign = ivec_component(drag.normal, normal_axis).signum();
+
+    let first = *drag.face_cells.first()?;
+    let mut min = first;
+    let mut max = first;
+    for cell in &drag.face_cells {
+        min = min.min(*cell);
+        max = max.max(*cell);
+    }
+
+    let plane = if normal_sign > 0 {
+        ivec_component(max, normal_axis) as f32 + 1.0
+    } else {
+        ivec_component(min, normal_axis) as f32
+    };
+    let u0 = ivec_component(min, u_axis) as f32;
+    let v0 = ivec_component(min, v_axis) as f32;
+    let u_len = (ivec_component(max, u_axis) - ivec_component(min, u_axis) + 1) as f32;
+    let v_len = (ivec_component(max, v_axis) - ivec_component(min, v_axis) + 1) as f32;
+
+    let origin = face_point(normal_axis, plane, u_axis, u0, v_axis, v0);
+    let mut axis_u = Vec3::ZERO;
+    axis_u = set_vec_component(axis_u, u_axis, u_len);
+    let mut axis_v = Vec3::ZERO;
+    axis_v = set_vec_component(axis_v, v_axis, v_len);
+
+    if axis_u.cross(axis_v).dot(drag.normal.as_vec3()) < 0.0 {
+        std::mem::swap(&mut axis_u, &mut axis_v);
+    }
+    Some((origin, axis_u, axis_v))
 }
 
 fn commit_tap_cleanup(
@@ -842,6 +1748,7 @@ fn commit_tap_cleanup(
     history: &mut BuilderHistory,
     state: &mut SculptState,
     toolbelt: &mut ToolbeltState,
+    tool_controller: &mut crate::sketch_model::ToolController,
 ) -> bool {
     if drag.face_cells.is_empty() {
         return false;
@@ -849,7 +1756,7 @@ fn commit_tap_cleanup(
     if drag.face_cells.len() > TAP_CLEANUP_FACE_CAP {
         state.status = "Sculpt: tap cleanup skipped; face is too large.".into();
         toolbelt.status = format!(
-            "Tap cleanup protects large faces: {} cells > {}. Drag Push/Pull to edit this surface.",
+            "Tap cleanup protects large faces: {} cells > {}. Use Push/Pull click-move-click to edit this surface.",
             drag.face_cells.len(),
             TAP_CLEANUP_FACE_CAP
         );
@@ -884,7 +1791,10 @@ fn commit_tap_cleanup(
     }
 
     let changed = changes.len();
-    history.record_external(format!("Tap cleanup {} cells", changed), changes);
+    let label = format!("Tap cleanup {} cells", changed);
+    history.record_external(label.clone(), changes);
+    tool_controller.begin_transaction(label);
+    let _ = tool_controller.commit_transaction();
     drag.clear();
     state.status = format!("Tap cleanup removed {changed} leftover cells. Ctrl+Z undo.");
     toolbelt.status = state.status.clone();
@@ -904,6 +1814,10 @@ pub fn universal_undo_input(
     mut toolbelt: ResMut<ToolbeltState>,
     mut mode: ResMut<ModeContext>,
     drag: Res<PushPullDrag>,
+    mut tool_controller: ResMut<crate::sketch_model::ToolController>,
+    mut semantic_hover: ResMut<crate::sketch_model::SemanticHoverHit>,
+    mut sketch_doc: ResMut<crate::sketch_model::SketchDocument>,
+    mut sketch_links: ResMut<crate::sketch_model::SketchVoxelLinkIndex>,
 ) {
     // Don't undo mid-drag — the preview owns the world's current state.
     if drag.active {
@@ -914,20 +1828,50 @@ pub fn universal_undo_input(
         return;
     }
     if keys.just_pressed(KeyCode::KeyZ) {
-        state.status = match history.pop_undo(&mut world) {
-            Some((label, n)) => format!("Undo '{label}': {n} Voxel."),
-            None => "Undo: nichts vorhanden.".into(),
+        let undone = history.undo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links);
+        if undone.as_ref().is_ok_and(|step| step.is_some()) {
+            clear_stale_editor_selection_after_history_step(
+                &mut tool_controller,
+                &mut semantic_hover,
+            );
+        }
+        state.status = match undone {
+            Ok(Some(step)) => format!("Undo '{}': {} Voxel.", step.label, step.voxel_count),
+            Ok(None) => "Undo: nothing to restore.".into(),
+            Err(step) => format!(
+                "Undo '{}' blocked: semantic history mismatch; world left unchanged.",
+                step.label
+            ),
         };
         toolbelt.status = state.status.clone();
         mode.status = state.status.clone();
     } else if keys.just_pressed(KeyCode::KeyY) || keys.just_pressed(KeyCode::KeyR) {
-        state.status = match history.pop_redo(&mut world) {
-            Some((label, n)) => format!("Redo '{label}': {n} Voxel."),
-            None => "Redo: nichts vorhanden.".into(),
+        let redone = history.redo_with_sketch(&mut world, &mut sketch_doc, &mut sketch_links);
+        if redone.as_ref().is_ok_and(|step| step.is_some()) {
+            clear_stale_editor_selection_after_history_step(
+                &mut tool_controller,
+                &mut semantic_hover,
+            );
+        }
+        state.status = match redone {
+            Ok(Some(step)) => format!("Redo '{}': {} Voxel.", step.label, step.voxel_count),
+            Ok(None) => "Redo: nothing to restore.".into(),
+            Err(step) => format!(
+                "Redo '{}' blocked: semantic history mismatch; world left unchanged.",
+                step.label
+            ),
         };
         toolbelt.status = state.status.clone();
         mode.status = state.status.clone();
     }
+}
+
+fn clear_stale_editor_selection_after_history_step(
+    tool_controller: &mut crate::sketch_model::ToolController,
+    semantic_hover: &mut crate::sketch_model::SemanticHoverHit,
+) {
+    let _ = tool_controller.clear_selection_context();
+    semantic_hover.0 = None;
 }
 
 /// Draw the boundary outline of the current hover face. We trace just
@@ -1081,11 +2025,231 @@ mod tests {
     use super::*;
     use crate::blocks::BlockType;
 
+    fn world_with_tree_voxels(entries: &[(IVec3, BlockType)]) -> VoxelWorld {
+        let mut world = VoxelWorld::new();
+        let mut batch = WorldEditBatch::default();
+        for (cell, block) in entries.iter().copied() {
+            world.edit_set_voxel_batched(cell.x, cell.y, cell.z, Voxel::from(block), &mut batch);
+        }
+        world.finish_edit_batch(batch);
+        world
+    }
+
+    #[test]
+    fn natural_tree_foliage_path_beats_geometrically_closer_wood_across_air_gap() {
+        let mut entries = Vec::new();
+        for y in 0..=2 {
+            entries.push((IVec3::new(5, y, 0), BlockType::Wood));
+            entries.push((IVec3::new(0, y, 2), BlockType::Wood));
+        }
+        for x in 0..=4 {
+            entries.push((IVec3::new(x, 2, 0), BlockType::Leaves));
+        }
+        let world = world_with_tree_voxels(&entries);
+        let links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        let hit = IVec3::new(0, 2, 0);
+
+        let parts = collect_natural_tree_parts(&world, &links, hit)
+            .expect("the connected canopy path should identify its actual trunk");
+        let wood = parts
+            .get(&Voxel::from(BlockType::Wood))
+            .expect("tree should contain a wood part");
+        let leaves = parts
+            .get(&Voxel::from(BlockType::Leaves))
+            .expect("tree should contain its connected canopy");
+
+        assert!(wood.contains(&IVec3::new(5, 0, 0)));
+        assert!(wood.contains(&IVec3::new(5, 2, 0)));
+        assert!(
+            !wood.contains(&IVec3::new(0, 2, 2)),
+            "closer wood separated by an air gap must not steal the canopy"
+        );
+        assert!(leaves.contains(&hit));
+    }
+
+    #[test]
+    fn touching_canopies_partition_by_path_distance_and_ties_fail_closed() {
+        let mut entries = Vec::new();
+        for y in 0..=1 {
+            entries.push((IVec3::new(-3, y, 0), BlockType::Wood));
+            entries.push((IVec3::new(3, y, 0), BlockType::Wood));
+        }
+        for x in -2..=2 {
+            entries.push((IVec3::new(x, 1, 0), BlockType::Leaves));
+        }
+        let world = world_with_tree_voxels(&entries);
+        let links = crate::sketch_model::SketchVoxelLinkIndex::default();
+
+        let left_parts = collect_natural_tree_parts(&world, &links, IVec3::new(-3, 0, 0))
+            .expect("left trunk should remain a valid tree");
+        let left_leaves = left_parts
+            .get(&Voxel::from(BlockType::Leaves))
+            .expect("left tree should own the nearer canopy cells");
+        assert!(left_leaves.contains(&IVec3::new(-2, 1, 0)));
+        assert!(left_leaves.contains(&IVec3::new(-1, 1, 0)));
+        assert!(
+            !left_leaves.contains(&IVec3::new(0, 1, 0)),
+            "a canopy cell tied between two trunks must remain unowned"
+        );
+        assert!(!left_leaves.contains(&IVec3::new(1, 1, 0)));
+
+        assert!(
+            collect_natural_tree_parts(&world, &links, IVec3::new(0, 1, 0)).is_none(),
+            "selecting the exact touching-canopy tie must fail closed instead of picking a tree arbitrarily"
+        );
+    }
+
+    #[test]
+    fn natural_tree_registration_is_idempotent_and_groups_wood_with_foliage() {
+        let entries = [
+            (IVec3::new(10, 0, 0), BlockType::Wood),
+            (IVec3::new(10, 1, 0), BlockType::Wood),
+            (IVec3::new(10, 2, 0), BlockType::Wood),
+            (IVec3::new(10, 3, 0), BlockType::Leaves),
+            (IVec3::new(9, 3, 0), BlockType::Leaves),
+            (IVec3::new(11, 3, 0), BlockType::Leaves),
+        ];
+        let world = world_with_tree_voxels(&entries);
+        let mut doc = crate::sketch_model::SketchDocument::new();
+        let mut links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        let foliage_hit_cell = IVec3::new(10, 3, 0);
+
+        let foliage_hit =
+            register_natural_tree_object(&world, &mut doc, &mut links, foliage_hit_cell)
+                .expect("first foliage click should register the natural tree");
+        let members = doc.object_members_for_entity(foliage_hit.entity);
+        assert_eq!(
+            members.len(),
+            2,
+            "wood and leaves should be two grouped parts"
+        );
+        assert!(members.iter().all(|entity| {
+            doc.entity_attribute(*entity, "voxel_native", "object_id")
+                .ok()
+                .flatten()
+                .is_some_and(|object_id| object_id == "natural-tree/10/0/0")
+        }));
+        assert!(members
+            .iter()
+            .all(|entity| !links.cells_for_entity(*entity).is_empty()));
+
+        let entity_count = doc
+            .context(doc.active_context())
+            .expect("active context")
+            .entities
+            .len();
+        let repeated_foliage_hit =
+            register_natural_tree_object(&world, &mut doc, &mut links, foliage_hit_cell)
+                .expect("registered foliage should resolve to its existing part");
+        let wood_hit =
+            register_natural_tree_object(&world, &mut doc, &mut links, IVec3::new(10, 0, 0))
+                .expect("registered wood should resolve to its existing part");
+
+        assert_eq!(repeated_foliage_hit.entity, foliage_hit.entity);
+        assert_ne!(wood_hit.entity, foliage_hit.entity);
+        assert_eq!(
+            doc.context(doc.active_context())
+                .expect("active context")
+                .entities
+                .len(),
+            entity_count,
+            "re-registering linked tree cells must not create duplicate semantic entities"
+        );
+        assert_eq!(doc.object_members_for_entity(wood_hit.entity), members);
+    }
+
     #[test]
     fn preview_distance_cap_scales_with_face_size() {
         assert_eq!(preview_distance_cap(1), 128);
         assert!(preview_distance_cap(16_384) < 32);
         assert!(preview_distance_cap(1_000_000) >= 1);
+    }
+
+    #[test]
+    fn semantic_hover_runs_for_every_canonical_pointer_tool() {
+        for tool in [
+            EditorToolId::Select,
+            EditorToolId::Pencil,
+            EditorToolId::Rectangle,
+            EditorToolId::PushPull,
+            EditorToolId::Move,
+            EditorToolId::Scale,
+            EditorToolId::Rotate,
+            EditorToolId::Room,
+            EditorToolId::CutOpening,
+            EditorToolId::Road,
+            EditorToolId::BotArea,
+            EditorToolId::Material,
+        ] {
+            assert!(editor_tool_needs_semantic_hover(tool), "{tool:?}");
+        }
+        assert!(legacy_crosshair_tool(Some(ToolbeltTool::BrushPlace)));
+        assert!(legacy_crosshair_tool(Some(ToolbeltTool::BrushCut)));
+        assert!(!legacy_crosshair_tool(Some(ToolbeltTool::DrawRect)));
+    }
+
+    #[test]
+    fn semantic_hover_uses_visible_pointer_for_mouse_first_editor_tools() {
+        assert!(semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::DrawRect),
+            crate::sketch_model::EditorToolId::Rectangle,
+            false
+        ));
+        assert!(semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::Navigate),
+            crate::sketch_model::EditorToolId::Select,
+            false
+        ));
+        assert!(semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::TransformMove),
+            crate::sketch_model::EditorToolId::Move,
+            false
+        ));
+        assert!(semantic_hover_uses_pointer_ray(
+            Some(ToolbeltTool::Sculpt),
+            crate::sketch_model::EditorToolId::PushPull,
+            false
+        ));
+        assert!(
+            semantic_hover_uses_pointer_ray(
+                Some(ToolbeltTool::DrawRect),
+                crate::sketch_model::EditorToolId::Rectangle,
+                true
+            ),
+            "a confined but visible Windows cursor is still the editor pointer"
+        );
+    }
+
+    #[test]
+    fn semantic_hover_crosshair_fallback_is_disabled_for_mouse_first_editor_tools() {
+        assert!(!semantic_hover_allows_crosshair_fallback(
+            Some(ToolbeltTool::DrawRect),
+            crate::sketch_model::EditorToolId::Rectangle,
+            false
+        ));
+        assert!(!semantic_hover_allows_crosshair_fallback(
+            Some(ToolbeltTool::TransformMove),
+            crate::sketch_model::EditorToolId::Move,
+            false
+        ));
+        assert!(!semantic_hover_allows_crosshair_fallback(
+            Some(ToolbeltTool::MaterialPicker),
+            crate::sketch_model::EditorToolId::Material,
+            false
+        ));
+        assert!(semantic_hover_allows_crosshair_fallback(
+            Some(ToolbeltTool::BrushPlace),
+            crate::sketch_model::EditorToolId::Pencil,
+            false
+        ));
+        assert!(
+            !semantic_hover_allows_crosshair_fallback(
+                Some(ToolbeltTool::DrawRect),
+                crate::sketch_model::EditorToolId::Rectangle,
+                true
+            ),
+            "mouse-first editor tools must not jump back to the crosshair when Windows confines the cursor"
+        );
     }
 
     #[test]
@@ -1144,6 +2308,272 @@ mod tests {
     }
 
     #[test]
+    fn pushpull_commit_records_semantic_extrusion_with_undo() {
+        let stone = Voxel::from(BlockType::Stone);
+        let drag = PushPullDrag {
+            active: true,
+            face_cells: vec![IVec3::ZERO, IVec3::X],
+            normal: IVec3::Y,
+            voxel: stone,
+            anchor_world: Vec3::ZERO,
+            screen_dir: Vec2::X,
+            motion_accum: Vec2::ZERO,
+            motion_len: 24.0,
+            click_finish: true,
+            tool_generation: 0,
+            last_d: 3,
+            reference_d: None,
+            preview: AHashMap::new(),
+        };
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+
+        let records = record_pushpull_semantics(&drag, &mut sketch_doc)
+            .expect("semantic push/pull should record");
+        assert_eq!(records.len(), 2);
+        let extrusion = records
+            .iter()
+            .find_map(|(entity, role)| {
+                (*role == crate::sketch_model::SketchVoxelLinkRole::Extrusion).then_some(*entity)
+            })
+            .expect("positive push/pull distance should create extrusion");
+
+        let ids = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .clone();
+        assert_eq!(ids.len(), 2);
+        let source_face = ids[0];
+        assert_eq!(ids[1], extrusion);
+        assert!(records.iter().any(|(entity, role)| {
+            *entity == source_face && *role == crate::sketch_model::SketchVoxelLinkRole::Face
+        }));
+        assert!(matches!(
+            &sketch_doc.entity(source_face).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::Face { vertices, normal }
+                if vertices[0] == Vec3::new(0.0, 1.0, 0.0)
+                    && vertices[2] == Vec3::new(2.0, 1.0, 1.0)
+                    && *normal == Vec3::Y
+        ));
+        assert!(matches!(
+            &sketch_doc.entity(extrusion).unwrap().kind,
+            crate::sketch_model::SketchEntityKind::PushPullExtrusion { source_face: got, depth, .. }
+                if *got == source_face && (*depth - 3.0).abs() < f32::EPSILON
+        ));
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        register_pushpull_semantic_links(
+            &drag,
+            &[IVec3::new(0, 1, 0), IVec3::new(1, 1, 0)],
+            sketch_doc.active_context(),
+            &records,
+            &mut sketch_links,
+        );
+        assert!(sketch_links
+            .links_for_face(IVec3::ZERO, IVec3::Y)
+            .iter()
+            .any(|link| {
+                link.entity == source_face
+                    && link.role == crate::sketch_model::SketchVoxelLinkRole::Face
+            }));
+        assert!(sketch_links
+            .links_for_cell(IVec3::new(0, 1, 0))
+            .iter()
+            .any(|link| {
+                link.entity == extrusion
+                    && link.role == crate::sketch_model::SketchVoxelLinkRole::Extrusion
+            }));
+
+        let undone = sketch_doc
+            .undo_last()
+            .expect("undo pushpull semantic batch");
+        assert_eq!(undone.label, "Push/Pull semantic");
+        assert_eq!(undone.entity_count, 2);
+        assert!(ids.iter().all(|id| sketch_doc.entity(*id).is_none()));
+
+        let redone = sketch_doc
+            .redo_last()
+            .expect("redo pushpull semantic batch");
+        assert_eq!(redone.entity_count, 2);
+        assert!(ids.iter().all(|id| sketch_doc.entity(*id).is_some()));
+    }
+
+    #[test]
+    fn semantic_hover_hit_uses_voxel_link_index() {
+        let stone = Voxel::from(BlockType::Stone);
+        let face = crate::sketch_model::SketchId::new_for_test(20);
+        let context = crate::sketch_model::SketchId::new_for_test(2);
+        let cell = IVec3::new(4, 5, 6);
+        let normal = IVec3::Y;
+        let mut links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        links.link_face_cell(
+            cell,
+            normal,
+            crate::sketch_model::SketchVoxelLink::new(
+                face,
+                context,
+                crate::sketch_model::SketchVoxelLinkRole::Face,
+            ),
+        );
+        let region = FaceRegion {
+            cells: vec![cell],
+            voxel: stone,
+            normal,
+            clipped: false,
+        };
+
+        let hit = semantic_hover_hit_from_region(&region, &links).expect("semantic hover hit");
+
+        assert_eq!(hit.entity, face);
+        assert_eq!(hit.kind, crate::sketch_model::HitKind::Face);
+        assert_eq!(hit.world_point, Vec3::new(4.5, 5.5, 6.5));
+        assert_eq!(hit.normal, Some(Vec3::Y));
+    }
+
+    #[test]
+    fn semantic_hover_hit_prefers_cursor_cell_inside_large_face_region() {
+        let stone = Voxel::from(BlockType::Stone);
+        let first = crate::sketch_model::SketchId::new_for_test(30);
+        let preferred = crate::sketch_model::SketchId::new_for_test(31);
+        let context = crate::sketch_model::SketchId::new_for_test(2);
+        let normal = IVec3::Y;
+        let mut links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        links.link_face_cell(
+            IVec3::new(0, 5, 0),
+            normal,
+            crate::sketch_model::SketchVoxelLink::new(
+                first,
+                context,
+                crate::sketch_model::SketchVoxelLinkRole::Face,
+            ),
+        );
+        links.link_face_cell(
+            IVec3::new(9, 5, 0),
+            normal,
+            crate::sketch_model::SketchVoxelLink::new(
+                preferred,
+                context,
+                crate::sketch_model::SketchVoxelLinkRole::Face,
+            ),
+        );
+        let region = FaceRegion {
+            cells: vec![IVec3::new(0, 5, 0), IVec3::new(9, 5, 0)],
+            voxel: stone,
+            normal,
+            clipped: false,
+        };
+
+        let hit = semantic_hover_hit_from_region_cell(&region, &links, IVec3::new(9, 5, 0))
+            .expect("preferred semantic hover hit");
+
+        assert_eq!(hit.entity, preferred);
+        assert_eq!(hit.world_point, Vec3::new(9.5, 5.5, 0.5));
+    }
+
+    #[test]
+    fn semantic_select_click_uses_hover_hit_and_respects_additive_selection() {
+        let first = crate::sketch_model::SketchId::new_for_test(10);
+        let second = crate::sketch_model::SketchId::new_for_test(11);
+        let mut controller = crate::sketch_model::ToolController::default();
+        let first_hit = crate::sketch_model::HitRecord::new(
+            first,
+            [],
+            crate::sketch_model::HitKind::Face,
+            Vec3::ZERO,
+            0.0,
+        );
+        let second_hit = crate::sketch_model::HitRecord::new(
+            second,
+            [],
+            crate::sketch_model::HitKind::Face,
+            Vec3::X,
+            0.0,
+        );
+
+        assert_eq!(
+            apply_semantic_selection_click(&mut controller, Some(&first_hit), false),
+            crate::sketch_model::SelectionUpdate::Selected(first)
+        );
+        assert_eq!(controller.selection().ordered(), &[first]);
+
+        assert_eq!(
+            apply_semantic_selection_click(&mut controller, Some(&second_hit), true),
+            crate::sketch_model::SelectionUpdate::Selected(second)
+        );
+        assert_eq!(controller.selection().ordered(), &[first, second]);
+
+        assert_eq!(
+            apply_semantic_selection_click(&mut controller, None, false),
+            crate::sketch_model::SelectionUpdate::Cleared
+        );
+        assert!(controller.selection().is_empty());
+        assert_eq!(
+            apply_semantic_selection_click(&mut controller, None, true),
+            crate::sketch_model::SelectionUpdate::Ignored
+        );
+    }
+
+    #[test]
+    fn semantic_select_input_only_runs_for_mouse_first_select_surface() {
+        assert!(semantic_select_input_active(
+            true,
+            EditorToolId::Select,
+            true,
+            false
+        ));
+        assert!(!semantic_select_input_active(
+            true,
+            EditorToolId::Rectangle,
+            true,
+            false
+        ));
+        assert!(
+            !semantic_select_input_active(
+                true,
+                EditorToolId::Move,
+                true,
+                false
+            ),
+            "Move starts a transform from the existing selection; selection clicks must not steal the same press"
+        );
+        assert!(
+            !semantic_select_input_active(true, EditorToolId::Rotate, true, false),
+            "Rotate must not have its first click reinterpreted as selection"
+        );
+        assert!(!semantic_select_input_active(
+            true,
+            EditorToolId::Select,
+            true,
+            true
+        ));
+        assert!(!semantic_select_input_active(
+            false,
+            EditorToolId::Select,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn undo_history_step_clears_stale_editor_selection_and_hover() {
+        let entity = crate::sketch_model::SketchId::new_for_test(91);
+        let mut controller = crate::sketch_model::ToolController::default();
+        controller.selection_mut().select(entity);
+        let hit = crate::sketch_model::HitRecord::new(
+            entity,
+            [],
+            crate::sketch_model::HitKind::Face,
+            Vec3::new(1.0, 2.0, 3.0),
+            0.0,
+        );
+        let mut hover = crate::sketch_model::SemanticHoverHit(Some(hit));
+
+        clear_stale_editor_selection_after_history_step(&mut controller, &mut hover);
+
+        assert!(controller.selection().is_empty());
+        assert!(hover.0.is_none());
+    }
+
+    #[test]
     fn tap_cleanup_removes_small_leftover_face_layer() {
         let mut world = VoxelWorld::new();
         let stone = Voxel::from(BlockType::Stone);
@@ -1160,6 +2590,8 @@ mod tests {
             screen_dir: Vec2::X,
             motion_accum: Vec2::ZERO,
             motion_len: 0.0,
+            click_finish: false,
+            tool_generation: 0,
             last_d: 0,
             reference_d: None,
             preview: AHashMap::new(),
@@ -1167,16 +2599,22 @@ mod tests {
         let mut history = BuilderHistory::default();
         let mut state = SculptState::default();
         let mut toolbelt = ToolbeltState::default();
+        let mut tool_controller = crate::sketch_model::ToolController::default();
 
         assert!(commit_tap_cleanup(
             &mut world,
             &mut drag,
             &mut history,
             &mut state,
-            &mut toolbelt
+            &mut toolbelt,
+            &mut tool_controller
         ));
         assert_eq!(world.voxel_at(0, 0, 0), AIR);
         assert_eq!(history.undo_len(), 1);
+        assert_eq!(
+            tool_controller.last_transaction_label(),
+            Some("Tap cleanup 1 cells")
+        );
     }
 
     #[test]
@@ -1222,6 +2660,107 @@ mod tests {
     }
 
     #[test]
+    fn pushpull_reference_points_use_shared_inference_kinds_and_tooltips() {
+        assert_eq!(
+            pushpull_inference_kind(InferenceSnapKind::Endpoint),
+            crate::sketch_model::InferenceKind::Endpoint
+        );
+        assert_eq!(
+            pushpull_inference_kind(InferenceSnapKind::Midpoint).tooltip(),
+            "Midpoint"
+        );
+        assert_eq!(
+            pushpull_inference_kind(InferenceSnapKind::FaceCenter).tooltip(),
+            "Face center"
+        );
+    }
+
+    #[test]
+    fn pushpull_history_restores_semantic_face_and_extrusion_links() {
+        let stone = Voxel::from(BlockType::Stone);
+        let drag = PushPullDrag {
+            active: true,
+            face_cells: vec![IVec3::ZERO],
+            normal: IVec3::Y,
+            voxel: stone,
+            anchor_world: Vec3::ZERO,
+            screen_dir: Vec2::X,
+            motion_accum: Vec2::ZERO,
+            motion_len: 0.0,
+            click_finish: false,
+            tool_generation: 0,
+            last_d: 2,
+            reference_d: None,
+            preview: AHashMap::new(),
+        };
+        let changed_cell = IVec3::new(0, 1, 0);
+        let mut sketch_doc = crate::sketch_model::SketchDocument::new();
+        let mut sketch_links = crate::sketch_model::SketchVoxelLinkIndex::default();
+        let meta = record_pushpull_semantics_for_history(
+            &drag,
+            &[changed_cell],
+            &mut sketch_doc,
+            &mut sketch_links,
+        )
+        .expect("push/pull semantic history meta");
+
+        let context_entities = sketch_doc
+            .context(sketch_doc.active_context())
+            .unwrap()
+            .entities
+            .clone();
+        assert_eq!(context_entities.len(), 2);
+        let face_entity = context_entities[0];
+        let extrusion_entity = context_entities[1];
+        assert!(sketch_links
+            .links_for_face(IVec3::ZERO, IVec3::Y)
+            .iter()
+            .any(|link| link.entity == face_entity));
+        assert!(sketch_links
+            .links_for_cell(changed_cell)
+            .iter()
+            .any(|link| link.entity == extrusion_entity));
+
+        let mut history = BuilderHistory::default();
+        let mut world = VoxelWorld::new();
+        history.record_external_with_sketch_meta(
+            "Push/Pull semantic test",
+            vec![(changed_cell, AIR, stone)],
+            Some(meta),
+        );
+
+        let undo_step = history
+            .pop_undo_detailed(&mut world)
+            .expect("push/pull undo step");
+        undo_step
+            .apply_sketch_undo(&mut sketch_doc, &mut sketch_links)
+            .expect("push/pull semantic undo");
+        assert!(sketch_doc.entity(face_entity).is_none());
+        assert!(sketch_doc.entity(extrusion_entity).is_none());
+        assert!(sketch_links
+            .links_for_face(IVec3::ZERO, IVec3::Y)
+            .is_empty());
+        assert!(sketch_links.links_for_cell(changed_cell).is_empty());
+
+        let redo_step = history
+            .pop_redo_detailed(&mut world)
+            .expect("push/pull redo step");
+        redo_step
+            .apply_sketch_redo(&mut sketch_doc, &mut sketch_links)
+            .expect("push/pull semantic redo");
+        assert!(sketch_doc.entity(face_entity).is_some());
+        assert!(sketch_doc.entity(extrusion_entity).is_some());
+        assert!(sketch_links
+            .links_for_face(IVec3::ZERO, IVec3::Y)
+            .iter()
+            .any(|link| link.entity == face_entity));
+        assert!(sketch_links
+            .links_for_cell(changed_cell)
+            .iter()
+            .any(|link| link.entity == extrusion_entity));
+    }
+
+    #[test]
     fn right_mouse_does_not_cancel_active_pushpull_drag() {
         assert!(
             !pushpull_drag_cancel_requested(false, true),
@@ -1237,6 +2776,24 @@ mod tests {
             "RMB orbit should move the camera without also changing Push/Pull depth"
         );
         assert!(pushpull_drag_accepts_motion(false));
+    }
+
+    #[test]
+    fn click_finish_pushpull_ignores_first_release_and_commits_on_second_click() {
+        assert!(!pushpull_commit_requested(true, false, true));
+        assert!(pushpull_commit_requested(true, true, false));
+        assert!(pushpull_commit_requested(false, false, true));
+        assert!(!pushpull_commit_requested(false, true, false));
+    }
+
+    #[test]
+    fn active_pushpull_preview_cancels_when_toolbox_selection_changes() {
+        let mut drag = PushPullDrag::default();
+        drag.active = true;
+        drag.tool_generation = 7;
+
+        assert!(pushpull_should_cancel_for_tool_selection(&drag, 8));
+        assert!(!pushpull_should_cancel_for_tool_selection(&drag, 7));
     }
 }
 

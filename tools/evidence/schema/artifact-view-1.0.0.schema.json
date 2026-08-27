@@ -1,0 +1,219 @@
+{
+  "$id": "https://voxel-native.invalid/schema/artifact-view-1.0.0.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_node_id": {
+      "pattern": "^artifact:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "artifact-view/1.0.0"
+    },
+    "sections": {
+      "items": {
+        "$ref": "#/$defs/section"
+      },
+      "maxItems": 512,
+      "type": "array"
+    },
+    "source_graph_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "title": {
+      "$ref": "#/$defs/string"
+    },
+    "view_id": {
+      "maxLength": 256,
+      "pattern": "^artifact-view:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "view_kind": {
+      "enum": [
+        "document",
+        "pdf",
+        "spreadsheet",
+        "presentation",
+        "site",
+        "visualization",
+        "github"
+      ],
+      "type": "string"
+    },
+    "view_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "required": [
+    "schema_version",
+    "view_id",
+    "view_sha256",
+    "source_graph_sha256",
+    "artifact_node_id",
+    "view_kind",
+    "title",
+    "sections"
+  ],
+  "title": "Voxel-Native Artifact View 1.0.0",
+  "type": "object",
+  "$defs": {
+    "cell": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "classification",
+              "task_state"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "source_node_ids": {
+          "$ref": "#/$defs/sourceNodeIds"
+        },
+        "task_state": {
+          "$ref": "#/$defs/taskState"
+        },
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "value",
+        "source_node_ids"
+      ],
+      "type": "object"
+    },
+    "classification": {
+      "enum": [
+        "Passed",
+        "Observed",
+        "Rejected",
+        "Planned",
+        "Blocked"
+      ],
+      "type": "string"
+    },
+    "machineId": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$",
+      "type": "string"
+    },
+    "nodeId": {
+      "maxLength": 256,
+      "pattern": "^(source_file|qa_run|observation|claim|issue|gate_run|visual_review|task|agent|artifact|external_asset|github_check):[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "row": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "classification",
+              "task_state"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "cells": {
+          "items": {
+            "$ref": "#/$defs/cell"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "id": {
+          "$ref": "#/$defs/machineId"
+        },
+        "source_node_ids": {
+          "$ref": "#/$defs/sourceNodeIds"
+        },
+        "task_state": {
+          "$ref": "#/$defs/taskState"
+        }
+      },
+      "required": [
+        "id",
+        "source_node_ids",
+        "cells"
+      ],
+      "type": "object"
+    },
+    "section": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/machineId"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/row"
+          },
+          "maxItems": 12000,
+          "type": "array"
+        },
+        "source_node_ids": {
+          "$ref": "#/$defs/sourceNodeIds"
+        },
+        "title": {
+          "$ref": "#/$defs/string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "source_node_ids",
+        "rows"
+      ],
+      "type": "object"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "sourceNodeIds": {
+      "items": {
+        "$ref": "#/$defs/nodeId"
+      },
+      "maxItems": 12000,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "string": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "type": "string"
+    },
+    "taskState": {
+      "enum": [
+        "planned",
+        "ready",
+        "running",
+        "blocked",
+        "review",
+        "complete",
+        "cancelled"
+      ],
+      "type": "string"
+    }
+  }
+}

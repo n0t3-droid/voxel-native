@@ -1,8 +1,8 @@
 //! Global Command Deck palette and keybind inspector.
 //!
 //! This is the first shared command layer: actions are described once
-//! with label, key, context and icon, then rendered as a searchable F1 /
-//! Ctrl+P overlay. Later phases can attach executable callbacks and
+//! with label, access path, context and icon, then rendered as a searchable
+//! command overlay. Later phases can attach executable callbacks and
 //! conflict-aware remapping without scattering strings through UI code.
 
 use bevy::prelude::*;
@@ -18,8 +18,9 @@ use crate::icons::{paint_icon, Icon};
 use crate::menu::{GameState, PauseScreen};
 use crate::player::{Player, PlayerProgressScratch};
 use crate::settings::{self, ActiveWorld, CompanionDockPosition, HudProfile, WorldSettings};
-use crate::theme::{command_frame, metric_pill, ThemeSettings, UiDensity, AMBER, CYAN, TEXT};
+use crate::theme::{command_frame, metric_pill, MotionRole, ThemeSettings, UiDensity, AMBER, CYAN};
 use crate::toolbelt::{ToolbeltState, ToolbeltTool};
+use crate::world::VoxelWorld;
 
 pub struct CommandDeckPlugin;
 
@@ -145,6 +146,20 @@ impl CommandContext {
             CommandContext::System => egui::Color32::from_rgb(0xC8, 0xC8, 0xC8),
         }
     }
+
+    fn icon(self) -> Icon {
+        match self {
+            CommandContext::Global => Icon::Globe,
+            CommandContext::Menu => Icon::Layout,
+            CommandContext::Gameplay => Icon::Player,
+            CommandContext::Combat => Icon::Intensity,
+            CommandContext::Builder => Icon::Builder,
+            CommandContext::Editor => Icon::ModeManipulate,
+            CommandContext::City => Icon::City,
+            CommandContext::Animation => Icon::Animation,
+            CommandContext::System => Icon::System,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -161,7 +176,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Command Deck oeffnen",
         detail: "Durchsuchbare Hilfe, Keybinds und Kontexte",
-        key: "F1 / Ctrl+P",
+        key: "Command",
         context: CommandContext::Global,
         icon: Icon::Search,
         essential: true,
@@ -177,7 +192,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Schnellspeichern",
         detail: "Aktuelle Settings und aktive Welt sichern",
-        key: "F5",
+        key: "Save",
         context: CommandContext::Global,
         icon: Icon::Save,
         essential: true,
@@ -185,7 +200,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Screenshot",
         detail: "Bild des aktuellen Views speichern",
-        key: "F2",
+        key: "Screenshot",
         context: CommandContext::Global,
         icon: Icon::Eye,
         essential: false,
@@ -193,7 +208,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Debug Overlay umschalten",
         detail: "FPS, Position, Biome, Streaming und Key-Hinweise zeigen",
-        key: "Shift+F3",
+        key: "Overlay",
         context: CommandContext::System,
         icon: Icon::Eye,
         essential: true,
@@ -207,97 +222,97 @@ const COMMANDS: &[CommandSpec] = &[
         essential: true,
     },
     CommandSpec {
-        label: "Build Live oeffnen",
-        detail: "Smart Builder direkt nutzen: LMB Startpunkt, zum Endpunkt ziehen, loslassen baut; RMB schneidet",
-        key: "LMB/RMB",
+        label: "Sketch Editor oeffnen",
+        detail: "Mouse-first Toolbox nutzen: Pencil, Rectangle, Push/Pull, Room, Opening, Roads und Bot Area",
+        key: "Toolbox",
         context: CommandContext::Builder,
         icon: Icon::ModeBuild,
         essential: true,
     },
     CommandSpec {
-        label: "Build / Waffen umschalten",
-        detail: "Minecraft-artig zwischen direktem Bauen und Kampfmodus wechseln",
-        key: "F8",
+        label: "Play Mode aktivieren",
+        detail: "Sketch Editor verlassen und Waffen/Spielsteuerung bewusst aktivieren",
+        key: "PLAY",
         context: CommandContext::Builder,
         icon: Icon::ModeBuild,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 1 Rectangle Fill",
+        label: "Workflow Rectangle",
         detail: "Rechtecke direkt in der Welt ziehen",
-        key: "1",
+        key: "Toolbox",
         context: CommandContext::Builder,
         icon: Icon::Grid,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 2 Sculpt Push Pull",
+        label: "Workflow Push Pull",
         detail: "Faces direkt herausziehen oder einschneiden",
-        key: "2",
+        key: "Toolbox",
         context: CommandContext::Builder,
         icon: Icon::Move,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 3 Smart Tower",
+        label: "Workflow Tower",
         detail: "Schneller Smart-Block fuer vertikale Formen",
-        key: "3",
+        key: "Drawer",
         context: CommandContext::Builder,
         icon: Icon::City,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 4 Smart Builder",
+        label: "Workflow Smart Builder",
         detail: "Startpunkt setzen, auf Block-Endpunkt ziehen, exakt bauen; RMB schneidet ohne Toolwechsel",
-        key: "4",
+        key: "Drawer",
         context: CommandContext::Builder,
         icon: Icon::Brush,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 5 Brush Cut",
+        label: "Workflow Brush Cut",
         detail: "Brush-Volumen direkt entfernen",
-        key: "5",
+        key: "Drawer",
         context: CommandContext::Builder,
         icon: Icon::Eraser,
         essential: true,
     },
     CommandSpec {
-        label: "Tool 6 Road",
-        detail: "Road-Grid direkt aus Build Live legen",
-        key: "6",
+        label: "Workflow Road",
+        detail: "Road-Komponenten direkt aus dem Sketch Editor legen",
+        key: "Toolbox",
         context: CommandContext::City,
         icon: Icon::Road,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 7 District",
+        label: "Workflow Bot Area",
         detail: "District-Zone direkt platzieren",
-        key: "7",
+        key: "Toolbox",
         context: CommandContext::City,
         icon: Icon::District,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 8 Building Shell",
+        label: "Workflow Building Shell",
         detail: "Gebaeude-Corners direkt in der Welt setzen",
-        key: "8",
+        key: "Toolbox",
         context: CommandContext::City,
         icon: Icon::City,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 9 Facade Stamp",
+        label: "Workflow Facade Stamp",
         detail: "Aktive Fassade direkt auf Waende stempeln",
-        key: "9",
+        key: "Drawer",
         context: CommandContext::City,
         icon: Icon::Open,
         essential: false,
     },
     CommandSpec {
-        label: "Tool 0 Animation Pick",
+        label: "Workflow Animation Pick",
         detail: "Voxel-Auswahl fuer Animation Studio direkt aktivieren",
-        key: "0",
+        key: "Drawer",
         context: CommandContext::Animation,
         icon: Icon::Animation,
         essential: false,
@@ -305,7 +320,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Simulation einfrieren",
         detail: "Zeit anhalten fuer Screenshots und Praezisionsbau",
-        key: "F6",
+        key: "Pause",
         context: CommandContext::Editor,
         icon: Icon::Time,
         essential: false,
@@ -352,7 +367,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         label: "Waffe wechseln",
-        detail: "Nur wenn Waffen per F8 bewusst scharf sind",
+        detail: "Nur wenn Waffen bewusst scharf sind",
         key: "1-9",
         context: CommandContext::Combat,
         icon: Icon::ModeBuild,
@@ -360,15 +375,15 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         label: "Waffen scharf schalten",
-        detail: "Explizit in Combat wechseln; F8 holstert wieder",
-        key: "F8",
+        detail: "Explizit in Combat wechseln; Sketch Editor holstert wieder",
+        key: "PLAY",
         context: CommandContext::Combat,
         icon: Icon::ModeBuild,
         essential: true,
     },
     CommandSpec {
         label: "Feuern",
-        detail: "Nur im Combat-Modus nach F8; Creative Build nutzt LMB zum Editieren",
+        detail: "Nur im Combat-Modus; Sketch Editor nutzt LMB zum Editieren",
         key: "LMB",
         context: CommandContext::Combat,
         icon: Icon::LightBulb,
@@ -457,7 +472,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         label: "Animation Picker",
         detail: "Voxel-Auswahl fuer Animation Studio aktivieren",
-        key: "F4",
+        key: "Drawer",
         context: CommandContext::Animation,
         icon: Icon::Animation,
         essential: false,
@@ -591,9 +606,7 @@ fn toggle_command_palette(
     mut palette: ResMut<CommandPaletteState>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let requested = keys.just_pressed(KeyCode::F1) || (ctrl && keys.just_pressed(KeyCode::KeyP));
-    if requested {
+    if command_palette_requested(&keys) {
         if palette.open {
             palette.close();
         } else {
@@ -612,6 +625,11 @@ fn toggle_command_palette(
     }
 }
 
+fn command_palette_requested(keys: &ButtonInput<KeyCode>) -> bool {
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    ctrl && keys.just_pressed(KeyCode::KeyP)
+}
+
 fn draw_command_palette(
     mut contexts: EguiContexts,
     settings: Res<WorldSettings>,
@@ -622,16 +640,17 @@ fn draw_command_palette(
         return;
     }
 
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let theme = settings.theme;
     let screen = ctx.screen_rect();
-    let time = ctx.input(|i| i.time) as f32;
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
         egui::Id::new("command_palette_dim"),
     ));
     painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(190));
-    draw_data_ribs(ctx, theme, time);
+    draw_data_ribs(ctx, theme);
 
     let width = screen.width().clamp(360.0, 860.0) - 32.0;
     let height = screen.height().clamp(420.0, 680.0) - 34.0;
@@ -718,10 +737,10 @@ fn draw_command_palette(
 
 fn draw_palette_header(ui: &mut egui::Ui, theme: ThemeSettings, state: &GameState) {
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(42.0, 42.0), egui::Sense::hover());
+        let response = crate::ui_kit::signal_reactor(ui, true, theme);
         paint_icon(
             ui.painter(),
-            rect.shrink(4.0),
+            response.rect.shrink(11.0),
             Icon::Search,
             theme.color.primary(),
         );
@@ -734,7 +753,7 @@ fn draw_palette_header(ui: &mut egui::Ui, theme: ThemeSettings, state: &GameStat
                     .color(theme.color.primary()),
             );
             ui.label(
-                egui::RichText::new("F1 / Ctrl+P  |  Esc schliesst, wenn dieses Deck offen ist")
+                egui::RichText::new("Search commands  |  Esc schliesst dieses Deck")
                     .monospace()
                     .small()
                     .color(theme.color.dim()),
@@ -757,123 +776,120 @@ fn command_row(
     command: &CommandSpec,
 ) -> Option<CommandAction> {
     let accent = command.context.tint(theme);
-    let fill = if command.essential {
-        egui::Color32::from_rgba_premultiplied(accent.r() / 7, accent.g() / 7, accent.b() / 7, 190)
-    } else {
-        egui::Color32::from_rgba_premultiplied(0, 0, 0, 150)
-    };
     let action = command_action(command);
     let mut requested = None;
+    let layout = command_row_layout(ui.available_width());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(1.0), layout.height),
+        egui::Sense::hover(),
+    );
+    crate::ui_kit::paint_interactive_surface(
+        ui,
+        rect,
+        &response,
+        false,
+        MotionRole::Feedback,
+        theme,
+    );
 
-    egui::Frame::none()
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, accent.linear_multiply(0.70)))
-        .rounding(egui::Rounding::same(5.0))
-        .inner_margin(egui::Margin::symmetric(9.0, 7.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                paint_icon(ui.painter(), rect.shrink(3.0), command.icon, accent);
+    let content = rect.shrink2(egui::vec2(10.0, 8.0));
+    let identity = if layout.wide {
+        egui::Rect::from_min_max(
+            content.min,
+            egui::pos2(
+                (content.right() - 350.0).max(content.left() + 120.0),
+                content.bottom(),
+            ),
+        )
+    } else {
+        egui::Rect::from_min_max(
+            content.min,
+            egui::pos2(content.right(), content.top() + 45.0),
+        )
+    };
+    paint_command_identity(ui, identity, command, accent, theme);
 
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(command.label)
-                            .monospace()
-                            .strong()
-                            .color(TEXT),
-                    );
-                    ui.label(
-                        egui::RichText::new(command.detail)
-                            .monospace()
-                            .small()
-                            .color(theme.color.dim()),
-                    );
-                });
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(action) = action {
-                        if action_button(ui, theme, accent).clicked() {
-                            requested = Some(action);
-                        }
-                    }
-                    key_chip(ui, theme, command.key);
-                    context_chip(ui, theme, command.context);
-                });
-            });
+    let controls = if layout.wide {
+        egui::Rect::from_min_max(
+            egui::pos2(identity.right() + 8.0, content.top()),
+            content.max,
+        )
+    } else {
+        egui::Rect::from_min_max(
+            egui::pos2(content.left(), content.bottom() - 31.0),
+            content.max,
+        )
+    };
+    ui.allocate_ui_at_rect(controls, |ui| {
+        ui.set_clip_rect(controls);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(action) = action {
+                if crate::ui_kit::icon_action_sized(ui, Icon::Play, "RUN", false, 84.0, theme)
+                    .on_hover_text("Run command")
+                    .clicked()
+                {
+                    requested = Some(action);
+                }
+            }
+            crate::ui_kit::status_chip(ui, Icon::Key, "KEY", command.key, theme);
+            crate::ui_kit::status_chip(
+                ui,
+                command.context.icon(),
+                "CTX",
+                command.context.label(),
+                theme,
+            );
         });
+    });
     requested
 }
 
-fn action_button(ui: &mut egui::Ui, theme: ThemeSettings, accent: egui::Color32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(84.0, 26.0), egui::Sense::click());
-    let fill = if response.hovered() {
-        accent.linear_multiply(1.12)
-    } else {
-        accent
-    };
-    let text = theme.text_on(fill);
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, egui::Rounding::same(5.0), fill);
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(5.0),
-        egui::Stroke::new(1.0, theme.semantic().stroke),
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CommandRowLayout {
+    height: f32,
+    wide: bool,
+}
+
+fn command_row_layout(available_width: f32) -> CommandRowLayout {
+    let wide = available_width.is_finite() && available_width >= 640.0;
+    CommandRowLayout {
+        height: if wide { 64.0 } else { 94.0 },
+        wide,
+    }
+}
+
+fn paint_command_identity(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    command: &CommandSpec,
+    accent: egui::Color32,
+    theme: ThemeSettings,
+) {
+    if !rect.is_positive() {
+        return;
+    }
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.center().y - 14.0),
+        egui::vec2(28.0, 28.0),
     );
-    paint_icon(
-        &painter,
-        egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 6.0), egui::vec2(14.0, 14.0)),
-        Icon::Play,
-        text,
+    let text_rect =
+        egui::Rect::from_min_max(egui::pos2(icon_rect.right() + 8.0, rect.top()), rect.max);
+    let painter = ui.painter_at(rect);
+    paint_icon(&painter, icon_rect.shrink(3.0), command.icon, accent);
+    painter.text(
+        egui::pos2(text_rect.left(), text_rect.top() + 3.0),
+        egui::Align2::LEFT_TOP,
+        command.label,
+        egui::FontId::monospace(13.0),
+        theme.semantic().text,
     );
     painter.text(
-        egui::pos2(rect.left() + 30.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "RUN",
-        egui::FontId::monospace(11.0),
-        text,
+        egui::pos2(text_rect.left(), text_rect.top() + 23.0),
+        egui::Align2::LEFT_TOP,
+        command.detail,
+        egui::FontId::monospace(10.5),
+        theme.color.dim(),
     );
-    response.on_hover_text("Run command")
-}
-
-fn context_chip(ui: &mut egui::Ui, theme: ThemeSettings, context: CommandContext) {
-    let tint = context.tint(theme);
-    egui::Frame::none()
-        .fill(egui::Color32::from_rgba_premultiplied(
-            tint.r() / 9,
-            tint.g() / 9,
-            tint.b() / 9,
-            160,
-        ))
-        .stroke(egui::Stroke::new(1.0, tint.linear_multiply(0.75)))
-        .rounding(egui::Rounding::same(4.0))
-        .inner_margin(egui::Margin::symmetric(7.0, 4.0))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(context.label())
-                    .monospace()
-                    .small()
-                    .strong()
-                    .color(tint),
-            );
-        });
-}
-
-fn key_chip(ui: &mut egui::Ui, theme: ThemeSettings, key: &str) {
-    egui::Frame::none()
-        .fill(egui::Color32::from_rgba_premultiplied(0, 0, 0, 180))
-        .stroke(egui::Stroke::new(1.0, theme.color.primary()))
-        .rounding(egui::Rounding::same(4.0))
-        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(key)
-                    .monospace()
-                    .small()
-                    .strong()
-                    .color(theme.color.primary()),
-            );
-        });
 }
 
 fn empty_state(ui: &mut egui::Ui, theme: ThemeSettings) {
@@ -894,14 +910,18 @@ fn empty_state(ui: &mut egui::Ui, theme: ThemeSettings) {
     });
 }
 
-fn draw_data_ribs(ctx: &egui::Context, theme: ThemeSettings, time: f32) {
+fn command_rib_alpha() -> u8 {
+    42
+}
+
+fn draw_data_ribs(ctx: &egui::Context, theme: ThemeSettings) {
     let screen = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Middle,
         egui::Id::new("command_palette_ribs"),
     ));
     let primary = theme.color.primary();
-    let alpha = (34.0 + ((time * 3.0).sin() * 0.5 + 0.5) * 24.0) as u8;
+    let alpha = command_rib_alpha();
     let color = egui::Color32::from_rgba_unmultiplied(primary.r(), primary.g(), primary.b(), alpha);
 
     let mut x = screen.left() + 18.0;
@@ -928,19 +948,19 @@ fn command_action(command: &CommandSpec) -> Option<CommandAction> {
         "Simulation einfrieren" => Some(CommandAction::ToggleSimPause),
         "Inventar oeffnen" => Some(CommandAction::OpenInventory),
         "Waffen scharf schalten" => Some(CommandAction::ArmWeapons),
-        "Build Live oeffnen" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushPlace)),
-        "Tool 1 Rectangle Fill" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
-        "Tool 2 Sculpt Push Pull" => Some(CommandAction::SetBuildTool(ToolbeltTool::Sculpt)),
-        "Tool 3 Smart Tower" => Some(CommandAction::SetBuildTool(ToolbeltTool::SmartTower)),
-        "Tool 4 Smart Builder" | "Tool 4 Power Brush" | "Tool 4 Brush Place" => {
+        "Sketch Editor oeffnen" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
+        "Workflow Rectangle" => Some(CommandAction::SetBuildTool(ToolbeltTool::DrawRect)),
+        "Workflow Push Pull" => Some(CommandAction::SetBuildTool(ToolbeltTool::Sculpt)),
+        "Workflow Tower" => Some(CommandAction::SetBuildTool(ToolbeltTool::SmartTower)),
+        "Workflow Smart Builder" | "Tool 4 Power Brush" | "Tool 4 Brush Place" => {
             Some(CommandAction::SetBuildTool(ToolbeltTool::BrushPlace))
         }
-        "Tool 5 Brush Cut" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushCut)),
-        "Tool 6 Road" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityRoad)),
-        "Tool 7 District" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityDistrict)),
-        "Tool 8 Building Shell" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityBuilding)),
-        "Tool 9 Facade Stamp" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityFacade)),
-        "Tool 0 Animation Pick" => Some(CommandAction::SetBuildTool(ToolbeltTool::AnimationPick)),
+        "Workflow Brush Cut" => Some(CommandAction::SetBuildTool(ToolbeltTool::BrushCut)),
+        "Workflow Road" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityRoad)),
+        "Workflow Bot Area" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityDistrict)),
+        "Workflow Building Shell" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityBuilding)),
+        "Workflow Facade Stamp" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityFacade)),
+        "Workflow Animation Pick" => Some(CommandAction::SetBuildTool(ToolbeltTool::AnimationPick)),
         "Builder Aktion rueckgaengig" => Some(CommandAction::BuilderUndo),
         "Builder Aktion wiederholen" => Some(CommandAction::BuilderRedo),
         "Box-Auswahl starten"
@@ -985,8 +1005,12 @@ fn execute_command_action(
     mut builder: ResMut<BuilderState>,
     mut studio: ResMut<AnimationStudio>,
     mut city: ResMut<CityState>,
-    mut toolbelt: ResMut<ToolbeltState>,
-    mut mode: ResMut<crate::mode::ModeContext>,
+    (mut toolbelt, mut mode, mut brain, mut world): (
+        ResMut<ToolbeltState>,
+        ResMut<crate::mode::ModeContext>,
+        ResMut<crate::bots::FriendlyWorldBrain>,
+        ResMut<VoxelWorld>,
+    ),
 ) {
     let Some(action) = palette.pending_action.take() else {
         return;
@@ -1008,10 +1032,21 @@ fn execute_command_action(
             }
         }
         CommandAction::SaveGame => {
-            save_current_world(&settings, active.as_deref(), &scratch, &player_q);
-            settings.save();
-            info!("Command Deck: save requested");
-            None
+            match save_current_world(
+                &settings,
+                active.as_deref(),
+                &scratch,
+                &player_q,
+                &mut brain,
+                &mut world,
+            ) {
+                Ok(()) => {
+                    settings.save();
+                    info!("Command Deck: world pose and settings saved");
+                    None
+                }
+                Err(error) => Some(format!("Save blocked: {error}")),
+            }
         }
         CommandAction::Screenshot => {
             editor.screenshot_requested = true;
@@ -1044,15 +1079,10 @@ fn execute_command_action(
         }
         CommandAction::SetBuildTool(tool) => {
             if *state.get() == GameState::MainMenu {
-                Some("Build Live braucht eine geladene Welt.".into())
+                Some("Sketch Editor braucht eine geladene Welt.".into())
             } else {
                 toolbelt.tool = tool;
-                let status = format!(
-                    "Build Live: [{}] {}. {}",
-                    tool.quick_slot_label(),
-                    tool.label(),
-                    tool.hint()
-                );
+                let status = format!("Sketch Editor: {}. {}", tool.label(), tool.hint());
                 mode.set(crate::mode::ActiveMode::BuildLive { tool }, status.clone());
                 toolbelt.status = status;
                 editor.open = false;
@@ -1101,7 +1131,7 @@ fn execute_command_action(
                         crate::mode::ActiveMode::BuildLive {
                             tool: ToolbeltTool::AnimationPick,
                         },
-                        "Build Live: Animation Picker. LMB/RMB pick voxels for animation authoring.",
+                        "Sketch Editor: Animation Picker. LMB/RMB pick voxels for animation authoring.",
                     );
                 } else {
                     mode.set(crate::mode::ActiveMode::Combat, "Animation Picker off.");
@@ -1133,7 +1163,7 @@ fn execute_command_action(
                             tool: toolbelt.tool,
                         },
                         format!(
-                            "Build Live: {}. {}",
+                            "Sketch Editor: {}. {}",
                             toolbelt.tool.label(),
                             toolbelt.tool.hint()
                         ),
@@ -1231,13 +1261,26 @@ fn quick_save_hotkey(
     active: Option<Res<ActiveWorld>>,
     scratch: Res<PlayerProgressScratch>,
     player_q: Query<(&Transform, &Player)>,
+    mut brain: ResMut<crate::bots::FriendlyWorldBrain>,
+    mut world: ResMut<VoxelWorld>,
 ) {
     if !keys.just_pressed(KeyCode::F5) {
         return;
     }
-    save_current_world(&settings, active.as_deref(), &scratch, &player_q);
-    settings.save();
-    info!("Quick-save: world pose and settings saved");
+    match save_current_world(
+        &settings,
+        active.as_deref(),
+        &scratch,
+        &player_q,
+        &mut brain,
+        &mut world,
+    ) {
+        Ok(()) => {
+            settings.save();
+            info!("Quick-save: world pose and settings saved");
+        }
+        Err(error) => warn!("Quick-save blocked: {error}"),
+    }
 }
 
 fn open_editor_tab(
@@ -1260,29 +1303,42 @@ fn save_current_world(
     active: Option<&ActiveWorld>,
     scratch: &PlayerProgressScratch,
     player_q: &Query<(&Transform, &Player)>,
-) {
+    brain: &mut crate::bots::FriendlyWorldBrain,
+    world: &mut VoxelWorld,
+) -> Result<(), String> {
     let Some(active) = active else {
-        return;
+        return Err("no active world authority".to_owned());
     };
+    settings::validate_world_storage_for_save(&active.meta)?;
     let mut meta = active.meta.clone();
-    meta.seed = settings.seed;
     meta.time_of_day = settings.time_of_day;
     meta.time_mode = settings.time_mode;
     meta.cycle_speed = settings.cycle_speed;
     meta.weather = settings.weather;
-    if let Ok((tf, player)) = player_q.get_single() {
-        settings::save_player_pose_checkpoint(
-            &meta,
-            settings,
-            [tf.translation.x, tf.translation.y, tf.translation.z],
-            player.yaw,
-            player.pitch,
-            scratch.mining,
-            scratch.suit,
-        );
-        return;
-    }
-    settings::save_world(&meta);
+    meta.bot_world = brain.save.clone();
+    crate::bots::save_world_transaction_after_edit_store(
+        &active.meta.name,
+        active.meta.generation_identity(),
+        brain,
+        world,
+        |manifest| {
+            meta.world_edit_manifest = manifest.clone();
+            if let Ok((tf, player)) = player_q.get_single() {
+                settings::save_player_pose_checkpoint(
+                    &meta,
+                    settings,
+                    [tf.translation.x, tf.translation.y, tf.translation.z],
+                    player.yaw,
+                    player.pitch,
+                    scratch.mining,
+                    scratch.suit,
+                )
+            } else {
+                settings::save_world(&meta)
+            }
+        },
+    )?;
+    Ok(())
 }
 
 fn city_tool_label(tool: CityTool) -> &'static str {
@@ -1344,5 +1400,91 @@ fn game_state_label(state: &GameState) -> &'static str {
         GameState::MainMenu => "MAIN MENU",
         GameState::InGame => "IN GAME",
         GameState::Paused => "PAUSED",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f1_no_longer_opens_command_palette() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::F1);
+
+        assert!(!command_palette_requested(&keys));
+    }
+
+    #[test]
+    fn ctrl_p_remains_hidden_command_palette_access() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        keys.press(KeyCode::KeyP);
+
+        assert!(command_palette_requested(&keys));
+    }
+
+    #[test]
+    fn command_deck_does_not_advertise_function_keys() {
+        for command in COMMANDS {
+            assert!(
+                !["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",]
+                    .iter()
+                    .any(|token| command.key.contains(token)),
+                "command still advertises a function-key workflow: {} -> {}",
+                command.label,
+                command.key
+            );
+        }
+    }
+
+    #[test]
+    fn command_rows_use_stable_responsive_geometry() {
+        let compact = command_row_layout(639.0);
+        let wide = command_row_layout(640.0);
+        let invalid = command_row_layout(f32::NAN);
+
+        assert_eq!(
+            compact,
+            CommandRowLayout {
+                height: 94.0,
+                wide: false
+            }
+        );
+        assert_eq!(
+            wide,
+            CommandRowLayout {
+                height: 64.0,
+                wide: true
+            }
+        );
+        assert_eq!(invalid, compact);
+        assert!(compact.height.is_finite() && compact.height > 0.0);
+        assert!(wide.height.is_finite() && wide.height > 0.0);
+    }
+
+    #[test]
+    fn decorative_command_ribs_are_static() {
+        assert_eq!(command_rib_alpha(), 42);
+        assert_eq!(command_rib_alpha(), command_rib_alpha());
+    }
+
+    #[test]
+    fn every_command_context_has_a_semantic_icon() {
+        let contexts = [
+            CommandContext::Global,
+            CommandContext::Menu,
+            CommandContext::Gameplay,
+            CommandContext::Combat,
+            CommandContext::Builder,
+            CommandContext::Editor,
+            CommandContext::City,
+            CommandContext::Animation,
+            CommandContext::System,
+        ];
+
+        for context in contexts {
+            let _ = context.icon();
+        }
     }
 }

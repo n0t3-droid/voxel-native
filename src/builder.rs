@@ -23,6 +23,10 @@ use serde::{Deserialize, Serialize};
 use crate::blocks::{BlockType, Voxel, AIR};
 use crate::director::UnifiedTelemetry;
 use crate::player::Player;
+use crate::sketch_model::{
+    SketchDocument, SketchEditSummary, SketchId, SketchVoxelEntityLinkSnapshot,
+    SketchVoxelLinkIndex,
+};
 use crate::world::{VoxelWorld, WorldEditBatch};
 
 /// Root resource for the in-game builder. The editor UI reads/writes
@@ -139,6 +143,14 @@ pub struct BuilderHistory {
     redo: Vec<EditHistoryBatch>,
 }
 
+/// Result of attempting to append one external edit to builder history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuilderHistoryRecordOutcome {
+    Recorded { voxel_count: usize },
+    SkippedNoChanges,
+    RejectedTooManyChanges { voxel_count: usize, limit: usize },
+}
+
 impl BuilderHistory {
     pub fn undo_len(&self) -> usize {
         self.undo.len()
@@ -152,35 +164,95 @@ impl BuilderHistory {
     /// [`crate::sculpt`]) push their per-voxel changes onto the same
     /// undo stack via this method so Ctrl+Z works uniformly across
     /// builder tools. `changes` is a list of `(pos, before, after)`
-    /// tuples; entries where `before == after` are filtered out so an
-    /// empty drag becomes a no-op rather than a stack-cluttering ghost
-    /// batch.
+    /// tuples. Duplicate positions are folded into a deterministic net
+    /// change using the first `before` and final `after`; net no-ops are
+    /// filtered so an empty drag does not clutter the stack.
     ///
-    /// The redo stack is cleared on every new edit, matching common
-    /// undo-history semantics. Stack and per-batch caps mirror the
-    /// existing Classic-builder limits.
+    /// The redo stack is cleared only after a new edit is accepted,
+    /// matching common undo-history semantics without destroying a
+    /// valid branch when a no-op or oversized request is rejected. The
+    /// per-batch cap protects low-end PCs from a single giant operation;
+    /// the stack cap is intentionally high so mouse-first Sketch sessions
+    /// do not lose early precise edits after only a few dozen strokes.
     pub fn record_external(
         &mut self,
         label: impl Into<String>,
         changes: Vec<(IVec3, Voxel, Voxel)>,
     ) {
-        let filtered: Vec<VoxelChange> = changes
-            .into_iter()
-            .filter(|(_, b, a)| b != a)
-            .take(UNDO_CHANGE_LIMIT)
-            .map(|(pos, before, after)| VoxelChange { pos, before, after })
-            .collect();
-        if filtered.is_empty() {
-            return;
+        self.record_external_with_sketch_meta(label, changes, None);
+    }
+
+    /// Checked form of [`Self::record_external`].
+    #[must_use]
+    pub fn record_external_checked(
+        &mut self,
+        label: impl Into<String>,
+        changes: Vec<(IVec3, Voxel, Voxel)>,
+    ) -> BuilderHistoryRecordOutcome {
+        self.record_external_with_sketch_meta_checked(label, changes, None)
+    }
+
+    pub fn record_external_with_sketch_meta(
+        &mut self,
+        label: impl Into<String>,
+        changes: Vec<(IVec3, Voxel, Voxel)>,
+        sketch_meta: Option<BuilderHistorySketchMeta>,
+    ) {
+        let label = label.into();
+        let outcome =
+            self.record_external_with_sketch_meta_checked(label.clone(), changes, sketch_meta);
+        if let BuilderHistoryRecordOutcome::RejectedTooManyChanges { voxel_count, limit } = outcome
+        {
+            warn!(
+                "Undo history rejected '{label}': {voxel_count} net voxel changes exceed the {limit}-change limit"
+            );
         }
+    }
+
+    /// Records the complete canonical batch or rejects it without retaining
+    /// voxel changes or semantic metadata.
+    #[must_use]
+    pub fn record_external_with_sketch_meta_checked(
+        &mut self,
+        label: impl Into<String>,
+        changes: Vec<(IVec3, Voxel, Voxel)>,
+        sketch_meta: Option<BuilderHistorySketchMeta>,
+    ) -> BuilderHistoryRecordOutcome {
+        let changes = canonicalize_voxel_changes(
+            changes
+                .into_iter()
+                .map(|(pos, before, after)| VoxelChange { pos, before, after }),
+        );
+        self.record_canonical_batch(label.into(), changes, sketch_meta)
+    }
+
+    fn record_canonical_batch(
+        &mut self,
+        label: String,
+        changes: Vec<VoxelChange>,
+        sketch_meta: Option<BuilderHistorySketchMeta>,
+    ) -> BuilderHistoryRecordOutcome {
+        let voxel_count = changes.len();
+        if voxel_count > UNDO_CHANGE_LIMIT {
+            return BuilderHistoryRecordOutcome::RejectedTooManyChanges {
+                voxel_count,
+                limit: UNDO_CHANGE_LIMIT,
+            };
+        }
+        if changes.is_empty() && sketch_meta.is_none() {
+            return BuilderHistoryRecordOutcome::SkippedNoChanges;
+        }
+
         self.undo.push(EditHistoryBatch {
-            label: label.into(),
-            changes: filtered,
+            label,
+            changes,
+            sketch_meta,
         });
         if self.undo.len() > UNDO_STACK_LIMIT {
             self.undo.remove(0);
         }
         self.redo.clear();
+        BuilderHistoryRecordOutcome::Recorded { voxel_count }
     }
 
     /// Pop the most recent batch off the undo stack, apply its `before`
@@ -188,27 +260,236 @@ impl BuilderHistory {
     /// the (label, voxel-count). Used by [`crate::sculpt`] for the
     /// universal Ctrl+Z handler. Returns `None` when the stack is empty.
     pub fn pop_undo(&mut self, world: &mut VoxelWorld) -> Option<(String, usize)> {
+        self.pop_undo_detailed(world)
+            .map(|step| (step.label, step.voxel_count))
+    }
+
+    pub fn pop_undo_detailed(&mut self, world: &mut VoxelWorld) -> Option<BuilderHistoryStep> {
         let batch = self.undo.pop()?;
         let n = apply_history_batch(world, &batch, true);
-        let label = batch.label.clone();
+        let step = BuilderHistoryStep {
+            label: batch.label.clone(),
+            voxel_count: n,
+            sketch_meta: batch.sketch_meta.clone(),
+        };
         self.redo.push(batch);
-        Some((label, n))
+        Some(step)
     }
 
     /// Mirror of [`Self::pop_undo`] for redo.
     pub fn pop_redo(&mut self, world: &mut VoxelWorld) -> Option<(String, usize)> {
+        self.pop_redo_detailed(world)
+            .map(|step| (step.label, step.voxel_count))
+    }
+
+    pub fn pop_redo_detailed(&mut self, world: &mut VoxelWorld) -> Option<BuilderHistoryStep> {
         let batch = self.redo.pop()?;
         let n = apply_history_batch(world, &batch, false);
-        let label = batch.label.clone();
+        let step = BuilderHistoryStep {
+            label: batch.label.clone(),
+            voxel_count: n,
+            sketch_meta: batch.sketch_meta.clone(),
+        };
         self.undo.push(batch);
-        Some((label, n))
+        Some(step)
     }
+
+    pub fn undo_with_sketch(
+        &mut self,
+        world: &mut VoxelWorld,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Result<Option<BuilderHistoryStep>, BuilderHistoryStep> {
+        let Some(step) = self.pop_undo_detailed(world) else {
+            return Ok(None);
+        };
+        if step.sketch_meta.is_some() && step.apply_sketch_undo(doc, links).is_none() {
+            let rollback = self.pop_redo_detailed(world);
+            debug_assert_eq!(
+                rollback.as_ref().map(|entry| entry.label.as_str()),
+                Some(step.label.as_str())
+            );
+            return Err(step);
+        }
+        Ok(Some(step))
+    }
+
+    pub fn redo_with_sketch(
+        &mut self,
+        world: &mut VoxelWorld,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Result<Option<BuilderHistoryStep>, BuilderHistoryStep> {
+        let Some(step) = self.pop_redo_detailed(world) else {
+            return Ok(None);
+        };
+        if step.sketch_meta.is_some() && step.apply_sketch_redo(doc, links).is_none() {
+            let rollback = self.pop_undo_detailed(world);
+            debug_assert_eq!(
+                rollback.as_ref().map(|entry| entry.label.as_str()),
+                Some(step.label.as_str())
+            );
+            return Err(step);
+        }
+        Ok(Some(step))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuilderHistoryStep {
+    pub label: String,
+    pub voxel_count: usize,
+    pub sketch_meta: Option<BuilderHistorySketchMeta>,
+}
+
+impl BuilderHistoryStep {
+    pub fn label_and_voxels(&self) -> (String, usize) {
+        (self.label.clone(), self.voxel_count)
+    }
+
+    pub fn apply_sketch_undo(
+        &self,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Option<SketchEditSummary> {
+        self.sketch_meta.as_ref()?.apply_undo(doc, links)
+    }
+
+    pub fn apply_sketch_redo(
+        &self,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Option<SketchEditSummary> {
+        self.sketch_meta.as_ref()?.apply_redo(doc, links)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuilderHistorySketchMeta {
+    SketchMove {
+        entities: Vec<SketchId>,
+        delta: IVec3,
+    },
+    SketchCreated {
+        link_snapshots: Vec<SketchVoxelEntityLinkSnapshot>,
+        document_steps: usize,
+    },
+    SketchTransform {
+        before_links: Vec<SketchVoxelEntityLinkSnapshot>,
+        after_links: Vec<SketchVoxelEntityLinkSnapshot>,
+        document_steps: usize,
+    },
+}
+
+impl BuilderHistorySketchMeta {
+    fn apply_undo(
+        &self,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Option<SketchEditSummary> {
+        match self {
+            Self::SketchMove { entities, delta } => {
+                let summary = doc.undo_last()?;
+                links.translate_entities(entities.iter().copied(), -*delta);
+                Some(summary)
+            }
+            Self::SketchCreated {
+                link_snapshots,
+                document_steps,
+            } => {
+                let summary = apply_sketch_document_steps(doc, *document_steps, true)?;
+                links.remove_entities(link_snapshots.iter().map(|snapshot| snapshot.entity));
+                Some(summary)
+            }
+            Self::SketchTransform {
+                before_links,
+                after_links,
+                document_steps,
+            } => {
+                let summary = apply_sketch_document_steps(doc, *document_steps, true)?;
+                restore_transform_link_snapshots(links, before_links, after_links, before_links);
+                Some(summary)
+            }
+        }
+    }
+
+    fn apply_redo(
+        &self,
+        doc: &mut SketchDocument,
+        links: &mut SketchVoxelLinkIndex,
+    ) -> Option<SketchEditSummary> {
+        match self {
+            Self::SketchMove { entities, delta } => {
+                let summary = doc.redo_last()?;
+                links.translate_entities(entities.iter().copied(), *delta);
+                Some(summary)
+            }
+            Self::SketchCreated {
+                link_snapshots,
+                document_steps,
+            } => {
+                let summary = apply_sketch_document_steps(doc, *document_steps, false)?;
+                links.restore_entity_snapshots(link_snapshots);
+                Some(summary)
+            }
+            Self::SketchTransform {
+                before_links,
+                after_links,
+                document_steps,
+            } => {
+                let summary = apply_sketch_document_steps(doc, *document_steps, false)?;
+                restore_transform_link_snapshots(links, before_links, after_links, after_links);
+                Some(summary)
+            }
+        }
+    }
+}
+
+fn restore_transform_link_snapshots(
+    links: &mut SketchVoxelLinkIndex,
+    before: &[SketchVoxelEntityLinkSnapshot],
+    after: &[SketchVoxelEntityLinkSnapshot],
+    target: &[SketchVoxelEntityLinkSnapshot],
+) {
+    links.remove_entities(before.iter().chain(after).map(|snapshot| snapshot.entity));
+    links.restore_entity_snapshots(target);
+}
+
+fn apply_sketch_document_steps(
+    doc: &mut SketchDocument,
+    steps: usize,
+    undo: bool,
+) -> Option<SketchEditSummary> {
+    if steps == 0 {
+        return None;
+    }
+    let before = doc.clone();
+    let mut labels = Vec::with_capacity(steps);
+    let mut entity_count = 0usize;
+    for _ in 0..steps {
+        let Some(summary) = (if undo {
+            doc.undo_last()
+        } else {
+            doc.redo_last()
+        }) else {
+            *doc = before;
+            return None;
+        };
+        labels.push(summary.label);
+        entity_count += summary.entity_count;
+    }
+    labels.dedup();
+    Some(SketchEditSummary {
+        label: labels.join(" + "),
+        entity_count,
+    })
 }
 
 #[derive(Clone)]
 struct EditHistoryBatch {
     label: String,
     changes: Vec<VoxelChange>,
+    sketch_meta: Option<BuilderHistorySketchMeta>,
 }
 
 #[derive(Clone, Copy)]
@@ -216,6 +497,26 @@ struct VoxelChange {
     pos: IVec3,
     before: Voxel,
     after: Voxel,
+}
+
+fn canonicalize_voxel_changes(changes: impl IntoIterator<Item = VoxelChange>) -> Vec<VoxelChange> {
+    let changes = changes.into_iter();
+    let mut by_position =
+        std::collections::HashMap::<IVec3, VoxelChange>::with_capacity(changes.size_hint().0);
+    for change in changes {
+        by_position
+            .entry(change.pos)
+            .and_modify(|net| net.after = change.after)
+            .or_insert(change);
+    }
+
+    let mut canonical: Vec<_> = by_position
+        .into_values()
+        .filter(|change| change.before != change.after)
+        .collect();
+    // Hash iteration order is unstable, so history uses world-coordinate order.
+    canonical.sort_unstable_by_key(|change| (change.pos.x, change.pos.y, change.pos.z));
+    canonical
 }
 
 impl BuilderClipboard {
@@ -624,22 +925,18 @@ fn apply_build_actions(
                 state.status = "Gespiegelt: Z-Achse.".into();
             }
             BuildAction::Undo => {
-                let Some(batch) = history.undo.pop() else {
+                let Some((label, n)) = history.pop_undo(&mut world) else {
                     state.status = "Undo: nichts vorhanden.".into();
                     continue;
                 };
-                let n = apply_history_batch(&mut world, &batch, true);
-                state.status = format!("Undo '{}': {} Bloecke.", batch.label, n);
-                history.redo.push(batch);
+                state.status = format!("Undo '{}': {} Bloecke.", label, n);
             }
             BuildAction::Redo => {
-                let Some(batch) = history.redo.pop() else {
+                let Some((label, n)) = history.pop_redo(&mut world) else {
                     state.status = "Redo: nichts vorhanden.".into();
                     continue;
                 };
-                let n = apply_history_batch(&mut world, &batch, false);
-                state.status = format!("Redo '{}': {} Bloecke.", batch.label, n);
-                history.undo.push(batch);
+                state.status = format!("Redo '{}': {} Bloecke.", label, n);
             }
         }
     }
@@ -669,7 +966,7 @@ fn live_builder_input(
     if !mode.is_build_live() {
         live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
-            toolbelt.status = "Build picker is open. Choose a tool or press Tab to hide the picker before building.".into();
+            toolbelt.status = build_drawer_blocked_status().into();
         }
         return;
     }
@@ -705,16 +1002,14 @@ fn live_builder_input(
     if !cursor_locked {
         live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
-            toolbelt.status =
-                "Build Live needs mouse capture. Click the game view once, then use LMB/RMB."
-                    .into();
+            toolbelt.status = build_cursor_capture_status().into();
         }
         return;
     }
     let Ok(cam_tf) = cam_q.get_single() else {
         live_brush_should_stamp(&mut state.live_flow, None, time.delta_seconds(), false);
         if user_action {
-            toolbelt.status = "Build Live could not find the player camera this frame.".into();
+            toolbelt.status = build_camera_missing_status().into();
         }
         return;
     };
@@ -792,6 +1087,18 @@ fn live_builder_input(
     }
 }
 
+fn build_drawer_blocked_status() -> &'static str {
+    "Sketch Editor drawer is open. Pick a Toolbox action or close the drawer before drawing."
+}
+
+fn build_cursor_capture_status() -> &'static str {
+    "Sketch Editor needs the game view. Click the game view once, then use the Toolbox action."
+}
+
+fn build_camera_missing_status() -> &'static str {
+    "Sketch Editor game view could not find the player camera this frame."
+}
+
 fn oriented_live_brush(base: IVec3, normal: IVec3) -> IVec3 {
     let base = IVec3::new(base.x.max(1), base.y.max(1), base.z.max(1));
     if normal.x != 0 {
@@ -857,22 +1164,16 @@ fn live_stamp_mirrored(
     let xs: &[bool] = if mirror.x { &[false, true] } else { &[false] };
     let ys: &[bool] = if mirror.y { &[false, true] } else { &[false] };
     let zs: &[bool] = if mirror.z { &[false, true] } else { &[false] };
-    let mut total = 0usize;
-    let mut last_note = String::new();
+    let mut plan = VoxelEditPlan::default();
     for &fx in xs {
         for &fy in ys {
             for &fz in zs {
                 let stamped_origin = reflect_origin(origin, brush, mirror.origin, (fx, fy, fz));
-                let (n, note) =
-                    stamp_cuboid(world, history, label.clone(), stamped_origin, brush, voxel);
-                total += n;
-                if !note.is_empty() {
-                    last_note = note;
-                }
+                plan.add_cuboid(stamped_origin, brush, voxel);
             }
         }
     }
-    (total, last_note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn live_raycast_voxel(
@@ -889,7 +1190,152 @@ fn live_raycast_voxel(
 }
 
 const UNDO_CHANGE_LIMIT: usize = 250_000;
-const UNDO_STACK_LIMIT: usize = 32;
+const UNDO_STACK_LIMIT: usize = 4096;
+
+/// Stages one complete builder operation before any chunk is mutated.
+///
+/// A plan is intentionally independent from [`WorldEditBatch`]. It first
+/// folds repeated writes using last-write-wins semantics, resolves exact net
+/// changes against the current world, and validates the complete transaction
+/// against the low-end-PC history budget. Only an accepted plan reaches the
+/// world, so rejection cannot leave a partial structure or a missing undo.
+#[derive(Default)]
+struct VoxelEditPlan {
+    writes: std::collections::HashMap<IVec3, Voxel>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoxelEditPlanOutcome {
+    Applied { voxel_count: usize },
+    NoChanges,
+    RejectedTooManyChanges { voxel_count: usize, limit: usize },
+}
+
+impl VoxelEditPlanOutcome {
+    fn into_builder_result(self) -> (usize, String) {
+        match self {
+            Self::Applied { voxel_count } => (voxel_count, "Undo bereit.".into()),
+            Self::NoChanges => (0, "Keine Aenderung.".into()),
+            Self::RejectedTooManyChanges { voxel_count, limit } => (
+                0,
+                format!(
+                    "Abgebrochen: {voxel_count} Netto-Aenderungen ueberschreiten das sichere \
+                     Limit von {limit}; Welt und Undo-Verlauf bleiben unveraendert."
+                ),
+            ),
+        }
+    }
+}
+
+impl VoxelEditPlan {
+    fn set(&mut self, pos: IVec3, voxel: Voxel) {
+        self.writes.insert(pos, voxel);
+    }
+
+    fn add_cuboid(&mut self, origin: IVec3, size: IVec3, voxel: Voxel) {
+        let size = size.max(IVec3::ONE);
+        for dy in 0..size.y {
+            for dz in 0..size.z {
+                for dx in 0..size.x {
+                    self.set(
+                        IVec3::new(origin.x + dx, origin.y + dy, origin.z + dz),
+                        voxel,
+                    );
+                }
+            }
+        }
+    }
+
+    fn resolve_changes(self, world: &VoxelWorld) -> Vec<VoxelChange> {
+        let mut changes = Vec::with_capacity(self.writes.len());
+        for (pos, after) in self.writes {
+            let before = world.voxel_at(pos.x, pos.y, pos.z);
+            if before != after {
+                changes.push(VoxelChange { pos, before, after });
+            }
+        }
+        changes.sort_unstable_by_key(|change| (change.pos.x, change.pos.y, change.pos.z));
+        changes
+    }
+
+    fn commit(
+        self,
+        world: &mut VoxelWorld,
+        history: &mut BuilderHistory,
+        label: String,
+    ) -> VoxelEditPlanOutcome {
+        self.commit_with_limit(world, history, label, UNDO_CHANGE_LIMIT)
+    }
+
+    fn commit_with_limit(
+        self,
+        world: &mut VoxelWorld,
+        history: &mut BuilderHistory,
+        label: String,
+        limit: usize,
+    ) -> VoxelEditPlanOutcome {
+        // A test or future quality tier may request a stricter cap, but no
+        // caller may bypass the global undo-safety limit.
+        let effective_limit = limit.min(UNDO_CHANGE_LIMIT);
+        let changes = self.resolve_changes(world);
+        let voxel_count = changes.len();
+        if voxel_count > effective_limit {
+            return VoxelEditPlanOutcome::RejectedTooManyChanges {
+                voxel_count,
+                limit: effective_limit,
+            };
+        }
+        if changes.is_empty() {
+            return VoxelEditPlanOutcome::NoChanges;
+        }
+
+        let mut batch = WorldEditBatch::default();
+        let mut applied = Vec::with_capacity(voxel_count);
+        for change in changes {
+            let Some((before, after)) = world.edit_set_voxel_batched(
+                change.pos.x,
+                change.pos.y,
+                change.pos.z,
+                change.after,
+                &mut batch,
+            ) else {
+                continue;
+            };
+            debug_assert_eq!(before, change.before);
+            debug_assert_eq!(after, change.after);
+            applied.push(VoxelChange {
+                pos: change.pos,
+                before,
+                after,
+            });
+        }
+        world.finish_edit_batch(batch);
+
+        if applied.is_empty() {
+            return VoxelEditPlanOutcome::NoChanges;
+        }
+        let applied_count = applied.len();
+        let outcome = history.record_canonical_batch(label, applied, None);
+        debug_assert_eq!(
+            outcome,
+            BuilderHistoryRecordOutcome::Recorded {
+                voxel_count: applied_count
+            }
+        );
+        match outcome {
+            BuilderHistoryRecordOutcome::Recorded { .. } => VoxelEditPlanOutcome::Applied {
+                voxel_count: applied_count,
+            },
+            BuilderHistoryRecordOutcome::SkippedNoChanges => VoxelEditPlanOutcome::NoChanges,
+            BuilderHistoryRecordOutcome::RejectedTooManyChanges { voxel_count, limit } => {
+                // The preflight cap makes this branch unreachable. Keep a
+                // defensive result for release builds without inventing a
+                // false success status.
+                VoxelEditPlanOutcome::RejectedTooManyChanges { voxel_count, limit }
+            }
+        }
+    }
+}
 
 fn stamp_cuboid(
     world: &mut VoxelWorld,
@@ -899,30 +1345,9 @@ fn stamp_cuboid(
     size: IVec3,
     v: Voxel,
 ) -> (usize, String) {
-    let size = size.max(IVec3::ONE);
-    let mut n = 0;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
-    for dy in 0..size.y {
-        for dz in 0..size.z {
-            for dx in 0..size.x {
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(origin.x + dx, origin.y + dy, origin.z + dz),
-                    v,
-                ) {
-                    n += 1;
-                }
-            }
-        }
-    }
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    let mut plan = VoxelEditPlan::default();
+    plan.add_cuboid(origin, size, v);
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn fill_box(
@@ -933,29 +1358,15 @@ fn fill_box(
     hi: IVec3,
     v: Voxel,
 ) -> (usize, String) {
-    let mut n = 0;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
     for y in lo.y..=hi.y {
         for z in lo.z..=hi.z {
             for x in lo.x..=hi.x {
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(x, y, z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(x, y, z), v);
             }
         }
     }
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn hollow_box(
@@ -966,32 +1377,18 @@ fn hollow_box(
     hi: IVec3,
     shell: Voxel,
 ) -> (usize, String) {
-    let mut n = 0;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
     for y in lo.y..=hi.y {
         for z in lo.z..=hi.z {
             for x in lo.x..=hi.x {
                 let boundary =
                     x == lo.x || x == hi.x || y == lo.y || y == hi.y || z == lo.z || z == hi.z;
                 let v = if boundary { shell } else { AIR };
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(x, y, z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(x, y, z), v);
             }
         }
     }
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn paste_clipboard(
@@ -1002,10 +1399,7 @@ fn paste_clipboard(
     origin: IVec3,
     include_air: bool,
 ) -> (usize, String) {
-    let mut n = 0usize;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
     let sz = clipboard.size;
     for y in 0..sz.y {
         for z in 0..sz.z {
@@ -1014,22 +1408,11 @@ fn paste_clipboard(
                 if v == AIR && !include_air {
                     continue;
                 }
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(origin.x + x, origin.y + y, origin.z + z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(origin.x + x, origin.y + y, origin.z + z), v);
             }
         }
     }
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 #[derive(Clone, Copy)]
@@ -1048,23 +1431,11 @@ fn smart_platform(
 ) -> (usize, String) {
     let floor_y = center.y - 1;
     let radius = 8;
-    let mut n = 0usize;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
 
     for z in center.z - radius..=center.z + radius {
         for x in center.x - radius..=center.x + radius {
-            if set_recorded(
-                world,
-                &mut batch,
-                &mut changes,
-                &mut overflow,
-                IVec3::new(x, floor_y, z),
-                deck,
-            ) {
-                n += 1;
-            }
+            plan.set(IVec3::new(x, floor_y, z), deck);
 
             for y in floor_y + 1..=floor_y + 5 {
                 let edge = x == center.x - radius
@@ -1077,16 +1448,7 @@ fn smart_platform(
                 } else {
                     AIR
                 };
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(x, y, z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(x, y, z), v);
             }
         }
     }
@@ -1098,22 +1460,11 @@ fn smart_platform(
         (center.x + radius, center.z + radius),
     ] {
         for y in floor_y + 1..=floor_y + 3 {
-            if set_recorded(
-                world,
-                &mut batch,
-                &mut changes,
-                &mut overflow,
-                IVec3::new(x, y, z),
-                BlockType::GlowSand.into(),
-            ) {
-                n += 1;
-            }
+            plan.set(IVec3::new(x, y, z), BlockType::GlowSand.into());
         }
     }
 
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn smart_shelter(
@@ -1128,10 +1479,7 @@ fn smart_shelter(
     let lo = IVec3::new(center.x - 6, floor_y, center.z - 6);
     let hi = IVec3::new(center.x + 6, floor_y + 6, center.z + 6);
     let door_dir = cardinal_xz(forward);
-    let mut n = 0usize;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
 
     for y in lo.y..=hi.y {
         for z in lo.z..=hi.z {
@@ -1147,23 +1495,12 @@ fn smart_shelter(
                     v = BlockType::GlowSand.into();
                 }
 
-                if set_recorded(
-                    world,
-                    &mut batch,
-                    &mut changes,
-                    &mut overflow,
-                    IVec3::new(x, y, z),
-                    v,
-                ) {
-                    n += 1;
-                }
+                plan.set(IVec3::new(x, y, z), v);
             }
         }
     }
 
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn smart_path_build(
@@ -1187,10 +1524,7 @@ fn smart_path_build(
         );
     }
 
-    let mut n = 0usize;
-    let mut batch = WorldEditBatch::default();
-    let mut changes = Vec::new();
-    let mut overflow = false;
+    let mut plan = VoxelEditPlan::default();
     let major_x = delta.x.abs() >= delta.z.abs();
     let perp = if major_x {
         IVec3::new(0, 0, 1)
@@ -1216,39 +1550,17 @@ fn smart_path_build(
             SmartPathKind::Bridge | SmartPathKind::Ramp => {
                 for w in -1..=1 {
                     let q = p + perp * w;
-                    if set_recorded(world, &mut batch, &mut changes, &mut overflow, q, deck) {
-                        n += 1;
-                    }
+                    plan.set(q, deck);
                     for clear_y in q.y + 1..=q.y + 4 {
-                        if set_recorded(
-                            world,
-                            &mut batch,
-                            &mut changes,
-                            &mut overflow,
-                            IVec3::new(q.x, clear_y, q.z),
-                            AIR,
-                        ) {
-                            n += 1;
-                        }
+                        plan.set(IVec3::new(q.x, clear_y, q.z), AIR);
                     }
                 }
                 for side in [-2, 2] {
                     let rail = p + perp * side + IVec3::Y;
-                    if set_recorded(world, &mut batch, &mut changes, &mut overflow, rail, deck) {
-                        n += 1;
-                    }
+                    plan.set(rail, deck);
                     if i % 5 == 0 {
                         let lamp = rail + IVec3::Y;
-                        if set_recorded(
-                            world,
-                            &mut batch,
-                            &mut changes,
-                            &mut overflow,
-                            lamp,
-                            BlockType::GlowSand.into(),
-                        ) {
-                            n += 1;
-                        }
+                        plan.set(lamp, BlockType::GlowSand.into());
                     }
                 }
             }
@@ -1256,55 +1568,24 @@ fn smart_path_build(
                 let floor = p - IVec3::Y;
                 for w in -2..=2 {
                     let base = floor + perp * w;
-                    if set_recorded(world, &mut batch, &mut changes, &mut overflow, base, deck) {
-                        n += 1;
-                    }
+                    plan.set(base, deck);
                     for h in 1..=4 {
-                        if set_recorded(
-                            world,
-                            &mut batch,
-                            &mut changes,
-                            &mut overflow,
-                            base + IVec3::Y * h,
-                            AIR,
-                        ) {
-                            n += 1;
-                        }
+                        plan.set(base + IVec3::Y * h, AIR);
                     }
                 }
                 for side in [-3, 3] {
                     for h in 0..=3 {
-                        if set_recorded(
-                            world,
-                            &mut batch,
-                            &mut changes,
-                            &mut overflow,
-                            floor + perp * side + IVec3::Y * h,
-                            deck,
-                        ) {
-                            n += 1;
-                        }
+                        plan.set(floor + perp * side + IVec3::Y * h, deck);
                     }
                 }
                 if i % 8 == 0 {
-                    if set_recorded(
-                        world,
-                        &mut batch,
-                        &mut changes,
-                        &mut overflow,
-                        floor + IVec3::Y * 5,
-                        BlockType::GlowSand.into(),
-                    ) {
-                        n += 1;
-                    }
+                    plan.set(floor + IVec3::Y * 5, BlockType::GlowSand.into());
                 }
             }
         }
     }
 
-    world.finish_edit_batch(batch);
-    let note = commit_history(history, label, changes, overflow);
-    (n, note)
+    plan.commit(world, history, label).into_builder_result()
 }
 
 fn cardinal_xz(forward: Vec3) -> IVec3 {
@@ -1332,53 +1613,11 @@ fn lerp_i32(a: i32, b: i32, t: f32) -> i32 {
     (a as f32 + (b - a) as f32 * t).round() as i32
 }
 
-fn set_recorded(
-    world: &mut VoxelWorld,
-    batch: &mut WorldEditBatch,
-    changes: &mut Vec<VoxelChange>,
-    overflow: &mut bool,
-    pos: IVec3,
-    v: Voxel,
-) -> bool {
-    let Some((before, after)) = world.edit_set_voxel_batched(pos.x, pos.y, pos.z, v, batch) else {
-        return false;
-    };
-    if !*overflow {
-        if changes.len() < UNDO_CHANGE_LIMIT {
-            changes.push(VoxelChange { pos, before, after });
-        } else {
-            changes.clear();
-            *overflow = true;
-        }
-    }
-    true
-}
-
-fn commit_history(
-    history: &mut BuilderHistory,
-    label: String,
-    changes: Vec<VoxelChange>,
-    overflow: bool,
-) -> String {
-    if overflow {
-        history.redo.clear();
-        return "Undo ausgelassen: Region zu gross.".into();
-    }
-    if changes.is_empty() {
-        return "Keine Aenderung.".into();
-    }
-    history.undo.push(EditHistoryBatch { label, changes });
-    if history.undo.len() > UNDO_STACK_LIMIT {
-        history.undo.remove(0);
-    }
-    history.redo.clear();
-    "Undo bereit.".into()
-}
-
 fn apply_history_batch(world: &mut VoxelWorld, batch_src: &EditHistoryBatch, undo: bool) -> usize {
     let mut batch = WorldEditBatch::default();
     let mut n = 0usize;
-    for change in &batch_src.changes {
+    let changes = canonicalize_voxel_changes(batch_src.changes.iter().copied());
+    for change in &changes {
         let v = if undo { change.before } else { change.after };
         if world
             .edit_set_voxel_batched(change.pos.x, change.pos.y, change.pos.z, v, &mut batch)
@@ -1583,6 +1822,425 @@ mod tests {
     use super::*;
 
     #[test]
+    fn atomic_undo_rolls_world_back_when_semantic_history_is_incomplete() {
+        let mut world = VoxelWorld::new();
+        let cell = IVec3::new(2, 3, 4);
+        let stone = Voxel::from(BlockType::Stone);
+        assert!(world.edit_set_voxel(cell.x, cell.y, cell.z, stone));
+
+        let mut doc = SketchDocument::new();
+        let edge = doc
+            .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::X)
+            .expect("semantic edge");
+        let mut links = SketchVoxelLinkIndex::default();
+        let mut history = BuilderHistory::default();
+        history.record_external_with_sketch_meta(
+            "incomplete semantic batch",
+            vec![(cell, AIR, stone)],
+            Some(BuilderHistorySketchMeta::SketchCreated {
+                link_snapshots: Vec::new(),
+                document_steps: 2,
+            }),
+        );
+
+        let failed = history
+            .undo_with_sketch(&mut world, &mut doc, &mut links)
+            .expect_err("semantic mismatch must block the whole undo");
+
+        assert_eq!(failed.label, "incomplete semantic batch");
+        assert_eq!(world.voxel_at(cell.x, cell.y, cell.z), stone);
+        assert!(doc.entity(edge).is_some());
+        assert_eq!(history.undo_len(), 1);
+        assert_eq!(history.redo_len(), 0);
+    }
+
+    #[test]
+    fn transform_history_restores_document_voxels_and_links_atomically() {
+        let mut world = VoxelWorld::new();
+        let stone = Voxel::from(BlockType::Stone);
+        for cell in [IVec3::X, IVec3::X * 2] {
+            assert!(world.edit_set_voxel(cell.x, cell.y, cell.z, stone));
+        }
+
+        let mut doc = SketchDocument::new();
+        let edge = doc
+            .draw_pencil_line(doc.active_context(), Vec3::X, Vec3::X * 3.0)
+            .expect("semantic edge");
+        let link = crate::sketch_model::SketchVoxelLink::new(
+            edge,
+            doc.active_context(),
+            crate::sketch_model::SketchVoxelLinkRole::Stroke,
+        );
+        let mut links = SketchVoxelLinkIndex::default();
+        links.link_cells([IVec3::X, IVec3::X * 2], link);
+        assert!(links.link_face_cell(IVec3::X, IVec3::X, link));
+        let before_links = links.snapshot_entities([edge]);
+
+        let mut selection = crate::sketch_model::SelectionSet::default();
+        selection.select(edge);
+        doc.rotate_selection_about_pivot(
+            &selection,
+            Vec3::ZERO,
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            "Rotate exact",
+        )
+        .expect("semantic rotation");
+        links.remove_entity(edge);
+        links.link_cells([IVec3::Y, IVec3::Y * 2], link);
+        assert!(links.link_face_cell(IVec3::Y, IVec3::Y, link));
+        let after_links = links.snapshot_entities([edge]);
+
+        for cell in [IVec3::X, IVec3::X * 2] {
+            assert!(world.edit_set_voxel(cell.x, cell.y, cell.z, AIR));
+        }
+        for cell in [IVec3::Y, IVec3::Y * 2] {
+            assert!(world.edit_set_voxel(cell.x, cell.y, cell.z, stone));
+        }
+        let changes = vec![
+            (IVec3::X, stone, AIR),
+            (IVec3::X * 2, stone, AIR),
+            (IVec3::Y, AIR, stone),
+            (IVec3::Y * 2, AIR, stone),
+        ];
+        let mut history = BuilderHistory::default();
+        history.record_external_with_sketch_meta(
+            "Rotate exact",
+            changes,
+            Some(BuilderHistorySketchMeta::SketchTransform {
+                before_links: before_links.clone(),
+                after_links: after_links.clone(),
+                document_steps: 1,
+            }),
+        );
+
+        history
+            .undo_with_sketch(&mut world, &mut doc, &mut links)
+            .expect("undo remains atomic")
+            .expect("undo step");
+        assert_eq!(world.voxel_at(1, 0, 0), stone);
+        assert_eq!(world.voxel_at(0, 1, 0), AIR);
+        assert_eq!(links.snapshot_entities([edge]), before_links);
+        assert!(matches!(
+            &doc.entity(edge).expect("restored edge").kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if *a == Vec3::X && *b == Vec3::X * 3.0
+        ));
+
+        history
+            .redo_with_sketch(&mut world, &mut doc, &mut links)
+            .expect("redo remains atomic")
+            .expect("redo step");
+        assert_eq!(world.voxel_at(1, 0, 0), AIR);
+        assert_eq!(world.voxel_at(0, 1, 0), stone);
+        assert_eq!(links.snapshot_entities([edge]), after_links);
+        assert!(matches!(
+            &doc.entity(edge).expect("rotated edge").kind,
+            crate::sketch_model::SketchEntityKind::Edge { a, b }
+                if a.distance(Vec3::Y) < 1.0e-5 && b.distance(Vec3::Y * 3.0) < 1.0e-5
+        ));
+    }
+
+    #[test]
+    fn failed_transform_history_keeps_link_index_unchanged() {
+        let mut world = VoxelWorld::new();
+        let cell = IVec3::new(4, 5, 6);
+        let stone = Voxel::from(BlockType::Stone);
+        assert!(world.edit_set_voxel(cell.x, cell.y, cell.z, stone));
+
+        let mut doc = SketchDocument::new();
+        let edge = doc
+            .draw_pencil_line(doc.active_context(), Vec3::ZERO, Vec3::X)
+            .expect("semantic edge");
+        let link = crate::sketch_model::SketchVoxelLink::new(
+            edge,
+            doc.active_context(),
+            crate::sketch_model::SketchVoxelLinkRole::Stroke,
+        );
+        let mut links = SketchVoxelLinkIndex::default();
+        links.link_cell(cell, link);
+        let original_links = links.clone();
+        let snapshots = links.snapshot_entities([edge]);
+        let mut history = BuilderHistory::default();
+        history.record_external_with_sketch_meta(
+            "incomplete transform",
+            vec![(cell, AIR, stone)],
+            Some(BuilderHistorySketchMeta::SketchTransform {
+                before_links: snapshots.clone(),
+                after_links: snapshots,
+                document_steps: 2,
+            }),
+        );
+
+        history
+            .undo_with_sketch(&mut world, &mut doc, &mut links)
+            .expect_err("semantic mismatch must reject transform undo");
+
+        assert_eq!(links, original_links);
+        assert_eq!(world.voxel_at(cell.x, cell.y, cell.z), stone);
+        assert!(doc.entity(edge).is_some());
+        assert_eq!(history.undo_len(), 1);
+        assert_eq!(history.redo_len(), 0);
+    }
+
+    #[test]
+    fn external_history_canonicalizes_overlapping_positions_for_atomic_undo_redo() {
+        let mut world = VoxelWorld::new();
+        let a = IVec3::new(3, 4, 5);
+        let b = IVec3::new(4, 4, 5);
+        let c = IVec3::new(5, 4, 5);
+        let stone = Voxel::from(BlockType::Stone);
+        let limestone = Voxel::from(BlockType::Limestone);
+        assert!(world.edit_set_voxel(a.x, a.y, a.z, limestone));
+        assert!(world.edit_set_voxel(c.x, c.y, c.z, stone));
+
+        let mut history = BuilderHistory::default();
+        let outcome = history.record_external_checked(
+            "overlapping transform",
+            vec![
+                (b, AIR, stone),
+                (a, stone, AIR),
+                (c, AIR, limestone),
+                (a, AIR, limestone),
+                (b, stone, AIR),
+                (c, limestone, stone),
+            ],
+        );
+
+        assert_eq!(
+            outcome,
+            BuilderHistoryRecordOutcome::Recorded { voxel_count: 2 }
+        );
+        assert_eq!(history.undo[0].changes.len(), 2);
+        assert_eq!(
+            history.undo[0]
+                .changes
+                .iter()
+                .map(|change| change.pos)
+                .collect::<Vec<_>>(),
+            vec![a, c]
+        );
+
+        let undone = history.pop_undo_detailed(&mut world).expect("undo step");
+        assert_eq!(undone.voxel_count, 2);
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), stone);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), AIR);
+        assert_eq!(world.voxel_at(c.x, c.y, c.z), AIR);
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
+
+        let redone = history.pop_redo_detailed(&mut world).expect("redo step");
+        assert_eq!(redone.voxel_count, 2);
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), limestone);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), AIR);
+        assert_eq!(world.voxel_at(c.x, c.y, c.z), stone);
+        assert_eq!((history.undo_len(), history.redo_len()), (1, 0));
+    }
+
+    #[test]
+    fn legacy_duplicate_history_uses_first_before_and_final_after() {
+        let mut world = VoxelWorld::new();
+        let cell = IVec3::new(7, 8, 9);
+        let stone = Voxel::from(BlockType::Stone);
+        let limestone = Voxel::from(BlockType::Limestone);
+        assert!(world.edit_set_voxel(cell.x, cell.y, cell.z, limestone));
+
+        let mut history = BuilderHistory::default();
+        history.undo.push(EditHistoryBatch {
+            label: "legacy overlap".into(),
+            changes: vec![
+                VoxelChange {
+                    pos: cell,
+                    before: AIR,
+                    after: stone,
+                },
+                VoxelChange {
+                    pos: cell,
+                    before: stone,
+                    after: limestone,
+                },
+            ],
+            sketch_meta: None,
+        });
+
+        let undone = history.pop_undo_detailed(&mut world).expect("legacy undo");
+        assert_eq!(undone.voxel_count, 1);
+        assert_eq!(world.voxel_at(cell.x, cell.y, cell.z), AIR);
+
+        let redone = history.pop_redo_detailed(&mut world).expect("legacy redo");
+        assert_eq!(redone.voxel_count, 1);
+        assert_eq!(world.voxel_at(cell.x, cell.y, cell.z), limestone);
+    }
+
+    #[test]
+    fn external_history_accepts_cap_and_rejects_cap_plus_one_atomically() {
+        let stone = Voxel::from(BlockType::Stone);
+        let make_changes = |count: usize| {
+            (0..count)
+                .map(|x| (IVec3::new(x as i32, 0, 0), AIR, stone))
+                .collect::<Vec<_>>()
+        };
+
+        let mut at_cap = make_changes(UNDO_CHANGE_LIMIT);
+        at_cap.push((IVec3::ZERO, stone, stone));
+        let mut history = BuilderHistory::default();
+        assert_eq!(
+            history.record_external_checked("at cap after deduplication", at_cap),
+            BuilderHistoryRecordOutcome::Recorded {
+                voxel_count: UNDO_CHANGE_LIMIT
+            }
+        );
+        assert_eq!(history.undo_len(), 1);
+        assert_eq!(history.undo[0].changes.len(), UNDO_CHANGE_LIMIT);
+        history.redo.push(EditHistoryBatch {
+            label: "existing redo branch".into(),
+            changes: vec![VoxelChange {
+                pos: IVec3::new(-1, 0, 0),
+                before: AIR,
+                after: stone,
+            }],
+            sketch_meta: None,
+        });
+
+        let rejected = history.record_external_with_sketch_meta_checked(
+            "cap plus one transform",
+            make_changes(UNDO_CHANGE_LIMIT + 1),
+            Some(BuilderHistorySketchMeta::SketchTransform {
+                before_links: Vec::new(),
+                after_links: Vec::new(),
+                document_steps: 1,
+            }),
+        );
+        assert_eq!(
+            rejected,
+            BuilderHistoryRecordOutcome::RejectedTooManyChanges {
+                voxel_count: UNDO_CHANGE_LIMIT + 1,
+                limit: UNDO_CHANGE_LIMIT,
+            }
+        );
+        assert_eq!(history.undo_len(), 1);
+        assert_eq!(history.undo[0].label, "at cap after deduplication");
+        assert!(history.undo.iter().all(|batch| batch.sketch_meta.is_none()));
+        assert_eq!(
+            history.redo_len(),
+            1,
+            "a rejected edit must not destroy an otherwise valid redo branch"
+        );
+    }
+
+    #[test]
+    fn rejected_voxel_edit_plan_leaves_world_and_history_untouched() {
+        let mut world = VoxelWorld::new();
+        let stone = Voxel::from(BlockType::Stone);
+        let limestone = Voxel::from(BlockType::Limestone);
+        let seed = IVec3::new(40, 2, 40);
+        assert!(world.edit_set_voxel(seed.x, seed.y, seed.z, stone));
+
+        let mut history = BuilderHistory::default();
+        history.record_external("seed edit", vec![(seed, AIR, stone)]);
+        history.pop_undo(&mut world).expect("create redo branch");
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
+
+        let targets = [
+            IVec3::new(1, 2, 3),
+            IVec3::new(2, 2, 3),
+            IVec3::new(3, 2, 3),
+        ];
+        let mut plan = VoxelEditPlan::default();
+        for target in targets {
+            plan.set(target, limestone);
+        }
+
+        let outcome = plan.commit_with_limit(&mut world, &mut history, "oversized test".into(), 2);
+
+        assert_eq!(
+            outcome,
+            VoxelEditPlanOutcome::RejectedTooManyChanges {
+                voxel_count: 3,
+                limit: 2,
+            }
+        );
+        assert!(targets
+            .into_iter()
+            .all(|target| world.voxel_at(target.x, target.y, target.z) == AIR));
+        assert_eq!(world.voxel_at(seed.x, seed.y, seed.z), AIR);
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
+    }
+
+    #[test]
+    fn accepted_voxel_edit_plan_is_one_exact_undoable_transaction() {
+        let mut world = VoxelWorld::new();
+        let mut history = BuilderHistory::default();
+        let a = IVec3::new(11, 12, 13);
+        let b = IVec3::new(12, 12, 13);
+        let stone = Voxel::from(BlockType::Stone);
+        let limestone = Voxel::from(BlockType::Limestone);
+        let mut plan = VoxelEditPlan::default();
+        plan.set(a, stone);
+        plan.set(b, limestone);
+
+        assert_eq!(
+            plan.commit_with_limit(&mut world, &mut history, "atomic pair".into(), 2),
+            VoxelEditPlanOutcome::Applied { voxel_count: 2 }
+        );
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), stone);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), limestone);
+        assert_eq!((history.undo_len(), history.redo_len()), (1, 0));
+
+        let undone = history.pop_undo(&mut world).expect("undo atomic pair");
+        assert_eq!(undone, ("atomic pair".into(), 2));
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), AIR);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), AIR);
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
+
+        let redone = history.pop_redo(&mut world).expect("redo atomic pair");
+        assert_eq!(redone, ("atomic pair".into(), 2));
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), stone);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), limestone);
+    }
+
+    #[test]
+    fn voxel_edit_plan_deduplicates_before_budgeting_with_last_write_wins() {
+        let mut world = VoxelWorld::new();
+        let mut history = BuilderHistory::default();
+        let a = IVec3::new(21, 22, 23);
+        let b = IVec3::new(22, 22, 23);
+        let stone = Voxel::from(BlockType::Stone);
+        let limestone = Voxel::from(BlockType::Limestone);
+        let mut plan = VoxelEditPlan::default();
+        plan.set(a, stone);
+        plan.set(a, AIR);
+        plan.set(a, limestone);
+        plan.set(b, stone);
+
+        assert_eq!(
+            plan.commit_with_limit(&mut world, &mut history, "deduplicated pair".into(), 2),
+            VoxelEditPlanOutcome::Applied { voxel_count: 2 }
+        );
+        assert_eq!(world.voxel_at(a.x, a.y, a.z), limestone);
+        assert_eq!(world.voxel_at(b.x, b.y, b.z), stone);
+        assert_eq!(history.undo[0].changes.len(), 2);
+    }
+
+    #[test]
+    fn no_op_voxel_edit_plan_preserves_redo_branch() {
+        let mut world = VoxelWorld::new();
+        let stone = Voxel::from(BlockType::Stone);
+        let seed = IVec3::new(31, 32, 33);
+        assert!(world.edit_set_voxel(seed.x, seed.y, seed.z, stone));
+        let mut history = BuilderHistory::default();
+        history.record_external("seed edit", vec![(seed, AIR, stone)]);
+        history.pop_undo(&mut world).expect("create redo branch");
+
+        let mut plan = VoxelEditPlan::default();
+        plan.set(seed, AIR);
+        plan.set(IVec3::new(32, 32, 33), AIR);
+        assert_eq!(
+            plan.commit_with_limit(&mut world, &mut history, "no-op".into(), 2),
+            VoxelEditPlanOutcome::NoChanges
+        );
+        assert_eq!((history.undo_len(), history.redo_len()), (0, 1));
+    }
+
+    #[test]
     fn live_brush_flow_stamps_once_per_new_target_while_held() {
         let mut flow = LiveBrushFlow::default();
         let brush = IVec3::new(2, 2, 2);
@@ -1616,5 +2274,36 @@ mod tests {
         assert!(!live_brush_should_stamp(&mut flow, Some(c), 0.0, false));
         assert!(!live_brush_should_stamp(&mut flow, None, 0.016, false));
         assert!(live_brush_should_stamp(&mut flow, Some(c), 0.0, true));
+    }
+
+    #[test]
+    fn builder_statuses_are_toolbox_first_not_old_build_live() {
+        for status in [
+            build_drawer_blocked_status(),
+            build_cursor_capture_status(),
+            build_camera_missing_status(),
+        ] {
+            assert!(!status.contains("Build Live"));
+            assert!(!status.contains("Tab"));
+            assert!(status.contains("Toolbox") || status.contains("game view"));
+        }
+    }
+
+    #[test]
+    fn builder_history_keeps_long_sketch_sessions_beyond_old_32_step_cap() {
+        let mut history = BuilderHistory::default();
+
+        for x in 0..96 {
+            history.record_external(
+                format!("Pencil line {x}"),
+                vec![(IVec3::new(x, 0, 0), AIR, Voxel::from(BlockType::Limestone))],
+            );
+        }
+
+        assert_eq!(
+            history.undo_len(),
+            96,
+            "SketchUp-style building sessions need long undo history; dropping edits after 32 actions makes precise construction feel broken"
+        );
     }
 }

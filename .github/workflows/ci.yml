@@ -2,39 +2,275 @@ name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  native:
+    name: Native Rust gates
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: stable
-          components: rustfmt, clippy
-          override: true
+          components: clippy, rustfmt
+
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: false
+          cache-workspace-crates: false
+
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libasound2-dev libudev-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features
 
-      - name: Build release
-        run: cargo build --release
+      - name: Build release executable
+        run: cargo build --locked --release --bin voxel-native
 
-      - name: Run tests
-        run: cargo test --workspace --quiet
+      - name: Run Rust tests
+        run: cargo test --locked --workspace --quiet
 
-      - name: Install cargo-audit
+  wasm:
+    name: WASM compilation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust with WASM target
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: false
+          cache-workspace-crates: false
+
+      - name: Compile current revision for WASM
+        run: cargo check --locked --target wasm32-unknown-unknown --bin voxel-native
+
+  evidence-contracts:
+    name: Evidence contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            tools/qa/requirements.txt
+            tools/qa/constraints-ci.txt
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+
+      - name: Install analyzer dependencies
+        run: python -m pip install --requirement tools/qa/requirements.txt --constraint tools/qa/constraints-ci.txt
+
+      - name: Test evidence graph contracts
+        run: python tools/evidence/tests/test_evidence_model.py
+
+      - name: Test L0 provenance analyzer contracts
+        run: python tools/qa/test_analyze_l0_provenance.py
+
+      - name: Test evidence manifest contracts
+        run: python tools/artifacts/test_build_evidence_manifest.py
+
+      - name: Test Python and Node artifact consumers
+        run: python tools/artifacts/test_artifact_manifest_consumers.py
+
+      - name: Test public repository presentation guards
+        run: python tools/publication/test_validate_repository_presentation.py
+
+      - name: Validate public repository artifacts
+        run: python tools/publication/validate_repository_presentation.py
+
+  atlas-release:
+    name: Codex atlas (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/artifacts/requirements-atlas.txt
+
+      - name: Install pinned atlas dependencies
+        run: python -m pip install --requirement tools/artifacts/requirements-atlas.txt
+
+      - name: Validate Codex Engineering Atlas inputs without writing output
+        run: python -B tools/artifacts/build_codex_engineering_atlas.py --check-only
+
+      - name: Test Codex Engineering Atlas builder contracts
+        run: python -B tools/artifacts/test_build_codex_engineering_atlas.py
+
+      - name: Bind validation to the checked-in atlas release inputs
+        shell: python
         run: |
-          cargo install cargo-audit --version 0.17.0 || true
+          import hashlib
+          import os
+          import pathlib
+          import subprocess
 
-      - name: Run cargo-audit
+          release_inputs = (
+              pathlib.Path(
+                  "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.pdf"
+              ),
+              pathlib.Path(
+                  "docs/releases/technical-preview/voxel-native-codex-engineering-atlas.provenance.json"
+              ),
+          )
+          revision = os.environ["GITHUB_SHA"]
+          checkout_revision = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
+          if checkout_revision != revision:
+              raise SystemExit(
+                  f"checkout revision {checkout_revision} does not match GITHUB_SHA {revision}"
+              )
+          status = subprocess.check_output(
+              ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+              text=True,
+          )
+          if status:
+              raise SystemExit(
+                  "atlas checks mutated the checkout before release validation:\n" + status
+              )
+
+          for release_input in release_inputs:
+              checked_out = release_input.read_bytes()
+              committed = subprocess.check_output(
+                  [
+                      "git",
+                      "cat-file",
+                      "blob",
+                      f"{revision}:{release_input.as_posix()}",
+                  ]
+              )
+              if checked_out != committed:
+                  raise SystemExit(
+                      f"{release_input} differs from its committed blob after tests"
+                  )
+              print(
+                  f"path={release_input.as_posix()} "
+                  f"sha256={hashlib.sha256(checked_out).hexdigest()} "
+                  f"bytes={len(checked_out)} revision={revision}"
+              )
+
+      - name: Validate canonical Codex Engineering Atlas release
+        run: python -B tools/artifacts/build_codex_engineering_atlas.py --validate-release
+
+  windows-static-qa:
+    name: Windows static QA matrix
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: false
+          cache-workspace-crates: false
+
+      - name: Build release executable
+        run: cargo build --locked --release --bin voxel-native
+
+      - name: Reject live-observer junction ancestors
+        shell: pwsh
+        run: .\scripts\live-observer.ps1 -PathSafetySelfTest
+
+      # StaticDryRun validates the fresh executable, source fingerprint, launch
+      # environment, and runner fixtures. The runner explicitly never invokes
+      # Process.Start and never reads or writes qa_runs in this mode.
+      - name: Validate four-arm planetary QA launch contract without GUI
+        shell: pwsh
         run: |
-          cargo audit || true
+          .\scripts\planetary-streaming-qa.ps1 -Profile natural -Seed 12345 -Scenery lush -DistanceKm 8 -Seconds 24 -ScreenshotInterval 5 -Width 1920 -Height 1080 -Hour 15.65 -Configuration Release -SurfaceMaterial lod-provenance-v1 -Hydro off -Focus river -Cohorts off -TerrainGrammar v3 -L0HeightMode point-16-v1 -StaticDryRun
+          .\scripts\planetary-streaming-qa.ps1 -Profile natural -Seed 12345 -Scenery lush -DistanceKm 8 -Seconds 24 -ScreenshotInterval 5 -Width 1920 -Height 1080 -Hour 15.65 -Configuration Release -SurfaceMaterial lod-provenance-v1 -Hydro off -Focus river -Cohorts off -TerrainGrammar v3 -L0HeightMode cardinal-trimmed-8-v1 -StaticDryRun
+          .\scripts\planetary-streaming-qa.ps1 -Profile astral -Seed 12345 -Scenery lush -DistanceKm 8 -Seconds 24 -ScreenshotInterval 5 -Width 1920 -Height 1080 -Hour 15.65 -Configuration Release -SurfaceMaterial lod-provenance-v1 -Hydro off -Focus lava -Cohorts off -TerrainGrammar v3 -L0HeightMode point-16-v1 -StaticDryRun
+          .\scripts\planetary-streaming-qa.ps1 -Profile astral -Seed 12345 -Scenery lush -DistanceKm 8 -Seconds 24 -ScreenshotInterval 5 -Width 1920 -Height 1080 -Hour 15.65 -Configuration Release -SurfaceMaterial lod-provenance-v1 -Hydro off -Focus lava -Cohorts off -TerrainGrammar v3 -L0HeightMode cardinal-trimmed-8-v1 -StaticDryRun
+
+  security-audit:
+    name: RustSec dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+
+      # Keep auditing isolated from compilation so a RustSec advisory, database
+      # outage, or installer failure is visible as its own blocking status.
+      - name: Install cargo-audit 0.22.2
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit locked dependencies
+        run: cargo audit --file Cargo.lock

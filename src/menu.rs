@@ -4,9 +4,11 @@
 //!   * Start -> MainMenu (Neue Welt / Welt laden / Einstellungen / Beenden)
 //!   * InGame + ESC -> Paused (Weiter / Speichern / Einstellungen / Hauptmenue / Beenden)
 //!   * InGame + E   -> Inventory (block palette grid)
-//!   * F3           -> build toolbelt / editor mode (via toolbelt.rs)
+//!   * F3           -> in-game engine editor panel
 //!   * Shift+F3     -> debug overlay toggle (via hud.rs)
 //!   * Space double -> toggle fly (via player.rs)
+
+use std::time::Duration;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
@@ -14,22 +16,110 @@ use bevy::window::{CursorGrabMode, PrimaryWindow};
 use bevy_egui::{egui, EguiContexts};
 
 use crate::commands::CommandPaletteState;
+use crate::creator_library::{
+    apply_creator_library_action, draw_creator_library, CreatorAssetId, CreatorLibraryEffect,
+    CreatorLibraryState,
+};
 use crate::editor::EditorState;
-use crate::hud::HotbarState;
+use crate::hud::{HotbarState, WorldArrival};
 use crate::icons::Icon;
 use crate::mode::ModeContext;
 use crate::player::Player;
 use crate::player::PlayerProgressScratch;
-use crate::settings::{self, ActiveWorld, WorldMeta, WorldSettings};
-use crate::theme::{command_frame, draw_neural_backdrop, metric_pill, CYAN, TEXT};
-use crate::world::{ChunkStreamer, VoxelWorld};
+use crate::settings::{self, ActiveWorld, SceneryQuality, WorldMeta, WorldProfile, WorldSettings};
+use crate::theme::{metric_pill, MotionRole};
+use crate::ui_kit::{paint_interactive_surface, ActionTone, LoadingState};
+use crate::world::{
+    ChunkStreamer, EditedOverrideSaveOutcome, PendingEditedOverrideStore, VoxelWorld,
+};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+const OPERATING_LAYER_LABEL: &str = "CODEX ENGINEERING // ZEN OPERATING LAYER";
+const START_TITLE: &str = "VOXEL NATIVE";
+const START_SUBTITLE: &str =
+    "mouse-first sketch studio // blossom worlds // bounded planetary streaming";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum InventoryPage {
-    Blocks,
-    Ships,
+    Creator,
     Companions,
     Hotbar,
+}
+
+impl InventoryPage {
+    const ALL: [(Self, Icon, &'static str); 3] = [
+        (Self::Creator, Icon::Drawer, "Creator"),
+        (Self::Companions, Icon::Follow, "Companions"),
+        (Self::Hotbar, Icon::Grid, "Hotbar"),
+    ];
+
+    const fn status(self) -> &'static str {
+        match self {
+            Self::Creator => "MATERIALS + SHUTTLES",
+            Self::Companions => "COMPANION LINK",
+            Self::Hotbar => "QUICK SLOT MAP",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InventoryExit {
+    PauseMenu,
+    ResumeWorld,
+}
+
+impl InventoryExit {
+    const fn resumes_world(self) -> bool {
+        matches!(self, Self::ResumeWorld)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InventoryBlockEntry {
+    block: crate::blocks::BlockType,
+    label: &'static str,
+    role: &'static str,
+    category: usize,
+}
+
+fn inventory_block_entries() -> Vec<InventoryBlockEntry> {
+    crate::blocks::block_palette_catalog()
+        .iter()
+        .enumerate()
+        .flat_map(|(category, group)| {
+            group.entries.iter().map(move |entry| InventoryBlockEntry {
+                block: entry.block,
+                label: entry.label,
+                role: entry.role,
+                category,
+            })
+        })
+        .collect()
+}
+
+fn inventory_entry_matches(
+    entry: InventoryBlockEntry,
+    category_label: &str,
+    query_lower: &str,
+) -> bool {
+    query_lower.is_empty()
+        || [entry.label, entry.role, category_label]
+            .iter()
+            .any(|value| value.to_ascii_lowercase().contains(query_lower))
+}
+
+fn apply_inventory_block_selection(
+    builder: &mut crate::builder::BuilderState,
+    block: crate::blocks::BlockType,
+) {
+    builder.block = block;
+    builder.status = format!(
+        "{} selected from inventory.",
+        crate::blocks::block_label(block)
+    );
+}
+
+fn menu_letter_shortcuts_enabled(wants_keyboard_input: bool) -> bool {
+    !wants_keyboard_input
 }
 
 #[derive(States, Clone, Eq, PartialEq, Debug, Hash, Default)]
@@ -48,10 +138,98 @@ pub enum PauseScreen {
     // Options is handled via editor.rs (state.open == true).
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct NewWorldForm {
     pub name: String,
     pub seed_text: String,
+    pub world_profile: WorldProfile,
+}
+
+impl Default for NewWorldForm {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            seed_text: String::new(),
+            // The user's chosen North Star is the new creation default. Old
+            // saves and programmatic Natural worlds remain untouched.
+            world_profile: WorldProfile::AstralFrontier,
+        }
+    }
+}
+
+#[derive(Resource, Debug, Default)]
+struct StartMenuState {
+    selected_world: Option<String>,
+    text_field_focused: bool,
+    show_blueprints: bool,
+    launch_error: Option<String>,
+}
+
+#[derive(Resource, Default)]
+struct PendingWorldDelete(Option<String>);
+
+impl PendingWorldDelete {
+    fn arm_or_confirm(&mut self, world: &str) -> bool {
+        if self.0.as_deref() == Some(world) {
+            self.0 = None;
+            true
+        } else {
+            self.0 = Some(world.to_owned());
+            false
+        }
+    }
+
+    fn is_armed(&self, world: &str) -> bool {
+        self.0.as_deref() == Some(world)
+    }
+}
+
+const PAUSE_NOTICE_ID: &str = "r93g_pause_notice";
+
+#[derive(Clone, Debug, PartialEq)]
+struct PauseNotice {
+    label: String,
+    value: String,
+    expires_at: f64,
+}
+
+impl PauseNotice {
+    fn is_active_at(&self, now: f64) -> bool {
+        now.is_finite() && self.expires_at.is_finite() && now < self.expires_at
+    }
+}
+
+fn set_pause_notice(ctx: &egui::Context, label: &str, value: impl Into<String>) {
+    let now = ctx.input(|input| input.time);
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new(PAUSE_NOTICE_ID),
+            PauseNotice {
+                label: label.to_owned(),
+                value: value.into(),
+                expires_at: now + 2.4,
+            },
+        );
+    });
+}
+
+fn active_pause_notice(ctx: &egui::Context) -> Option<PauseNotice> {
+    let id = egui::Id::new(PAUSE_NOTICE_ID);
+    let now = ctx.input(|input| input.time);
+    let notice = ctx.data(|data| data.get_temp::<PauseNotice>(id));
+    match notice {
+        Some(notice) if notice.is_active_at(now) => {
+            ctx.request_repaint_after(Duration::from_secs_f64(
+                (notice.expires_at - now).max(0.001),
+            ));
+            Some(notice)
+        }
+        Some(_) => {
+            ctx.data_mut(|data| data.remove::<PauseNotice>(id));
+            None
+        }
+        None => None,
+    }
 }
 
 /// Set to `true` by the main menu when a fresh world is created/loaded,
@@ -68,8 +246,11 @@ impl Plugin for MenuPlugin {
         app.init_state::<GameState>()
             .insert_resource(PauseScreen::default())
             .insert_resource(NewWorldForm::default())
+            .insert_resource(StartMenuState::default())
+            .insert_resource(PendingWorldDelete::default())
             .insert_resource(PendingWorldLoad::default())
-            .add_systems(Update, handle_keys.run_if(not_in_menu_text_edit))
+            .insert_resource(PendingEditedOverrideStore::default())
+            .add_systems(Update, handle_keys)
             .add_systems(
                 Update,
                 (
@@ -91,14 +272,29 @@ fn clear_pending_load(mut pending: ResMut<PendingWorldLoad>) {
     }
 }
 
-fn not_in_menu_text_edit() -> bool {
+fn active_mode_owns_escape(mode: Option<&ModeContext>) -> bool {
+    mode.is_some_and(ModeContext::is_ship_placement)
+}
+
+fn apply_editor_f3(
+    game_state: &GameState,
+    keys: &ButtonInput<KeyCode>,
+    editor_open: &mut bool,
+) -> bool {
+    let shifted = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if *game_state != GameState::InGame || shifted || !keys.just_pressed(KeyCode::F3) {
+        return false;
+    }
+
+    *editor_open = !*editor_open;
     true
 }
 
-/// ESC and E drive the state machine. The editor window close button also
+/// F3, ESC and E drive the state machine. The editor window close button also
 /// flips PauseScreen back to Menu, but key handling lives here for clarity.
 fn handle_keys(
     keys: Res<ButtonInput<KeyCode>>,
+    mut contexts: EguiContexts,
     state: Res<State<GameState>>,
     mut next: ResMut<NextState<GameState>>,
     mut pause_screen: ResMut<PauseScreen>,
@@ -106,6 +302,11 @@ fn handle_keys(
     command_palette: Option<ResMut<CommandPaletteState>>,
     mode: Option<Res<ModeContext>>,
 ) {
+    let allow_letter_shortcuts = contexts
+        .try_ctx_mut()
+        .map(|ctx| menu_letter_shortcuts_enabled(ctx.wants_keyboard_input()))
+        .unwrap_or(false);
+
     if let Some(mut command_palette) = command_palette {
         if command_palette.open {
             if keys.just_pressed(KeyCode::Escape) {
@@ -115,8 +316,17 @@ fn handle_keys(
         }
     }
 
+    if apply_editor_f3(state.get(), &keys, &mut editor.open) {
+        return;
+    }
+
     match state.get() {
         GameState::InGame => {
+            // Placement gestures own Escape so cancellation cannot leak into
+            // the pause state machine during the same frame.
+            if keys.just_pressed(KeyCode::Escape) && active_mode_owns_escape(mode.as_deref()) {
+                return;
+            }
             // E cycles Build Studio tools — don't open inventory mid-build.
             // ESC always opens pause so you are never trapped in a tool gesture.
             if mode.as_deref().map(|m| m.is_build()).unwrap_or(false)
@@ -128,7 +338,7 @@ fn handle_keys(
                 *pause_screen = PauseScreen::Menu;
                 editor.open = false;
                 next.set(GameState::Paused);
-            } else if keys.just_pressed(KeyCode::KeyE) {
+            } else if allow_letter_shortcuts && keys.just_pressed(KeyCode::KeyE) {
                 *pause_screen = PauseScreen::Inventory;
                 editor.open = false;
                 next.set(GameState::Paused);
@@ -144,7 +354,8 @@ fn handle_keys(
                     next.set(GameState::InGame);
                 }
             }
-            if keys.just_pressed(KeyCode::KeyE)
+            if allow_letter_shortcuts
+                && keys.just_pressed(KeyCode::KeyE)
                 && *pause_screen == PauseScreen::Inventory
                 && !editor.open
             {
@@ -182,298 +393,1324 @@ fn on_game_start(
 
 // ============================ Main Menu ===================================
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartMenuDensity {
+    Compact,
+    Standard,
+    Wide,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StartMenuLayout {
+    density: StartMenuDensity,
+    content_width: f32,
+    outer_margin: f32,
+    title_size: f32,
+    show_subtitle: bool,
+    world_columns: usize,
+    world_list_height: f32,
+}
+
+impl StartMenuLayout {
+    fn uses_split_rows(self) -> bool {
+        self.density != StartMenuDensity::Compact
+    }
+}
+
+fn start_menu_layout(viewport: egui::Vec2, world_count: usize) -> StartMenuLayout {
+    let safe_width = if viewport.x.is_finite() {
+        viewport.x.max(1.0)
+    } else {
+        320.0
+    };
+    let safe_height = if viewport.y.is_finite() {
+        viewport.y.max(1.0)
+    } else {
+        280.0
+    };
+    let density = if safe_width < 680.0 || safe_height < 560.0 {
+        StartMenuDensity::Compact
+    } else if safe_width < 1120.0 {
+        StartMenuDensity::Standard
+    } else {
+        StartMenuDensity::Wide
+    };
+    let outer_margin = match density {
+        StartMenuDensity::Compact => 12.0,
+        StartMenuDensity::Standard => 22.0,
+        StartMenuDensity::Wide => 32.0,
+    };
+    let available_content = (safe_width - outer_margin * 2.0).max(1.0);
+    let content_width = match density {
+        StartMenuDensity::Compact => safe_width - outer_margin * 2.0,
+        StartMenuDensity::Standard => (safe_width - outer_margin * 2.0).min(820.0),
+        StartMenuDensity::Wide => (safe_width - outer_margin * 2.0).min(1080.0),
+    }
+    .max(280.0)
+    .min(available_content);
+    let title_size = match density {
+        StartMenuDensity::Compact => 25.0,
+        StartMenuDensity::Standard => 30.0,
+        StartMenuDensity::Wide => 34.0,
+    };
+    let world_columns = if density == StartMenuDensity::Wide
+        || (density == StartMenuDensity::Standard && content_width >= 780.0)
+    {
+        2
+    } else {
+        1
+    };
+    let visible_rows = match density {
+        StartMenuDensity::Compact => 2usize,
+        StartMenuDensity::Standard => 3,
+        StartMenuDensity::Wide => 4,
+    };
+    let world_rows = world_count.div_ceil(world_columns);
+    let world_list_height = if world_count == 0 {
+        72.0
+    } else {
+        (world_rows.min(visible_rows) as f32 * 94.0 + 4.0).min((safe_height * 0.36).max(98.0))
+    };
+
+    StartMenuLayout {
+        density,
+        content_width,
+        outer_margin,
+        title_size,
+        show_subtitle: safe_width >= 520.0 && safe_height >= 440.0,
+        world_columns,
+        world_list_height,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorldQualityTier {
+    Minimal,
+    Efficient,
+    Balanced,
+    Immersive,
+}
+
+impl WorldQualityTier {
+    fn from_quality(quality: SceneryQuality) -> Self {
+        match quality {
+            SceneryQuality::Off => Self::Minimal,
+            SceneryQuality::Lean => Self::Efficient,
+            SceneryQuality::Balanced => Self::Balanced,
+            SceneryQuality::Lush => Self::Immersive,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Minimal => "MINIMAL",
+            Self::Efficient => "EFFICIENT",
+            Self::Balanced => "BALANCED",
+            Self::Immersive => "IMMERSIVE",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Minimal => "SCENERY OFF",
+            Self::Efficient => "LEAN SCENERY",
+            Self::Balanced => "BALANCED SCENERY",
+            Self::Immersive => "LUSH SCENERY",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorldSelectionMove {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
+fn sync_start_menu_selection(state: &mut StartMenuState, worlds: &[WorldMeta]) {
+    let selection_is_valid = state
+        .selected_world
+        .as_deref()
+        .is_some_and(|name| worlds.iter().any(|world| world.name == name));
+    if selection_is_valid {
+        return;
+    }
+
+    state.selected_world = worlds
+        .iter()
+        .max_by_key(|world| world.last_played_epoch)
+        .map(|world| world.name.clone());
+}
+
+fn moved_world_selection(
+    selected_world: Option<&str>,
+    worlds: &[WorldMeta],
+    movement: WorldSelectionMove,
+) -> Option<String> {
+    if worlds.is_empty() {
+        return None;
+    }
+
+    let current = selected_world
+        .and_then(|name| worlds.iter().position(|world| world.name == name))
+        .unwrap_or(0);
+    let index = match movement {
+        WorldSelectionMove::Previous => current.checked_sub(1).unwrap_or(worlds.len() - 1),
+        WorldSelectionMove::Next => (current + 1) % worlds.len(),
+        WorldSelectionMove::First => 0,
+        WorldSelectionMove::Last => worlds.len() - 1,
+    };
+    Some(worlds[index].name.clone())
+}
+
+fn start_menu_navigation_enabled(text_field_focused: bool, overlay_open: bool) -> bool {
+    !text_field_focused && !overlay_open
+}
+
+fn fitted_start_text_size(text: &str, max_width: f32, preferred: f32, minimum: f32) -> f32 {
+    if text.is_empty() || !max_width.is_finite() || max_width <= 0.0 {
+        return preferred.max(minimum);
+    }
+    let estimated_width = text.chars().count() as f32 * preferred * 0.61;
+    if estimated_width <= max_width {
+        preferred
+    } else {
+        (preferred * max_width / estimated_width).clamp(minimum, preferred)
+    }
+}
+
+fn inventory_grid_metrics(available_width: f32) -> (usize, f32) {
+    const MAX_COLUMNS: usize = 5;
+    const MIN_TILE_WIDTH: f32 = 148.0;
+    const GAP: f32 = 10.0;
+
+    let available_width = if available_width.is_finite() {
+        available_width.max(112.0)
+    } else {
+        MIN_TILE_WIDTH
+    };
+    let columns =
+        (((available_width + GAP) / (MIN_TILE_WIDTH + GAP)).floor() as usize).clamp(1, MAX_COLUMNS);
+    let tile_width =
+        ((available_width - GAP * columns.saturating_sub(1) as f32) / columns as f32).max(112.0);
+    (columns, tile_width)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuOverlayKind {
+    Pause,
+    Inventory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MenuOverlayLayout {
+    size: egui::Vec2,
+    compact: bool,
+}
+
+fn menu_overlay_layout(viewport: egui::Vec2, kind: MenuOverlayKind) -> MenuOverlayLayout {
+    let viewport = egui::vec2(
+        if viewport.x.is_finite() {
+            viewport.x.max(1.0)
+        } else {
+            1.0
+        },
+        if viewport.y.is_finite() {
+            viewport.y.max(1.0)
+        } else {
+            1.0
+        },
+    );
+    let (target, compact_below) = match kind {
+        MenuOverlayKind::Pause => (egui::vec2(520.0, 660.0), egui::vec2(440.0, 560.0)),
+        MenuOverlayKind::Inventory => (egui::vec2(980.0, 700.0), egui::vec2(720.0, 600.0)),
+    };
+    let margin = if viewport.x < 420.0 || viewport.y < 420.0 {
+        8.0
+    } else {
+        20.0
+    };
+    let available = egui::vec2(
+        (viewport.x - margin * 2.0).max(1.0),
+        (viewport.y - margin * 2.0).max(1.0),
+    );
+    let size = egui::vec2(target.x.min(available.x), target.y.min(available.y));
+
+    MenuOverlayLayout {
+        size,
+        compact: size.x < compact_below.x || size.y < compact_below.y,
+    }
+}
+
+fn draw_menu_overlay_scrim(
+    ctx: &egui::Context,
+    id: &'static str,
+    theme: crate::theme::ThemeSettings,
+    alpha: u8,
+) {
+    let colors = theme.semantic();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new(id),
+    ));
+    painter.rect_filled(
+        ctx.screen_rect(),
+        0.0,
+        start_menu_alpha(colors.background, alpha),
+    );
+}
+
+fn draw_menu_overlay_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    subtitle: &str,
+    metric_label: &str,
+    metric_value: &str,
+    compact: bool,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    ui.horizontal_wrapped(|ui| {
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new(OPERATING_LAYER_LABEL)
+                    .size(9.5)
+                    .strong()
+                    .monospace()
+                    .color(colors.accent),
+            );
+            ui.label(
+                egui::RichText::new(title)
+                    .size(if compact { 20.0 } else { 25.0 })
+                    .strong()
+                    .monospace()
+                    .color(colors.text),
+            );
+            ui.label(
+                egui::RichText::new(subtitle)
+                    .size(10.5)
+                    .monospace()
+                    .color(colors.text_muted),
+            );
+        });
+        if !compact {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                metric_pill(ui, theme, metric_label, metric_value)
+            });
+        }
+    });
+    if compact {
+        ui.add_space(5.0);
+        metric_pill(ui, theme, metric_label, metric_value);
+    }
+    ui.add_space(8.0);
+    crate::ui_kit::compact_separator(ui, theme);
+}
+
+fn start_menu_command(
+    ui: &mut egui::Ui,
+    label: &str,
+    detail: Option<&str>,
+    primary: bool,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Response {
+    let height = if primary { 54.0 } else { 38.0 };
+    crate::ui_kit::command_action(
+        ui,
+        label,
+        detail,
+        if primary {
+            ActionTone::Primary
+        } else {
+            ActionTone::Standard
+        },
+        height,
+        theme,
+    )
+}
+
+fn start_menu_footer_action(
+    ui: &mut egui::Ui,
+    label: &str,
+    danger: bool,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Response {
+    crate::ui_kit::command_action(
+        ui,
+        label,
+        None,
+        if danger {
+            ActionTone::Danger
+        } else {
+            ActionTone::Standard
+        },
+        36.0,
+        theme,
+    )
+}
+
+const START_WORLD_CARD_HEIGHT: f32 = 88.0;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StartWorldCardEvent {
+    select: bool,
+    open: bool,
+}
+
+fn world_edit_summary(edited_chunks: usize) -> String {
+    match edited_chunks {
+        0 => "PRISTINE".to_owned(),
+        1 => "1 EDITED CHUNK".to_owned(),
+        count => format!("{count} EDITED CHUNKS"),
+    }
+}
+
+fn start_menu_alpha(color: egui::Color32, alpha: u8) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+fn draw_start_world_card(
+    ui: &mut egui::Ui,
+    meta: &WorldMeta,
+    ordinal: usize,
+    selected: bool,
+    latest: bool,
+    reveal_selection: bool,
+    theme: crate::theme::ThemeSettings,
+) -> StartWorldCardEvent {
+    let colors = theme.semantic();
+    let size = egui::vec2(ui.available_width().max(1.0), START_WORLD_CARD_HEIGHT);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let focused = response.has_focus();
+    let surface =
+        paint_interactive_surface(ui, rect, &response, selected, MotionRole::State, theme);
+    let paint_rect = surface.paint_rect;
+    let painter = ui.painter_at(rect.expand(5.0));
+
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(paint_rect.left() + 24.0, paint_rect.top() + 27.0),
+        egui::vec2(20.0, 20.0),
+    );
+    crate::icons::paint_icon(&painter, icon_rect, Icon::Globe, surface.icon);
+
+    let quality = WorldQualityTier::from_quality(meta.scenery_quality);
+    let quality_color = match quality {
+        WorldQualityTier::Minimal => colors.warning,
+        WorldQualityTier::Efficient => colors.info,
+        WorldQualityTier::Balanced => colors.success,
+        WorldQualityTier::Immersive => colors.accent,
+    };
+    let quality_rect = egui::Rect::from_min_size(
+        egui::pos2(paint_rect.right() - 98.0, paint_rect.top() + 11.0),
+        egui::vec2(86.0, 20.0),
+    );
+    painter.rect_filled(
+        quality_rect,
+        egui::Rounding::same(4.0),
+        start_menu_alpha(quality_color, 28),
+    );
+    painter.rect_stroke(
+        quality_rect,
+        egui::Rounding::same(4.0),
+        egui::Stroke::new(1.0, start_menu_alpha(quality_color, 142)),
+    );
+    painter.text(
+        quality_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        quality.label(),
+        egui::FontId::monospace(9.0),
+        quality_color,
+    );
+
+    let title_x = paint_rect.left() + 42.0;
+    let title_width = (quality_rect.left() - title_x - 8.0).max(54.0);
+    painter
+        .with_clip_rect(egui::Rect::from_min_max(
+            egui::pos2(title_x, paint_rect.top() + 8.0),
+            egui::pos2(quality_rect.left() - 6.0, paint_rect.top() + 37.0),
+        ))
+        .text(
+            egui::pos2(title_x, paint_rect.top() + 21.0),
+            egui::Align2::LEFT_CENTER,
+            &meta.name,
+            egui::FontId::monospace(fitted_start_text_size(&meta.name, title_width, 13.0, 8.5)),
+            surface.text,
+        );
+
+    let edits = world_edit_summary(meta.world_edit_manifest.edited_chunks);
+    let detail = format!("SEED {}  //  {edits}", meta.seed);
+    painter
+        .with_clip_rect(paint_rect.shrink2(egui::vec2(12.0, 4.0)))
+        .text(
+            egui::pos2(paint_rect.left() + 14.0, paint_rect.top() + 51.0),
+            egui::Align2::LEFT_CENTER,
+            detail,
+            egui::FontId::monospace(9.5),
+            surface.detail,
+        );
+    painter.text(
+        egui::pos2(paint_rect.left() + 14.0, paint_rect.bottom() - 13.0),
+        egui::Align2::LEFT_CENTER,
+        format!("WORLD {:02}", ordinal + 1),
+        egui::FontId::monospace(9.0),
+        if latest {
+            colors.success
+        } else {
+            surface.detail
+        },
+    );
+    painter.text(
+        egui::pos2(paint_rect.right() - 12.0, paint_rect.bottom() - 13.0),
+        egui::Align2::RIGHT_CENTER,
+        if latest {
+            "LATEST SESSION"
+        } else {
+            quality.detail()
+        },
+        egui::FontId::monospace(9.0),
+        if latest {
+            colors.success
+        } else {
+            quality_color
+        },
+    );
+
+    let select = response.clicked();
+    let open = response.double_clicked()
+        || (focused
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)));
+    if select {
+        response.request_focus();
+    }
+    if selected && reveal_selection {
+        response.scroll_to_me(Some(egui::Align::Center));
+    }
+    let _ = response.on_hover_text(format!(
+        "Select {}. Double-click or press Enter to open.",
+        meta.name
+    ));
+
+    StartWorldCardEvent { select, open }
+}
+
+fn draw_start_launch_summary(
+    ui: &mut egui::Ui,
+    selected: Option<&WorldMeta>,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    ui.label(
+        egui::RichText::new("LAUNCH CONSOLE")
+            .size(10.0)
+            .strong()
+            .monospace()
+            .color(colors.text_muted),
+    );
+    if let Some(meta) = selected {
+        let title_size = fitted_start_text_size(&meta.name, ui.available_width(), 20.0, 11.0);
+        ui.label(
+            egui::RichText::new(&meta.name)
+                .size(title_size)
+                .strong()
+                .monospace()
+                .color(colors.text),
+        );
+        ui.horizontal_wrapped(|ui| {
+            crate::ui_kit::status_chip(
+                ui,
+                Icon::Detail,
+                "QUALITY",
+                WorldQualityTier::from_quality(meta.scenery_quality).label(),
+                theme,
+            );
+            crate::ui_kit::status_chip(
+                ui,
+                Icon::Chunk,
+                "EDITS",
+                &meta.world_edit_manifest.edited_chunks.to_string(),
+                theme,
+            );
+            crate::ui_kit::status_chip(ui, Icon::Seed, "SEED", &meta.seed.to_string(), theme);
+        });
+    } else {
+        ui.label(
+            egui::RichText::new("EMPTY GARDEN")
+                .size(20.0)
+                .strong()
+                .monospace()
+                .color(colors.text),
+        );
+        ui.label(
+            egui::RichText::new("A generated name and seed are ready when you are.")
+                .size(10.5)
+                .monospace()
+                .color(colors.text_muted),
+        );
+        crate::ui_kit::status_chip(ui, Icon::Globe, "STATE", "READY TO CREATE", theme);
+    }
+}
+
+fn start_response_activated(ui: &mut egui::Ui, response: &egui::Response) -> bool {
+    response.clicked()
+        || (response.has_focus()
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)))
+}
+
 fn draw_main_menu(
     mut contexts: EguiContexts,
     mut next: ResMut<NextState<GameState>>,
     mut commands: Commands,
     mut form: ResMut<NewWorldForm>,
+    mut start_state: ResMut<StartMenuState>,
     mut settings: ResMut<WorldSettings>,
     mut editor: ResMut<EditorState>,
     mut command_palette: ResMut<CommandPaletteState>,
     mut pending: ResMut<PendingWorldLoad>,
+    mut pending_edits: ResMut<PendingEditedOverrideStore>,
+    mut arrival: ResMut<WorldArrival>,
+    mut pending_delete: ResMut<PendingWorldDelete>,
     mut exit: EventWriter<AppExit>,
 ) {
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let screen = ctx.screen_rect();
-    // Drive animations from egui's internal time (wall-clock seconds).
-    let t_anim = ctx.input(|i| i.time) as f32;
-    ctx.request_repaint(); // keep backdrop animated
-
-    draw_neural_backdrop(ctx, settings.theme, t_anim);
-    let painter = ctx.layer_painter(egui::LayerId::background());
     let theme = settings.theme;
+    let colors = theme.semantic();
     let primary = theme.color.primary();
     let dim = theme.color.dim();
-
-    // ---- Title with neon glow + animated underline ----
-    let title_pos = egui::pos2(screen.center().x, screen.top() + 100.0);
-    let glow_pulse = (t_anim * 1.5).sin() * 0.25 + 0.75;
-    // Glow halo behind text.
-    for g in (1..=4).rev() {
-        let a = (30.0 * glow_pulse / g as f32) as u8;
-        painter.text(
-            title_pos + egui::vec2(0.0, 0.0),
-            egui::Align2::CENTER_CENTER,
-            "VOXEL-NATIVE",
-            egui::FontId::monospace(64.0 + g as f32 * 2.0),
-            egui::Color32::from_rgba_unmultiplied(primary.r(), primary.g(), primary.b(), a),
-        );
-    }
-    painter.text(
-        title_pos,
-        egui::Align2::CENTER_CENTER,
-        "VOXEL-NATIVE",
-        egui::FontId::monospace(64.0),
-        TEXT,
-    );
-    painter.text(
-        egui::pos2(title_pos.x, title_pos.y + 50.0),
-        egui::Align2::CENTER_CENTER,
-        "// COMMAND DECK // RUST + BEVY + WGPU // ZERO BROWSER TAX",
-        egui::FontId::monospace(15.0),
-        dim,
-    );
-    // Animated accent bar under title.
-    let bar_w = 360.0;
-    let bar_y = title_pos.y + 68.0;
-    let bar_rect = egui::Rect::from_min_size(
-        egui::pos2(title_pos.x - bar_w * 0.5, bar_y),
-        egui::vec2(bar_w, 2.0),
-    );
-    painter.rect_filled(
-        bar_rect,
-        egui::Rounding::same(1.0),
-        egui::Color32::from_rgba_unmultiplied(dim.r(), dim.g(), dim.b(), 180),
-    );
-    // Moving glow on the bar.
-    let glow_x = (t_anim * 0.8).sin() * 0.5 + 0.5;
-    let gx = bar_rect.left() + glow_x * (bar_w - 60.0);
-    painter.rect_filled(
-        egui::Rect::from_min_size(egui::pos2(gx, bar_y - 0.5), egui::vec2(60.0, 3.0)),
-        egui::Rounding::same(1.5),
-        primary,
-    );
-
-    // Centered card panel.
     let worlds = settings::list_worlds();
-    let latest_world = worlds
+    sync_start_menu_selection(&mut start_state, &worlds);
+
+    let overlay_open = editor.open || command_palette.open;
+    let navigation_enabled =
+        start_menu_navigation_enabled(start_state.text_field_focused, overlay_open);
+    let mut focus_new_world = false;
+    let mut focus_primary = false;
+    if navigation_enabled {
+        let movement = ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                Some(WorldSelectionMove::Previous)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                Some(WorldSelectionMove::Next)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
+                Some(WorldSelectionMove::First)
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::End) {
+                Some(WorldSelectionMove::Last)
+            } else {
+                None
+            }
+        });
+        if let Some(movement) = movement {
+            start_state.selected_world =
+                moved_world_selection(start_state.selected_world.as_deref(), &worlds, movement);
+            pending_delete.0 = None;
+            focus_primary = true;
+        }
+        focus_new_world =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::N));
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            pending_delete.0 = None;
+            start_state.show_blueprints = false;
+        }
+    }
+
+    let selected = start_state
+        .selected_world
+        .as_deref()
+        .and_then(|name| worlds.iter().find(|world| world.name == name));
+    let latest_name = worlds
         .iter()
-        .max_by_key(|meta| meta.last_played_epoch)
-        .cloned();
-    let panel_w = 720.0_f32.min(screen.width() - 40.0);
-    let panel_h = 590.0_f32.min(screen.height() - 190.0);
-    let pos = egui::pos2(screen.center().x - panel_w * 0.5, screen.top() + 180.0);
+        .max_by_key(|world| world.last_played_epoch)
+        .map(|world| world.name.as_str());
+    let layout = start_menu_layout(screen.size(), worlds.len());
 
-    egui::Window::new("voxel_native_main_menu")
-        .title_bar(false)
-        .resizable(false)
-        .collapsible(false)
-        .movable(false)
-        .frame(crate::ui_kit::toolbench_frame(theme))
-        .fixed_pos(pos)
-        .fixed_size(egui::vec2(panel_w, panel_h))
+    let mut open_requested = None::<WorldMeta>;
+    let mut create_requested = false;
+    let mut delete_requested = None::<WorldMeta>;
+    let mut open_toolbench = false;
+    let mut open_commands = false;
+    let mut quit_requested = false;
+    let mut text_field_focused = false;
+
+    // Static paint only: the menu idles without scheduling frame-by-frame work.
+    draw_stable_start_backdrop(ctx, theme);
+    egui::CentralPanel::default()
+        .frame(egui::Frame::none())
         .show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("LIQUID GLASS ENGINE")
-                            .size(23.0)
-                            .color(primary)
-                            .strong()
-                            .monospace(),
-                    );
-                    ui.label(
-                        egui::RichText::new("Starten, fliegen, bauen - mit smarter Konfiguration.")
-                            .size(11.0)
-                            .color(dim)
-                            .monospace(),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    metric_pill(ui, theme, "WORLDS", &worlds.len().to_string());
-                    metric_pill(ui, theme, "SEED", &format!("{:08X}", settings.seed));
-                });
-            });
-            crate::ui_kit::compact_separator(ui, theme);
-            ui.add_space(10.0);
-
-            if let Some(meta) = latest_world.as_ref() {
-                crate::ui_kit::surface_panel(ui, theme, |ui| {
+            egui::ScrollArea::vertical()
+                .id_source("r93g_start_scroll_v2")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_space(if layout.density == StartMenuDensity::Compact {
+                        12.0
+                    } else {
+                        22.0
+                    });
                     ui.horizontal(|ui| {
-                        if crate::ui_kit::major_action(
-                            ui,
-                            Icon::Resume,
-                            "Continue",
-                            &format!("{}  seed {}", meta.name, meta.seed),
-                            false,
-                            theme,
-                        )
-                        .clicked()
-                        {
-                            apply_world_to_settings(meta, &mut settings);
-                            commands.insert_resource(ActiveWorld { meta: meta.clone() });
-                            editor.open = false;
-                            pending.0 = true;
-                            next.set(GameState::InGame);
-                        }
+                        let side = ((ui.available_width() - layout.content_width) * 0.5).max(0.0);
+                        ui.add_space(side);
                         ui.vertical(|ui| {
-                            crate::ui_kit::status_chip(ui, Icon::Globe, "WORLD", &meta.name, theme);
-                            crate::ui_kit::status_chip(
-                                ui,
-                                Icon::Teleport,
-                                "POS",
-                                &format!(
-                                    "{:.0}/{:.0}/{:.0}",
-                                    meta.player_pos[0], meta.player_pos[1], meta.player_pos[2]
-                                ),
-                                theme,
-                            );
+                            ui.set_width(layout.content_width);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(OPERATING_LAYER_LABEL)
+                                            .size(10.0)
+                                            .strong()
+                                            .monospace()
+                                            .color(primary),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(START_TITLE)
+                                            .size(layout.title_size)
+                                            .strong()
+                                            .monospace()
+                                            .color(colors.text),
+                                    );
+                                    if layout.show_subtitle {
+                                        ui.label(
+                                            egui::RichText::new(START_SUBTITLE)
+                                                .size(10.5)
+                                                .monospace()
+                                                .color(dim),
+                                        );
+                                    }
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        metric_pill(ui, theme, "WORLDS", &worlds.len().to_string());
+                                        metric_pill(ui, theme, "STREAM", "READY");
+                                    },
+                                );
+                            });
+                            ui.add_space(8.0);
+                            crate::ui_kit::compact_separator(ui, theme);
+                            ui.add_space(10.0);
+
+                            crate::ui_kit::surface_panel(ui, theme, |ui| {
+                                let mut draw_primary = |ui: &mut egui::Ui| {
+                                    let (label, detail) = if let Some(meta) = selected {
+                                        ("ENTER WORLD", meta.name.as_str())
+                                    } else {
+                                        ("CREATE FIRST WORLD", "generated name + random seed")
+                                    };
+                                    let response =
+                                        start_menu_command(ui, label, Some(detail), true, theme);
+                                    if navigation_enabled
+                                        && (focus_primary
+                                            || ui.ctx().memory(|memory| memory.focused().is_none()))
+                                    {
+                                        response.request_focus();
+                                    }
+                                    if start_response_activated(ui, &response) {
+                                        if let Some(meta) = selected {
+                                            open_requested = Some(meta.clone());
+                                        } else {
+                                            create_requested = true;
+                                        }
+                                    }
+
+                                    if let Some(meta) = selected {
+                                        ui.add_space(6.0);
+                                        let delete_armed = pending_delete.is_armed(&meta.name);
+                                        let delete_label = if delete_armed {
+                                            "CONFIRM DELETE"
+                                        } else {
+                                            "DELETE WORLD"
+                                        };
+                                        if start_menu_footer_action(ui, delete_label, true, theme)
+                                            .clicked()
+                                            && pending_delete.arm_or_confirm(&meta.name)
+                                        {
+                                            delete_requested = Some(meta.clone());
+                                        }
+                                    }
+                                };
+
+                                if layout.uses_split_rows() {
+                                    ui.columns(2, |cols| {
+                                        draw_start_launch_summary(&mut cols[0], selected, theme);
+                                        draw_primary(&mut cols[1]);
+                                    });
+                                } else {
+                                    draw_start_launch_summary(ui, selected, theme);
+                                    ui.add_space(10.0);
+                                    draw_primary(ui);
+                                }
+                            });
+
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("WORLD LIBRARY")
+                                        .size(10.5)
+                                        .strong()
+                                        .monospace()
+                                        .color(colors.text_muted),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new("LOCAL SAVE INDEX")
+                                                .size(9.0)
+                                                .monospace()
+                                                .color(dim),
+                                        );
+                                    },
+                                );
+                            });
+                            egui::ScrollArea::vertical()
+                                .id_source("r93g_world_library_v2")
+                                .max_height(layout.world_list_height)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    if worlds.is_empty() {
+                                        crate::ui_kit::activity_status(
+                                            ui,
+                                            LoadingState::Idle,
+                                            "WORLD LIBRARY",
+                                            "No local worlds yet",
+                                            theme,
+                                        );
+                                    } else if layout.world_columns == 1 {
+                                        for (index, meta) in worlds.iter().enumerate() {
+                                            let event = draw_start_world_card(
+                                                ui,
+                                                meta,
+                                                index,
+                                                start_state.selected_world.as_deref()
+                                                    == Some(meta.name.as_str()),
+                                                latest_name == Some(meta.name.as_str()),
+                                                focus_primary,
+                                                theme,
+                                            );
+                                            if event.select {
+                                                start_state.selected_world =
+                                                    Some(meta.name.clone());
+                                                pending_delete.0 = None;
+                                            }
+                                            if event.open {
+                                                open_requested = Some(meta.clone());
+                                            }
+                                            ui.add_space(6.0);
+                                        }
+                                    } else {
+                                        for (row, pair) in worlds.chunks(2).enumerate() {
+                                            ui.columns(2, |cols| {
+                                                for (column, meta) in pair.iter().enumerate() {
+                                                    let index = row * 2 + column;
+                                                    let event = draw_start_world_card(
+                                                        &mut cols[column],
+                                                        meta,
+                                                        index,
+                                                        start_state.selected_world.as_deref()
+                                                            == Some(meta.name.as_str()),
+                                                        latest_name == Some(meta.name.as_str()),
+                                                        focus_primary,
+                                                        theme,
+                                                    );
+                                                    if event.select {
+                                                        start_state.selected_world =
+                                                            Some(meta.name.clone());
+                                                        pending_delete.0 = None;
+                                                    }
+                                                    if event.open {
+                                                        open_requested = Some(meta.clone());
+                                                    }
+                                                }
+                                            });
+                                            ui.add_space(6.0);
+                                        }
+                                    }
+                                });
+
+                            ui.add_space(8.0);
+                            crate::ui_kit::surface_panel(ui, theme, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("NEW WORLD")
+                                            .size(10.5)
+                                            .strong()
+                                            .monospace()
+                                            .color(colors.text_muted),
+                                    );
+                                    crate::ui_kit::status_chip(
+                                        ui,
+                                        Icon::Detail,
+                                        "PROFILE",
+                                        form.world_profile.label(),
+                                        theme,
+                                    );
+                                });
+                                ui.add_space(5.0);
+
+                                ui.horizontal_wrapped(|ui| {
+                                    for profile in WorldProfile::ALL {
+                                        if crate::ui_kit::choice_chip_sized(
+                                            ui,
+                                            profile.label(),
+                                            form.world_profile == profile,
+                                            156.0,
+                                            theme,
+                                        )
+                                        .on_hover_text(profile.detail())
+                                        .clicked()
+                                        {
+                                            form.world_profile = profile;
+                                        }
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new(form.world_profile.detail())
+                                        .size(10.5)
+                                        .color(colors.text_muted),
+                                );
+                                ui.add_space(6.0);
+
+                                let name_hint = auto_world_name(&worlds);
+                                if layout.uses_split_rows() {
+                                    ui.columns(2, |cols| {
+                                        let name_response = cols[0]
+                                            .push_id("start_new_world_name_v2", |ui| {
+                                                crate::ui_kit::search_box(
+                                                    ui,
+                                                    &mut form.name,
+                                                    &name_hint,
+                                                    theme,
+                                                )
+                                            })
+                                            .inner;
+                                        if focus_new_world {
+                                            name_response.request_focus();
+                                        }
+                                        text_field_focused |= name_response.has_focus();
+
+                                        let seed_response = cols[1]
+                                            .push_id("start_new_world_seed_v2", |ui| {
+                                                crate::ui_kit::search_box(
+                                                    ui,
+                                                    &mut form.seed_text,
+                                                    "RANDOM SEED",
+                                                    theme,
+                                                )
+                                            })
+                                            .inner;
+                                        text_field_focused |= seed_response.has_focus();
+                                    });
+                                } else {
+                                    let name_response = ui
+                                        .push_id("start_new_world_name_v2", |ui| {
+                                            crate::ui_kit::search_box(
+                                                ui,
+                                                &mut form.name,
+                                                &name_hint,
+                                                theme,
+                                            )
+                                        })
+                                        .inner;
+                                    if focus_new_world {
+                                        name_response.request_focus();
+                                    }
+                                    text_field_focused |= name_response.has_focus();
+                                    let seed_response = ui
+                                        .push_id("start_new_world_seed_v2", |ui| {
+                                            crate::ui_kit::search_box(
+                                                ui,
+                                                &mut form.seed_text,
+                                                "RANDOM SEED",
+                                                theme,
+                                            )
+                                        })
+                                        .inner;
+                                    text_field_focused |= seed_response.has_focus();
+                                }
+
+                                ui.add_space(6.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    if crate::ui_kit::icon_square(
+                                        ui,
+                                        Icon::Seed,
+                                        false,
+                                        theme,
+                                        "Generate random seed",
+                                    )
+                                    .clicked()
+                                    {
+                                        form.seed_text = rand_seed().to_string();
+                                    }
+                                    if crate::ui_kit::icon_action(
+                                        ui,
+                                        Icon::Layout,
+                                        "Blueprints",
+                                        start_state.show_blueprints,
+                                        theme,
+                                    )
+                                    .clicked()
+                                    {
+                                        start_state.show_blueprints = !start_state.show_blueprints;
+                                    }
+                                    if crate::ui_kit::icon_action(
+                                        ui,
+                                        Icon::Play,
+                                        "Create",
+                                        false,
+                                        theme,
+                                    )
+                                    .clicked()
+                                    {
+                                        create_requested = true;
+                                    }
+                                });
+
+                                if start_state.show_blueprints {
+                                    ui.add_space(7.0);
+                                    crate::ui_kit::compact_separator(ui, theme);
+                                    ui.add_space(7.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        for (label, world_name, seed) in [
+                                            ("NEO-KYOTO", "neo_kyoto_garden", "930514"),
+                                            ("CYBER-ZEN", "cyber_zen_path", "440993"),
+                                            ("SAKURA VOID", "sakura_void", "884499"),
+                                            ("LOTUS DRIFT", "lotus_drift", "221177"),
+                                        ] {
+                                            let selected_blueprint = form.seed_text == seed;
+                                            if crate::ui_kit::choice_chip_sized(
+                                                ui,
+                                                label,
+                                                selected_blueprint,
+                                                142.0,
+                                                theme,
+                                            )
+                                            .clicked()
+                                            {
+                                                form.name = world_name.to_owned();
+                                                form.seed_text = seed.to_owned();
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+
+                            if pending.0 {
+                                ui.add_space(8.0);
+                                crate::ui_kit::activity_status(
+                                    ui,
+                                    LoadingState::Indeterminate,
+                                    "WORLD LINK",
+                                    "Opening selected world...",
+                                    theme,
+                                );
+                            } else if let Some(reason) = start_state.launch_error.as_deref() {
+                                ui.add_space(8.0);
+                                crate::ui_kit::activity_status(
+                                    ui,
+                                    LoadingState::Idle,
+                                    "WORLD BLOCKED",
+                                    reason,
+                                    theme,
+                                );
+                            }
+
+                            ui.add_space(8.0);
+                            crate::ui_kit::compact_separator(ui, theme);
+                            ui.add_space(8.0);
+                            ui.horizontal_wrapped(|ui| {
+                                open_toolbench = crate::ui_kit::icon_action(
+                                    ui,
+                                    Icon::Gear,
+                                    "Toolbench",
+                                    false,
+                                    theme,
+                                )
+                                .clicked();
+                                open_commands = crate::ui_kit::icon_action(
+                                    ui,
+                                    Icon::Key,
+                                    "Command deck",
+                                    false,
+                                    theme,
+                                )
+                                .clicked();
+                                quit_requested =
+                                    crate::ui_kit::danger_action(ui, Icon::Quit, "Quit", theme)
+                                        .clicked();
+                            });
+                            ui.add_space(layout.outer_margin);
                         });
                     });
                 });
-                ui.add_space(8.0);
-            }
-
-            crate::ui_kit::surface_panel(ui, theme, |ui| {
-                ui.horizontal(|ui| {
-                    crate::ui_kit::status_chip(ui, Icon::New, "NEW WORLD", "seed + name", theme);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.name)
-                            .hint_text(auto_world_name(&worlds))
-                            .desired_width(190.0),
-                    );
-                    ui.add(
-                        egui::TextEdit::singleline(&mut form.seed_text)
-                            .hint_text("Seed")
-                            .desired_width(86.0),
-                    );
-                    if crate::ui_kit::icon_square(ui, Icon::Seed, false, theme, "Random seed")
-                        .clicked()
-                    {
-                        form.seed_text = rand_seed().to_string();
-                    }
-                    if crate::ui_kit::icon_action(ui, Icon::Play, "Start", false, theme).clicked() {
-                        let seed = form
-                            .seed_text
-                            .parse::<u32>()
-                            .unwrap_or_else(|_| rand_seed());
-                        let name = if form.name.trim().is_empty() {
-                            auto_world_name(&worlds)
-                        } else {
-                            form.name.trim().to_string()
-                        };
-                        let meta = WorldMeta::new(name, seed);
-                        settings::save_world(&meta);
-                        apply_world_to_settings(&meta, &mut settings);
-                        commands.insert_resource(ActiveWorld { meta });
-                        editor.open = false;
-                        pending.0 = true;
-                        form.name.clear();
-                        form.seed_text.clear();
-                        next.set(GameState::InGame);
-                    }
-                });
-            });
-
-            ui.add_space(10.0);
-            crate::ui_kit::status_chip(ui, Icon::Open, "WORLDS", &worlds.len().to_string(), theme);
-            if worlds.is_empty() {
-                ui.label(
-                    egui::RichText::new("Noch keine Welten gespeichert.")
-                        .color(egui::Color32::from_gray(150)),
-                );
-            } else {
-                egui::ScrollArea::vertical()
-                    .max_height(160.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for meta in worlds.iter() {
-                            crate::ui_kit::surface_panel(ui, theme, |ui| {
-                                ui.horizontal(|ui| {
-                                    crate::ui_kit::status_chip(
-                                        ui,
-                                        Icon::Globe,
-                                        "WORLD",
-                                        &meta.name,
-                                        theme,
-                                    );
-                                    crate::ui_kit::status_chip(
-                                        ui,
-                                        Icon::Seed,
-                                        "SEED",
-                                        &meta.seed.to_string(),
-                                        theme,
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if crate::ui_kit::danger_action(
-                                                ui,
-                                                Icon::Delete,
-                                                "Delete",
-                                                theme,
-                                            )
-                                            .clicked()
-                                            {
-                                                settings::delete_world(&meta.name);
-                                            }
-                                            if crate::ui_kit::icon_action(
-                                                ui,
-                                                Icon::Play,
-                                                "Play",
-                                                false,
-                                                theme,
-                                            )
-                                            .clicked()
-                                            {
-                                                apply_world_to_settings(meta, &mut settings);
-                                                commands.insert_resource(ActiveWorld {
-                                                    meta: meta.clone(),
-                                                });
-                                                editor.open = false;
-                                                pending.0 = true;
-                                                next.set(GameState::InGame);
-                                            }
-                                        },
-                                    );
-                                });
-                            });
-                            ui.add_space(2.0);
-                        }
-                    });
-            }
-
-            ui.add_space(16.0);
-            crate::ui_kit::compact_separator(ui, theme);
-            ui.add_space(8.0);
-            // Evenly-split footer so buttons can never overlap on
-            // narrow panels or long translations.
-            ui.columns(3, |cols| {
-                cols[0].vertical_centered_justified(|ui| {
-                    if crate::ui_kit::icon_action(ui, Icon::Layout, "Toolbench", false, theme)
-                        .clicked()
-                    {
-                        editor.open = true;
-                    }
-                });
-                cols[1].vertical_centered_justified(|ui| {
-                    if crate::ui_kit::icon_action(ui, Icon::Search, "Command Deck", false, theme)
-                        .clicked()
-                    {
-                        command_palette.open();
-                    }
-                });
-                cols[2].vertical_centered_justified(|ui| {
-                    if crate::ui_kit::danger_action(ui, Icon::Quit, "Quit", theme).clicked() {
-                        exit.send(AppExit::Success);
-                    }
-                });
-            });
-            ui.add_space(4.0);
         });
+
+    start_state.text_field_focused = text_field_focused;
+
+    if let Some(meta) = delete_requested {
+        match settings::delete_world(&meta) {
+            Ok(()) => {
+                pending_delete.0 = None;
+                start_state.launch_error = None;
+                if start_state.selected_world.as_deref() == Some(meta.name.as_str()) {
+                    start_state.selected_world = None;
+                }
+            }
+            Err(reason) => {
+                start_state.launch_error = Some(bounded_world_store_error(&reason));
+                warn!("world delete failed closed: {reason}");
+            }
+        }
+    }
+
+    if let Some(meta) = open_requested {
+        let identity = meta.generation_identity();
+        let load = crate::world::load_edited_overrides_for_world(&meta.name, identity);
+        match pending_edits.prepare(&meta.name, identity, load) {
+            Ok(()) => {
+                let world_name = meta.name.clone();
+                apply_world_to_settings(&meta, &mut settings);
+                commands.insert_resource(ActiveWorld { meta });
+                editor.open = false;
+                pending.0 = true;
+                start_state.launch_error = None;
+                arrival.begin(world_name);
+                next.set(GameState::InGame);
+            }
+            Err(reason) => {
+                pending.0 = false;
+                start_state.launch_error = Some(bounded_world_store_error(&reason));
+                warn!("world edits: refused menu open: {reason}");
+            }
+        }
+    } else if create_requested {
+        let seed = form
+            .seed_text
+            .parse::<u32>()
+            .unwrap_or_else(|_| rand_seed());
+        let name = clean_new_world_name(&form.name, &worlds);
+        let meta = WorldMeta::new_with_profile(name, seed, form.world_profile);
+        let identity = meta.generation_identity();
+        if let Err(reason) = settings::save_world(&meta) {
+            pending.0 = false;
+            pending_edits.clear();
+            start_state.launch_error = Some(bounded_world_store_error(&reason));
+            warn!("world metadata: could not initialize new world: {reason}");
+        } else {
+            let initialized = crate::world::save_edited_overrides_snapshot(
+                &meta.name,
+                identity,
+                ahash::AHashMap::new(),
+            );
+            match initialized {
+                EditedOverrideSaveOutcome::Saved(_) => {
+                    let load = crate::world::load_edited_overrides_for_world(&meta.name, identity);
+                    match pending_edits.prepare(&meta.name, identity, load) {
+                        Ok(()) => {
+                            let world_name = meta.name.clone();
+                            apply_world_to_settings(&meta, &mut settings);
+                            commands.insert_resource(ActiveWorld { meta });
+                            editor.open = false;
+                            pending.0 = true;
+                            start_state.launch_error = None;
+                            arrival.begin(world_name);
+                            form.name.clear();
+                            form.seed_text.clear();
+                            next.set(GameState::InGame);
+                        }
+                        Err(reason) => {
+                            pending.0 = false;
+                            start_state.launch_error = Some(bounded_world_store_error(&reason));
+                            warn!("world edits: refused newly initialized world: {reason}");
+                        }
+                    }
+                }
+                EditedOverrideSaveOutcome::Blocked { reason } => {
+                    pending.0 = false;
+                    pending_edits.clear();
+                    start_state.launch_error = Some(bounded_world_store_error(&reason));
+                    warn!("world edits: could not initialize new world authority: {reason}");
+                }
+            }
+        }
+    }
+
+    if open_toolbench {
+        editor.open = true;
+    }
+    if open_commands {
+        command_palette.open();
+    }
+    if quit_requested {
+        settings.save();
+        exit.send(AppExit::Success);
+    }
 }
 
+fn draw_stable_start_backdrop(ctx: &egui::Context, theme: crate::theme::ThemeSettings) {
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let colors = theme.semantic();
+    let primary = theme.color.primary();
+    let rose = egui::Color32::from_rgb(236, 104, 151);
+    let warm = egui::Color32::from_rgb(232, 194, 124);
+    let ink = egui::Color32::from_rgb(7, 7, 11);
+    let horizon = screen.top() + screen.height() * 0.62;
+
+    painter.rect_filled(screen, 0.0, ink);
+    painter.rect_filled(
+        egui::Rect::from_min_max(screen.min, egui::pos2(screen.right(), horizon)),
+        0.0,
+        egui::Color32::from_rgb(22, 13, 23),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(egui::pos2(screen.left(), horizon), screen.max),
+        0.0,
+        egui::Color32::from_rgb(6, 10, 14),
+    );
+
+    // A static architectural grid gives the page depth without animation,
+    // texture uploads, or a frame-by-frame repaint loop.
+    for row in 0..6 {
+        let y = horizon + row as f32 * 34.0;
+        painter.line_segment(
+            [egui::pos2(screen.left(), y), egui::pos2(screen.right(), y)],
+            egui::Stroke::new(
+                1.0,
+                start_menu_alpha(primary, (46_i32 - row * 6).max(12) as u8),
+            ),
+        );
+    }
+    for column in 0..=10 {
+        let x = screen.left() + screen.width() * column as f32 / 10.0;
+        painter.line_segment(
+            [egui::pos2(x, horizon), egui::pos2(x, screen.bottom())],
+            egui::Stroke::new(1.0, start_menu_alpha(colors.outline, 34)),
+        );
+    }
+
+    // Quiet skyline telemetry along the horizon.
+    for index in 0..12 {
+        let width = 18.0 + (index % 4) as f32 * 8.0;
+        let height = 34.0 + ((index * 29) % 92) as f32;
+        let x = screen.right() - 390.0 + index as f32 * 31.0;
+        let rect =
+            egui::Rect::from_min_size(egui::pos2(x, horizon - height), egui::vec2(width, height));
+        painter.rect_filled(
+            rect,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(2, 8, 14, 138),
+        );
+        painter.line_segment(
+            [rect.left_top(), rect.right_top()],
+            egui::Stroke::new(
+                1.0,
+                start_menu_alpha(if index % 3 == 0 { rose } else { primary }, 58),
+            ),
+        );
+    }
+
+    // An offset shoji portal is the visual anchor. Only corner strokes are
+    // painted, leaving the content surface calm and readable.
+    let portal = egui::Rect::from_center_size(
+        egui::pos2(
+            screen.center().x + screen.width() * 0.27,
+            screen.top() + screen.height() * 0.35,
+        ),
+        egui::vec2(
+            (screen.width() * 0.25).clamp(180.0, 360.0),
+            (screen.height() * 0.34).clamp(180.0, 330.0),
+        ),
+    );
+    let corner = portal.width().min(portal.height()) * 0.18;
+    let portal_stroke = egui::Stroke::new(1.4, start_menu_alpha(warm, 108));
+    for (origin, x_sign, y_sign) in [
+        (portal.left_top(), 1.0, 1.0),
+        (portal.right_top(), -1.0, 1.0),
+        (portal.left_bottom(), 1.0, -1.0),
+        (portal.right_bottom(), -1.0, -1.0),
+    ] {
+        painter.line_segment(
+            [origin, origin + egui::vec2(corner * x_sign, 0.0)],
+            portal_stroke,
+        );
+        painter.line_segment(
+            [origin, origin + egui::vec2(0.0, corner * y_sign)],
+            portal_stroke,
+        );
+    }
+    painter.line_segment(
+        [
+            egui::pos2(portal.center().x, portal.top() + 18.0),
+            egui::pos2(portal.center().x, portal.bottom() - 18.0),
+        ],
+        egui::Stroke::new(1.0, start_menu_alpha(rose, 54)),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(portal.left() + 18.0, portal.center().y),
+            egui::pos2(portal.right() - 18.0, portal.center().y),
+        ],
+        egui::Stroke::new(1.0, start_menu_alpha(primary, 54)),
+    );
+
+    // A reduced torii signal on the opposite side balances the product shell.
+    let gate_x = screen.left() + screen.width() * 0.18;
+    let gate_y = horizon - 8.0;
+    let gate = egui::Stroke::new(2.0, start_menu_alpha(rose, 112));
+    painter.line_segment(
+        [
+            egui::pos2(gate_x - 68.0, gate_y),
+            egui::pos2(gate_x + 68.0, gate_y),
+        ],
+        gate,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(gate_x - 48.0, gate_y + 12.0),
+            egui::pos2(gate_x + 48.0, gate_y + 12.0),
+        ],
+        egui::Stroke::new(1.0, start_menu_alpha(warm, 82)),
+    );
+    for x in [gate_x - 40.0, gate_x + 40.0] {
+        painter.line_segment([egui::pos2(x, gate_y), egui::pos2(x, gate_y + 88.0)], gate);
+    }
+
+    // Sparse cross-signals replace particle decoration and remain deterministic.
+    for index in 0..14 {
+        let u = index as f32 / 14.0;
+        let x = screen.left() + screen.width() * ((u * 5.73 + 0.17).fract());
+        let y = screen.top() + screen.height() * (0.08 + ((u * 13.1).sin() * 0.5 + 0.5) * 0.38);
+        let signal = if index % 3 == 0 { warm } else { primary };
+        let alpha = 34 + (index % 4) as u8 * 10;
+        painter.line_segment(
+            [egui::pos2(x - 2.0, y), egui::pos2(x + 2.0, y)],
+            egui::Stroke::new(1.0, start_menu_alpha(signal, alpha)),
+        );
+        painter.line_segment(
+            [egui::pos2(x, y - 2.0), egui::pos2(x, y + 2.0)],
+            egui::Stroke::new(1.0, start_menu_alpha(signal, alpha)),
+        );
+    }
+
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            screen.min,
+            egui::pos2(screen.left() + screen.width().min(140.0), screen.bottom()),
+        ),
+        0.0,
+        egui::Color32::from_black_alpha(82),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(screen.right() - screen.width().min(140.0), screen.top()),
+            screen.max,
+        ),
+        0.0,
+        egui::Color32::from_black_alpha(82),
+    );
+}
 // ============================ Pause / Inventory ===========================
 
 fn draw_pause_menu(
@@ -483,7 +1720,7 @@ fn draw_pause_menu(
     settings: Res<WorldSettings>,
     mut editor: ResMut<EditorState>,
     ship_inventory: Res<crate::ships::ShipInventory>,
-    brain: Res<crate::bots::FriendlyWorldBrain>,
+    mut brain: ResMut<crate::bots::FriendlyWorldBrain>,
     active: Option<Res<ActiveWorld>>,
     scratch: Res<PlayerProgressScratch>,
     player_q: Query<(&Transform, &Player)>,
@@ -499,13 +1736,10 @@ fn draw_pause_menu(
     }
     // While the editor window is open, it handles its own overlay -- we only
     // dim the background behind it.
-    let ctx = contexts.ctx_mut();
-    let screen = ctx.screen_rect();
-    ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Background,
-        egui::Id::new("pause_dim"),
-    ))
-    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(140));
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    draw_menu_overlay_scrim(ctx, "pause_dim", settings.theme, 176);
 
     if editor.open {
         return; // editor.rs draws its own panel on top.
@@ -522,7 +1756,7 @@ fn draw_pause_menu(
         &player_q,
         &ship_q,
         &ship_inventory,
-        &brain,
+        &mut brain,
         &mut commands,
         &mut world,
         &mut streamer,
@@ -537,26 +1771,674 @@ fn draw_inventory_menu(
     mut pause_screen: ResMut<PauseScreen>,
     mut settings: ResMut<WorldSettings>,
     mut hotbar: ResMut<HotbarState>,
+    mut builder: ResMut<crate::builder::BuilderState>,
     mut ship_inventory: ResMut<crate::ships::ShipInventory>,
     mut ship_placement: ResMut<crate::ships::ShipPlacementState>,
+    mut creator_library: ResMut<CreatorLibraryState>,
     mut mode: ResMut<ModeContext>,
     mut brain: ResMut<crate::bots::FriendlyWorldBrain>,
 ) {
     if *pause_screen != PauseScreen::Inventory {
         return;
     }
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     draw_inventory(
         ctx,
         &mut hotbar,
+        &mut builder,
         &mut pause_screen,
         &mut next,
         &mut settings,
         &mut ship_inventory,
         &mut ship_placement,
+        &mut creator_library,
         &mut mode,
         &mut brain,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::settings::{SceneryQuality, WorldMeta};
+
+    #[test]
+    fn menus_do_not_force_continuous_repaint() {
+        let source = include_str!("menu.rs");
+        assert!(
+            !source.contains(concat!("request_", "repaint();")),
+            "menu surfaces should not force an every-frame repaint"
+        );
+    }
+
+    #[test]
+    fn ship_placement_owns_escape_without_opening_pause() {
+        let mut placement = ModeContext::default();
+        placement.set(
+            crate::mode::ActiveMode::ShipPlacement {
+                kind: crate::ships::ShipKind::ScoutShuttle,
+            },
+            "Place Scout",
+        );
+
+        assert!(active_mode_owns_escape(Some(&placement)));
+        assert!(!active_mode_owns_escape(Some(&ModeContext::default())));
+        assert!(!active_mode_owns_escape(None));
+    }
+
+    fn pressed_keys(keys: &[KeyCode]) -> ButtonInput<KeyCode> {
+        let mut input = ButtonInput::default();
+        for key in keys {
+            input.press(*key);
+        }
+        input
+    }
+
+    #[test]
+    fn plain_f3_toggles_editor_only_in_game() {
+        let mut open = false;
+        assert!(apply_editor_f3(
+            &GameState::InGame,
+            &pressed_keys(&[KeyCode::F3]),
+            &mut open,
+        ));
+        assert!(open);
+
+        assert!(apply_editor_f3(
+            &GameState::InGame,
+            &pressed_keys(&[KeyCode::F3]),
+            &mut open,
+        ));
+        assert!(!open);
+
+        for game_state in [GameState::Paused, GameState::MainMenu] {
+            assert!(!apply_editor_f3(
+                &game_state,
+                &pressed_keys(&[KeyCode::F3]),
+                &mut open,
+            ));
+            assert!(!open);
+        }
+    }
+
+    #[test]
+    fn shift_f3_is_reserved_for_debug_overlay() {
+        for shift in [KeyCode::ShiftLeft, KeyCode::ShiftRight] {
+            let mut open = false;
+            assert!(!apply_editor_f3(
+                &GameState::InGame,
+                &pressed_keys(&[shift, KeyCode::F3]),
+                &mut open,
+            ));
+            assert!(!open);
+        }
+    }
+
+    #[test]
+    fn held_f3_does_not_repeat_toggle() {
+        let mut keys = pressed_keys(&[KeyCode::F3]);
+        let mut open = false;
+        assert!(apply_editor_f3(&GameState::InGame, &keys, &mut open,));
+        keys.clear_just_pressed(KeyCode::F3);
+        assert!(!apply_editor_f3(&GameState::InGame, &keys, &mut open,));
+        assert!(open);
+    }
+
+    #[test]
+    fn start_screen_uses_voxel_native_codex_identity() {
+        assert_eq!(START_TITLE, "VOXEL NATIVE");
+        assert!(OPERATING_LAYER_LABEL.contains("CODEX ENGINEERING"));
+        assert!(OPERATING_LAYER_LABEL.contains("ZEN OPERATING LAYER"));
+        assert!(START_SUBTITLE.contains("sketch studio"));
+        assert!(START_SUBTITLE.contains("blossom worlds"));
+        assert!(START_SUBTITLE.contains("bounded planetary streaming"));
+    }
+
+    #[test]
+    fn compact_start_layout_fits_small_windows_without_fixed_panel_clipping() {
+        let viewport = egui::vec2(480.0, 360.0);
+        let layout = start_menu_layout(viewport, 12);
+        let tiny = start_menu_layout(egui::vec2(320.0, 480.0), 1);
+
+        assert_eq!(layout.density, StartMenuDensity::Compact);
+        assert!(!layout.uses_split_rows());
+        assert!(!layout.show_subtitle);
+        assert!(layout.content_width <= viewport.x - layout.outer_margin * 2.0);
+        assert!(layout.content_width >= 300.0);
+        assert_eq!(layout.world_columns, 1);
+        assert!(layout.world_list_height <= viewport.y * 0.36);
+        assert!(tiny.content_width <= 320.0 - tiny.outer_margin * 2.0);
+    }
+
+    #[test]
+    fn wide_start_layout_prioritizes_readability_and_more_world_rows() {
+        let standard = start_menu_layout(egui::vec2(800.0, 700.0), 20);
+        let wide = start_menu_layout(egui::vec2(1440.0, 900.0), 20);
+
+        assert_eq!(standard.density, StartMenuDensity::Standard);
+        assert_eq!(wide.density, StartMenuDensity::Wide);
+        assert!(standard.uses_split_rows());
+        assert!(wide.show_subtitle);
+        assert!(wide.content_width > standard.content_width);
+        assert!(wide.world_list_height > standard.world_list_height);
+        assert_eq!(standard.world_columns, 1);
+        assert_eq!(wide.world_columns, 2);
+        assert!(wide.content_width <= 1080.0);
+    }
+
+    #[test]
+    fn empty_library_keeps_a_small_stable_placeholder() {
+        let compact = start_menu_layout(egui::vec2(400.0, 320.0), 0);
+        let wide = start_menu_layout(egui::vec2(1600.0, 1000.0), 0);
+
+        assert_eq!(compact.world_list_height, 72.0);
+        assert_eq!(wide.world_list_height, 72.0);
+    }
+
+    #[test]
+    fn world_selection_defaults_to_latest_and_survives_reordering() {
+        let mut archived = WorldMeta::new("archive".to_owned(), 11);
+        archived.last_played_epoch = 10;
+        let mut recent = WorldMeta::new("recent".to_owned(), 22);
+        recent.last_played_epoch = 30;
+        let mut middle = WorldMeta::new("middle".to_owned(), 33);
+        middle.last_played_epoch = 20;
+        let mut worlds = vec![archived, recent, middle];
+        let mut state = StartMenuState::default();
+
+        sync_start_menu_selection(&mut state, &worlds);
+        assert_eq!(state.selected_world.as_deref(), Some("recent"));
+
+        worlds.reverse();
+        sync_start_menu_selection(&mut state, &worlds);
+        assert_eq!(state.selected_world.as_deref(), Some("recent"));
+
+        worlds.retain(|world| world.name != "recent");
+        sync_start_menu_selection(&mut state, &worlds);
+        assert_eq!(state.selected_world.as_deref(), Some("middle"));
+    }
+
+    #[test]
+    fn keyboard_world_selection_wraps_and_supports_boundaries() {
+        let worlds = vec![
+            WorldMeta::new("alpha".to_owned(), 1),
+            WorldMeta::new("beta".to_owned(), 2),
+            WorldMeta::new("gamma".to_owned(), 3),
+        ];
+
+        assert_eq!(
+            moved_world_selection(Some("alpha"), &worlds, WorldSelectionMove::Previous).as_deref(),
+            Some("gamma")
+        );
+        assert_eq!(
+            moved_world_selection(Some("gamma"), &worlds, WorldSelectionMove::Next).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            moved_world_selection(None, &worlds, WorldSelectionMove::Last).as_deref(),
+            Some("gamma")
+        );
+        assert_eq!(
+            moved_world_selection(Some("gamma"), &worlds, WorldSelectionMove::First).as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(
+            moved_world_selection(Some("alpha"), &[], WorldSelectionMove::Next),
+            None
+        );
+    }
+
+    #[test]
+    fn world_quality_tiers_cover_every_saved_scenery_profile() {
+        assert_eq!(
+            WorldQualityTier::from_quality(SceneryQuality::Off),
+            WorldQualityTier::Minimal
+        );
+        assert_eq!(
+            WorldQualityTier::from_quality(SceneryQuality::Lean),
+            WorldQualityTier::Efficient
+        );
+        assert_eq!(
+            WorldQualityTier::from_quality(SceneryQuality::Balanced),
+            WorldQualityTier::Balanced
+        );
+        assert_eq!(
+            WorldQualityTier::from_quality(SceneryQuality::Lush),
+            WorldQualityTier::Immersive
+        );
+        assert_eq!(WorldQualityTier::Immersive.detail(), "LUSH SCENERY");
+    }
+
+    #[test]
+    fn world_card_statuses_are_compact_and_grammatical() {
+        assert_eq!(world_edit_summary(0), "PRISTINE");
+        assert_eq!(world_edit_summary(1), "1 EDITED CHUNK");
+        assert_eq!(world_edit_summary(42), "42 EDITED CHUNKS");
+        assert_eq!(START_WORLD_CARD_HEIGHT, 88.0);
+    }
+
+    #[test]
+    fn text_entry_and_overlays_suspend_global_world_navigation() {
+        assert!(start_menu_navigation_enabled(false, false));
+        assert!(!start_menu_navigation_enabled(true, false));
+        assert!(!start_menu_navigation_enabled(false, true));
+        assert!(!start_menu_navigation_enabled(true, true));
+    }
+
+    #[test]
+    fn long_world_names_shrink_without_growing_card_geometry() {
+        let size = fitted_start_text_size(
+            "a_world_name_that_is_far_longer_than_the_available_card_width",
+            120.0,
+            13.0,
+            8.5,
+        );
+
+        assert!((8.5..13.0).contains(&size));
+        assert_eq!(fitted_start_text_size("zen", 120.0, 13.0, 8.5), 13.0);
+    }
+
+    #[test]
+    fn inventory_grid_adapts_without_overflowing_narrow_panels() {
+        let (narrow_columns, narrow_tile) = inventory_grid_metrics(250.0);
+        let (medium_columns, medium_tile) = inventory_grid_metrics(500.0);
+        let (wide_columns, wide_tile) = inventory_grid_metrics(940.0);
+
+        assert_eq!(narrow_columns, 1);
+        assert_eq!(medium_columns, 3);
+        assert_eq!(wide_columns, 5);
+        assert!(narrow_tile <= 250.0);
+        assert!(medium_tile * medium_columns as f32 <= 500.0);
+        assert!(wide_tile * wide_columns as f32 <= 940.0);
+    }
+
+    #[test]
+    fn pause_and_inventory_overlays_fit_small_and_desktop_viewports() {
+        let small_viewport = egui::vec2(320.0, 480.0);
+        for kind in [MenuOverlayKind::Pause, MenuOverlayKind::Inventory] {
+            let layout = menu_overlay_layout(small_viewport, kind);
+            assert!(layout.compact);
+            assert!(layout.size.x > 0.0 && layout.size.y > 0.0);
+            assert!(layout.size.x <= small_viewport.x);
+            assert!(layout.size.y <= small_viewport.y);
+        }
+
+        let desktop = egui::vec2(1440.0, 900.0);
+        let pause = menu_overlay_layout(desktop, MenuOverlayKind::Pause);
+        let inventory = menu_overlay_layout(desktop, MenuOverlayKind::Inventory);
+        assert_eq!(pause.size, egui::vec2(520.0, 660.0));
+        assert_eq!(inventory.size, egui::vec2(980.0, 700.0));
+        assert!(!pause.compact);
+        assert!(!inventory.compact);
+    }
+
+    #[test]
+    fn inventory_exit_distinguishes_pause_navigation_from_resume() {
+        assert!(!InventoryExit::PauseMenu.resumes_world());
+        assert!(InventoryExit::ResumeWorld.resumes_world());
+    }
+
+    #[test]
+    fn inventory_has_one_creator_entry_instead_of_split_asset_catalogs() {
+        assert_eq!(InventoryPage::ALL.len(), 3);
+        assert_eq!(InventoryPage::ALL[0].0, InventoryPage::Creator);
+        assert!(!InventoryPage::ALL.iter().any(|(_, _, label)| {
+            label.eq_ignore_ascii_case("blocks") || label.eq_ignore_ascii_case("ships")
+        }));
+    }
+
+    #[test]
+    fn pause_has_exactly_one_selected_primary_action() {
+        let selected: Vec<PauseAction> = PAUSE_SESSION_ACTIONS
+            .iter()
+            .chain(PAUSE_TOOL_ACTIONS.iter())
+            .filter(|spec| spec.selected)
+            .map(|spec| spec.action)
+            .collect();
+
+        assert_eq!(selected, vec![PauseAction::Resume]);
+    }
+
+    #[test]
+    fn unavailable_inventory_action_is_disabled_in_egui() {
+        let context = egui::Context::default();
+        context.begin_frame(egui::RawInput::default());
+        egui::CentralPanel::default().show(&context, |ui| {
+            let response = enabled_inventory_icon_action(
+                ui,
+                false,
+                Icon::Approve,
+                "Approve",
+                false,
+                crate::theme::ThemeSettings::default(),
+            );
+            assert!(!response.enabled());
+        });
+        let _ = context.end_frame();
+    }
+
+    #[test]
+    fn pause_notice_has_a_finite_lifetime() {
+        let notice = PauseNotice {
+            label: "WORLD SAVE".to_owned(),
+            value: "Snapshot written".to_owned(),
+            expires_at: 12.4,
+        };
+
+        assert!(notice.is_active_at(10.0));
+        assert!(!notice.is_active_at(12.4));
+        assert!(!notice.is_active_at(f64::NAN));
+    }
+
+    #[test]
+    fn material_color_conversion_clamps_invalid_channels() {
+        assert_eq!(
+            rgba_color32([-1.0, 0.5, 2.0, f32::NAN]),
+            egui::Color32::from_rgba_unmultiplied(0, 128, 255, 0)
+        );
+    }
+
+    #[test]
+    fn auto_world_name_skips_orphan_artifact_stems() {
+        let worlds = Vec::<WorldMeta>::new();
+        let reserved = HashSet::from(["world_01".to_string(), "world_02".to_string()]);
+
+        assert_eq!(
+            auto_world_name_with_reserved(&worlds, &reserved),
+            "world_03"
+        );
+    }
+
+    #[test]
+    fn typed_new_world_name_is_made_unique_when_storage_stem_exists() {
+        let worlds = Vec::<WorldMeta>::new();
+        let reserved = HashSet::from(["dream_city".to_string()]);
+
+        assert_eq!(
+            clean_new_world_name_with_reserved("dream_city", &worlds, &reserved),
+            "dream_city_02"
+        );
+    }
+
+    #[test]
+    fn typed_new_world_name_rejects_case_only_storage_aliases() {
+        let worlds = vec![WorldMeta::new("ExistingWorld".to_string(), 7)];
+        let reserved = HashSet::from(["dream_city".to_string()]);
+
+        assert_eq!(
+            clean_new_world_name_with_reserved("DREAM_CITY", &[], &reserved),
+            "DREAM_CITY_02"
+        );
+        assert_eq!(
+            clean_new_world_name_with_reserved("existingworld", &worlds, &HashSet::new()),
+            "existingworld_02"
+        );
+    }
+
+    #[test]
+    fn world_delete_requires_two_matching_clicks() {
+        let mut pending = PendingWorldDelete::default();
+
+        assert!(!pending.arm_or_confirm("garden_a"));
+        assert!(pending.is_armed("garden_a"));
+        assert!(!pending.arm_or_confirm("garden_b"));
+        assert!(!pending.is_armed("garden_a"));
+        assert!(pending.is_armed("garden_b"));
+        assert!(pending.arm_or_confirm("garden_b"));
+        assert!(!pending.is_armed("garden_b"));
+    }
+
+    #[test]
+    fn loading_world_applies_saved_scenery_quality() {
+        let mut settings = WorldSettings::default();
+        settings.scenery_quality = SceneryQuality::Lean;
+        settings.terrain_grammar = crate::settings::TerrainGrammarVersion::V1;
+        let mut meta = WorldMeta::new("garden".to_string(), 930514);
+        meta.scenery_quality = SceneryQuality::Lush;
+        meta.world_profile = WorldProfile::AstralFrontier;
+        meta.terrain_grammar = crate::settings::TerrainGrammarVersion::V2;
+
+        apply_world_to_settings(&meta, &mut settings);
+
+        assert_eq!(settings.scenery_quality, SceneryQuality::Lush);
+        assert_eq!(settings.world_profile, WorldProfile::AstralFrontier);
+        assert_eq!(
+            settings.terrain_grammar,
+            crate::settings::TerrainGrammarVersion::V2
+        );
+    }
+
+    #[test]
+    fn loading_v3_world_applies_its_exact_generation_identity() {
+        let mut settings = WorldSettings::default();
+        settings.seed = 1;
+        settings.terrain_grammar = crate::settings::TerrainGrammarVersion::V1;
+        let mut meta = WorldMeta::new("v3-world".to_string(), 0xCAFE_BABE);
+        meta.world_profile = WorldProfile::Natural;
+        meta.scenery_quality = SceneryQuality::Lean;
+        meta.terrain_grammar = crate::settings::TerrainGrammarVersion::V3;
+
+        apply_world_to_settings(&meta, &mut settings);
+
+        assert_eq!(settings.generation_identity(), meta.generation_identity());
+        assert_eq!(
+            settings.terrain_grammar,
+            crate::settings::TerrainGrammarVersion::V3
+        );
+    }
+
+    #[test]
+    fn blocked_world_store_diagnostic_is_bounded_for_menu_rendering() {
+        let long = "x".repeat(512);
+        let bounded = bounded_world_store_error(&long);
+
+        assert_eq!(bounded.chars().count(), 183);
+        assert!(bounded.ends_with("..."));
+    }
+
+    #[test]
+    fn new_world_form_defaults_to_the_selected_astral_north_star() {
+        assert_eq!(
+            NewWorldForm::default().world_profile,
+            WorldProfile::AstralFrontier
+        );
+    }
+
+    #[test]
+    fn creative_inventory_covers_the_canonical_buildable_catalog() {
+        let entries = inventory_block_entries();
+        let catalog = crate::blocks::block_palette_catalog();
+        let mut actual: Vec<u16> = entries.iter().map(|entry| entry.block as u16).collect();
+        let mut expected: Vec<u16> = crate::blocks::BUILDABLE_BLOCKS
+            .iter()
+            .map(|block| *block as u16)
+            .collect();
+        actual.sort_unstable();
+        expected.sort_unstable();
+
+        assert_eq!(actual, expected);
+        assert!(entries.iter().all(|entry| entry.category < catalog.len()));
+    }
+
+    #[test]
+    fn creative_inventory_search_includes_catalog_roles_and_categories() {
+        let entry = inventory_block_entries()
+            .into_iter()
+            .find(|entry| entry.block == crate::blocks::BlockType::EngineCore)
+            .expect("engine core should be in the canonical catalog");
+        let category = crate::blocks::block_palette_catalog()[entry.category];
+
+        assert!(inventory_entry_matches(entry, category.label, "machinery"));
+        assert!(inventory_entry_matches(entry, category.label, "metal"));
+    }
+
+    #[test]
+    fn creative_inventory_selection_changes_the_real_builder_material() {
+        let mut builder = crate::builder::BuilderState::default();
+
+        apply_inventory_block_selection(&mut builder, crate::blocks::BlockType::ShojiLamp);
+
+        assert_eq!(builder.block, crate::blocks::BlockType::ShojiLamp);
+        assert!(builder.status.contains("Lantern"));
+    }
+
+    #[test]
+    fn keyboard_owned_by_search_disables_the_e_shortcut() {
+        let context = egui::Context::default();
+        let mut search = String::new();
+        context.begin_frame(egui::RawInput::default());
+        egui::CentralPanel::default().show(&context, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut search))
+                .request_focus();
+        });
+
+        assert!(context.wants_keyboard_input());
+        assert!(!menu_letter_shortcuts_enabled(
+            context.wants_keyboard_input()
+        ));
+        assert!(menu_letter_shortcuts_enabled(false));
+        let _ = context.end_frame();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PauseAction {
+    Resume,
+    Save,
+    Inventory,
+    RepairTerrain,
+    Toolbench,
+    CommandDeck,
+    MainMenu,
+    Quit,
+}
+
+#[derive(Clone, Copy)]
+struct PauseActionSpec {
+    action: PauseAction,
+    icon: Icon,
+    label: &'static str,
+    detail: &'static str,
+    selected: bool,
+}
+
+const PAUSE_SESSION_ACTIONS: [PauseActionSpec; 3] = [
+    PauseActionSpec {
+        action: PauseAction::Resume,
+        icon: Icon::Resume,
+        label: "Resume",
+        detail: "Back to the world",
+        selected: true,
+    },
+    PauseActionSpec {
+        action: PauseAction::Save,
+        icon: Icon::Save,
+        label: "Save",
+        detail: "Write current world",
+        selected: false,
+    },
+    PauseActionSpec {
+        action: PauseAction::Inventory,
+        icon: Icon::Cube,
+        label: "Inventory",
+        detail: "Creator assets and companions",
+        selected: false,
+    },
+];
+
+const PAUSE_TOOL_ACTIONS: [PauseActionSpec; 3] = [
+    PauseActionSpec {
+        action: PauseAction::RepairTerrain,
+        icon: Icon::Wand,
+        label: "Repair Terrain",
+        detail: "Remove visual artifacts",
+        selected: false,
+    },
+    PauseActionSpec {
+        action: PauseAction::Toolbench,
+        icon: Icon::Layout,
+        label: "Toolbench",
+        detail: "HUD, world and visuals",
+        selected: false,
+    },
+    PauseActionSpec {
+        action: PauseAction::CommandDeck,
+        icon: Icon::Search,
+        label: "Command Deck",
+        detail: "Actions and keybinds",
+        selected: false,
+    },
+];
+
+fn draw_pause_action_section(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    label: &str,
+    actions: &[PauseActionSpec],
+    compact: bool,
+    emphasized: bool,
+    theme: crate::theme::ThemeSettings,
+) -> Option<PauseAction> {
+    let colors = theme.semantic();
+    let mut requested = None;
+    crate::ui_kit::surface_panel_animated(ui, theme, egui::Id::new(id), emphasized, |ui| {
+        ui.label(
+            egui::RichText::new(label)
+                .size(10.5)
+                .strong()
+                .monospace()
+                .color(colors.text_muted),
+        );
+        ui.add_space(6.0);
+        if compact {
+            for (index, spec) in actions.iter().enumerate() {
+                ui.vertical_centered(|ui| {
+                    if crate::ui_kit::major_action(
+                        ui,
+                        spec.icon,
+                        spec.label,
+                        spec.detail,
+                        spec.selected,
+                        theme,
+                    )
+                    .clicked()
+                    {
+                        requested = Some(spec.action);
+                    }
+                });
+                if index + 1 < actions.len() {
+                    ui.add_space(6.0);
+                }
+            }
+        } else {
+            for row in actions.chunks(2) {
+                ui.columns(2, |cols| {
+                    for (column, spec) in row.iter().enumerate() {
+                        cols[column].vertical_centered(|ui| {
+                            if crate::ui_kit::major_action(
+                                ui,
+                                spec.icon,
+                                spec.label,
+                                spec.detail,
+                                spec.selected,
+                                theme,
+                            )
+                            .clicked()
+                            {
+                                requested = Some(spec.action);
+                            }
+                        });
+                    }
+                });
+                ui.add_space(6.0);
+            }
+        }
+    });
+    requested
 }
 
 fn draw_pause_main(
@@ -570,7 +2452,7 @@ fn draw_pause_main(
     player_q: &Query<(&Transform, &Player)>,
     ship_q: &Query<(Entity, &Transform, &crate::ships::ShipInstance)>,
     ship_inventory: &crate::ships::ShipInventory,
-    brain: &crate::bots::FriendlyWorldBrain,
+    brain: &mut crate::bots::FriendlyWorldBrain,
     commands: &mut Commands,
     world: &mut VoxelWorld,
     streamer: &mut ChunkStreamer,
@@ -578,319 +2460,251 @@ fn draw_pause_main(
     exit: &mut EventWriter<AppExit>,
 ) {
     let screen = ctx.screen_rect();
-    let panel_w = 500.0_f32.min(screen.width() - 40.0);
-    let panel_h = 640.0_f32.min(screen.height() - 80.0);
-    let pos = egui::pos2(
-        screen.center().x - panel_w * 0.5,
-        screen.center().y - panel_h * 0.5,
-    );
+    let layout = menu_overlay_layout(screen.size(), MenuOverlayKind::Pause);
+    let pos = screen.center() - layout.size * 0.5;
+    let notice = active_pause_notice(ctx);
+    let world_name = active
+        .map(|active| active.meta.name.as_str())
+        .unwrap_or("LOCAL WORLD");
+    let subtitle = format!("{world_name} // simulation suspended");
+    let mut requested_action = None;
 
     egui::Window::new("voxel_native_pause")
         .title_bar(false)
         .resizable(false)
         .collapsible(false)
         .movable(false)
-        .frame(command_frame(settings.theme))
+        .frame(crate::ui_kit::toolbench_frame(settings.theme))
         .fixed_pos(pos)
-        .fixed_size(egui::vec2(panel_w, panel_h))
+        .fixed_size(layout.size)
         .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("PAUSE // COMMAND HOLD")
-                        .size(28.0)
-                        .color(settings.theme.color.primary())
-                        .strong()
-                        .monospace(),
+            draw_menu_overlay_header(
+                ui,
+                "PAUSE // COMMAND HOLD",
+                &subtitle,
+                "STATE",
+                "PAUSED",
+                layout.compact,
+                settings.theme,
+            );
+            ui.add_space(8.0);
+            if let Some(notice) = &notice {
+                crate::ui_kit::activity_status(
+                    ui,
+                    LoadingState::Complete,
+                    &notice.label,
+                    &notice.value,
+                    settings.theme,
                 );
-                if let Some(active) = active {
-                    ui.label(
-                        egui::RichText::new(format!("Welt: {}", active.meta.name))
-                            .color(settings.theme.color.dim())
-                            .size(14.0),
-                    );
-                }
-            });
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(12.0);
-            ui.vertical_centered(|ui| {
-                if crate::ui_kit::major_action(
+            } else {
+                crate::ui_kit::activity_status(
                     ui,
-                    Icon::Resume,
-                    "Resume",
-                    "Back to the world",
-                    false,
+                    LoadingState::Idle,
+                    "SESSION HOLD",
+                    "World simulation paused",
                     settings.theme,
-                )
-                .clicked()
-                {
-                    next.set(GameState::InGame);
-                }
-                ui.add_space(6.0);
-                if crate::ui_kit::major_action(
-                    ui,
-                    Icon::Save,
-                    "Save",
-                    "Write current world",
-                    false,
-                    settings.theme,
-                )
-                .clicked()
-                {
-                    save_current_world(
-                        settings,
-                        active,
-                        scratch,
-                        player_q,
-                        ship_q,
-                        ship_inventory,
-                        brain,
-                        world,
-                    );
-                }
-                ui.add_space(6.0);
-                if crate::ui_kit::major_action(
-                    ui,
-                    Icon::Cube,
-                    "Inventory",
-                    "Blocks, ships, companions",
-                    false,
-                    settings.theme,
-                )
-                .clicked()
-                {
-                    **pause_screen = PauseScreen::Inventory;
-                }
-                ui.add_space(6.0);
-                if crate::ui_kit::major_action(
-                    ui,
-                    Icon::Wand,
-                    "Repair Terrain",
-                    "Remove old visual artifact chunks",
-                    false,
-                    settings.theme,
-                )
-                .clicked()
-                {
-                    let report = world.repair_visual_artifact_overrides();
-                    if report.removed_chunks > 0 {
-                        streamer.frontier_complete = false;
-                        streamer.needs_orphan_scan = true;
-                        save_current_world(
-                            settings,
-                            active,
-                            scratch,
-                            player_q,
-                            ship_q,
-                            ship_inventory,
-                            brain,
-                            world,
+                );
+            }
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .id_source("pause_command_scroll")
+                .auto_shrink([false, false])
+                .max_height((layout.size.y - 164.0).max(180.0))
+                .show(ui, |ui| {
+                    if let Some(action) = draw_pause_action_section(
+                        ui,
+                        "pause_session_actions",
+                        "SESSION",
+                        &PAUSE_SESSION_ACTIONS,
+                        layout.compact,
+                        true,
+                        settings.theme,
+                    ) {
+                        requested_action = Some(action);
+                    }
+                    ui.add_space(8.0);
+                    if let Some(action) = draw_pause_action_section(
+                        ui,
+                        "pause_tool_actions",
+                        "TOOLS",
+                        &PAUSE_TOOL_ACTIONS,
+                        layout.compact,
+                        false,
+                        settings.theme,
+                    ) {
+                        requested_action = Some(action);
+                    }
+                    if let Some(report) = world.last_repair_report {
+                        ui.add_space(6.0);
+                        let repair_text = if report.removed_chunks == 0 {
+                            format!("0 fixed / {} scanned", report.scanned_chunks)
+                        } else {
+                            format!(
+                                "{} fixed / {} scanned / {} live refreshed",
+                                report.removed_chunks,
+                                report.scanned_chunks,
+                                report.refreshed_loaded_chunks
+                            )
+                        };
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Wand,
+                            "REPAIR",
+                            &repair_text,
+                            settings.theme,
                         );
                     }
-                    info!(
-                        "Scanned {} edit chunks, repaired {}, refreshed {} loaded chunks.",
-                        report.scanned_chunks,
-                        report.removed_chunks,
-                        report.refreshed_loaded_chunks
-                    );
-                }
-                if let Some(report) = world.last_repair_report {
-                    let repair_text = if report.removed_chunks == 0 {
-                        format!("0 fixed / {} scanned", report.scanned_chunks)
-                    } else {
-                        format!(
-                            "{} fixed / {} scanned / {} live refreshed",
-                            report.removed_chunks,
-                            report.scanned_chunks,
-                            report.refreshed_loaded_chunks
-                        )
-                    };
-                    crate::ui_kit::status_chip(
-                        ui,
-                        Icon::Wand,
-                        "REPAIR",
-                        &repair_text,
-                        settings.theme,
-                    );
-                }
-                ui.add_space(6.0);
-                if crate::ui_kit::major_action(
-                    ui,
-                    Icon::Layout,
-                    "Toolbench",
-                    "HUD, world and visual settings",
-                    false,
-                    settings.theme,
-                )
-                .clicked()
-                {
-                    editor.open = true;
-                }
-                ui.add_space(6.0);
-                if crate::ui_kit::major_action(
-                    ui,
-                    Icon::Search,
-                    "Command Deck",
-                    "Search actions and keybinds",
-                    false,
-                    settings.theme,
-                )
-                .clicked()
-                {
-                    command_palette.open();
-                }
-                ui.add_space(6.0);
-                if crate::ui_kit::major_action(
-                    ui,
-                    Icon::Open,
-                    "Main Menu",
-                    "Save and leave this world",
-                    false,
-                    settings.theme,
-                )
-                .clicked()
-                {
-                    save_current_world(
-                        settings,
-                        active,
-                        scratch,
-                        player_q,
-                        ship_q,
-                        ship_inventory,
-                        brain,
-                        world,
-                    );
-                    // Wipe chunk entities so the next world starts clean.
-                    world.clear_chunks();
-                    for (ship, _, _) in ship_q.iter() {
-                        if let Some(entity_commands) = commands.get_entity(ship) {
-                            entity_commands.despawn_recursive();
-                        }
-                    }
-                    for (_, group) in streamer.entities.drain() {
-                        for entry in group {
-                            if let Some(entity_commands) = commands.get_entity(entry.entity) {
-                                entity_commands.despawn_recursive();
+                    ui.add_space(8.0);
+                    crate::ui_kit::surface_panel(ui, settings.theme, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            if crate::ui_kit::icon_action(
+                                ui,
+                                Icon::Open,
+                                "Main Menu",
+                                false,
+                                settings.theme,
+                            )
+                            .clicked()
+                            {
+                                requested_action = Some(PauseAction::MainMenu);
                             }
-                        }
-                    }
-                    next.set(GameState::MainMenu);
-                }
-                ui.add_space(6.0);
-                if crate::ui_kit::danger_action(ui, Icon::Quit, "Quit", settings.theme).clicked() {
-                    save_current_world(
-                        settings,
-                        active,
-                        scratch,
-                        player_q,
-                        ship_q,
-                        ship_inventory,
-                        brain,
-                        world,
-                    );
-                    exit.send(AppExit::Success);
-                }
-            });
+                            if crate::ui_kit::danger_action(ui, Icon::Quit, "Quit", settings.theme)
+                                .clicked()
+                            {
+                                requested_action = Some(PauseAction::Quit);
+                            }
+                        });
+                    });
+                });
         });
+
+    match requested_action {
+        Some(PauseAction::Resume) => next.set(GameState::InGame),
+        Some(PauseAction::Save) => {
+            match save_current_world(
+                settings,
+                active,
+                scratch,
+                player_q,
+                ship_q,
+                ship_inventory,
+                brain,
+                world,
+            ) {
+                Ok(()) => set_pause_notice(ctx, "WORLD SAVE", "Snapshot written"),
+                Err(reason) => {
+                    set_pause_notice(ctx, "SAVE BLOCKED", bounded_world_store_error(&reason))
+                }
+            }
+        }
+        Some(PauseAction::Inventory) => **pause_screen = PauseScreen::Inventory,
+        Some(PauseAction::RepairTerrain) => {
+            let report = world.repair_visual_artifact_overrides();
+            if report.removed_chunks > 0 {
+                streamer.frontier_complete = false;
+                streamer.needs_orphan_scan = true;
+                if let Err(reason) = save_current_world(
+                    settings,
+                    active,
+                    scratch,
+                    player_q,
+                    ship_q,
+                    ship_inventory,
+                    brain,
+                    world,
+                ) {
+                    set_pause_notice(ctx, "SAVE BLOCKED", bounded_world_store_error(&reason));
+                    return;
+                }
+            }
+            info!(
+                "Scanned {} edit chunks, repaired {}, refreshed {} loaded chunks.",
+                report.scanned_chunks, report.removed_chunks, report.refreshed_loaded_chunks
+            );
+            set_pause_notice(
+                ctx,
+                "TERRAIN SCAN",
+                if report.removed_chunks == 0 {
+                    format!("No artifacts in {} chunks", report.scanned_chunks)
+                } else {
+                    format!("{} artifact chunks repaired", report.removed_chunks)
+                },
+            );
+        }
+        Some(PauseAction::Toolbench) => editor.open = true,
+        Some(PauseAction::CommandDeck) => command_palette.open(),
+        Some(PauseAction::MainMenu) => {
+            if let Err(reason) = save_current_world(
+                settings,
+                active,
+                scratch,
+                player_q,
+                ship_q,
+                ship_inventory,
+                brain,
+                world,
+            ) {
+                set_pause_notice(ctx, "SAVE BLOCKED", bounded_world_store_error(&reason));
+                return;
+            }
+            world.clear_chunks();
+            for (ship, _, _) in ship_q.iter() {
+                if let Some(entity_commands) = commands.get_entity(ship) {
+                    entity_commands.despawn_recursive();
+                }
+            }
+            for (_, group) in streamer.entities.drain() {
+                for entry in group {
+                    if let Some(entity_commands) = commands.get_entity(entry.entity) {
+                        entity_commands.despawn_recursive();
+                    }
+                }
+            }
+            next.set(GameState::MainMenu);
+        }
+        Some(PauseAction::Quit) => {
+            if let Err(reason) = save_current_world(
+                settings,
+                active,
+                scratch,
+                player_q,
+                ship_q,
+                ship_inventory,
+                brain,
+                world,
+            ) {
+                set_pause_notice(ctx, "SAVE BLOCKED", bounded_world_store_error(&reason));
+            } else {
+                exit.send(AppExit::Success);
+            }
+        }
+        None => {}
+    }
 }
 
 fn draw_inventory(
     ctx: &egui::Context,
     hotbar: &mut HotbarState,
+    builder: &mut crate::builder::BuilderState,
     pause_screen: &mut PauseScreen,
     next: &mut ResMut<NextState<GameState>>,
     settings: &mut WorldSettings,
     ship_inventory: &mut crate::ships::ShipInventory,
     ship_placement: &mut crate::ships::ShipPlacementState,
+    creator_library: &mut CreatorLibraryState,
     mode: &mut ModeContext,
     brain: &mut crate::bots::FriendlyWorldBrain,
 ) {
     let theme = settings.theme;
-    // Glassmorphism backdrop: deep gradient + subtle vignette so the
-    // panel reads as a focused modal, not a flat overlay.
-    egui::Area::new(egui::Id::new("inv_backdrop"))
-        .fixed_pos(egui::pos2(0.0, 0.0))
-        .order(egui::Order::Background)
-        .show(ctx, |ui| {
-            let rect = ctx.screen_rect();
-            let p = ui.painter();
-            // Deep base — almost black with a hint of cool blue.
-            p.rect_filled(
-                rect,
-                0.0,
-                egui::Color32::from_rgba_unmultiplied(2, 5, 5, 232),
-            );
-            let mut y = rect.top();
-            while y < rect.bottom() {
-                p.line_segment(
-                    [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                    egui::Stroke::new(1.0, egui::Color32::from_black_alpha(42)),
-                );
-                y += 5.0;
-            }
-        });
+    draw_menu_overlay_scrim(ctx, "inv_backdrop", theme, 238);
 
     let screen = ctx.screen_rect();
-    let panel_w = 980.0_f32.min(screen.width() - 40.0);
-    let panel_h = 700.0_f32.min(screen.height() - 60.0);
-    let pos = egui::pos2(
-        screen.center().x - panel_w * 0.5,
-        screen.center().y - panel_h * 0.5,
-    );
+    let layout = menu_overlay_layout(screen.size(), MenuOverlayKind::Inventory);
+    let pos = screen.center() - layout.size * 0.5;
 
-    use crate::blocks::BlockType::*;
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Cat {
-        All,
-        Natural,
-        Stone,
-        Wood,
-        Liquid,
-        Tech,
-    }
-    let cats: [(Cat, &str); 6] = [
-        (Cat::All, "ALLE"),
-        (Cat::Natural, "NATUR"),
-        (Cat::Stone, "GESTEIN"),
-        (Cat::Wood, "HOLZ & LAUB"),
-        (Cat::Liquid, "FLUESSIG"),
-        (Cat::Tech, "HANGAR"),
-    ];
-    let palette: [(crate::blocks::BlockType, &str, Cat); 30] = [
-        (Grass, "Grass", Cat::Natural),
-        (Dirt, "Dirt", Cat::Natural),
-        (Sand, "Sand", Cat::Natural),
-        (Gravel, "Kies", Cat::Natural),
-        (Snow, "Schnee", Cat::Natural),
-        (TundraGrass, "Tundra", Cat::Natural),
-        (SavannaGrass, "Savanne", Cat::Natural),
-        (Stone, "Stone", Cat::Stone),
-        (Bedrock, "Bedrock", Cat::Stone),
-        (RedSand, "Rotsand", Cat::Natural),
-        (RedStone, "Rotstein", Cat::Stone),
-        (MesaClay, "Mesa-Ton", Cat::Stone),
-        (MossStone, "Moosstein", Cat::Stone),
-        (Limestone, "Kalkstein", Cat::Stone),
-        (Wood, "Holz", Cat::Wood),
-        (Leaves, "Laub", Cat::Wood),
-        (JungleLeaves, "Dschungel", Cat::Wood),
-        (Water, "Wasser", Cat::Liquid),
-        (Ice, "Eis", Cat::Liquid),
-        (ShipHullDark, "Hull Dark", Cat::Tech),
-        (ShipHullAlloy, "Alloy Hull", Cat::Tech),
-        (CockpitGlass, "Cockpit", Cat::Tech),
-        (NeonCyan, "Neon Cyan", Cat::Tech),
-        (NeonMagenta, "Neon Magenta", Cat::Tech),
-        (NeonAmber, "Neon Amber", Cat::Tech),
-        (EngineCore, "Engine Core", Cat::Tech),
-        (Crystal, "Crystal", Cat::Stone),
-        (LuminiteCrystal, "Luminite", Cat::Stone),
-        (MagnetiteOre, "Magnetite", Cat::Stone),
-        (IridiumVein, "Iridium", Cat::Stone),
-    ];
+    let palette = inventory_block_entries();
 
-    let mut frame = command_frame(theme);
+    let mut frame = crate::ui_kit::toolbench_frame(theme);
     frame.inner_margin = egui::Margin::symmetric(20.0, 18.0);
 
     egui::Window::new("voxel_native_inventory")
@@ -899,376 +2713,264 @@ fn draw_inventory(
         .collapsible(false)
         .movable(false)
         .fixed_pos(pos)
-        .fixed_size(egui::vec2(panel_w, panel_h))
+        .fixed_size(layout.size)
         .frame(frame)
         .show(ctx, |ui| {
-            // -------- Header (title + accent bar) --------
-            ui.horizontal(|ui| {
-                // Cyan accent bar on the left.
-                let (bar_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(4.0, 32.0), egui::Sense::hover());
-                ui.painter().rect_filled(
-                    bar_rect,
-                    egui::Rounding::same(2.0),
-                    egui::Color32::from_rgb(0, 220, 255),
-                );
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("INVENTAR")
-                            .size(28.0)
-                            .color(theme.color.primary())
-                            .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new("Block waehlen ▸ Slot zuweisen ▸ bauen")
-                            .size(11.0)
-                            .color(egui::Color32::from_gray(140)),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new("E / ESC ▸ schliessen")
-                            .size(11.0)
-                            .color(egui::Color32::from_gray(120))
-                            .italics(),
-                    );
-                });
-            });
-            ui.add_space(14.0);
+            draw_menu_overlay_header(
+                ui,
+                "CREATOR LIBRARY // ASSET DECK",
+                "Search once // choose materials // drag shuttles into the world",
+                "E / ESC",
+                "RESUME",
+                layout.compact,
+                theme,
+            );
+            ui.add_space(10.0);
 
             // -------- Persisted UI state --------
             let mut active_page: InventoryPage = ui
                 .data_mut(|d| d.get_temp(egui::Id::new("inv_page")))
-                .unwrap_or(InventoryPage::Blocks);
-            let mut selected: u8 = ui
-                .data_mut(|d| d.get_temp(egui::Id::new("inv_selected")))
-                .unwrap_or(0);
-            let mut active_cat: Cat = ui
-                .data_mut(|d| d.get_temp(egui::Id::new("inv_cat")))
-                .unwrap_or(Cat::All);
-            let mut search: String = ui
-                .data_mut(|d| d.get_temp(egui::Id::new("inv_search")))
-                .unwrap_or_default();
+                .unwrap_or(InventoryPage::Creator);
 
             ui.horizontal_wrapped(|ui| {
-                for (page, icon, label) in [
-                    (InventoryPage::Blocks, Icon::Cube, "Blocks"),
-                    (InventoryPage::Ships, Icon::Globe, "Ships"),
-                    (InventoryPage::Companions, Icon::Follow, "Companions"),
-                    (InventoryPage::Hotbar, Icon::Grid, "Hotbar"),
-                ] {
+                for (page, icon, label) in InventoryPage::ALL {
                     if crate::ui_kit::tab_chip(ui, icon, label, active_page == page, theme)
                         .clicked()
                     {
                         active_page = page;
                     }
                 }
-            });
-            ui.add_space(12.0);
-
-            if active_page == InventoryPage::Companions {
-                draw_inventory_companion_panel(ui, settings, brain, pause_screen, next);
-                ui.add_space(14.0);
-            }
-
-            // -------- Search + category tabs --------
-            if active_page == InventoryPage::Blocks {
-            ui.horizontal(|ui| {
-                let te = egui::TextEdit::singleline(&mut search)
-                    .hint_text("🔍  Block suchen…")
-                    .desired_width(220.0)
-                    .font(egui::FontId::proportional(13.0));
-                ui.add(te);
-                ui.add_space(14.0);
-                for (c, name) in cats.iter() {
-                    let sel = active_cat == *c;
-                    let btn = egui::Button::new(
-                        egui::RichText::new(*name)
-                            .size(11.5)
-                            .color(if sel {
-                                egui::Color32::from_rgb(8, 14, 22)
-                            } else {
-                                egui::Color32::from_gray(200)
-                            })
-                            .strong(),
-                    )
-                    .fill(if sel {
-                        egui::Color32::from_rgb(0, 220, 255)
-                    } else {
-                        egui::Color32::from_rgba_unmultiplied(40, 50, 66, 200)
-                    })
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        if sel {
-                            egui::Color32::from_rgb(0, 240, 255)
-                        } else {
-                            egui::Color32::from_rgba_unmultiplied(70, 90, 110, 180)
-                        },
-                    ))
-                    .rounding(egui::Rounding::same(20.0))
-                    .min_size(egui::vec2(92.0, 28.0));
-                    if ui.add(btn).clicked() {
-                        active_cat = *c;
-                    }
+                if !layout.compact {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        metric_pill(ui, theme, "VIEW", active_page.status())
+                    });
                 }
             });
-            ui.add_space(16.0);
+            ui.add_space(10.0);
 
-            // -------- Filter block list --------
-            let search_lc = search.to_lowercase();
-            let visible: Vec<(usize, crate::blocks::BlockType, &str)> = palette
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, name, cat))| {
-                    (active_cat == Cat::All || *cat == active_cat)
-                        && (search_lc.is_empty() || name.to_lowercase().contains(&search_lc))
-                })
-                .map(|(i, (b, n, _))| (i, *b, *n))
-                .collect();
-
-            // -------- Block grid (5 columns of cinematic cards) --------
+            let mut requested_exit = None;
+            let body_height = (ui.available_height() - 58.0).max(96.0);
             egui::ScrollArea::vertical()
-                .max_height((panel_h - 340.0).max(220.0))
+                .id_source(("inventory_page_scroll", active_page))
+                .max_height(body_height)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    egui::Grid::new("inv_grid")
-                        .num_columns(5)
-                        .spacing([12.0, 12.0])
-                        .show(ui, |ui| {
-                            for (col_idx, (i, b, name)) in visible.iter().enumerate() {
-                                draw_block_tile(
+                    if active_page == InventoryPage::Companions {
+                        draw_inventory_companion_panel(ui, settings, brain, pause_screen, next);
+                        return;
+                    }
+                    crate::ui_kit::surface_panel_animated(
+                        ui,
+                        theme,
+                        egui::Id::new(("inventory_page_panel", active_page)),
+                        true,
+                        |ui| match active_page {
+                            InventoryPage::Creator => {
+                                let library_result = draw_creator_library(
                                     ui,
-                                    b,
-                                    name,
-                                    selected as usize == *i,
-                                    |sel_idx| {
-                                        selected = sel_idx as u8;
-                                    },
-                                    *i,
+                                    creator_library,
+                                    builder.block,
+                                    ship_inventory,
+                                    layout.compact,
+                                    theme,
                                 );
-                                if (col_idx + 1) % 5 == 0 {
-                                    ui.end_row();
+                                if let Some(action) = library_result.action {
+                                    if apply_creator_library_action(
+                                        action,
+                                        creator_library,
+                                        builder,
+                                        ship_inventory,
+                                        ship_placement,
+                                        mode,
+                                    ) == CreatorLibraryEffect::PlacementStarted
+                                    {
+                                        requested_exit = Some(InventoryExit::ResumeWorld);
+                                    }
                                 }
+                                ui.add_space(10.0);
+                                crate::ui_kit::compact_separator(ui, theme);
+                                ui.add_space(8.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    crate::ui_kit::status_chip(
+                                        ui,
+                                        Icon::Globe,
+                                        "SHUTTLE SIM",
+                                        if settings.ship_skirmish_ai {
+                                            "ACTIVE"
+                                        } else {
+                                            "CALM"
+                                        },
+                                        theme,
+                                    );
+                                    if crate::ui_kit::icon_action(
+                                        ui,
+                                        Icon::Animation,
+                                        "Flight encounters",
+                                        settings.ship_skirmish_ai,
+                                        theme,
+                                    )
+                                    .clicked()
+                                    {
+                                        settings.ship_skirmish_ai = !settings.ship_skirmish_ai;
+                                        settings.save();
+                                    }
+                                });
                             }
-                        });
-                });
-            }
-
-            ui.add_space(14.0);
-            // Decorative gradient separator.
-            let sep_rect = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 2.0), egui::Sense::hover())
-                .0;
-            for x in 0..(sep_rect.width() as i32) {
-                let t = x as f32 / sep_rect.width().max(1.0);
-                let alpha = ((1.0 - (t * 2.0 - 1.0).abs()) * 100.0) as u8;
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_size(
-                        egui::pos2(sep_rect.min.x + x as f32, sep_rect.min.y),
-                        egui::vec2(1.0, 2.0),
-                    ),
-                    0.0,
-                    egui::Color32::from_rgba_unmultiplied(0, 220, 255, alpha),
-                );
-            }
-            ui.add_space(12.0);
-
-            // -------- Selected-block info strip --------
-            let (sel_b, sel_name, _) = palette[selected.min((palette.len() - 1) as u8) as usize];
-            let sel_rgba = crate::blocks::voxel_color(sel_b.into());
-            if matches!(active_page, InventoryPage::Blocks | InventoryPage::Hotbar) {
-            ui.horizontal(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
-                draw_gradient_swatch(ui.painter(), rect, sel_rgba, 8.0);
-                ui.painter().rect_stroke(
-                    rect,
-                    egui::Rounding::same(8.0),
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 220, 80)),
-                );
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(sel_name)
-                            .size(20.0)
-                            .color(egui::Color32::from_rgb(240, 250, 255))
-                            .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new("Aktive Auswahl ▸ klick einen Hotbar-Slot unten")
-                            .size(11.0)
-                            .color(egui::Color32::from_gray(150)),
+                            InventoryPage::Companions => unreachable!(),
+                            InventoryPage::Hotbar => {
+                                let selected = match creator_library.selected {
+                                    CreatorAssetId::Material(block) => block,
+                                    CreatorAssetId::Ship(_) => builder.block,
+                                };
+                                let selected_entry = palette
+                                    .iter()
+                                    .find(|entry| entry.block == selected)
+                                    .or_else(|| palette.first())
+                                    .expect("canonical block palette must not be empty");
+                                draw_inventory_selected_material(ui, selected_entry, theme);
+                                ui.add_space(12.0);
+                                draw_inventory_hotbar(
+                                    ui,
+                                    hotbar,
+                                    builder,
+                                    selected_entry.block,
+                                    theme,
+                                );
+                            }
+                        },
                     );
                 });
-            });
-            }
 
-            ui.add_space(14.0);
-
-            // -------- Hangar shuttle row --------
-            if active_page == InventoryPage::Ships {
-            ui.label(
-                egui::RichText::new("HANGAR  SHUTTLES")
-                    .size(11.5)
-                    .color(egui::Color32::from_rgb(255, 80, 230))
-                    .strong(),
-            );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let r = crate::ui_kit::icon_action(
-                    ui,
-                    Icon::Animation,
-                    "Drone AI",
-                    settings.ship_skirmish_ai,
-                    theme,
-                );
-                if r.clicked() {
-                    settings.ship_skirmish_ai = !settings.ship_skirmish_ai;
-                    settings.save();
-                }
-            });
-            ui.label(
-                egui::RichText::new(
-                    "Aus = keine Orbital-Gegner beim Fliegen. Ein = Wellen, mehr mit der Zeit, Pausen bei wenig Schild.",
-                )
-                .size(10.5)
-                .color(egui::Color32::from_gray(145)),
-            );
-            ui.add_space(6.0);
+            ui.add_space(8.0);
+            crate::ui_kit::compact_separator(ui, theme);
+            ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
-                for kind in crate::ships::ShipKind::ALL {
-                    let unlocked = ship_inventory.unlocked.contains(&kind);
-                    let selected_ship = ship_inventory.selected == kind;
-                    let fill = if selected_ship {
-                        egui::Color32::from_rgb(0, 210, 235)
-                    } else {
-                        egui::Color32::from_rgba_unmultiplied(24, 30, 45, 220)
-                    };
-                    let text_color = if selected_ship {
-                        egui::Color32::from_rgb(5, 10, 18)
-                    } else {
-                        egui::Color32::from_rgb(230, 245, 255)
-                    };
-                    let resp = ui.add_enabled(
-                        unlocked,
-                        egui::Button::new(
-                            egui::RichText::new(kind.short())
-                                .size(13.0)
-                                .strong()
-                                .color(text_color),
-                        )
-                        .fill(fill)
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            egui::Color32::from_rgb(255, 80, 230),
-                        ))
-                        .rounding(egui::Rounding::same(8.0))
-                        .min_size(egui::vec2(130.0, 42.0)),
-                    );
-                    if resp.clicked() {
-                        ship_inventory.selected = kind;
-                        ship_placement.start(kind);
-                        mode.set(
-                            crate::mode::ActiveMode::ShipPlacement { kind },
-                            format!("Placing {}.", kind.label()),
-                        );
-                        *pause_screen = PauseScreen::Menu;
-                        next.set(GameState::InGame);
-                    }
-                    resp.on_hover_text(format!(
-                        "{} blueprint: LMB place, RMB cancel, mouse wheel rotate.",
-                        kind.label()
-                    ));
-                }
-            });
-            }
-
-            ui.add_space(14.0);
-
-            // -------- Hotbar assignment row --------
-            if matches!(active_page, InventoryPage::Blocks | InventoryPage::Hotbar) {
-            ui.label(
-                egui::RichText::new("HOTBAR  1 — 9")
-                    .size(11.5)
-                    .color(egui::Color32::from_rgb(0, 200, 230))
-                    .strong(),
-            );
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                for i in 0..9 {
-                    let slot = hotbar.slots[i];
-                    let is_active = hotbar.active == i;
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(62.0, 62.0), egui::Sense::click());
-                    let hovered = resp.hovered();
-                    // Slot background (deep panel).
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::Rounding::same(8.0),
-                        egui::Color32::from_rgba_unmultiplied(20, 26, 36, 230),
-                    );
-                    // Inner gradient swatch with the slot's block colour.
-                    let inner = rect.shrink(6.0);
-                    let c = slot.color.to_srgba();
-                    draw_gradient_swatch(ui.painter(), inner, [c.red, c.green, c.blue, 1.0], 5.0);
-                    // Number badge in the corner.
-                    ui.painter().text(
-                        rect.min + egui::vec2(6.0, 4.0),
-                        egui::Align2::LEFT_TOP,
-                        format!("{}", i + 1),
-                        egui::FontId::proportional(11.0),
-                        egui::Color32::from_white_alpha(220),
-                    );
-                    // Active / hover ring.
-                    let ring_color = if is_active {
-                        egui::Color32::from_rgb(255, 220, 80)
-                    } else if hovered {
-                        egui::Color32::from_rgb(0, 220, 255)
-                    } else {
-                        egui::Color32::from_rgba_unmultiplied(60, 80, 100, 200)
-                    };
-                    ui.painter().rect_stroke(
-                        rect,
-                        egui::Rounding::same(8.0),
-                        egui::Stroke::new(if is_active { 2.5 } else { 1.0 }, ring_color),
-                    );
-                    if resp.clicked() {
-                        let cc = crate::blocks::voxel_color(sel_b.into());
-                        hotbar.slots[i] = crate::hud::HotbarBlock {
-                            color: Color::srgb(cc[0], cc[1], cc[2]),
-                        };
-                        hotbar.active = i;
-                    }
-                    ui.add_space(4.0);
-                }
-            });
-            }
-
-            ui.add_space(16.0);
-            ui.vertical_centered(|ui| {
-                if ui
-                    .add(big_button("Schliessen  (E)", [40, 140, 80]))
-                    .clicked()
+                if crate::ui_kit::icon_action(ui, Icon::Pause, "Pause menu", false, theme).clicked()
                 {
-                    *pause_screen = PauseScreen::Menu;
-                    next.set(GameState::InGame);
+                    requested_exit = Some(InventoryExit::PauseMenu);
+                }
+                if crate::ui_kit::icon_action(ui, Icon::Resume, "Resume", true, theme).clicked() {
+                    requested_exit = Some(InventoryExit::ResumeWorld);
                 }
             });
 
-            // Persist UI state so reopening preserves selection/search.
+            if let Some(exit) = requested_exit {
+                leave_inventory(pause_screen, next, exit);
+            }
+
+            // Search, category, and asset selection live in the canonical
+            // CreatorLibraryState. Only the visible page is local UI state.
             ui.data_mut(|d| {
-                d.insert_temp(egui::Id::new("inv_selected"), selected);
-                d.insert_temp(egui::Id::new("inv_cat"), active_cat);
-                d.insert_temp(egui::Id::new("inv_search"), search);
                 d.insert_temp(egui::Id::new("inv_page"), active_page);
             });
         });
 }
 
-/// Paint a vertical-gradient swatch — top is the block's true colour
-/// brightened, bottom is the same colour darkened. Cheap fake "lit cube"
-/// look that makes the inventory tiles feel 3D without any real geometry.
+fn leave_inventory(
+    pause_screen: &mut PauseScreen,
+    next: &mut ResMut<NextState<GameState>>,
+    exit: InventoryExit,
+) {
+    *pause_screen = PauseScreen::Menu;
+    if exit.resumes_world() {
+        next.set(GameState::InGame);
+    }
+}
+
+fn enabled_inventory_icon_action(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    icon: Icon,
+    label: &str,
+    selected: bool,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        crate::ui_kit::icon_action(ui, icon, label, selected, theme)
+    })
+    .inner
+}
+
+fn draw_inventory_selected_material(
+    ui: &mut egui::Ui,
+    selected: &InventoryBlockEntry,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    ui.horizontal_wrapped(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::hover());
+        crate::ui_kit::paint_material_swatch(
+            ui.painter(),
+            rect,
+            rgba_color32(crate::blocks::voxel_color(selected.block.into())),
+            5.0,
+        );
+        crate::theme::paint_neon_outline(
+            ui.painter(),
+            rect,
+            5.0,
+            colors.focus_glow,
+            colors.outline_active,
+            1.0,
+        );
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new(selected.label)
+                    .size(17.0)
+                    .monospace()
+                    .color(colors.text)
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new("SELECTED MATERIAL // choose a hotbar slot")
+                    .size(10.5)
+                    .monospace()
+                    .color(colors.text_muted),
+            );
+        });
+    });
+}
+
+fn draw_inventory_hotbar(
+    ui: &mut egui::Ui,
+    hotbar: &mut HotbarState,
+    builder: &mut crate::builder::BuilderState,
+    selected: crate::blocks::BlockType,
+    theme: crate::theme::ThemeSettings,
+) {
+    let colors = theme.semantic();
+    ui.label(
+        egui::RichText::new("HOTBAR // SLOTS 1-9")
+            .size(10.5)
+            .monospace()
+            .color(colors.accent)
+            .strong(),
+    );
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        for index in 0..9 {
+            let slot = hotbar.slots[index];
+            let color = slot.color.to_srgba();
+            if crate::ui_kit::swatch_slot(
+                ui,
+                index,
+                rgba_color32([color.red, color.green, color.blue, 1.0]),
+                hotbar.active == index,
+                theme,
+                slot.label(),
+            )
+            .clicked()
+            {
+                hotbar.assign_block(index, selected);
+                apply_inventory_block_selection(builder, selected);
+            }
+        }
+    });
+}
+
+/// Companion controls share the same finite panel and control feedback as the
+/// material and ship pages.
 fn draw_inventory_companion_panel(
     ui: &mut egui::Ui,
     settings: &mut WorldSettings,
@@ -1331,21 +3033,31 @@ fn draw_inventory_companion_panel(
     });
     ui.add_space(8.0);
 
-    ui.horizontal_wrapped(|ui| {
-        for (id, name, mode, last) in companions {
-            draw_inventory_companion_card(
-                ui,
-                brain,
-                id,
-                &name,
-                &mode,
-                &last,
-                pause_screen,
-                next,
-                theme,
-            );
-        }
-    });
+    if companions.is_empty() {
+        crate::ui_kit::activity_status(
+            ui,
+            LoadingState::Idle,
+            "COMPANION LINK",
+            "No companions assigned",
+            theme,
+        );
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            for (id, name, mode, last) in companions {
+                draw_inventory_companion_card(
+                    ui,
+                    brain,
+                    id,
+                    &name,
+                    &mode,
+                    &last,
+                    pause_screen,
+                    next,
+                    theme,
+                );
+            }
+        });
+    }
 
     if settings.companion_ui.editor_assist_enabled {
         ui.add_space(8.0);
@@ -1371,14 +3083,15 @@ fn draw_inventory_companion_panel(
                 }
                 if let Some(preview) = &brain.save.companion_preview {
                     let can_approve = preview.status.is_valid();
-                    let approve = crate::ui_kit::icon_action(
+                    let approve = enabled_inventory_icon_action(
                         ui,
+                        can_approve,
                         Icon::Approve,
                         "Approve",
                         can_approve,
                         theme,
                     );
-                    if can_approve && approve.clicked() {
+                    if approve.clicked() {
                         brain.companion_command =
                             Some(crate::bots::CompanionCommand::ExecutePreview);
                         close_inventory_for_companion_command(pause_screen, next);
@@ -1406,101 +3119,123 @@ fn draw_inventory_companion_card(
     theme: crate::theme::ThemeSettings,
 ) {
     let colors = theme.semantic();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(330.0, 166.0), egui::Sense::hover());
-    let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min), None);
-    child
-        .painter()
-        .rect_filled(rect, egui::Rounding::same(8.0), colors.surface);
-    child.painter().rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.2, colors.stroke),
+    let selected = brain.selected_bot == id;
+    let width = ui.available_width().min(330.0).max(112.0);
+    let summary = if last.chars().count() > 72 {
+        format!("{}...", last.chars().take(69).collect::<String>())
+    } else {
+        last.to_owned()
+    };
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 166.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_width(width);
+            crate::ui_kit::surface_panel_animated(
+                ui,
+                theme,
+                egui::Id::new(("inventory_companion_card", id)),
+                selected,
+                |ui| {
+                    ui.set_min_size(egui::vec2((width - 24.0).max(88.0), 142.0));
+                    ui.horizontal_wrapped(|ui| {
+                        crate::ui_kit::status_chip(ui, Icon::Follow, name, mode, theme);
+                        if selected {
+                            crate::ui_kit::status_chip(
+                                ui,
+                                Icon::Approve,
+                                "LINK",
+                                "SELECTED",
+                                theme,
+                            );
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(summary)
+                            .size(10.5)
+                            .monospace()
+                            .color(colors.text_muted),
+                    );
+                    ui.add_space(5.0);
+                    crate::ui_kit::compact_separator(ui, theme);
+                    ui.add_space(5.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if crate::ui_kit::icon_action(ui, Icon::Teleport, "Here", false, theme)
+                            .on_hover_text("Place beside me")
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::PlaceSelectedNearPlayer,
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Follow, "Follow", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::FollowSelected,
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Hold, "Hold", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::HoldSelected,
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Scan, "Scan", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::ScanSelected,
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Teleport, "Pad", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::PreviewAssist(
+                                    crate::bots::CompanionAssistKind::LandingPad,
+                                ),
+                                pause_screen,
+                                next,
+                            );
+                        }
+                        if crate::ui_kit::icon_action(ui, Icon::Road, "Road", false, theme)
+                            .clicked()
+                        {
+                            issue_inventory_companion_command(
+                                brain,
+                                id,
+                                crate::bots::CompanionCommand::PreviewAssist(
+                                    crate::bots::CompanionAssistKind::Road,
+                                ),
+                                pause_screen,
+                                next,
+                            );
+                        }
+                    });
+                },
+            );
+        },
     );
-    child.set_clip_rect(rect.shrink(8.0));
-    child.add_space(8.0);
-    child.horizontal(|ui| {
-        let (avatar, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-        let p = ui.painter_at(avatar);
-        p.circle_filled(avatar.center(), 21.0, colors.surface_strong);
-        crate::icons::paint_icon(&p, avatar.shrink(9.0), Icon::Follow, colors.accent);
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(format!("{name} // {mode}"))
-                    .size(14.0)
-                    .strong()
-                    .color(colors.text),
-            );
-            ui.label(
-                egui::RichText::new(last)
-                    .size(10.5)
-                    .color(colors.text_muted),
-            );
-        });
-    });
-    child.add_space(6.0);
-    child.horizontal_wrapped(|ui| {
-        if crate::ui_kit::icon_action(ui, Icon::Teleport, "Here", false, theme)
-            .on_hover_text("Place beside me")
-            .clicked()
-        {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::PlaceSelectedNearPlayer,
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Follow, "Follow", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::FollowSelected,
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Hold, "Hold", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::HoldSelected,
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Scan, "Scan", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::ScanSelected,
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Teleport, "Pad", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::PreviewAssist(
-                    crate::bots::CompanionAssistKind::LandingPad,
-                ),
-                pause_screen,
-                next,
-            );
-        }
-        if crate::ui_kit::icon_action(ui, Icon::Road, "Road", false, theme).clicked() {
-            issue_inventory_companion_command(
-                brain,
-                id,
-                crate::bots::CompanionCommand::PreviewAssist(
-                    crate::bots::CompanionAssistKind::Road,
-                ),
-                pause_screen,
-                next,
-            );
-        }
-    });
 }
 
 fn issue_inventory_companion_command(
@@ -1519,217 +3254,92 @@ fn close_inventory_for_companion_command(
     pause_screen: &mut PauseScreen,
     next: &mut ResMut<NextState<GameState>>,
 ) {
-    *pause_screen = PauseScreen::Menu;
-    next.set(GameState::InGame);
+    leave_inventory(pause_screen, next, InventoryExit::ResumeWorld);
 }
 
-fn draw_gradient_swatch(painter: &egui::Painter, rect: egui::Rect, rgba: [f32; 4], radius: f32) {
-    let r = rgba[0];
-    let g = rgba[1];
-    let b = rgba[2];
-    let top = egui::Color32::from_rgb(
-        ((r * 1.18).min(1.0) * 255.0) as u8,
-        ((g * 1.18).min(1.0) * 255.0) as u8,
-        ((b * 1.18).min(1.0) * 255.0) as u8,
-    );
-    let bot = egui::Color32::from_rgb(
-        ((r * 0.65) * 255.0) as u8,
-        ((g * 0.65) * 255.0) as u8,
-        ((b * 0.65) * 255.0) as u8,
-    );
-    // Approximate a gradient by stacking ~16 horizontal bands. egui has
-    // no native gradient primitive, but 16 bands at 1-3 px each are
-    // visually indistinguishable from a true gradient at this scale.
-    let bands = 16i32;
-    let band_h = rect.height() / bands as f32;
-    for i in 0..bands {
-        let t = i as f32 / (bands - 1).max(1) as f32;
-        let cr = top.r() as f32 * (1.0 - t) + bot.r() as f32 * t;
-        let cg = top.g() as f32 * (1.0 - t) + bot.g() as f32 * t;
-        let cb = top.b() as f32 * (1.0 - t) + bot.b() as f32 * t;
-        let band = egui::Rect::from_min_size(
-            egui::pos2(rect.min.x, rect.min.y + i as f32 * band_h),
-            egui::vec2(rect.width(), band_h + 0.5),
-        );
-        // Only round the very first / last band so the rounding wraps
-        // the swatch as a whole.
-        let rounding = if i == 0 {
-            egui::Rounding {
-                nw: radius,
-                ne: radius,
-                sw: 0.0,
-                se: 0.0,
-            }
-        } else if i == bands - 1 {
-            egui::Rounding {
-                nw: 0.0,
-                ne: 0.0,
-                sw: radius,
-                se: radius,
-            }
+fn rgba_color32(rgba: [f32; 4]) -> egui::Color32 {
+    let channel = |value: f32| {
+        if value.is_finite() {
+            (value.clamp(0.0, 1.0) * 255.0).round() as u8
         } else {
-            egui::Rounding::ZERO
-        };
-        painter.rect_filled(
-            band,
-            rounding,
-            egui::Color32::from_rgb(cr as u8, cg as u8, cb as u8),
-        );
-    }
-    // Subtle inner top highlight (specular hint).
-    painter.line_segment(
-        [
-            egui::pos2(rect.min.x + 4.0, rect.min.y + 2.0),
-            egui::pos2(rect.max.x - 4.0, rect.min.y + 2.0),
-        ],
-        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(60)),
-    );
-}
-
-/// Render a single block tile in the inventory grid. Cinematic card with
-/// a gradient swatch, hover/selection ring, and crisp typography.
-fn draw_block_tile(
-    ui: &mut egui::Ui,
-    b: &crate::blocks::BlockType,
-    name: &str,
-    selected: bool,
-    mut on_click: impl FnMut(usize),
-    idx: usize,
-) {
-    let col = crate::blocks::voxel_color((*b).into());
-
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(168.0, 96.0), egui::Sense::click());
-    let hovered = resp.hovered();
-
-    // Card background — deep glass with gentle gradient.
-    let bg_top = if selected {
-        egui::Color32::from_rgba_unmultiplied(38, 60, 86, 240)
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(28, 38, 54, 230)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(22, 28, 40, 215)
+            0
+        }
     };
-    let bg_bot = if selected {
-        egui::Color32::from_rgba_unmultiplied(20, 32, 50, 240)
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(16, 22, 32, 230)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(12, 16, 24, 215)
-    };
-    // Two-band gradient for the card body (cheaper than the swatch's
-    // 16 bands — at 96 px tall the eye doesn't notice).
-    ui.painter().rect_filled(
-        egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.center().y)),
-        egui::Rounding {
-            nw: 10.0,
-            ne: 10.0,
-            sw: 0.0,
-            se: 0.0,
-        },
-        bg_top,
-    );
-    ui.painter().rect_filled(
-        egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.center().y), rect.max),
-        egui::Rounding {
-            nw: 0.0,
-            ne: 0.0,
-            sw: 10.0,
-            se: 10.0,
-        },
-        bg_bot,
-    );
-
-    // Color swatch (left rounded square with gradient + highlight).
-    let swatch =
-        egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::vec2(76.0, 76.0));
-    draw_gradient_swatch(ui.painter(), swatch, col, 7.0);
-    // Subtle dark inner border to seat the swatch in the card.
-    ui.painter().rect_stroke(
-        swatch,
-        egui::Rounding::same(7.0),
-        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(140)),
-    );
-
-    // Name + index label.
-    ui.painter().text(
-        rect.min + egui::vec2(96.0, 30.0),
-        egui::Align2::LEFT_CENTER,
-        name,
-        egui::FontId::proportional(15.0),
-        egui::Color32::from_rgb(235, 245, 255),
-    );
-    ui.painter().text(
-        rect.min + egui::vec2(96.0, 52.0),
-        egui::Align2::LEFT_CENTER,
-        format!("ID  {:02}", idx + 1),
-        egui::FontId::proportional(10.5),
-        egui::Color32::from_gray(140),
-    );
-    if selected {
-        ui.painter().text(
-            rect.min + egui::vec2(96.0, 72.0),
-            egui::Align2::LEFT_CENTER,
-            "● AKTIV",
-            egui::FontId::proportional(10.0),
-            egui::Color32::from_rgb(255, 220, 80),
-        );
-    }
-
-    // Outer selection / hover ring.
-    let ring = egui::Stroke::new(
-        if selected { 2.0 } else { 1.0 },
-        if selected {
-            egui::Color32::from_rgb(255, 220, 80)
-        } else if hovered {
-            egui::Color32::from_rgb(0, 220, 255)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(60, 80, 100, 200)
-        },
-    );
-    ui.painter()
-        .rect_stroke(rect, egui::Rounding::same(10.0), ring);
-
-    if resp.clicked() {
-        on_click(idx);
-    }
+    egui::Color32::from_rgba_unmultiplied(
+        channel(rgba[0]),
+        channel(rgba[1]),
+        channel(rgba[2]),
+        channel(rgba[3]),
+    )
 }
 
 // ============================ Helpers =====================================
 
-fn big_button(label: &str, fill: [u8; 3]) -> egui::Button<'_> {
-    // Command button: darkened semantic fill, high-contrast type,
-    // tight radius and a cool outline shared with the command deck.
-    let bg = egui::Color32::from_rgb(
-        (fill[0] as f32 * 0.85) as u8,
-        (fill[1] as f32 * 0.85) as u8,
-        (fill[2] as f32 * 0.85) as u8,
-    );
-    egui::Button::new(egui::RichText::new(label).size(15.5).color(TEXT).strong())
-        .fill(bg)
-        .stroke(egui::Stroke::new(1.0, CYAN.linear_multiply(0.72)))
-        // 0 min-width so the button flexes to whatever column/layout is
-        // giving us (prevents overlap in narrow two-column footers), but
-        // keeps a crisp tall profile.
-        .min_size(egui::vec2(0.0, 42.0))
-        .rounding(egui::Rounding::same(6.0))
+fn auto_world_name(worlds: &[WorldMeta]) -> String {
+    let reserved = settings::reserved_world_storage_stems();
+    auto_world_name_with_reserved(worlds, &reserved)
 }
 
-fn auto_world_name(worlds: &[WorldMeta]) -> String {
+fn clean_new_world_name(input: &str, worlds: &[WorldMeta]) -> String {
+    let reserved = settings::reserved_world_storage_stems();
+    clean_new_world_name_with_reserved(input, worlds, &reserved)
+}
+
+fn auto_world_name_with_reserved(
+    worlds: &[WorldMeta],
+    reserved: &std::collections::HashSet<String>,
+) -> String {
     for n in 1..1000 {
         let candidate = format!("world_{n:02}");
-        if !worlds.iter().any(|world| world.name == candidate) {
+        if !world_storage_stem_taken(&candidate, worlds, reserved) {
             return candidate;
         }
     }
     format!("world_{}", rand_seed())
 }
 
+fn clean_new_world_name_with_reserved(
+    input: &str,
+    worlds: &[WorldMeta],
+    reserved: &std::collections::HashSet<String>,
+) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return auto_world_name_with_reserved(worlds, reserved);
+    }
+    if !world_storage_stem_taken(trimmed, worlds, reserved) {
+        return trimmed.to_string();
+    }
+    for n in 2..1000 {
+        let candidate = format!("{trimmed}_{n:02}");
+        if !world_storage_stem_taken(&candidate, worlds, reserved) {
+            return candidate;
+        }
+    }
+    format!("{}_{}", trimmed, rand_seed())
+}
+
+fn world_storage_stem_taken(
+    name: &str,
+    worlds: &[WorldMeta],
+    reserved: &std::collections::HashSet<String>,
+) -> bool {
+    let claim_key = settings::world_storage_claim_key(name);
+    reserved.contains(&claim_key)
+        || worlds
+            .iter()
+            .any(|world| settings::world_storage_claim_key(&world.name) == claim_key)
+}
+
 fn apply_world_to_settings(meta: &WorldMeta, settings: &mut WorldSettings) {
     settings.seed = meta.seed;
+    settings.world_profile = meta.world_profile;
+    settings.terrain_grammar = meta.terrain_grammar;
     settings.time_of_day = meta.time_of_day;
     settings.time_mode = meta.time_mode;
     settings.cycle_speed = meta.cycle_speed;
     settings.weather = meta.weather;
+    settings.scenery_quality = meta.scenery_quality;
     if settings.visual_preset == crate::settings::VisualPreset::NeonShuttle {
         settings.time_mode = crate::settings::TimeMode::Fixed;
         settings.time_of_day = 21.35;
@@ -1747,22 +3357,30 @@ fn save_current_world(
     player_q: &Query<(&Transform, &Player)>,
     ship_q: &Query<(Entity, &Transform, &crate::ships::ShipInstance)>,
     ship_inventory: &crate::ships::ShipInventory,
-    brain: &crate::bots::FriendlyWorldBrain,
-    world: &VoxelWorld,
-) {
+    brain: &mut crate::bots::FriendlyWorldBrain,
+    world: &mut VoxelWorld,
+) -> Result<(), String> {
     let Some(active) = active else {
-        return;
+        return Err("no active world authority".to_owned());
     };
+    let generation_identity = active.meta.generation_identity();
+    settings::validate_world_storage_for_save(&active.meta)?;
+    if !world
+        .edit_store_status
+        .is_compatible_with(generation_identity)
+    {
+        return Err(format!(
+            "edit authority is {} for the active generation identity",
+            world.edit_store_status.label()
+        ));
+    }
     let mut meta = active.meta.clone();
-    meta.seed = settings.seed;
     meta.time_of_day = settings.time_of_day;
     meta.time_mode = settings.time_mode;
     meta.cycle_speed = settings.cycle_speed;
     meta.weather = settings.weather;
     meta.ship_inventory = ship_inventory.clone();
     meta.bot_world = brain.save.clone();
-    crate::bots::save_bot_world_files(&meta.name, &brain.save);
-    meta.world_edit_manifest = crate::world::save_edited_overrides_for_world(&meta.name, world);
     meta.ships = ship_q
         .iter()
         .map(|(_, tf, ship)| {
@@ -1777,8 +3395,28 @@ fn save_current_world(
     meta.player_mining = scratch.mining;
     meta.player_suit = scratch.suit;
     meta.last_played_epoch = crate::platform::now_epoch();
-    settings::save_world(&meta);
-    settings.save();
+    crate::bots::save_world_transaction_after_edit_store(
+        &active.meta.name,
+        generation_identity,
+        brain,
+        world,
+        |manifest| {
+            meta.world_edit_manifest = manifest.clone();
+            settings::save_world(&meta)?;
+            settings.save();
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+fn bounded_world_store_error(reason: &str) -> String {
+    const MAX_CHARS: usize = 180;
+    let mut out = reason.chars().take(MAX_CHARS).collect::<String>();
+    if reason.chars().count() > MAX_CHARS {
+        out.push_str("...");
+    }
+    out
 }
 
 fn rand_seed() -> u32 {

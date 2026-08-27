@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
+  <title id="title">Voxel Native — constant-budget world systems engineered with Codex</title>
+  <desc id="desc">A dark technical hero graphic with six nested square terrain clipmap rings, exact spacing and L-infinity radius formulas, and Rust, Bevy, wgpu, and deterministic QA labels.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071014"/>
+      <stop offset="0.55" stop-color="#0b1820"/>
+      <stop offset="1" stop-color="#081116"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="76%" cy="48%" r="50%">
+      <stop offset="0" stop-color="#25f2c2" stop-opacity="0.16"/>
+      <stop offset="0.55" stop-color="#4ab8ff" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#071014" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#55f7cc"/>
+      <stop offset="1" stop-color="#53a8ff"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#7eb4c8" stroke-opacity="0.055" stroke-width="1"/>
+    </pattern>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="720" rx="24" fill="url(#bg)"/>
+  <rect width="1600" height="720" rx="24" fill="url(#grid)"/>
+  <rect width="1600" height="720" rx="24" fill="url(#glow)"/>
+  <path d="M0 612C230 575 410 690 676 629S1078 532 1600 624V720H0Z" fill="#0b2027" fill-opacity="0.58"/>
+  <path d="M0 640C231 598 455 704 724 646S1170 575 1600 650" fill="none" stroke="#55f7cc" stroke-opacity="0.18" stroke-width="2"/>
+
+  <g font-family="Helvetica">
+    <text x="92" y="92" fill="#70f8d8" font-size="19" font-weight="bold" letter-spacing="5">CODEX ENGINEERING LAB</text>
+    <rect x="92" y="119" width="82" height="5" rx="2.5" fill="url(#rule)"/>
+    <text x="88" y="248" fill="#f3fbff" font-size="112" font-weight="bold" letter-spacing="-5">VOXEL</text>
+    <text x="88" y="352" fill="#f3fbff" font-size="112" font-weight="normal" letter-spacing="16">NATIVE</text>
+    <text x="95" y="406" fill="#a8c8d5" font-size="25" font-weight="normal">Editable near world. Kilometre-scale horizon.</text>
+    <text x="95" y="442" fill="#a8c8d5" font-size="25" font-weight="normal">Fixed budgets. Reproducible evidence.</text>
+
+    <g transform="translate(95 493)" font-size="17" font-weight="bold" letter-spacing="1">
+      <rect width="126" height="42" rx="21" fill="#102b31" stroke="#2b665f"/>
+      <text x="63" y="27" text-anchor="middle" fill="#aefbea">RUST 2021</text>
+      <rect x="140" width="126" height="42" rx="21" fill="#102631" stroke="#27566c"/>
+      <text x="203" y="27" text-anchor="middle" fill="#b8e9ff">BEVY 0.14</text>
+      <rect x="280" width="92" height="42" rx="21" fill="#102631" stroke="#27566c"/>
+      <text x="326" y="27" text-anchor="middle" fill="#b8e9ff">WGPU</text>
+      <rect x="386" width="206" height="42" rx="21" fill="#17282b" stroke="#536448"/>
+      <text x="489" y="27" text-anchor="middle" fill="#d6f6b1">DETERMINISTIC QA</text>
+    </g>
+
+    <g transform="translate(1085 350) rotate(-10)" fill="none" filter="url(#softGlow)">
+      <rect x="-300" y="-300" width="600" height="600" stroke="#3f90bf" stroke-opacity="0.28" stroke-width="2"/>
+      <rect x="-242" y="-242" width="484" height="484" stroke="#4aa8d5" stroke-opacity="0.36" stroke-width="2"/>
+      <rect x="-190" y="-190" width="380" height="380" stroke="#4fc5da" stroke-opacity="0.46" stroke-width="2.2"/>
+      <rect x="-143" y="-143" width="286" height="286" stroke="#4ee1ce" stroke-opacity="0.58" stroke-width="2.4"/>
+      <rect x="-101" y="-101" width="202" height="202" stroke="#66f2bd" stroke-opacity="0.72" stroke-width="2.6"/>
+      <rect x="-62" y="-62" width="124" height="124" stroke="#b4ff83" stroke-opacity="0.92" stroke-width="3"/>
+      <circle r="10" fill="#f3fbff" stroke="#55f7cc" stroke-width="3"/>
+      <path d="M-16 0H16M0-16V16" stroke="#071014" stroke-width="2"/>
+    </g>
+
+    <g fill="#d8edf4" font-size="16" font-weight="bold">
+      <text x="1454" y="68">L5 · 512 m</text>
+      <text x="1428" y="129">L4 · 256 m</text>
+      <text x="1396" y="183">L3 · 128 m</text>
+      <text x="1362" y="232">L2 · 64 m</text>
+      <text x="1321" y="276">L1 · 32 m</text>
+      <text x="1268" y="316">L0 · 16 m</text>
+    </g>
+
+    <g transform="translate(870 548)">
+      <rect width="622" height="112" rx="16" fill="#071014" fill-opacity="0.88" stroke="#2f5661"/>
+      <text x="28" y="40" fill="#73f8d7" font-size="23" font-weight="bold">Delta_l = 16 * 2^l m</text>
+      <text x="28" y="79" fill="#a8c8d5" font-size="18">six levels · 61^2 top-grid vertices</text>
+      <path d="M322 19V91" stroke="#31545f"/>
+      <text x="350" y="40" fill="#79c7ff" font-size="23" font-weight="bold">R_l = 30 * Delta_l</text>
+      <text x="350" y="79" fill="#a8c8d5" font-size="18">L_inf radius = 15.36 km</text>
+    </g>
+  </g>
+</svg>

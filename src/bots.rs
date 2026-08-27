@@ -13,33 +13,46 @@ use std::collections::{HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 #[cfg(not(target_arch = "wasm32"))]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 use crate::blocks::{BlockType, Voxel, AIR};
+use crate::bot_command::BotCommandStateMachine;
+use crate::bot_executor::{
+    cancel_bot_command_jobs_on_world_unload, dispatch_authorized_bot_commands,
+    finalize_authorized_bot_commands, retire_all_bot_command_jobs, BotCommandExecutor,
+    ExactBotCommandPlan,
+};
 use crate::builder::BuilderHistory;
+use crate::chunk::{world_to_chunk, ChunkPos};
 use crate::editor::{EditorState, EditorTab};
 use crate::menu::{GameState, PendingWorldLoad};
 use crate::neurocore::RuntimeBudget;
 use crate::player::Player;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::settings::SAVES_DIR;
-use crate::settings::{ActiveWorld, WorldSettings};
+use crate::settings::{ActiveWorld, WorldEditManifest, WorldGenerationIdentity, WorldSettings};
 use crate::ships::ShipInstance;
+use crate::terrain::TerrainGenerator;
+use crate::villagers::CivicPopulation;
 use crate::world::{
-    save_edited_overrides_for_world, save_edited_overrides_snapshot, EditedChunkOverride,
-    VoxelWorld, WorldEditBatch,
+    capture_edited_overrides_for_world, capture_existing_edited_override_authority,
+    commit_edited_override_capture_with, EditedOverrideSaveCapture,
+    OrderedEditedOverrideSaveOutcome, VoxelWorld, WorldEditBatch, WorldEditStoreStatus,
 };
 
 const MEGA_CITY_RADIUS: i32 = 1024;
 const DEFAULT_MAX_ACTIVE_PROJECTS: usize = 3;
 const AUTONOMY_BURST_ACTIVE_PROJECTS: usize = 5;
 const MAX_ACTIVE_PROJECTS_LIMIT: usize = 48;
+const BOT_ACTIVE_AREA_HARD_LIMIT: usize = 6;
 const MAX_CREW_BOTS_PER_PROJECT: usize = 32;
-const COMPANION_WORKERS_PER_LEADER: u8 = 4;
+const MAX_COMPANION_TEAM: usize = 4;
+const COMPANION_WORKERS_PER_LEADER: u8 = 0;
 const VISIBLE_MESSAGE_COOLDOWN: f32 = 10.0;
 const CONVERSATION_INTERVAL: f32 = 14.0;
 const BOT_MEET_DISTANCE: f32 = 58.0;
@@ -47,21 +60,81 @@ const BOT_MEET_OFFSET: f32 = 11.0;
 const BOT_BUSY_RETARGET_INTERVAL: f32 = 3.5;
 const BOT_GREETER_INTERVAL: f32 = 4.0;
 const BOT_PLAYER_EDIT_RADIUS: f32 = 14.0;
-const BOT_PLAYER_PROJECT_MARGIN: f32 = 128.0;
+const BOT_PLAYER_ADMISSION_CLEARANCE: f32 = 18.0;
 const BOT_SHIP_EDIT_RADIUS: f32 = 14.0;
-const BOT_SHIP_PROJECT_MARGIN: f32 = 32.0;
+const BOT_SHIP_ADMISSION_CLEARANCE: f32 = 32.0;
+const BOT_OBSERVER_STANDOFF: f32 = 22.0;
+const BOT_WORKFRONT_REACH: f32 = 5.5;
+const BOT_WORKFRONT_SCAN_LIMIT: u32 = 512;
+const BOT_REGULAR_CREW_LIMIT: usize = 3;
 const BOT_MAX_FRAME_EDITS: usize = 128;
 const BOT_MAX_PROJECT_SLICE_EDITS: usize = 48;
-const COMPANION_FOLLOW_DEFAULT: f32 = 3.2;
-const COMPANION_FOLLOW_MIN: f32 = 1.25;
-const COMPANION_FOLLOW_MAX: f32 = 22.0;
+const COMPANION_FOLLOW_DEFAULT: f32 = 8.0;
+const COMPANION_FOLLOW_MIN: f32 = 5.0;
+const COMPANION_FOLLOW_MAX: f32 = 28.0;
 const COMPANION_FOLLOW_STEP: f32 = 2.25;
+const BOT_LOD_REFRESH_SECONDS: f32 = 0.25;
+const BOT_LOD_DISTANCE_BUCKET_SQUARED: f32 = 16.0;
+const BOT_FULL_DETAIL_DISTANCE: f32 = 48.0;
+const BOT_REDUCED_DETAIL_DISTANCE: f32 = 112.0;
+const BOT_PROXY_DISTANCE: f32 = 256.0;
+const BOT_FULL_DETAIL_LIMIT: usize = 3;
+const BOT_REDUCED_DETAIL_LIMIT: usize = 8;
+const BOT_PROXY_LIMIT: usize = 32;
+const BOT_UPDATE_GROUP_COUNT: u64 = 8;
+const BOT_MAX_FRAME_PERCEPTION_BOTS: usize = 4;
+const BOT_MAX_FRAME_ROOT_SYNCS: usize = 10;
+const BOT_MAX_FRAME_ANIMATED_RIGS: usize = 6;
+const BOT_MAX_FRAME_FX_BOTS: usize = 2;
+const BOT_MAX_FRAME_VISUAL_BUILDS: usize = 2;
+const BOT_MAX_FRAME_VISUAL_REMOVALS: usize = 4;
+const MAX_FINISHED_PROJECT_HISTORY: usize = 64;
+
+fn companion_workers_per_leader() -> u8 {
+    COMPANION_WORKERS_PER_LEADER
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 static BOT_SAVE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+#[derive(Resource, Clone, Default)]
+struct BotAutosaveCompletion(Arc<Mutex<Option<BotAutosaveCompletionRecord>>>);
+
+#[derive(Debug)]
+struct BotAutosaveCompletionRecord {
+    world_name: String,
+    generation_identity: WorldGenerationIdentity,
+    bot_revision: u64,
+    result: OrderedEditedOverrideSaveOutcome,
+}
+
+impl BotAutosaveCompletion {
+    fn publish(&self, completion: BotAutosaveCompletionRecord) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(completion);
+    }
+
+    fn take(&self) -> Option<BotAutosaveCompletionRecord> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BotSaveEnqueueOutcome {
+    Accepted,
+    #[cfg(not(target_arch = "wasm32"))]
+    Busy,
+    #[cfg(not(target_arch = "wasm32"))]
+    Failed(String),
+}
+
 fn bot_save_version() -> u32 {
-    2
+    3
 }
 
 fn default_next_id() -> u64 {
@@ -114,19 +187,33 @@ impl Plugin for BotsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FriendlyWorldBrain::default())
             .insert_resource(BotVisualCache::default())
+            .insert_resource(BotRuntimeControl::default())
+            .insert_resource(BotAutosaveCompletion::default())
+            .init_resource::<BotCommandExecutor>()
             .add_systems(OnEnter(GameState::InGame), load_or_seed_bot_world)
-            .add_systems(OnEnter(GameState::MainMenu), cleanup_bot_entities)
+            .add_systems(
+                OnEnter(GameState::MainMenu),
+                (
+                    cancel_bot_command_jobs_on_world_unload,
+                    save_bot_world_on_world_unload,
+                    cleanup_bot_entities,
+                )
+                    .chain(),
+            )
             .add_systems(
                 Update,
                 (
+                    update_bot_runtime_control,
                     spawn_missing_bot_entities,
+                    apply_bot_visual_lod,
+                    dispatch_authorized_bot_commands,
                     tick_friendly_world,
+                    finalize_authorized_bot_commands,
                     process_bot_visit_request,
                     process_companion_command,
                     draw_companion_preview_gizmos,
                     sync_bot_visuals,
                     animate_worker_bots,
-                    manual_save_bot_world,
                     autosave_bot_world,
                 )
                     .chain()
@@ -154,6 +241,7 @@ pub struct FriendlyWorldBrain {
     pub hud_message: String,
     pub autosave_timer: f32,
     pub force_city_idea: bool,
+    pub one_shot_plan_request: bool,
     message_cooldown: f32,
     conversation_timer: f32,
     greeter_timer: f32,
@@ -162,6 +250,7 @@ pub struct FriendlyWorldBrain {
     project_scan_cursor: usize,
     world_name: String,
     dirty: bool,
+    save_revision: u64,
 }
 
 impl Default for FriendlyWorldBrain {
@@ -177,6 +266,7 @@ impl Default for FriendlyWorldBrain {
             hud_message: "BOT CITY // waiting for world".into(),
             autosave_timer: 30.0,
             force_city_idea: false,
+            one_shot_plan_request: false,
             message_cooldown: 0.0,
             conversation_timer: 5.0,
             greeter_timer: 1.0,
@@ -185,6 +275,7 @@ impl Default for FriendlyWorldBrain {
             project_scan_cursor: 0,
             world_name: String::new(),
             dirty: false,
+            save_revision: 0,
         }
     }
 }
@@ -331,6 +422,22 @@ impl CompanionAssistKind {
 }
 
 impl FriendlyWorldBrain {
+    pub(crate) fn mark_dirty(&mut self) {
+        self.save_revision = self
+            .save_revision
+            .checked_add(1)
+            .expect("in-memory bot-save revision exhausted");
+        self.dirty = true;
+    }
+
+    fn confirm_save_revision(&mut self, captured_revision: u64, latest_receipt: bool) -> bool {
+        if !latest_receipt || self.save_revision != captured_revision {
+            return false;
+        }
+        self.dirty = false;
+        true
+    }
+
     pub fn cockpit_line(&self) -> String {
         let active = self
             .save
@@ -423,6 +530,8 @@ pub struct BotWorldSave {
     #[serde(default)]
     pub projects: Vec<BotProject>,
     #[serde(default)]
+    exact_command_project_ids: Vec<u64>,
+    #[serde(default)]
     pub districts: Vec<BotDistrict>,
     #[serde(default)]
     pub user_roads: Vec<BotRoadGuide>,
@@ -442,6 +551,10 @@ pub struct BotWorldSave {
     pub last_blocked_reason: String,
     #[serde(default)]
     pub companion_preview: Option<CompanionBuildPreview>,
+    /// Persistent, bounded settlement life. Construction droids remain a
+    /// separate authority; this population contains no trading or economy.
+    #[serde(default)]
+    pub civic_population: CivicPopulation,
 }
 
 impl Default for BotWorldSave {
@@ -457,6 +570,7 @@ impl Default for BotWorldSave {
             settlements: Vec::new(),
             agents: Vec::new(),
             projects: Vec::new(),
+            exact_command_project_ids: Vec::new(),
             districts: Vec::new(),
             user_roads: Vec::new(),
             ideas: Vec::new(),
@@ -467,6 +581,7 @@ impl Default for BotWorldSave {
             autonomy: BotAutonomySettings::default(),
             last_blocked_reason: String::new(),
             companion_preview: None,
+            civic_population: CivicPopulation::default(),
         }
     }
 }
@@ -544,8 +659,16 @@ impl BotWorldSave {
         self.next_idea_id = self.next_idea_id.max(1);
         self.next_conversation_id = self.next_conversation_id.max(1);
         self.next_crew_id = self.next_crew_id.max(1);
+        self.autonomy.intensity = self.autonomy.intensity.clamp(1, 10);
+        if self
+            .autonomy
+            .active_work_area
+            .is_some_and(|area| area.dimensions().x <= 0 || area.dimensions().z <= 0)
+        {
+            self.autonomy.active_work_area = None;
+        }
         if legacy_version < 2 {
-            self.autonomy.enabled = false;
+            self.autonomy.set_fleet_mode(BotFleetMode::Parked);
         }
 
         for settlement in &mut self.settlements {
@@ -564,8 +687,10 @@ impl BotWorldSave {
             settlement.bounds.max_active_projects = settlement
                 .bounds
                 .max_active_projects
-                .clamp(1, MAX_ACTIVE_PROJECTS_LIMIT);
+                .clamp(1, BOT_ACTIVE_AREA_HARD_LIMIT);
         }
+        self.civic_population
+            .normalize(self.settlements.iter().map(|settlement| settlement.id));
         ensure_city_districts(self);
         if legacy_version < 2 {
             normalize_legacy_companions(self);
@@ -577,6 +702,33 @@ impl BotWorldSave {
             .max(self.agents.iter().map(|b| b.id).max().unwrap_or(0) + 1);
         if legacy_version >= 2 {
             ensure_companion_worker_swarms(self);
+        }
+        self.exact_command_project_ids.sort_unstable();
+        self.exact_command_project_ids.dedup();
+        let existing_project_ids = self
+            .projects
+            .iter()
+            .map(|project| project.id)
+            .collect::<HashSet<_>>();
+        self.exact_command_project_ids
+            .retain(|project_id| existing_project_ids.contains(project_id));
+        let exact_command_project_ids = self
+            .exact_command_project_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        for project in &mut self.projects {
+            let lost_exact_capability =
+                exact_command_project_ids.contains(&project.id) && !project.status.is_done();
+            if project.status == BotProjectStatus::CommandHeld || lost_exact_capability {
+                project.status = BotProjectStatus::Blocked;
+                project.blocked_reason = if lost_exact_capability {
+                    "exact command authorization is unavailable after reload; reissue the command"
+                        .into()
+                } else {
+                    "exact command session ended before the project could finish".into()
+                };
+            }
         }
         restore_project_assignments(self);
         normalize_relationships(self);
@@ -601,16 +753,42 @@ impl BotWorldSave {
             .next_crew_id
             .max(self.crews.iter().map(|c| c.id).max().unwrap_or(0) + 1);
 
+        compact_project_history(self);
         self.ideas.truncate(96);
         self.conversations.truncate(96);
         self.journal.truncate(128);
     }
 
     fn seed(world_name: &str, hub: Vec3, world: &VoxelWorld) -> Self {
+        Self::seed_with_surface_height(world_name, hub, |x, z| world.surface_height_at(x, z))
+    }
+
+    /// Seed a fresh bot world from the authoritative active-world seed.
+    ///
+    /// `OnEnter(InGame)` systems from separate plugins are not implicitly
+    /// ordered. Reading `VoxelWorld::generator` here used to race the world's
+    /// reinitialisation and could place a river world's hub tens of blocks
+    /// above its real terrain using the previous seed. Deriving the height
+    /// directly from `ActiveWorld.meta.seed` makes the result independent of
+    /// schedule order, just like the ship spawn path.
+    fn seed_for_active_world(
+        world_name: &str,
+        hub: Vec3,
+        identity: WorldGenerationIdentity,
+    ) -> Self {
+        let generator = TerrainGenerator::from_identity(identity);
+        Self::seed_with_surface_height(world_name, hub, |x, z| generator.surface_height_at(x, z))
+    }
+
+    fn seed_with_surface_height(
+        world_name: &str,
+        hub: Vec3,
+        surface_height_at: impl Fn(i32, i32) -> i32,
+    ) -> Self {
         let mut save = Self::default();
         let hub_x = hub.x.round() as i32;
         let hub_z = hub.z.round() as i32;
-        let hub_y = world.surface_height_at(hub_x, hub_z) + 2;
+        let hub_y = surface_height_at(hub_x, hub_z) + 2;
         let hub = [hub_x as f32 + 0.5, hub_y as f32, hub_z as f32 + 0.5];
         save.settlements.push(BotSettlement {
             id: 1,
@@ -670,7 +848,7 @@ impl BotWorldSave {
                 },
             });
         }
-        save.autonomy.enabled = false;
+        save.autonomy.set_fleet_mode(BotFleetMode::Parked);
         ensure_city_districts(&mut save);
         normalize_relationships(&mut save);
         save.journal.push(BotJournalEntry::new(format!(
@@ -679,6 +857,40 @@ impl BotWorldSave {
         )));
         save
     }
+}
+
+fn compact_project_history(save: &mut BotWorldSave) {
+    let finished_count = save
+        .projects
+        .iter()
+        .filter(|project| project.status.is_done())
+        .count();
+    if finished_count <= MAX_FINISHED_PROJECT_HISTORY {
+        return;
+    }
+
+    let mut newest_finished_ids = save
+        .projects
+        .iter()
+        .filter(|project| project.status.is_done())
+        .map(|project| project.id)
+        .collect::<Vec<_>>();
+    newest_finished_ids.sort_unstable_by(|a, b| b.cmp(a));
+    newest_finished_ids.truncate(MAX_FINISHED_PROJECT_HISTORY);
+    let newest_finished_ids = newest_finished_ids.into_iter().collect::<HashSet<_>>();
+
+    save.projects
+        .retain(|project| !project.status.is_done() || newest_finished_ids.contains(&project.id));
+
+    let retained_project_ids = save
+        .projects
+        .iter()
+        .map(|project| project.id)
+        .collect::<HashSet<_>>();
+    save.crews
+        .retain(|crew| crew.active || retained_project_ids.contains(&crew.project_id));
+    save.exact_command_project_ids
+        .retain(|project_id| retained_project_ids.contains(project_id));
 }
 
 fn normalize_legacy_companions(save: &mut BotWorldSave) {
@@ -885,53 +1097,11 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
             "Architect online. I watch skyline rhythm, facades, setbacks, and plazas.",
         ),
         (
-            "Mona",
-            BotRole::Planner,
-            Vec3::new(5.5, 1.7, -7.5),
-            3_u8,
-            "Planner online. I maintain the build spreadsheet and city priorities.",
-        ),
-        (
             "Kai",
             BotRole::RoadCrew,
-            Vec3::new(-8.0, 1.6, -2.0),
-            4_u8,
+            Vec3::new(5.5, 1.7, -7.5),
+            3_u8,
             "Road crew online. I connect blocks before buildings sprawl.",
-        ),
-        (
-            "Lina",
-            BotRole::Surveyor,
-            Vec3::new(8.0, 1.6, -2.0),
-            5_u8,
-            "Surveyor online. I scan terrain, slopes, loaded chunks, and build risk.",
-        ),
-        (
-            "Iris",
-            BotRole::CompanionGuide,
-            Vec3::new(-10.0, 1.8, 5.0),
-            6_u8,
-            "Guide online. I keep close formation and route you through active builds.",
-        ),
-        (
-            "Orion",
-            BotRole::CompanionMaker,
-            Vec3::new(10.0, 1.8, 5.0),
-            7_u8,
-            "Maker online. I assist heavy builds and emergency repairs.",
-        ),
-        (
-            "Noah",
-            BotRole::RepairTech,
-            Vec3::new(-6.5, 1.8, 3.0),
-            8_u8,
-            "Systems tech online. I handle lights, utilities, and maintenance details.",
-        ),
-        (
-            "Ava",
-            BotRole::ParkKeeper,
-            Vec3::new(6.5, 1.8, 3.0),
-            9_u8,
-            "Landscape lead online. I keep the city breathable with parks and waterfronts.",
         ),
     ];
     let core_names: HashSet<&'static str> = specs.iter().map(|(name, _, _, _, _)| *name).collect();
@@ -975,6 +1145,9 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
             bot.position = [p.x, p.y, p.z];
             bot.target = [p.x, p.y, p.z];
             bot.companion_mode = BotCompanionMode::AwaitingInstruction;
+            bot.crew_id = None;
+            bot.current_task = None;
+            bot.state = BotState::Idle;
         }
         bot.name = name.into();
         bot.role = role;
@@ -983,9 +1156,10 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
         bot.companion_order = order;
         bot.swarm_leader_id = None;
         bot.swarm_index = 0;
-        bot.crew_id = None;
-        bot.current_task = None;
-        bot.state = BotState::Idle;
+        if bot.current_task.is_none() {
+            bot.state = BotState::Idle;
+            bot.companion_mode = BotCompanionMode::AwaitingInstruction;
+        }
         bot.memory.preferred_follow_distance = bot
             .memory
             .preferred_follow_distance
@@ -997,9 +1171,24 @@ fn normalize_companion_swarm(save: &mut BotWorldSave) {
         save.agents.push(bot);
     }
 
+    save.agents
+        .sort_by_key(|bot| (!bot.companion, bot.companion_order, bot.id));
+    let mut companion_seen = 0usize;
+    save.agents.retain(|bot| {
+        if !bot.companion {
+            return true;
+        }
+        companion_seen += 1;
+        companion_seen <= MAX_COMPANION_TEAM
+    });
+
     let mut existing_ids: HashSet<u64> = save.agents.iter().map(|bot| bot.id).collect();
     for mut bot in existing {
-        if core_names.contains(bot.name.as_str()) || existing_ids.contains(&bot.id) {
+        if core_names.contains(bot.name.as_str())
+            || existing_ids.contains(&bot.id)
+            || bot.companion
+            || bot.current_task.is_none()
+        {
             continue;
         }
         bot.memory.preferred_follow_distance = bot
@@ -1033,8 +1222,10 @@ fn ensure_companion_worker_swarms(save: &mut BotWorldSave) {
         BotRole::RepairTech,
     ];
 
+    let worker_count = companion_workers_per_leader();
     for (leader_id, leader_name, order, leader_pos, home_id) in leaders {
-        for index in 1..=COMPANION_WORKERS_PER_LEADER {
+        for offset in 0..worker_count {
+            let index = offset + 1;
             let helper_name = format!("{leader_name} Swarm {index}");
             let existing_idx = save.agents.iter().position(|bot| {
                 (bot.swarm_leader_id == Some(leader_id) && bot.swarm_index == index)
@@ -1090,6 +1281,9 @@ fn ensure_companion_worker_swarms(save: &mut BotWorldSave) {
 }
 
 fn restore_project_assignments(save: &mut BotWorldSave) {
+    save.next_crew_id = save
+        .next_crew_id
+        .max(save.crews.iter().map(|crew| crew.id).max().unwrap_or(0) + 1);
     let active_project_ids: HashSet<u64> = save
         .projects
         .iter()
@@ -1098,9 +1292,31 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
         .collect();
     save.crews
         .retain(|crew| active_project_ids.contains(&crew.project_id));
-    let crew_ids: HashSet<u64> = save.crews.iter().map(|crew| crew.id).collect();
+    for crew in &mut save.crews {
+        crew.active = true;
+    }
+    let retained_crew_ids: HashSet<u64> = save.crews.iter().map(|crew| crew.id).collect();
+    let saved_progress: HashMap<(u64, u64), f32> = save
+        .agents
+        .iter()
+        .filter_map(|bot| {
+            bot.current_task
+                .as_ref()
+                .map(|task| ((bot.id, task.project_id), task.progress))
+        })
+        .collect();
     for bot in &mut save.agents {
-        if bot.crew_id.is_some_and(|id| !crew_ids.contains(&id)) {
+        if bot
+            .current_task
+            .as_ref()
+            .is_some_and(|task| active_project_ids.contains(&task.project_id))
+        {
+            bot.current_task = None;
+        }
+        if bot
+            .crew_id
+            .is_some_and(|id| retained_crew_ids.contains(&id))
+        {
             bot.crew_id = None;
         }
         if bot
@@ -1110,9 +1326,15 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
         {
             bot.current_task = None;
         }
+        if bot
+            .crew_id
+            .is_some_and(|id| !retained_crew_ids.contains(&id))
+        {
+            bot.crew_id = None;
+        }
     }
 
-    let project_specs: Vec<_> = save
+    let mut project_specs: Vec<_> = save
         .projects
         .iter()
         .enumerate()
@@ -1126,13 +1348,37 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
                 project.crew_id,
                 project.origin,
                 project.label.clone(),
+                project.priority,
             )
         })
         .collect();
+    project_specs.sort_by_key(|spec| (std::cmp::Reverse(spec.7), spec.1));
+    let existing_bot_ids: HashSet<u64> = save.agents.iter().map(|bot| bot.id).collect();
+    let mut claimed_bot_ids = HashSet::new();
 
-    for (idx, project_id, kind, assigned_bot, crew_id, origin, label) in project_specs {
-        let valid_crew = crew_id.filter(|id| save.crews.iter().any(|crew| crew.id == *id));
+    for (idx, project_id, kind, assigned_bot, crew_id, origin, label, _) in project_specs {
+        let valid_crew = crew_id.filter(|id| {
+            save.crews
+                .iter()
+                .any(|crew| crew.id == *id && crew.project_id == project_id)
+        });
+        if let Some(id) = valid_crew {
+            if let Some(crew) = save.crews.iter_mut().find(|crew| crew.id == id) {
+                crew.bot_ids.retain(|bot_id| {
+                    existing_bot_ids.contains(bot_id) && !claimed_bot_ids.contains(bot_id)
+                });
+                crew.bot_ids.truncate(regular_crew_size(kind));
+                claimed_bot_ids.extend(crew.bot_ids.iter().copied());
+                crew.active = true;
+            }
+        }
         let crew_id = valid_crew
+            .filter(|id| {
+                save.crews
+                    .iter()
+                    .find(|crew| crew.id == *id)
+                    .is_some_and(|crew| !crew.bot_ids.is_empty())
+            })
             .or_else(|| create_project_crew(save, project_id, kind, assigned_bot, origin));
         if let Some(project) = save.projects.get_mut(idx) {
             project.crew_id = crew_id;
@@ -1146,7 +1392,30 @@ fn restore_project_assignments(save: &mut BotWorldSave) {
             &label,
             origin,
         );
+        if let Some(id) = crew_id {
+            if let Some(crew) = save.crews.iter().find(|crew| crew.id == id) {
+                claimed_bot_ids.extend(crew.bot_ids.iter().copied());
+            }
+        }
     }
+
+    for bot in &mut save.agents {
+        let Some(task) = &mut bot.current_task else {
+            continue;
+        };
+        if let Some(progress) = saved_progress.get(&(bot.id, task.project_id)) {
+            task.progress = *progress;
+        }
+    }
+
+    let referenced_crew_ids: HashSet<u64> = save
+        .projects
+        .iter()
+        .filter(|project| !project.status.is_done())
+        .filter_map(|project| project.crew_id)
+        .collect();
+    save.crews
+        .retain(|crew| referenced_crew_ids.contains(&crew.id));
 }
 
 fn clamp_to_bounds(bounds: BotCityBounds, target: Vec3) -> Vec3 {
@@ -1727,6 +1996,60 @@ pub struct BotCrew {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BotWorkArea {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+}
+
+impl BotWorkArea {
+    fn from_corners(a: IVec3, b: IVec3) -> Self {
+        Self {
+            min: [a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)],
+            max: [a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)],
+        }
+    }
+
+    fn contains_box(self, origin: [i32; 3], size: [i32; 3]) -> bool {
+        if size.iter().any(|value| *value <= 0) {
+            return false;
+        }
+        let max_x = origin[0].saturating_add(size[0] - 1);
+        let max_z = origin[2].saturating_add(size[2] - 1);
+        origin[0] >= self.min[0]
+            && origin[2] >= self.min[2]
+            && max_x <= self.max[0]
+            && max_z <= self.max[2]
+    }
+
+    fn dimensions(self) -> IVec3 {
+        IVec3::new(
+            self.max[0] - self.min[0] + 1,
+            self.max[1] - self.min[1] + 1,
+            self.max[2] - self.min[2] + 1,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotFleetMode {
+    Parked,
+    ManualQueue,
+    MarkedArea,
+    ContinuousAutonomy,
+}
+
+impl BotFleetMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Parked => "PARKED",
+            Self::ManualQueue => "MANUAL QUEUE",
+            Self::MarkedArea => "MARKED AREA",
+            Self::ContinuousAutonomy => "AUTONOMY",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotAutonomySettings {
     #[serde(default = "default_autonomy_enabled")]
@@ -1735,6 +2058,8 @@ pub struct BotAutonomySettings {
     pub bots_active: bool,
     #[serde(default = "default_autonomy_intensity")]
     pub intensity: u8,
+    #[serde(default)]
+    pub active_work_area: Option<BotWorkArea>,
 }
 
 impl Default for BotAutonomySettings {
@@ -1743,6 +2068,38 @@ impl Default for BotAutonomySettings {
             enabled: default_autonomy_enabled(),
             bots_active: default_bots_active(),
             intensity: default_autonomy_intensity(),
+            active_work_area: None,
+        }
+    }
+}
+
+impl BotAutonomySettings {
+    fn fleet_mode(&self) -> BotFleetMode {
+        if !self.bots_active {
+            BotFleetMode::Parked
+        } else if self.enabled {
+            BotFleetMode::ContinuousAutonomy
+        } else if self.active_work_area.is_some() {
+            BotFleetMode::MarkedArea
+        } else {
+            BotFleetMode::ManualQueue
+        }
+    }
+
+    fn set_fleet_mode(&mut self, mode: BotFleetMode) {
+        match mode {
+            BotFleetMode::Parked => {
+                self.bots_active = false;
+                self.enabled = false;
+            }
+            BotFleetMode::ManualQueue | BotFleetMode::MarkedArea => {
+                self.bots_active = true;
+                self.enabled = false;
+            }
+            BotFleetMode::ContinuousAutonomy => {
+                self.bots_active = true;
+                self.enabled = true;
+            }
         }
     }
 }
@@ -1817,8 +2174,14 @@ pub enum BotState {
 pub enum BotProjectStatus {
     Queued,
     Active,
+    WaitingForCrew,
     WaitingForChunks,
     WaitingForPlayer,
+    /// Temporarily held by the exact bot-command executor.
+    ///
+    /// This state is not schedulable and is converted to `Blocked` when a
+    /// save is loaded without the in-memory command capability that owns it.
+    CommandHeld,
     Complete,
     Blocked,
 }
@@ -2034,6 +2397,354 @@ struct FriendlyBotEntity {
     id: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BotRuntimeTier {
+    Full,
+    Reduced,
+    Proxy,
+    Culled,
+}
+
+impl BotRuntimeTier {
+    fn cadence(self, work: BotRuntimeWork) -> Option<u64> {
+        match (self, work) {
+            (Self::Full, BotRuntimeWork::Perception) => Some(4),
+            (Self::Full, BotRuntimeWork::RootSync) => Some(1),
+            (Self::Full, BotRuntimeWork::Animation | BotRuntimeWork::Fx) => Some(2),
+            (Self::Reduced, BotRuntimeWork::Perception) => Some(6),
+            (Self::Reduced, BotRuntimeWork::RootSync) => Some(3),
+            (Self::Reduced, BotRuntimeWork::Animation) => Some(4),
+            (Self::Reduced, BotRuntimeWork::Fx) => Some(8),
+            (Self::Proxy, BotRuntimeWork::Perception) => Some(18),
+            (Self::Proxy, BotRuntimeWork::RootSync) => Some(8),
+            (Self::Proxy, BotRuntimeWork::Animation | BotRuntimeWork::Fx) => None,
+            (Self::Culled, BotRuntimeWork::Perception) => Some(30),
+            (Self::Culled, _) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotRuntimeWork {
+    Perception,
+    RootSync,
+    Animation,
+    Fx,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BotLodSample {
+    id: u64,
+    distance_squared: f32,
+    companion: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BotIdBudget<const N: usize> {
+    ids: [u64; N],
+    len: usize,
+}
+
+impl<const N: usize> Default for BotIdBudget<N> {
+    fn default() -> Self {
+        Self {
+            ids: [0; N],
+            len: 0,
+        }
+    }
+}
+
+impl<const N: usize> BotIdBudget<N> {
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn contains(&self, id: &u64) -> bool {
+        self.ids[..self.len].contains(id)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.ids[..self.len].iter().copied()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+#[derive(Debug, Default)]
+struct BotFrameSchedule {
+    perception: BotIdBudget<BOT_MAX_FRAME_PERCEPTION_BOTS>,
+    root_sync: BotIdBudget<BOT_MAX_FRAME_ROOT_SYNCS>,
+    animation: BotIdBudget<BOT_MAX_FRAME_ANIMATED_RIGS>,
+    fx: BotIdBudget<BOT_MAX_FRAME_FX_BOTS>,
+}
+
+#[derive(Resource)]
+struct BotRuntimeControl {
+    frame: u64,
+    lod_refresh_timer: f32,
+    lod_revision: u64,
+    tiers: AHashMap<u64, BotRuntimeTier>,
+    lod_samples: Vec<BotLodSample>,
+    schedule: BotFrameSchedule,
+}
+
+impl Default for BotRuntimeControl {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            lod_refresh_timer: 0.0,
+            lod_revision: 0,
+            tiers: AHashMap::new(),
+            lod_samples: Vec::new(),
+            schedule: BotFrameSchedule::default(),
+        }
+    }
+}
+
+impl BotRuntimeControl {
+    fn tier(&self, bot_id: u64) -> BotRuntimeTier {
+        self.tiers
+            .get(&bot_id)
+            .copied()
+            .unwrap_or(BotRuntimeTier::Culled)
+    }
+}
+
+#[derive(Component)]
+struct BotDetailedRig {
+    bot_id: u64,
+}
+
+#[derive(Component)]
+struct BotLodProxy {
+    bot_id: u64,
+    full_tier_fallback: bool,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum BotVisualMode {
+    Detailed,
+    Proxy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BotVisualVariant {
+    chassis: u8,
+    armor: u8,
+    sensor: u8,
+    marking: u8,
+}
+
+fn stable_bot_mix(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn bot_role_seed(role: BotRole) -> u64 {
+    match role {
+        BotRole::CompanionGuide => 0x11,
+        BotRole::CompanionMaker => 0x23,
+        BotRole::Planner => 0x35,
+        BotRole::Surveyor => 0x47,
+        BotRole::Builder => 0x59,
+        BotRole::Architect => 0x6b,
+        BotRole::RoadCrew => 0x7d,
+        BotRole::ParkKeeper => 0x8f,
+        BotRole::RepairTech => 0xa1,
+    }
+}
+
+fn bot_visual_variant(bot_id: u64, role: BotRole) -> BotVisualVariant {
+    let seed = stable_bot_mix(bot_id ^ bot_role_seed(role).rotate_left(17));
+    BotVisualVariant {
+        chassis: (seed % 3) as u8,
+        armor: ((seed >> 11) % 3) as u8,
+        sensor: ((seed >> 23) % 3) as u8,
+        marking: ((seed >> 37) % 4) as u8,
+    }
+}
+
+fn bot_update_group(bot_id: u64) -> u64 {
+    stable_bot_mix(bot_id) % BOT_UPDATE_GROUP_COUNT
+}
+
+fn assign_bot_runtime_tiers_in_place(
+    samples: &mut [BotLodSample],
+    tiers: &mut AHashMap<u64, BotRuntimeTier>,
+) {
+    samples.sort_by_key(|sample| {
+        let distance_bucket =
+            (sample.distance_squared.max(0.0) / BOT_LOD_DISTANCE_BUCKET_SQUARED).floor() as u32;
+        (
+            distance_bucket,
+            !sample.companion,
+            bot_update_group(sample.id),
+            stable_bot_mix(sample.id),
+            sample.id,
+        )
+    });
+
+    let mut full = 0usize;
+    let mut reduced = 0usize;
+    let mut proxy = 0usize;
+    tiers.clear();
+    if tiers.capacity() < samples.len() {
+        tiers.reserve(samples.len());
+    }
+    for sample in samples {
+        let full_distance = if sample.companion {
+            BOT_REDUCED_DETAIL_DISTANCE
+        } else {
+            BOT_FULL_DETAIL_DISTANCE
+        };
+        let reduced_distance = if sample.companion {
+            BOT_PROXY_DISTANCE
+        } else {
+            BOT_REDUCED_DETAIL_DISTANCE
+        };
+        let tier = if full < BOT_FULL_DETAIL_LIMIT
+            && sample.distance_squared <= full_distance * full_distance
+        {
+            full += 1;
+            BotRuntimeTier::Full
+        } else if reduced < BOT_REDUCED_DETAIL_LIMIT
+            && sample.distance_squared <= reduced_distance * reduced_distance
+        {
+            reduced += 1;
+            BotRuntimeTier::Reduced
+        } else if proxy < BOT_PROXY_LIMIT
+            && sample.distance_squared <= BOT_PROXY_DISTANCE * BOT_PROXY_DISTANCE
+        {
+            proxy += 1;
+            BotRuntimeTier::Proxy
+        } else {
+            BotRuntimeTier::Culled
+        };
+        tiers.insert(sample.id, tier);
+    }
+}
+
+#[cfg(test)]
+fn assign_bot_runtime_tiers(samples: &[BotLodSample]) -> AHashMap<u64, BotRuntimeTier> {
+    let mut ordered = samples.to_vec();
+    let mut tiers = AHashMap::with_capacity(ordered.len());
+    assign_bot_runtime_tiers_in_place(&mut ordered, &mut tiers);
+    tiers
+}
+
+fn bot_update_rank(
+    id: u64,
+    tier: BotRuntimeTier,
+    schedule_epoch: u64,
+) -> (BotRuntimeTier, u64, u64) {
+    (
+        tier,
+        stable_bot_mix(id ^ schedule_epoch.wrapping_mul(0xd134_2543_de82_ef95)),
+        id,
+    )
+}
+
+fn schedule_bot_update_ids<const N: usize>(
+    tiers: &AHashMap<u64, BotRuntimeTier>,
+    frame: u64,
+    work: BotRuntimeWork,
+    budget: usize,
+    scheduled: &mut BotIdBudget<N>,
+) {
+    scheduled.clear();
+    let budget = budget.min(N);
+    let schedule_epoch = frame / BOT_UPDATE_GROUP_COUNT;
+    for (&id, &tier) in tiers {
+        let Some(cadence) = tier.cadence(work) else {
+            continue;
+        };
+        if (frame + bot_update_group(id)) % cadence != 0 {
+            continue;
+        }
+
+        let rank = bot_update_rank(id, tier, schedule_epoch);
+        let insert_at = scheduled.ids[..scheduled.len]
+            .iter()
+            .position(|existing| {
+                let existing_tier = tiers
+                    .get(existing)
+                    .copied()
+                    .unwrap_or(BotRuntimeTier::Culled);
+                rank < bot_update_rank(*existing, existing_tier, schedule_epoch)
+            })
+            .unwrap_or(scheduled.len);
+        if insert_at >= budget {
+            continue;
+        }
+        let new_len = (scheduled.len + 1).min(budget);
+        if new_len > insert_at + 1 {
+            scheduled
+                .ids
+                .copy_within(insert_at..new_len - 1, insert_at + 1);
+        }
+        scheduled.ids[insert_at] = id;
+        scheduled.len = new_len;
+    }
+}
+
+fn refresh_bot_frame_schedule(runtime: &mut BotRuntimeControl) {
+    let BotRuntimeControl {
+        frame,
+        tiers,
+        schedule,
+        ..
+    } = runtime;
+    schedule_bot_update_ids(
+        tiers,
+        *frame,
+        BotRuntimeWork::Perception,
+        BOT_MAX_FRAME_PERCEPTION_BOTS,
+        &mut schedule.perception,
+    );
+    schedule_bot_update_ids(
+        tiers,
+        *frame,
+        BotRuntimeWork::RootSync,
+        BOT_MAX_FRAME_ROOT_SYNCS,
+        &mut schedule.root_sync,
+    );
+    schedule_bot_update_ids(
+        tiers,
+        *frame,
+        BotRuntimeWork::Animation,
+        BOT_MAX_FRAME_ANIMATED_RIGS,
+        &mut schedule.animation,
+    );
+    schedule_bot_update_ids(
+        tiers,
+        *frame,
+        BotRuntimeWork::Fx,
+        BOT_MAX_FRAME_FX_BOTS,
+        &mut schedule.fx,
+    );
+}
+
+#[cfg(test)]
+fn budgeted_bot_update_ids(
+    tiers: &AHashMap<u64, BotRuntimeTier>,
+    frame: u64,
+    work: BotRuntimeWork,
+    budget: usize,
+) -> BotIdBudget<BOT_MAX_FRAME_ROOT_SYNCS> {
+    let mut scheduled = BotIdBudget::default();
+    schedule_bot_update_ids(tiers, frame, work, budget, &mut scheduled);
+    scheduled
+}
+
 /// Marks a child of a companion bot so we can keep the saucer ring spinning
 /// independently of the body. Stores spin speed (rad/sec) and a phase offset
 /// so two companions don't pulse in lockstep.
@@ -2134,11 +2845,26 @@ struct WorkerBotPart {
     base_scale: Vec3,
 }
 
+#[derive(Clone, Copy)]
+struct WorkerAnimationPose {
+    phase: f32,
+    gait: f32,
+    activity: f32,
+    pulse: f32,
+    head_yaw_local: f32,
+    walking: bool,
+    state: BotState,
+}
+
 #[derive(Resource, Default)]
 #[allow(dead_code)]
 struct BotVisualCache {
     cube: Option<Handle<Mesh>>,
     mats: HashMap<BotRole, Handle<StandardMaterial>>,
+    worker_chassis: Option<Handle<Mesh>>,
+    worker_joint: Option<Handle<Mesh>>,
+    worker_sensor: Option<Handle<Mesh>>,
+    worker_materials: HashMap<BotRole, WorkerMaterialSet>,
     companion_shell: Option<Handle<StandardMaterial>>,
     saucer_disc: Option<Handle<Mesh>>,
     saucer_rim: Option<Handle<Mesh>>,
@@ -2195,10 +2921,19 @@ struct BotVisualCache {
     mat_holo_bolt: Option<Handle<StandardMaterial>>,
 }
 
+#[derive(Clone)]
+struct WorkerMaterialSet {
+    body: Handle<StandardMaterial>,
+    trim: Handle<StandardMaterial>,
+    visor: Handle<StandardMaterial>,
+    sensor: Handle<StandardMaterial>,
+    thruster: Handle<StandardMaterial>,
+    chest: Handle<StandardMaterial>,
+}
+
 fn load_or_seed_bot_world(
     pending: Res<PendingWorldLoad>,
     active: Option<Res<ActiveWorld>>,
-    world: Res<VoxelWorld>,
     mut brain: ResMut<FriendlyWorldBrain>,
 ) {
     if !pending.0 {
@@ -2216,7 +2951,11 @@ fn load_or_seed_bot_world(
             active.meta.player_pos[1],
             active.meta.player_pos[2],
         );
-        save = BotWorldSave::seed(&world_name, hub, &world);
+        save = BotWorldSave::seed_for_active_world(
+            &world_name,
+            hub,
+            active.meta.generation_identity(),
+        );
     }
     save.normalize();
     prime_autonomous_city_defaults(&mut save);
@@ -2240,12 +2979,12 @@ fn load_or_seed_bot_world(
     brain.greeter_timer = 0.5;
     brain.busy_timer = 0.5;
     brain.force_city_idea = false;
-    brain.dirty = true;
+    brain.one_shot_plan_request = false;
+    brain.mark_dirty();
 }
 
 fn prime_autonomous_city_defaults(save: &mut BotWorldSave) {
-    save.autonomy.enabled = false;
-    save.autonomy.bots_active = false;
+    save.autonomy.set_fleet_mode(BotFleetMode::Parked);
     save.autonomy.intensity = save.autonomy.intensity.clamp(1, 6);
     if let Some(settlement) = save.settlements.first_mut() {
         settlement.bounds.max_active_projects = settlement
@@ -2253,13 +2992,16 @@ fn prime_autonomous_city_defaults(save: &mut BotWorldSave) {
             .max_active_projects
             .min(DEFAULT_MAX_ACTIVE_PROJECTS)
             .max(1)
-            .min(MAX_ACTIVE_PROJECTS_LIMIT);
+            .min(BOT_ACTIVE_AREA_HARD_LIMIT);
     }
     for bot in save.agents.iter_mut().filter(|bot| bot.companion) {
         bot.memory.work_focus = bot.memory.work_focus.min(0.75);
         bot.memory.curiosity = bot.memory.curiosity.min(0.75);
-        bot.companion_mode = BotCompanionMode::AwaitingInstruction;
-        bot.current_task = None;
+        bot.companion_mode = if bot.current_task.is_some() {
+            BotCompanionMode::AssistingTask
+        } else {
+            BotCompanionMode::AwaitingInstruction
+        };
     }
 }
 
@@ -2267,11 +3009,123 @@ fn cleanup_bot_entities(
     mut commands: Commands,
     query: Query<Entity, With<FriendlyBotEntity>>,
     mut brain: ResMut<FriendlyWorldBrain>,
+    mut runtime: ResMut<BotRuntimeControl>,
 ) {
     for entity in &query {
         despawn(&mut commands, entity);
     }
     brain.world_name.clear();
+    *runtime = BotRuntimeControl::default();
+}
+
+fn update_bot_runtime_control(
+    time: Res<Time>,
+    brain: Res<FriendlyWorldBrain>,
+    player_q: Query<&Transform, With<Player>>,
+    mut runtime: ResMut<BotRuntimeControl>,
+) {
+    runtime.frame = runtime.frame.wrapping_add(1);
+    runtime.lod_refresh_timer -= time.delta_seconds().min(0.1);
+    if runtime.lod_refresh_timer <= 0.0 {
+        let player_pos = player_q
+            .get_single()
+            .ok()
+            .map(|transform| transform.translation);
+        runtime.lod_samples.clear();
+        if runtime.lod_samples.capacity() < brain.save.agents.len() {
+            let additional = brain.save.agents.len() - runtime.lod_samples.capacity();
+            runtime.lod_samples.reserve(additional);
+        }
+        for bot in brain
+            .save
+            .agents
+            .iter()
+            .filter(|bot| bot_should_spawn_visual(bot))
+        {
+            let distance_squared = player_pos
+                .map(|player| vec3_from_arr(bot.position).distance_squared(player))
+                .unwrap_or(0.0);
+            runtime.lod_samples.push(BotLodSample {
+                id: bot.id,
+                distance_squared,
+                companion: bot.companion,
+            });
+        }
+        let BotRuntimeControl {
+            lod_samples,
+            tiers,
+            lod_revision,
+            lod_refresh_timer,
+            ..
+        } = &mut *runtime;
+        assign_bot_runtime_tiers_in_place(lod_samples, tiers);
+        *lod_revision = lod_revision.wrapping_add(1).max(1);
+        *lod_refresh_timer = BOT_LOD_REFRESH_SECONDS;
+    }
+    refresh_bot_frame_schedule(&mut runtime);
+}
+
+fn bot_uses_detailed_rig(tier: BotRuntimeTier) -> bool {
+    tier == BotRuntimeTier::Full
+}
+
+fn bot_uses_proxy(tier: BotRuntimeTier) -> bool {
+    matches!(tier, BotRuntimeTier::Reduced | BotRuntimeTier::Proxy)
+}
+
+fn apply_bot_visual_lod(
+    runtime: Res<BotRuntimeControl>,
+    mut applied_revision: Local<u64>,
+    mut roots: Query<
+        (&FriendlyBotEntity, &mut Visibility),
+        (Without<BotDetailedRig>, Without<BotLodProxy>),
+    >,
+    mut detailed: Query<
+        (&BotDetailedRig, &mut Visibility),
+        (Without<FriendlyBotEntity>, Without<BotLodProxy>),
+    >,
+    mut proxies: Query<
+        (&BotLodProxy, &mut Visibility),
+        (Without<FriendlyBotEntity>, Without<BotDetailedRig>),
+    >,
+) {
+    if *applied_revision == runtime.lod_revision {
+        return;
+    }
+    *applied_revision = runtime.lod_revision;
+
+    for (bot, mut visibility) in &mut roots {
+        let desired = if runtime.tier(bot.id) == BotRuntimeTier::Culled {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        if *visibility != desired {
+            *visibility = desired;
+        }
+    }
+    for (rig, mut visibility) in &mut detailed {
+        let desired = if bot_uses_detailed_rig(runtime.tier(rig.bot_id)) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != desired {
+            *visibility = desired;
+        }
+    }
+    for (proxy, mut visibility) in &mut proxies {
+        let tier = runtime.tier(proxy.bot_id);
+        let desired =
+            if bot_uses_proxy(tier) || (proxy.full_tier_fallback && tier == BotRuntimeTier::Full) {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+        if *visibility != desired {
+            *visibility = desired;
+        }
+    }
 }
 
 fn spawn_missing_bot_entities(
@@ -2279,16 +3133,245 @@ fn spawn_missing_bot_entities(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: ResMut<BotVisualCache>,
+    runtime: Res<BotRuntimeControl>,
     brain: Res<FriendlyWorldBrain>,
-    query: Query<&FriendlyBotEntity>,
+    query: Query<(Entity, &FriendlyBotEntity, &BotVisualMode)>,
 ) {
-    let existing: HashSet<u64> = query.iter().map(|b| b.id).collect();
-    for bot in &brain.save.agents {
-        if existing.contains(&bot.id) {
-            continue;
+    let mut removals = 0usize;
+    for (entity, visual, _) in &query {
+        let keep = brain
+            .save
+            .agents
+            .iter()
+            .find(|bot| bot.id == visual.id)
+            .is_some_and(|bot| bot_should_materialize_visual(bot, runtime.tier(bot.id)));
+        if !keep && removals < BOT_MAX_FRAME_VISUAL_REMOVALS {
+            despawn(&mut commands, entity);
+            removals += 1;
         }
-        spawn_bot_entity(&mut commands, &mut meshes, &mut materials, &mut cache, bot);
     }
+
+    let mut selected = [None; BOT_MAX_FRAME_VISUAL_BUILDS];
+    for slot_index in 0..selected.len() {
+        let mut best: Option<((BotRuntimeTier, bool, u64, u64), u64)> = None;
+        for bot in &brain.save.agents {
+            if selected.contains(&Some(bot.id)) {
+                continue;
+            }
+            let tier = runtime.tier(bot.id);
+            let Some(desired_mode) = desired_bot_visual_mode(bot, tier) else {
+                continue;
+            };
+            let current_mode = query
+                .iter()
+                .find(|(_, visual, _)| visual.id == bot.id)
+                .map(|(_, _, mode)| *mode);
+            if current_mode == Some(desired_mode) {
+                continue;
+            }
+            let rank = (tier, !bot.companion, stable_bot_mix(bot.id), bot.id);
+            if best.is_none_or(|(best_rank, _)| rank < best_rank) {
+                best = Some((rank, bot.id));
+            }
+        }
+        selected[slot_index] = best.map(|(_, id)| id);
+    }
+
+    for id in selected.into_iter().flatten() {
+        if let Some((entity, _, _)) = query.iter().find(|(_, visual, _)| visual.id == id) {
+            despawn(&mut commands, entity);
+        }
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == id) else {
+            continue;
+        };
+        let tier = runtime.tier(bot.id);
+        match desired_bot_visual_mode(bot, tier) {
+            Some(BotVisualMode::Detailed) => spawn_bot_entity(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                bot,
+                tier,
+            ),
+            Some(BotVisualMode::Proxy) => spawn_bot_proxy_entity(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                bot,
+                tier,
+            ),
+            None => {}
+        }
+    }
+}
+
+fn bot_should_spawn_visual(bot: &BotAgent) -> bool {
+    bot.companion || bot.current_task.is_some()
+}
+
+fn bot_should_materialize_visual(bot: &BotAgent, tier: BotRuntimeTier) -> bool {
+    bot_should_spawn_visual(bot) && (bot.companion || tier != BotRuntimeTier::Culled)
+}
+
+fn desired_bot_visual_mode(bot: &BotAgent, tier: BotRuntimeTier) -> Option<BotVisualMode> {
+    if !bot_should_materialize_visual(bot, tier) {
+        None
+    } else if bot_uses_detailed_rig(tier) {
+        Some(BotVisualMode::Detailed)
+    } else {
+        Some(BotVisualMode::Proxy)
+    }
+}
+
+fn bot_agent_index(save: &BotWorldSave) -> AHashMap<u64, usize> {
+    save.agents
+        .iter()
+        .enumerate()
+        .map(|(idx, bot)| (bot.id, idx))
+        .collect()
+}
+
+fn bot_by_id<'a>(
+    save: &'a BotWorldSave,
+    index: &AHashMap<u64, usize>,
+    id: u64,
+) -> Option<&'a BotAgent> {
+    index
+        .get(&id)
+        .and_then(|idx| save.agents.get(*idx))
+        .filter(|bot| bot.id == id)
+}
+
+fn worker_material_set(
+    cache: &mut BotVisualCache,
+    materials: &mut Assets<StandardMaterial>,
+    role: BotRole,
+) -> WorkerMaterialSet {
+    if let Some(set) = cache.worker_materials.get(&role) {
+        return set.clone();
+    }
+
+    let role_color = bot_role_color(role);
+    let role_lin = role_color.to_linear();
+    let set = WorkerMaterialSet {
+        body: materials.add(StandardMaterial {
+            base_color: role_color,
+            metallic: 0.72,
+            perceptual_roughness: 0.64,
+            ..default()
+        }),
+        trim: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.045, 0.052, 0.058),
+            metallic: 0.88,
+            perceptual_roughness: 0.60,
+            ..default()
+        }),
+        visor: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.008, 0.012, 0.014),
+            emissive: LinearRgba::rgb(
+                role_lin.red * 0.55,
+                role_lin.green * 0.55,
+                role_lin.blue * 0.55,
+            ),
+            metallic: 1.0,
+            perceptual_roughness: 0.18,
+            ..default()
+        }),
+        sensor: materials.add(StandardMaterial {
+            base_color: role_color,
+            emissive: LinearRgba::rgb(
+                role_lin.red * 7.0,
+                role_lin.green * 7.0,
+                role_lin.blue * 7.0,
+            ),
+            metallic: 0.35,
+            perceptual_roughness: 0.32,
+            ..default()
+        }),
+        thruster: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.10, 0.075, 0.045),
+            emissive: LinearRgba::rgb(
+                role_lin.red * 3.5,
+                role_lin.green * 3.5,
+                role_lin.blue * 3.5,
+            ),
+            metallic: 0.86,
+            perceptual_roughness: 0.74,
+            ..default()
+        }),
+        chest: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.12, 0.13, 0.14),
+            emissive: LinearRgba::rgb(
+                role_lin.red * 1.15,
+                role_lin.green * 1.15,
+                role_lin.blue * 1.15,
+            ),
+            metallic: 0.82,
+            perceptual_roughness: 0.52,
+            ..default()
+        }),
+    };
+    cache.worker_materials.insert(role, set.clone());
+    set
+}
+
+fn spawn_bot_proxy_entity(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut BotVisualCache,
+    bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
+) {
+    let mesh = cache
+        .worker_chassis
+        .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
+        .clone();
+    let material = worker_material_set(cache, materials, bot.role).body;
+    let scale = if bot.companion {
+        Vec3::new(0.90, 1.05, 0.78)
+    } else {
+        Vec3::new(0.92, 1.55, 0.72)
+    };
+    let bot_id = bot.id;
+    commands
+        .spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(vec3_from_arr(bot.position)),
+                visibility: if runtime_tier == BotRuntimeTier::Culled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
+                ..default()
+            },
+            FriendlyBotEntity { id: bot_id },
+            BotVisualMode::Proxy,
+            Name::new("Bot LOD proxy"),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                PbrBundle {
+                    mesh,
+                    material,
+                    transform: Transform::from_translation(Vec3::Y * 0.42).with_scale(scale),
+                    visibility: if bot_uses_proxy(runtime_tier)
+                        || runtime_tier == BotRuntimeTier::Full
+                    {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotLodProxy {
+                    bot_id,
+                    full_tier_fallback: true,
+                },
+            ));
+        });
 }
 
 fn spawn_bot_entity(
@@ -2297,9 +3380,10 @@ fn spawn_bot_entity(
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BotVisualCache,
     bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
 ) {
     if bot.companion {
-        spawn_companion_entity(commands, meshes, materials, cache, bot);
+        spawn_companion_entity(commands, meshes, materials, cache, bot, runtime_tier);
         return;
     }
     // --- Cached primitives. The worker droid is a real character rig: hover
@@ -2311,17 +3395,21 @@ fn spawn_bot_entity(
         .cube
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
-    let head_sphere = cache
-        .char_body_egg
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.55)))
+    let chassis_mesh = cache
+        .worker_chassis
+        .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
+        .clone();
+    let joint_mesh = cache
+        .worker_joint
+        .get_or_insert_with(|| meshes.add(Sphere::new(0.50)))
         .clone();
     let visor_mesh = cache
         .char_visor
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.05, 0.32, 0.62)))
         .clone();
     let eye_mesh = cache
-        .char_iris
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.16)))
+        .worker_sensor
+        .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
     let antenna_mesh = cache
         .char_antenna
@@ -2343,463 +3431,460 @@ fn spawn_bot_entity(
         .char_claw
         .get_or_insert_with(|| meshes.add(Cuboid::new(0.18, 0.12, 0.28)))
         .clone();
-    let role_color = bot_role_color(bot.role);
-    let mat = materials.add(StandardMaterial {
-        base_color: role_color,
-        metallic: 0.15,
-        perceptual_roughness: 0.65, // Star Wars realistic painted metal (matte/worn)
-        ..default()
-    });
-    let role_lin = role_color.to_linear();
-    // Dark gunmetal trim material — re-used for visor, panel seams, joints.
-    let trim_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.08, 0.08, 0.09), // Imperial grey-steel
-        emissive: LinearRgba::rgb(
-            role_lin.red * 0.1,
-            role_lin.green * 0.1,
-            role_lin.blue * 0.1,
-        ),
-        metallic: 0.90, // Scraped metal
-        perceptual_roughness: 0.55,
-        ..default()
-    });
-    let visor_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.01, 0.01, 0.01, 1.0),
-        emissive: LinearRgba::rgb(
-            role_lin.red * 1.5,
-            role_lin.green * 1.5,
-            role_lin.blue * 1.5,
-        ),
-        metallic: 1.0,
-        perceptual_roughness: 0.1, // Glassy but grim
-        ..default()
-    });
-    let eye_mat = materials.add(StandardMaterial {
-        base_color: role_color,
-        emissive: LinearRgba::rgb(
-            role_lin.red * 35.0,
-            role_lin.green * 35.0,
-            role_lin.blue * 35.0,
-        ), // Blindingly bright optic
-        ..default()
-    });
-    let thruster_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.15, 0.1, 0.05), // Scorched engine bell
-        emissive: LinearRgba::rgb(
-            role_lin.red * 12.0,
-            role_lin.green * 12.0,
-            role_lin.blue * 12.0,
-        ),
-        metallic: 0.8,
-        perceptual_roughness: 0.8,
-        ..default()
-    });
-    let chest_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.18, 0.18, 0.18), // Beskar / raw steel
-        emissive: LinearRgba::rgb(
-            role_lin.red * 3.0,
-            role_lin.green * 3.0,
-            role_lin.blue * 3.0,
-        ),
-        metallic: 0.85,
-        perceptual_roughness: 0.45,
-        ..default()
-    });
+    let variant = bot_visual_variant(bot.id, bot.role);
+    let chassis_width = [0.94, 1.0, 1.07][variant.chassis as usize];
+    let armor_depth = [0.92, 1.0, 1.08][variant.armor as usize];
+    let sensor_spread = [0.13, 0.18, 0.22][variant.sensor as usize];
+    let WorkerMaterialSet {
+        body: mat,
+        trim: trim_mat,
+        visor: visor_mat,
+        sensor: eye_mat,
+        thruster: thruster_mat,
+        chest: chest_mat,
+    } = worker_material_set(cache, materials, bot.role);
     let p = vec3_from_arr(bot.position);
     let bot_id = bot.id;
     commands
         .spawn((
             SpatialBundle {
                 transform: Transform::from_translation(p),
+                visibility: if runtime_tier == BotRuntimeTier::Culled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
+            BotVisualMode::Detailed,
             Name::new(format!("FriendlyBot_{}_{}", bot.id, bot.name)),
         ))
-        .with_children(|c| {
-            // ----- Hover pod / skirt -----
-            let ring_pos = Vec3::new(0.0, -0.55, 0.0);
-            let ring_scale = Vec3::new(1.6, 1.0, 1.6);
-            c.spawn((
+        .with_children(|root| {
+            root.spawn((
                 PbrBundle {
-                    mesh: hover_ring.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(ring_pos).with_scale(ring_scale),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::HoverRing,
-                    base_translation: ring_pos,
-                    base_scale: ring_scale,
-                },
-            ));
-            // Pod underside disc (the actual hover engine).
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.68, 0.0))
-                    .with_scale(Vec3::new(1.05, 1.0, 1.05)),
-                ..default()
-            });
-            // Hip ring above the pod (chamfered base of torso).
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.36, 0.0))
-                    .with_scale(Vec3::new(0.96, 0.18, 0.70)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.22, 0.0))
-                    .with_scale(Vec3::new(0.84, 0.22, 0.58)),
-                ..default()
-            });
-
-            // ----- Torso -----
-            let torso_pos = Vec3::new(0.0, 0.32, 0.0);
-            let torso_scale = Vec3::new(1.08, 1.35, 0.82);
-            c.spawn((
-                PbrBundle {
-                    mesh: head_sphere.clone(),
+                    mesh: chassis_mesh.clone(),
                     material: mat.clone(),
-                    transform: Transform::from_translation(torso_pos).with_scale(torso_scale),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.42, 0.0))
+                        .with_scale(Vec3::new(0.92 * chassis_width, 1.55, 0.72 * armor_depth)),
+                    visibility: if bot_uses_proxy(runtime_tier) {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
                     ..default()
                 },
-                WorkerBotPart {
+                BotLodProxy {
                     bot_id,
-                    part: WorkerPart::Torso,
-                    base_translation: torso_pos,
-                    base_scale: torso_scale,
+                    full_tier_fallback: false,
                 },
             ));
-            // Torso seam belt.
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.10, 0.0))
-                    .with_scale(Vec3::new(1.16, 0.06, 0.90)),
-                ..default()
-            });
-            // Chest plate emissive (role badge).
-            let chest_pos = Vec3::new(0.0, 0.50, 0.42);
-            let chest_scale = Vec3::new(0.52, 0.46, 0.04);
-            c.spawn((
-                PbrBundle {
+            root.spawn((
+                SpatialBundle {
+                    visibility: if bot_uses_detailed_rig(runtime_tier) {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotDetailedRig { bot_id },
+            ))
+            .with_children(|c| {
+                // ----- Hover pod / skirt -----
+                let ring_pos = Vec3::new(0.0, -0.55, 0.0);
+                let ring_scale = Vec3::new(1.35 * chassis_width, 1.0, 1.28 * armor_depth);
+                c.spawn((
+                    PbrBundle {
+                        mesh: hover_ring.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(ring_pos).with_scale(ring_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::HoverRing,
+                        base_translation: ring_pos,
+                        base_scale: ring_scale,
+                    },
+                ));
+                // Pod underside disc (the actual hover engine).
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.68, 0.0))
+                        .with_scale(Vec3::new(1.05, 1.0, 1.05)),
+                    ..default()
+                });
+                // Hip ring above the pod (chamfered base of torso).
+                c.spawn(PbrBundle {
                     mesh: cube.clone(),
-                    material: chest_mat.clone(),
-                    transform: Transform::from_translation(chest_pos).with_scale(chest_scale),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.36, 0.0))
+                        .with_scale(Vec3::new(0.96, 0.18, 0.70)),
                     ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::ChestPanel,
-                    base_translation: chest_pos,
-                    base_scale: chest_scale,
-                },
-            ));
-            // Chest seam rivets.
-            for cx in [-0.20_f32, 0.20] {
-                for cy in [0.34_f32, 0.66] {
+                });
+                c.spawn(PbrBundle {
+                    mesh: cube.clone(),
+                    material: mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.22, 0.0))
+                        .with_scale(Vec3::new(0.84, 0.22, 0.58)),
+                    ..default()
+                });
+
+                // ----- Torso -----
+                let torso_pos = Vec3::new(0.0, 0.32, 0.0);
+                let torso_scale = Vec3::new(
+                    0.96 * chassis_width,
+                    1.18 + variant.armor as f32 * 0.05,
+                    0.72 * armor_depth,
+                );
+                c.spawn((
+                    PbrBundle {
+                        mesh: chassis_mesh.clone(),
+                        material: mat.clone(),
+                        transform: Transform::from_translation(torso_pos).with_scale(torso_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::Torso,
+                        base_translation: torso_pos,
+                        base_scale: torso_scale,
+                    },
+                ));
+                // Torso seam belt.
+                c.spawn(PbrBundle {
+                    mesh: cube.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.10, 0.0))
+                        .with_scale(Vec3::new(1.16, 0.06, 0.90)),
+                    ..default()
+                });
+                // Chest plate emissive (role badge).
+                let chest_pos = Vec3::new(0.0, 0.50, 0.42);
+                let chest_scale = Vec3::new(
+                    (0.40 + variant.marking as f32 * 0.025) * chassis_width,
+                    0.30,
+                    0.035,
+                );
+                c.spawn((
+                    PbrBundle {
+                        mesh: cube.clone(),
+                        material: chest_mat.clone(),
+                        transform: Transform::from_translation(chest_pos).with_scale(chest_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::ChestPanel,
+                        base_translation: chest_pos,
+                        base_scale: chest_scale,
+                    },
+                ));
+                // Chest seam rivets.
+                for cx in [-0.20_f32, 0.20] {
+                    for cy in [0.34_f32, 0.66] {
+                        c.spawn(PbrBundle {
+                            mesh: eye_mesh.clone(),
+                            material: trim_mat.clone(),
+                            transform: Transform::from_translation(Vec3::new(cx, cy, 0.42))
+                                .with_scale(Vec3::splat(0.18)),
+                            ..default()
+                        });
+                    }
+                }
+                // Backpack.
+                c.spawn(PbrBundle {
+                    mesh: backpack.clone(),
+                    material: mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.56, -0.44))
+                        .with_scale(Vec3::splat(1.0)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: backpack.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.56, -0.55))
+                        .with_scale(Vec3::new(0.85, 0.90, 0.20)),
+                    ..default()
+                });
+                // Backpack vent (pulses with work intensity).
+                let vent_pos = Vec3::new(0.0, 0.28, -0.58);
+                let vent_scale = Vec3::new(0.38, 0.10, 0.04);
+                c.spawn((
+                    PbrBundle {
+                        mesh: cube.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(vent_pos).with_scale(vent_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::BackpackVent,
+                        base_translation: vent_pos,
+                        base_scale: vent_scale,
+                    },
+                ));
+                // Side vents on the backpack.
+                for sx in [-0.22_f32, 0.22] {
                     c.spawn(PbrBundle {
-                        mesh: eye_mesh.clone(),
-                        material: trim_mat.clone(),
-                        transform: Transform::from_translation(Vec3::new(cx, cy, 0.42))
-                            .with_scale(Vec3::splat(0.18)),
+                        mesh: cube.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, 0.78, -0.55))
+                            .with_scale(Vec3::new(0.06, 0.30, 0.04)),
                         ..default()
                     });
                 }
-            }
-            // Backpack.
-            c.spawn(PbrBundle {
-                mesh: backpack.clone(),
-                material: mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.56, -0.44))
-                    .with_scale(Vec3::splat(1.0)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: backpack.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.56, -0.55))
-                    .with_scale(Vec3::new(0.85, 0.90, 0.20)),
-                ..default()
-            });
-            // Backpack vent (pulses with work intensity).
-            let vent_pos = Vec3::new(0.0, 0.28, -0.58);
-            let vent_scale = Vec3::new(0.38, 0.10, 0.04);
-            c.spawn((
-                PbrBundle {
-                    mesh: cube.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(vent_pos).with_scale(vent_scale),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::BackpackVent,
-                    base_translation: vent_pos,
-                    base_scale: vent_scale,
-                },
-            ));
-            // Side vents on the backpack.
-            for sx in [-0.22_f32, 0.22] {
-                c.spawn(PbrBundle {
-                    mesh: cube.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, 0.78, -0.55))
-                        .with_scale(Vec3::new(0.06, 0.30, 0.04)),
-                    ..default()
-                });
-            }
 
-            // ----- Shoulders + arms (two-bone, animated) -----
-            for (side_sign, side) in [(-1.0_f32, -1.0_f32), (1.0_f32, 1.0_f32)] {
-                let shoulder_pos = Vec3::new(0.64 * side, 0.78, 0.0);
-                let shoulder_part = if side_sign < 0.0 {
-                    WorkerPart::ShoulderL
-                } else {
-                    WorkerPart::ShoulderR
-                };
-                c.spawn((
-                    PbrBundle {
-                        mesh: head_sphere.clone(),
-                        material: mat.clone(),
-                        transform: Transform::from_translation(shoulder_pos)
-                            .with_scale(Vec3::splat(0.36)),
+                // ----- Shoulders + arms (two-bone, animated) -----
+                for (side_sign, side) in [(-1.0_f32, -1.0_f32), (1.0_f32, 1.0_f32)] {
+                    let shoulder_x = (0.58 + variant.armor as f32 * 0.035) * chassis_width;
+                    let shoulder_pos = Vec3::new(shoulder_x * side, 0.76, 0.0);
+                    let shoulder_part = if side_sign < 0.0 {
+                        WorkerPart::ShoulderL
+                    } else {
+                        WorkerPart::ShoulderR
+                    };
+                    c.spawn((
+                        PbrBundle {
+                            mesh: joint_mesh.clone(),
+                            material: mat.clone(),
+                            transform: Transform::from_translation(shoulder_pos)
+                                .with_scale(Vec3::splat(0.36)),
+                            ..default()
+                        },
+                        WorkerBotPart {
+                            bot_id,
+                            part: shoulder_part,
+                            base_translation: shoulder_pos,
+                            base_scale: Vec3::splat(0.36),
+                        },
+                    ));
+                    let upper_pos = Vec3::new((shoulder_x + 0.14) * side, 0.40, 0.0);
+                    let upper_part = if side_sign < 0.0 {
+                        WorkerPart::ArmUpperL
+                    } else {
+                        WorkerPart::ArmUpperR
+                    };
+                    c.spawn((
+                        PbrBundle {
+                            mesh: cube.clone(),
+                            material: mat.clone(),
+                            transform: Transform::from_translation(upper_pos)
+                                .with_scale(Vec3::new(0.26, 0.55, 0.26)),
+                            ..default()
+                        },
+                        WorkerBotPart {
+                            bot_id,
+                            part: upper_part,
+                            base_translation: upper_pos,
+                            base_scale: Vec3::new(0.26, 0.55, 0.26),
+                        },
+                    ));
+                    // Elbow joint.
+                    c.spawn(PbrBundle {
+                        mesh: joint_mesh.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(
+                            (shoulder_x + 0.16) * side,
+                            0.10,
+                            0.0,
+                        ))
+                        .with_scale(Vec3::splat(0.22)),
                         ..default()
-                    },
-                    WorkerBotPart {
-                        bot_id,
-                        part: shoulder_part,
-                        base_translation: shoulder_pos,
-                        base_scale: Vec3::splat(0.36),
-                    },
-                ));
-                let upper_pos = Vec3::new(0.78 * side, 0.42, 0.0);
-                let upper_part = if side_sign < 0.0 {
-                    WorkerPart::ArmUpperL
-                } else {
-                    WorkerPart::ArmUpperR
-                };
+                    });
+                    let fore_pos = Vec3::new((shoulder_x + 0.18) * side, -0.18, 0.04);
+                    let fore_part = if side_sign < 0.0 {
+                        WorkerPart::ArmForeL
+                    } else {
+                        WorkerPart::ArmForeR
+                    };
+                    c.spawn((
+                        PbrBundle {
+                            mesh: cube.clone(),
+                            material: mat.clone(),
+                            transform: Transform::from_translation(fore_pos)
+                                .with_scale(Vec3::new(0.24, 0.50, 0.24)),
+                            ..default()
+                        },
+                        WorkerBotPart {
+                            bot_id,
+                            part: fore_part,
+                            base_translation: fore_pos,
+                            base_scale: Vec3::new(0.24, 0.50, 0.24),
+                        },
+                    ));
+                    // Wrist + claw / tool.
+                    c.spawn(PbrBundle {
+                        mesh: joint_mesh.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(
+                            (shoulder_x + 0.20) * side,
+                            -0.44,
+                            0.04,
+                        ))
+                        .with_scale(Vec3::splat(0.22)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: claw_mesh.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(
+                            (shoulder_x + 0.20) * side,
+                            -0.60,
+                            0.10,
+                        ))
+                        .with_scale(Vec3::splat(0.95)),
+                        ..default()
+                    });
+                    let _ = side; // suppress unused warning for clarity.
+                }
+
+                // Glowing held tool on the left hand (welder / scanner — flicks
+                // on while building/surveying).
+                let tool_pos = Vec3::new(-0.84, -0.74, 0.18);
                 c.spawn((
                     PbrBundle {
                         mesh: cube.clone(),
-                        material: mat.clone(),
-                        transform: Transform::from_translation(upper_pos)
-                            .with_scale(Vec3::new(0.26, 0.55, 0.26)),
+                        material: eye_mat.clone(),
+                        transform: Transform::from_translation(tool_pos)
+                            .with_scale(Vec3::new(0.10, 0.10, 0.30)),
                         ..default()
                     },
                     WorkerBotPart {
                         bot_id,
-                        part: upper_part,
-                        base_translation: upper_pos,
-                        base_scale: Vec3::new(0.26, 0.55, 0.26),
+                        part: WorkerPart::ToolL,
+                        base_translation: tool_pos,
+                        base_scale: Vec3::new(0.10, 0.10, 0.30),
                     },
                 ));
-                // Elbow joint.
+
+                // ----- Neck -----
                 c.spawn(PbrBundle {
-                    mesh: head_sphere.clone(),
+                    mesh: cube.clone(),
                     material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.80 * side, 0.12, 0.0))
-                        .with_scale(Vec3::splat(0.22)),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.99, 0.0))
+                        .with_scale(Vec3::new(0.22, 0.14, 0.22)),
                     ..default()
                 });
-                let fore_pos = Vec3::new(0.82 * side, -0.18, 0.04);
-                let fore_part = if side_sign < 0.0 {
-                    WorkerPart::ArmForeL
-                } else {
-                    WorkerPart::ArmForeR
-                };
+
+                // ----- Head (animated as a unit via its WorkerPart::Head tag) -----
+                let head_pos = Vec3::new(0.0, 1.24, 0.0);
+                let head_scale = Vec3::new(0.84 * chassis_width, 0.58, 0.68 * armor_depth);
                 c.spawn((
                     PbrBundle {
-                        mesh: cube.clone(),
+                        mesh: chassis_mesh.clone(),
                         material: mat.clone(),
-                        transform: Transform::from_translation(fore_pos)
-                            .with_scale(Vec3::new(0.24, 0.50, 0.24)),
+                        transform: Transform::from_translation(head_pos).with_scale(head_scale),
                         ..default()
                     },
                     WorkerBotPart {
                         bot_id,
-                        part: fore_part,
-                        base_translation: fore_pos,
-                        base_scale: Vec3::new(0.24, 0.50, 0.24),
+                        part: WorkerPart::Head,
+                        base_translation: head_pos,
+                        base_scale: head_scale,
                     },
                 ));
-                // Wrist + claw / tool.
+                // Jaw / chin trim.
                 c.spawn(PbrBundle {
-                    mesh: head_sphere.clone(),
+                    mesh: cube.clone(),
                     material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.84 * side, -0.44, 0.04))
-                        .with_scale(Vec3::splat(0.22)),
+                    transform: Transform::from_translation(Vec3::new(0.0, 1.05, 0.18))
+                        .with_scale(Vec3::new(0.46, 0.10, 0.34)),
                     ..default()
                 });
+                // Visor — large emissive band; animated to scan when surveying.
+                let visor_pos = Vec3::new(0.0, 1.26, 0.34);
+                let visor_scale = Vec3::new(0.62 * chassis_width, 0.42, 0.30 * armor_depth);
+                c.spawn((
+                    PbrBundle {
+                        mesh: visor_mesh.clone(),
+                        material: visor_mat.clone(),
+                        transform: Transform::from_translation(visor_pos).with_scale(visor_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::Visor,
+                        base_translation: visor_pos,
+                        base_scale: visor_scale,
+                    },
+                ));
+                // Two binocular eyes — pulse-animated.
+                let eye_l_pos = Vec3::new(-sensor_spread, 1.28, 0.51 * armor_depth);
+                let eye_r_pos = Vec3::new(sensor_spread, 1.28, 0.51 * armor_depth);
+                let eye_scale = Vec3::new(0.12, 0.045, 0.035);
+                c.spawn((
+                    PbrBundle {
+                        mesh: eye_mesh.clone(),
+                        material: eye_mat.clone(),
+                        transform: Transform::from_translation(eye_l_pos).with_scale(eye_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::EyeL,
+                        base_translation: eye_l_pos,
+                        base_scale: eye_scale,
+                    },
+                ));
+                c.spawn((
+                    PbrBundle {
+                        mesh: eye_mesh.clone(),
+                        material: eye_mat.clone(),
+                        transform: Transform::from_translation(eye_r_pos).with_scale(eye_scale),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::EyeR,
+                        base_translation: eye_r_pos,
+                        base_scale: eye_scale,
+                    },
+                ));
+                // Cheek vents.
+                for sx in [-0.42_f32, 0.42] {
+                    c.spawn(PbrBundle {
+                        mesh: cube.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, 1.22, 0.20))
+                            .with_scale(Vec3::new(0.06, 0.18, 0.10)),
+                        ..default()
+                    });
+                }
+                // Cranial fin.
                 c.spawn(PbrBundle {
-                    mesh: claw_mesh.clone(),
+                    mesh: cube.clone(),
                     material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.84 * side, -0.60, 0.10))
+                    transform: Transform::from_translation(Vec3::new(0.0, 1.56, -0.10))
+                        .with_scale(Vec3::new(0.12, 0.34, 0.42)),
+                    ..default()
+                });
+                // Antenna mast.
+                c.spawn(PbrBundle {
+                    mesh: antenna_mesh.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.18, 1.72, -0.04))
                         .with_scale(Vec3::splat(0.95)),
                     ..default()
                 });
-                let _ = side; // suppress unused warning for clarity.
-            }
-
-            // Glowing held tool on the left hand (welder / scanner — flicks
-            // on while building/surveying).
-            let tool_pos = Vec3::new(-0.84, -0.74, 0.18);
-            c.spawn((
-                PbrBundle {
-                    mesh: cube.clone(),
-                    material: eye_mat.clone(),
-                    transform: Transform::from_translation(tool_pos)
-                        .with_scale(Vec3::new(0.10, 0.10, 0.30)),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::ToolL,
-                    base_translation: tool_pos,
-                    base_scale: Vec3::new(0.10, 0.10, 0.30),
-                },
-            ));
-
-            // ----- Neck -----
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.99, 0.0))
-                    .with_scale(Vec3::new(0.22, 0.14, 0.22)),
-                ..default()
-            });
-
-            // ----- Head (animated as a unit via its WorkerPart::Head tag) -----
-            let head_pos = Vec3::new(0.0, 1.24, 0.0);
-            let head_scale = Vec3::new(0.94, 0.96, 0.94);
-            c.spawn((
-                PbrBundle {
-                    mesh: head_sphere.clone(),
-                    material: mat.clone(),
-                    transform: Transform::from_translation(head_pos).with_scale(head_scale),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::Head,
-                    base_translation: head_pos,
-                    base_scale: head_scale,
-                },
-            ));
-            // Jaw / chin trim.
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 1.05, 0.18))
-                    .with_scale(Vec3::new(0.46, 0.10, 0.34)),
-                ..default()
-            });
-            // Visor — large emissive band; animated to scan when surveying.
-            let visor_pos = Vec3::new(0.0, 1.26, 0.34);
-            let visor_scale = Vec3::new(0.54, 0.56, 0.46);
-            c.spawn((
-                PbrBundle {
-                    mesh: visor_mesh.clone(),
-                    material: visor_mat.clone(),
-                    transform: Transform::from_translation(visor_pos).with_scale(visor_scale),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::Visor,
-                    base_translation: visor_pos,
-                    base_scale: visor_scale,
-                },
-            ));
-            // Two binocular eyes — pulse-animated.
-            let eye_l_pos = Vec3::new(-0.18, 1.28, 0.48);
-            let eye_r_pos = Vec3::new(0.18, 1.28, 0.48);
-            c.spawn((
-                PbrBundle {
-                    mesh: eye_mesh.clone(),
-                    material: eye_mat.clone(),
-                    transform: Transform::from_translation(eye_l_pos).with_scale(Vec3::splat(0.55)),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::EyeL,
-                    base_translation: eye_l_pos,
-                    base_scale: Vec3::splat(0.55),
-                },
-            ));
-            c.spawn((
-                PbrBundle {
-                    mesh: eye_mesh.clone(),
-                    material: eye_mat.clone(),
-                    transform: Transform::from_translation(eye_r_pos).with_scale(Vec3::splat(0.55)),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::EyeR,
-                    base_translation: eye_r_pos,
-                    base_scale: Vec3::splat(0.55),
-                },
-            ));
-            // Cheek vents.
-            for sx in [-0.42_f32, 0.42] {
-                c.spawn(PbrBundle {
-                    mesh: cube.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, 1.22, 0.20))
-                        .with_scale(Vec3::new(0.06, 0.18, 0.10)),
-                    ..default()
-                });
-            }
-            // Cranial fin.
-            c.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 1.56, -0.10))
-                    .with_scale(Vec3::new(0.12, 0.34, 0.42)),
-                ..default()
-            });
-            // Antenna mast.
-            c.spawn(PbrBundle {
-                mesh: antenna_mesh.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.18, 1.72, -0.04))
-                    .with_scale(Vec3::splat(0.95)),
-                ..default()
-            });
-            let ant_pos = Vec3::new(0.18, 2.02, -0.04);
-            c.spawn((
-                PbrBundle {
-                    mesh: antenna_tip_mesh.clone(),
-                    material: eye_mat.clone(),
-                    transform: Transform::from_translation(ant_pos).with_scale(Vec3::splat(0.95)),
-                    ..default()
-                },
-                WorkerBotPart {
-                    bot_id,
-                    part: WorkerPart::AntennaTip,
-                    base_translation: ant_pos,
-                    base_scale: Vec3::splat(0.95),
-                },
-            ));
-
-            // Soft role light for personality.
-            c.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: role_color,
-                    intensity: 320_000.0,
-                    range: 26.0,
-                    shadows_enabled: false,
-                    ..default()
-                },
-                transform: Transform::from_translation(Vec3::new(0.0, 1.4, 0.0)),
-                ..default()
+                let ant_pos = Vec3::new(0.18, 2.02, -0.04);
+                c.spawn((
+                    PbrBundle {
+                        mesh: antenna_tip_mesh.clone(),
+                        material: eye_mat.clone(),
+                        transform: Transform::from_translation(ant_pos)
+                            .with_scale(Vec3::splat(0.95)),
+                        ..default()
+                    },
+                    WorkerBotPart {
+                        bot_id,
+                        part: WorkerPart::AntennaTip,
+                        base_translation: ant_pos,
+                        base_scale: Vec3::splat(0.95),
+                    },
+                ));
             });
         });
 }
@@ -2810,25 +3895,27 @@ fn spawn_companion_entity(
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BotVisualCache,
     bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
 ) {
     if bot.companion_order == 0 {
-        spawn_aura_companion(commands, meshes, materials, cache, bot);
+        spawn_aura_companion(commands, meshes, materials, cache, bot, runtime_tier);
     } else {
-        spawn_bolt_companion(commands, meshes, materials, cache, bot);
+        spawn_bolt_companion(commands, meshes, materials, cache, bot, runtime_tier);
     }
 }
 
-/// AURA — pearl-white egg companion (EVE / Rodney style).
+/// AURA — cool-alloy survey companion with an armored sensor housing.
 fn spawn_aura_companion(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BotVisualCache,
     bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
 ) {
     let body = cache
         .char_body_egg
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.55)))
+        .get_or_insert_with(|| meshes.add(Cuboid::new(0.92, 1.16, 0.78)))
         .clone();
     let visor = cache
         .char_visor
@@ -2836,7 +3923,7 @@ fn spawn_aura_companion(
         .clone();
     let iris = cache
         .char_iris
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.16)))
+        .get_or_insert_with(|| meshes.add(Cuboid::new(0.18, 0.07, 0.05)))
         .clone();
     let pupil = cache
         .char_iris_pupil
@@ -2921,258 +4008,295 @@ fn spawn_aura_companion(
 
     let p = vec3_from_arr(bot.position);
     let bot_id = bot.id;
+    let variant = bot_visual_variant(bot.id, bot.role);
+    let rig_scale = 0.96 + variant.chassis as f32 * 0.025;
 
     commands
         .spawn((
             SpatialBundle {
                 transform: Transform::from_translation(p),
+                visibility: if runtime_tier == BotRuntimeTier::Culled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
+            BotVisualMode::Detailed,
             Name::new(format!("AURA_{}_{}", bot_id, bot.name)),
         ))
-        .with_children(|c| {
-            // Ground shadow disc — fakes AO under the floating bot.
-            c.spawn(PbrBundle {
-                mesh: shadow.clone(),
-                material: shadow_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.95, 0.0))
-                    .with_scale(Vec3::new(1.0, 1.0, 1.4)),
-                ..default()
-            });
-            // Hover-glow ring — emissive disc just below the body.
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: hover_ring_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.72, 0.0)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: holo_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 1.42, -0.05))
-                    .with_scale(Vec3::new(0.72, 1.0, 0.72)),
-                ..default()
-            });
-            for &(sx, yaw) in &[(-0.72_f32, 0.18_f32), (0.72, -0.18)] {
-                c.spawn(PbrBundle {
-                    mesh: holo_blade.clone(),
-                    material: holo_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, 0.04, -0.05))
-                        .with_rotation(Quat::from_rotation_z(yaw))
-                        .with_scale(Vec3::new(1.15, 1.0, 1.0)),
-                    ..default()
-                });
-            }
-            for &(x, y, z) in &[
-                (-0.38_f32, 1.28_f32, 0.22_f32),
-                (0.38, 1.28, 0.22),
-                (-0.28, 1.18, -0.34),
-                (0.28, 1.18, -0.34),
-            ] {
-                c.spawn(PbrBundle {
-                    mesh: orbit_dot.clone(),
-                    material: holo_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(x, y, z)),
-                    ..default()
-                });
-            }
-            // Lower belly (mirrored egg).
-            c.spawn(PbrBundle {
-                mesh: body.clone(),
-                material: shell_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.18, 0.0))
-                    .with_scale(Vec3::new(0.78, 0.95, 0.78)),
-                ..default()
-            });
-            // Shoulder seam — thin dark trim ring at belly join.
-            c.spawn(PbrBundle {
-                mesh: panel_seam.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.20, 0.0))
-                    .with_scale(Vec3::new(0.60, 1.0, 0.60)),
-                ..default()
-            });
-
-            // HEAD assembly — visor + iris + antenna ride together so we can
-            // tilt the head independently.
-            c.spawn(PbrBundle {
-                mesh: backpack.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.10, -0.56))
-                    .with_scale(Vec3::new(1.0, 1.0, 0.85)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: sensor_bar.clone(),
-                material: visor_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.95, 0.48))
-                    .with_scale(Vec3::new(1.25, 1.0, 1.0)),
-                ..default()
-            });
-            for &sx in &[-1.0_f32, 1.0_f32] {
-                c.spawn(PbrBundle {
-                    mesh: arm_segment.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.72, -0.12, 0.12))
-                        .with_rotation(Quat::from_rotation_z(sx * -0.42)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: claw.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.86, -0.54, 0.18))
-                        .with_rotation(Quat::from_rotation_z(sx * -0.55)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: leg_strut.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.28, -0.86, 0.08))
-                        .with_rotation(Quat::from_rotation_z(sx * 0.20)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: foot_pad.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.34, -1.18, 0.16))
-                        .with_rotation(Quat::from_rotation_y(sx * 0.08)),
-                    ..default()
-                });
-            }
-
-            c.spawn((
-                SpatialBundle {
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.42, 0.0)),
-                    ..default()
-                },
-                CompanionHead { bot_id, kind: 0 },
-            ))
-            .with_children(|h| {
-                // Head shell — taller egg.
-                h.spawn(PbrBundle {
+        .with_children(|root| {
+            root.spawn((
+                PbrBundle {
                     mesh: body.clone(),
                     material: shell_mat.clone(),
-                    transform: Transform::from_scale(Vec3::new(0.92, 1.05, 0.85)),
+                    transform: Transform::from_scale(Vec3::new(
+                        1.05 * rig_scale,
+                        1.12,
+                        0.92 * rig_scale,
+                    )),
+                    visibility: if bot_uses_proxy(runtime_tier) {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotLodProxy {
+                    bot_id,
+                    full_tier_fallback: false,
+                },
+            ));
+            root.spawn((
+                SpatialBundle {
+                    transform: Transform::from_scale(Vec3::new(
+                        rig_scale,
+                        0.97 + variant.armor as f32 * 0.02,
+                        rig_scale,
+                    )),
+                    visibility: if bot_uses_detailed_rig(runtime_tier) {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
+                    ..default()
+                },
+                BotDetailedRig { bot_id },
+            ))
+            .with_children(|c| {
+                // Ground shadow disc — fakes AO under the floating bot.
+                c.spawn(PbrBundle {
+                    mesh: shadow.clone(),
+                    material: shadow_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.95, 0.0))
+                        .with_scale(Vec3::new(1.0, 1.0, 1.4)),
+                    ..default()
+                });
+                // Hover-glow ring — emissive disc just below the body.
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: hover_ring_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.72, 0.0)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: holo_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 1.42, -0.05))
+                        .with_scale(Vec3::new(0.72, 1.0, 0.72)),
+                    ..default()
+                });
+                for &(sx, yaw) in &[(-0.72_f32, 0.18_f32), (0.72, -0.18)] {
+                    c.spawn(PbrBundle {
+                        mesh: holo_blade.clone(),
+                        material: holo_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, 0.04, -0.05))
+                            .with_rotation(Quat::from_rotation_z(yaw))
+                            .with_scale(Vec3::new(1.15, 1.0, 1.0)),
+                        ..default()
+                    });
+                }
+                for &(x, y, z) in &[
+                    (-0.38_f32, 1.28_f32, 0.22_f32),
+                    (0.38, 1.28, 0.22),
+                    (-0.28, 1.18, -0.34),
+                    (0.28, 1.18, -0.34),
+                ] {
+                    c.spawn(PbrBundle {
+                        mesh: orbit_dot.clone(),
+                        material: holo_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(x, y, z)),
+                        ..default()
+                    });
+                }
+                // Lower belly (mirrored egg).
+                c.spawn(PbrBundle {
+                    mesh: body.clone(),
+                    material: shell_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.18, 0.0))
+                        .with_scale(Vec3::new(0.78, 0.95, 0.78)),
+                    ..default()
+                });
+                // Shoulder seam — thin dark trim ring at belly join.
+                c.spawn(PbrBundle {
+                    mesh: panel_seam.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.20, 0.0))
+                        .with_scale(Vec3::new(0.60, 1.0, 0.60)),
                     ..default()
                 });
 
-                // Dark visor band.
-                h.spawn(PbrBundle {
-                    mesh: visor.clone(),
+                // HEAD assembly — visor + iris + antenna ride together so we can
+                // tilt the head independently.
+                c.spawn(PbrBundle {
+                    mesh: backpack.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.10, -0.56))
+                        .with_scale(Vec3::new(1.0, 1.0, 0.85)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: sensor_bar.clone(),
                     material: visor_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.05, 0.36))
-                        .with_scale(Vec3::new(0.78, 1.0, 0.55)),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.95, 0.48))
+                        .with_scale(Vec3::new(1.25, 1.0, 1.0)),
                     ..default()
                 });
-
-                // Two glowing iris spheres (left + right).
-                for &(sx, side) in &[(-0.30_f32, -1_i8), (0.30_f32, 1_i8)] {
-                    let base = Vec3::new(sx, 0.06, 0.52);
-                    let base_scale = Vec3::splat(1.0);
-                    h.spawn((
-                        PbrBundle {
-                            mesh: iris.clone(),
-                            material: iris_mat.clone(),
-                            transform: Transform::from_translation(base).with_scale(base_scale),
-                            ..default()
-                        },
-                        CompanionEyeIris {
-                            bot_id,
-                            side,
-                            base,
-                            base_scale,
-                        },
-                    ))
-                    .with_children(|e| {
-                        // Pupil dot — sits slightly forward on the iris.
-                        e.spawn(PbrBundle {
-                            mesh: pupil.clone(),
-                            material: pupil_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.13)),
-                            ..default()
-                        });
-                        // Cartoon shine highlight — small white dot on top-front.
-                        e.spawn(PbrBundle {
-                            mesh: iris_highlight.clone(),
-                            material: highlight_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(-0.05, 0.07, 0.135)),
-                            ..default()
-                        });
+                for &sx in &[-1.0_f32, 1.0_f32] {
+                    c.spawn(PbrBundle {
+                        mesh: arm_segment.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.72, -0.12, 0.12))
+                            .with_rotation(Quat::from_rotation_z(sx * -0.42)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: claw.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.86, -0.54, 0.18))
+                            .with_rotation(Quat::from_rotation_z(sx * -0.55)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: leg_strut.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.28, -0.86, 0.08))
+                            .with_rotation(Quat::from_rotation_z(sx * 0.20)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: foot_pad.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.34, -1.18, 0.16))
+                            .with_rotation(Quat::from_rotation_y(sx * 0.08)),
+                        ..default()
                     });
                 }
 
-                // Slim antenna.
-                h.spawn(PbrBundle {
-                    mesh: antenna.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.55, -0.05)),
-                    ..default()
-                });
-                // Antenna tip — pulses.
-                h.spawn((
-                    PbrBundle {
-                        mesh: antenna_tip.clone(),
-                        material: antenna_tip_mat.clone(),
-                        transform: Transform::from_translation(Vec3::new(0.0, 0.88, -0.05)),
+                c.spawn((
+                    SpatialBundle {
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.42, 0.0)),
                         ..default()
                     },
-                    CompanionAntennaTip {
+                    CompanionHead { bot_id, kind: 0 },
+                ))
+                .with_children(|h| {
+                    // Head shell — taller egg.
+                    h.spawn(PbrBundle {
+                        mesh: body.clone(),
+                        material: shell_mat.clone(),
+                        transform: Transform::from_scale(Vec3::new(0.92, 1.05, 0.85)),
+                        ..default()
+                    });
+
+                    // Dark visor band.
+                    h.spawn(PbrBundle {
+                        mesh: visor.clone(),
+                        material: visor_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.05, 0.36))
+                            .with_scale(Vec3::new(0.78, 1.0, 0.55)),
+                        ..default()
+                    });
+
+                    // Twin recessed sensor apertures.
+                    for &(sx, side) in &[(-0.30_f32, -1_i8), (0.30_f32, 1_i8)] {
+                        let base = Vec3::new(sx, 0.06, 0.52);
+                        let base_scale = Vec3::splat(1.0);
+                        h.spawn((
+                            PbrBundle {
+                                mesh: iris.clone(),
+                                material: iris_mat.clone(),
+                                transform: Transform::from_translation(base).with_scale(base_scale),
+                                ..default()
+                            },
+                            CompanionEyeIris {
+                                bot_id,
+                                side,
+                                base,
+                                base_scale,
+                            },
+                        ))
+                        .with_children(|e| {
+                            // Pupil dot — sits slightly forward on the iris.
+                            e.spawn(PbrBundle {
+                                mesh: pupil.clone(),
+                                material: pupil_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.13)),
+                                ..default()
+                            });
+                            // Cartoon shine highlight — small white dot on top-front.
+                            e.spawn(PbrBundle {
+                                mesh: iris_highlight.clone(),
+                                material: highlight_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(
+                                    -0.05, 0.07, 0.135,
+                                )),
+                                ..default()
+                            });
+                        });
+                    }
+
+                    // Slim antenna.
+                    h.spawn(PbrBundle {
+                        mesh: antenna.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.55, -0.05)),
+                        ..default()
+                    });
+                    // Antenna tip — pulses.
+                    h.spawn((
+                        PbrBundle {
+                            mesh: antenna_tip.clone(),
+                            material: antenna_tip_mat.clone(),
+                            transform: Transform::from_translation(Vec3::new(0.0, 0.88, -0.05)),
+                            ..default()
+                        },
+                        CompanionAntennaTip {
+                            bot_id,
+                            base_scale: 1.0,
+                        },
+                    ));
+                });
+
+                // Chest mood disc — color is driven each frame from the active
+                // companion mode.
+                c.spawn((
+                    PbrBundle {
+                        mesh: mood_disc.clone(),
+                        material: mood_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, -0.05, 0.55))
+                            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                            .with_scale(Vec3::splat(1.0)),
+                        ..default()
+                    },
+                    CompanionMoodLight {
                         bot_id,
-                        base_scale: 1.0,
+                        mat: mood_mat.clone(),
                     },
                 ));
-            });
 
-            // Chest mood disc — color is driven each frame from the active
-            // companion mode.
-            c.spawn((
-                PbrBundle {
-                    mesh: mood_disc.clone(),
-                    material: mood_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, -0.05, 0.55))
-                        .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                        .with_scale(Vec3::splat(1.0)),
-                    ..default()
-                },
-                CompanionMoodLight {
-                    bot_id,
-                    mat: mood_mat.clone(),
-                },
-            ));
-
-            // Side hover-thrusters (warm glows tucked at the bot's hips).
-            for &sx in &[-0.55_f32, 0.55_f32] {
-                c.spawn(PbrBundle {
-                    mesh: side_thruster.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, -0.45, 0.0)),
-                    ..default()
-                });
-            }
-
-            // Soft cyan glow.
-            c.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: Color::srgb(0.55, 0.92, 1.0),
-                    intensity: 580_000.0,
-                    range: 36.0,
-                    shadows_enabled: false,
-                    ..default()
-                },
-                transform: Transform::from_translation(Vec3::new(0.0, -0.2, 0.0)),
-                ..default()
+                // Side hover-thrusters (warm glows tucked at the bot's hips).
+                for &sx in &[-0.55_f32, 0.55_f32] {
+                    c.spawn(PbrBundle {
+                        mesh: side_thruster.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, -0.45, 0.0)),
+                        ..default()
+                    });
+                }
             });
         });
 }
 
-/// BOLT — warm-yellow stalk-eyed companion (WALL-E / Fender style).
+/// BOLT — warm-alloy field companion with a reinforced utility chassis.
 fn spawn_bolt_companion(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BotVisualCache,
     bot: &BotAgent,
+    runtime_tier: BotRuntimeTier,
 ) {
     let body = cache
         .char_body_barrel
@@ -3188,7 +4312,7 @@ fn spawn_bolt_companion(
         .clone();
     let iris = cache
         .char_iris
-        .get_or_insert_with(|| meshes.add(Sphere::new(0.16)))
+        .get_or_insert_with(|| meshes.add(Cuboid::new(0.18, 0.07, 0.05)))
         .clone();
     let pupil = cache
         .char_iris_pupil
@@ -3278,255 +4402,293 @@ fn spawn_bolt_companion(
 
     let p = vec3_from_arr(bot.position);
     let bot_id = bot.id;
+    let variant = bot_visual_variant(bot.id, bot.role);
+    let rig_scale = 0.96 + variant.chassis as f32 * 0.025;
 
     commands
         .spawn((
             SpatialBundle {
                 transform: Transform::from_translation(p),
+                visibility: if runtime_tier == BotRuntimeTier::Culled {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Inherited
+                },
                 ..default()
             },
             FriendlyBotEntity { id: bot_id },
+            BotVisualMode::Detailed,
             Name::new(format!("BOLT_{}_{}", bot_id, bot.name)),
         ))
-        .with_children(|c| {
-            // Ground shadow + hover ring (under the body).
-            c.spawn(PbrBundle {
-                mesh: shadow.clone(),
-                material: shadow_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.95, 0.0))
-                    .with_scale(Vec3::new(1.05, 1.0, 1.5)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: hover_ring_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, -0.65, 0.0))
-                    .with_scale(Vec3::new(1.1, 1.0, 1.1)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: hover_ring.clone(),
-                material: holo_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.78, -0.10))
-                    .with_scale(Vec3::new(0.82, 1.0, 0.82)),
-                ..default()
-            });
-            for &(sx, yaw) in &[(-0.70_f32, -0.14_f32), (0.70, 0.14)] {
-                c.spawn(PbrBundle {
-                    mesh: holo_blade.clone(),
-                    material: holo_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, -0.10, -0.03))
-                        .with_rotation(Quat::from_rotation_z(yaw))
-                        .with_scale(Vec3::new(1.05, 1.0, 1.0)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: orbit_dot.clone(),
-                    material: holo_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.58, 0.72, 0.30)),
-                    ..default()
-                });
-            }
-            // Body — main barrel shell.
-            c.spawn(PbrBundle {
-                mesh: body.clone(),
-                material: shell_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
-                ..default()
-            });
-            // Subtle inner bevel for chamfered look.
-            c.spawn(PbrBundle {
-                mesh: bevel.clone(),
-                material: trim_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0))
-                    .with_scale(Vec3::new(1.02, 0.65, 1.05)),
-                ..default()
-            });
-            // Chest rivets — 4 small dark cubes in a + pattern.
-            for &(rx, ry) in &[(0.0_f32, 0.20_f32), (0.0, -0.20), (-0.20, 0.0), (0.20, 0.0)] {
-                c.spawn(PbrBundle {
-                    mesh: rivet.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(rx, ry, 0.49)),
-                    ..default()
-                });
-            }
-
-            // HEAD — stalk-eye head sits on top.
-            c.spawn(PbrBundle {
-                mesh: backpack.clone(),
-                material: ear_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.02, -0.58))
-                    .with_scale(Vec3::new(1.15, 1.05, 0.9)),
-                ..default()
-            });
-            c.spawn(PbrBundle {
-                mesh: sensor_bar.clone(),
-                material: ear_mat.clone(),
-                transform: Transform::from_translation(Vec3::new(0.0, 0.36, 0.54))
-                    .with_scale(Vec3::new(1.55, 1.0, 1.0)),
-                ..default()
-            });
-            for &sx in &[-1.0_f32, 1.0_f32] {
-                c.spawn(PbrBundle {
-                    mesh: arm_segment.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.68, -0.10, 0.16))
-                        .with_rotation(Quat::from_rotation_z(sx * -0.28)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: claw.clone(),
-                    material: ear_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.82, -0.50, 0.25))
-                        .with_rotation(Quat::from_rotation_z(sx * -0.38)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: bevel.clone(),
-                    material: ear_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.72, -0.40, -0.04))
-                        .with_scale(Vec3::new(0.22, 0.42, 0.86)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: leg_strut.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.28, -0.82, 0.05))
-                        .with_rotation(Quat::from_rotation_z(sx * 0.10)),
-                    ..default()
-                });
-                c.spawn(PbrBundle {
-                    mesh: foot_pad.clone(),
-                    material: ear_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx * 0.34, -1.12, 0.10))
-                        .with_scale(Vec3::new(1.15, 1.0, 0.95)),
-                    ..default()
-                });
-            }
-
-            c.spawn((
-                SpatialBundle {
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.55, 0.05)),
-                    ..default()
-                },
-                CompanionHead { bot_id, kind: 1 },
-            ))
-            .with_children(|h| {
-                // Two stalk eyes (left + right), tipped forward.
-                for &(sx, side) in &[(-0.22_f32, -1_i8), (0.22_f32, 1_i8)] {
-                    h.spawn(PbrBundle {
-                        mesh: stalk.clone(),
-                        material: trim_mat.clone(),
-                        transform: Transform::from_translation(Vec3::new(sx, 0.10, 0.10))
-                            .with_rotation(Quat::from_rotation_x(0.35)),
-                        ..default()
-                    });
-                    let base = Vec3::new(sx, 0.22, 0.20);
-                    let base_scale = Vec3::splat(1.0);
-                    h.spawn((
-                        PbrBundle {
-                            mesh: iris.clone(),
-                            material: iris_mat.clone(),
-                            transform: Transform::from_translation(base).with_scale(base_scale),
-                            ..default()
-                        },
-                        CompanionEyeIris {
-                            bot_id,
-                            side,
-                            base,
-                            base_scale,
-                        },
-                    ))
-                    .with_children(|e| {
-                        e.spawn(PbrBundle {
-                            mesh: pupil.clone(),
-                            material: pupil_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.13)),
-                            ..default()
-                        });
-                        e.spawn(PbrBundle {
-                            mesh: iris_highlight.clone(),
-                            material: highlight_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(-0.05, 0.07, 0.135)),
-                            ..default()
-                        });
-                    });
-                }
-
-                // Headphone-style ear caps.
-                for &(sx, side) in &[(-0.55_f32, -1_i8), (0.55_f32, 1_i8)] {
-                    h.spawn((
-                        PbrBundle {
-                            mesh: ear.clone(),
-                            material: ear_mat.clone(),
-                            transform: Transform::from_translation(Vec3::new(sx, 0.0, 0.0))
-                                .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-                            ..default()
-                        },
-                        CompanionEarCap { bot_id, side },
-                    ));
-                }
-
-                // Tail-rotor antenna at the back of the head.
-                h.spawn(PbrBundle {
-                    mesh: antenna.clone(),
-                    material: trim_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, 0.18, -0.35))
-                        .with_rotation(Quat::from_rotation_x(0.6)),
-                    ..default()
-                });
-                h.spawn((
-                    PbrBundle {
-                        mesh: antenna_tip.clone(),
-                        material: antenna_tip_mat.clone(),
-                        transform: Transform::from_translation(Vec3::new(0.0, 0.40, -0.55)),
-                        ..default()
-                    },
-                    CompanionAntennaTip {
-                        bot_id,
-                        base_scale: 1.0,
-                    },
-                ));
-            });
-
-            // Chest mood plate — wide warm-amber on BOLT.
-            c.spawn((
+        .with_children(|root| {
+            root.spawn((
                 PbrBundle {
-                    mesh: mood_disc.clone(),
-                    material: mood_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(0.0, -0.05, 0.50))
-                        .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                        .with_scale(Vec3::new(1.2, 1.0, 1.0)),
+                    mesh: body.clone(),
+                    material: shell_mat.clone(),
+                    transform: Transform::from_scale(Vec3::new(
+                        1.02 * rig_scale,
+                        1.05,
+                        0.96 * rig_scale,
+                    )),
+                    visibility: if bot_uses_proxy(runtime_tier) {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
                     ..default()
                 },
-                CompanionMoodLight {
+                BotLodProxy {
                     bot_id,
-                    mat: mood_mat.clone(),
+                    full_tier_fallback: false,
                 },
             ));
-
-            // Ducted side fans (small warm thruster glows under the body).
-            for &sx in &[-0.55_f32, 0.55_f32] {
-                c.spawn(PbrBundle {
-                    mesh: side_thruster.clone(),
-                    material: thruster_mat.clone(),
-                    transform: Transform::from_translation(Vec3::new(sx, -0.50, 0.0)),
-                    ..default()
-                });
-            }
-
-            // Warm under-glow.
-            c.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: Color::srgb(1.0, 0.78, 0.45),
-                    intensity: 520_000.0,
-                    range: 32.0,
-                    shadows_enabled: false,
+            root.spawn((
+                SpatialBundle {
+                    transform: Transform::from_scale(Vec3::new(
+                        rig_scale,
+                        0.97 + variant.armor as f32 * 0.02,
+                        rig_scale,
+                    )),
+                    visibility: if bot_uses_detailed_rig(runtime_tier) {
+                        Visibility::Inherited
+                    } else {
+                        Visibility::Hidden
+                    },
                     ..default()
                 },
-                transform: Transform::from_translation(Vec3::new(0.0, -0.2, 0.0)),
-                ..default()
+                BotDetailedRig { bot_id },
+            ))
+            .with_children(|c| {
+                // Ground shadow + hover ring (under the body).
+                c.spawn(PbrBundle {
+                    mesh: shadow.clone(),
+                    material: shadow_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.95, 0.0))
+                        .with_scale(Vec3::new(1.05, 1.0, 1.5)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: hover_ring_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -0.65, 0.0))
+                        .with_scale(Vec3::new(1.1, 1.0, 1.1)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: hover_ring.clone(),
+                    material: holo_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.78, -0.10))
+                        .with_scale(Vec3::new(0.82, 1.0, 0.82)),
+                    ..default()
+                });
+                for &(sx, yaw) in &[(-0.70_f32, -0.14_f32), (0.70, 0.14)] {
+                    c.spawn(PbrBundle {
+                        mesh: holo_blade.clone(),
+                        material: holo_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, -0.10, -0.03))
+                            .with_rotation(Quat::from_rotation_z(yaw))
+                            .with_scale(Vec3::new(1.05, 1.0, 1.0)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: orbit_dot.clone(),
+                        material: holo_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.58, 0.72, 0.30)),
+                        ..default()
+                    });
+                }
+                // Body — main barrel shell.
+                c.spawn(PbrBundle {
+                    mesh: body.clone(),
+                    material: shell_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+                    ..default()
+                });
+                // Subtle inner bevel for chamfered look.
+                c.spawn(PbrBundle {
+                    mesh: bevel.clone(),
+                    material: trim_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0))
+                        .with_scale(Vec3::new(1.02, 0.65, 1.05)),
+                    ..default()
+                });
+                // Chest rivets — 4 small dark cubes in a + pattern.
+                for &(rx, ry) in &[(0.0_f32, 0.20_f32), (0.0, -0.20), (-0.20, 0.0), (0.20, 0.0)] {
+                    c.spawn(PbrBundle {
+                        mesh: rivet.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(rx, ry, 0.49)),
+                        ..default()
+                    });
+                }
+
+                // HEAD — stalk-eye head sits on top.
+                c.spawn(PbrBundle {
+                    mesh: backpack.clone(),
+                    material: ear_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.02, -0.58))
+                        .with_scale(Vec3::new(1.15, 1.05, 0.9)),
+                    ..default()
+                });
+                c.spawn(PbrBundle {
+                    mesh: sensor_bar.clone(),
+                    material: ear_mat.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.36, 0.54))
+                        .with_scale(Vec3::new(1.55, 1.0, 1.0)),
+                    ..default()
+                });
+                for &sx in &[-1.0_f32, 1.0_f32] {
+                    c.spawn(PbrBundle {
+                        mesh: arm_segment.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.68, -0.10, 0.16))
+                            .with_rotation(Quat::from_rotation_z(sx * -0.28)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: claw.clone(),
+                        material: ear_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.82, -0.50, 0.25))
+                            .with_rotation(Quat::from_rotation_z(sx * -0.38)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: bevel.clone(),
+                        material: ear_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.72, -0.40, -0.04))
+                            .with_scale(Vec3::new(0.22, 0.42, 0.86)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: leg_strut.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.28, -0.82, 0.05))
+                            .with_rotation(Quat::from_rotation_z(sx * 0.10)),
+                        ..default()
+                    });
+                    c.spawn(PbrBundle {
+                        mesh: foot_pad.clone(),
+                        material: ear_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx * 0.34, -1.12, 0.10))
+                            .with_scale(Vec3::new(1.15, 1.0, 0.95)),
+                        ..default()
+                    });
+                }
+
+                c.spawn((
+                    SpatialBundle {
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.55, 0.05)),
+                        ..default()
+                    },
+                    CompanionHead { bot_id, kind: 1 },
+                ))
+                .with_children(|h| {
+                    // Two stalk eyes (left + right), tipped forward.
+                    for &(sx, side) in &[(-0.22_f32, -1_i8), (0.22_f32, 1_i8)] {
+                        h.spawn(PbrBundle {
+                            mesh: stalk.clone(),
+                            material: trim_mat.clone(),
+                            transform: Transform::from_translation(Vec3::new(sx, 0.10, 0.10))
+                                .with_rotation(Quat::from_rotation_x(0.35)),
+                            ..default()
+                        });
+                        let base = Vec3::new(sx, 0.22, 0.20);
+                        let base_scale = Vec3::splat(1.0);
+                        h.spawn((
+                            PbrBundle {
+                                mesh: iris.clone(),
+                                material: iris_mat.clone(),
+                                transform: Transform::from_translation(base).with_scale(base_scale),
+                                ..default()
+                            },
+                            CompanionEyeIris {
+                                bot_id,
+                                side,
+                                base,
+                                base_scale,
+                            },
+                        ))
+                        .with_children(|e| {
+                            e.spawn(PbrBundle {
+                                mesh: pupil.clone(),
+                                material: pupil_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.13)),
+                                ..default()
+                            });
+                            e.spawn(PbrBundle {
+                                mesh: iris_highlight.clone(),
+                                material: highlight_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(
+                                    -0.05, 0.07, 0.135,
+                                )),
+                                ..default()
+                            });
+                        });
+                    }
+
+                    // Headphone-style ear caps.
+                    for &(sx, side) in &[(-0.55_f32, -1_i8), (0.55_f32, 1_i8)] {
+                        h.spawn((
+                            PbrBundle {
+                                mesh: ear.clone(),
+                                material: ear_mat.clone(),
+                                transform: Transform::from_translation(Vec3::new(sx, 0.0, 0.0))
+                                    .with_rotation(Quat::from_rotation_z(
+                                        std::f32::consts::FRAC_PI_2,
+                                    )),
+                                ..default()
+                            },
+                            CompanionEarCap { bot_id, side },
+                        ));
+                    }
+
+                    // Tail-rotor antenna at the back of the head.
+                    h.spawn(PbrBundle {
+                        mesh: antenna.clone(),
+                        material: trim_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, 0.18, -0.35))
+                            .with_rotation(Quat::from_rotation_x(0.6)),
+                        ..default()
+                    });
+                    h.spawn((
+                        PbrBundle {
+                            mesh: antenna_tip.clone(),
+                            material: antenna_tip_mat.clone(),
+                            transform: Transform::from_translation(Vec3::new(0.0, 0.40, -0.55)),
+                            ..default()
+                        },
+                        CompanionAntennaTip {
+                            bot_id,
+                            base_scale: 1.0,
+                        },
+                    ));
+                });
+
+                // Chest mood plate — wide warm-amber on BOLT.
+                c.spawn((
+                    PbrBundle {
+                        mesh: mood_disc.clone(),
+                        material: mood_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(0.0, -0.05, 0.50))
+                            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                            .with_scale(Vec3::new(1.2, 1.0, 1.0)),
+                        ..default()
+                    },
+                    CompanionMoodLight {
+                        bot_id,
+                        mat: mood_mat.clone(),
+                    },
+                ));
+
+                // Ducted side fans (small warm thruster glows under the body).
+                for &sx in &[-0.55_f32, 0.55_f32] {
+                    c.spawn(PbrBundle {
+                        mesh: side_thruster.clone(),
+                        material: thruster_mat.clone(),
+                        transform: Transform::from_translation(Vec3::new(sx, -0.50, 0.0)),
+                        ..default()
+                    });
+                }
             });
         });
 }
@@ -3662,11 +4824,11 @@ fn companion_aura_shell_material(
     }
     // Star Wars gritty realistic imperial white/grey
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.55, 0.55, 0.55),
+        base_color: Color::srgb(0.34, 0.36, 0.37),
         emissive: LinearRgba::rgb(0.01, 0.01, 0.01),
-        metallic: 0.85,
-        perceptual_roughness: 0.65,
-        reflectance: 0.3,
+        metallic: 0.95,
+        perceptual_roughness: 0.76,
+        reflectance: 0.18,
         ..default()
     });
     cache.mat_aura_shell = Some(h.clone());
@@ -3682,11 +4844,11 @@ fn companion_bolt_shell_material(
     }
     // Star Wars realistic rusted astromech yellow/orange.
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.48, 0.35, 0.10),
+        base_color: Color::srgb(0.30, 0.27, 0.18),
         emissive: LinearRgba::rgb(0.02, 0.01, 0.0),
-        metallic: 0.9,
-        perceptual_roughness: 0.8,
-        reflectance: 0.2,
+        metallic: 0.94,
+        perceptual_roughness: 0.84,
+        reflectance: 0.16,
         ..default()
     });
     cache.mat_bolt_shell = Some(h.clone());
@@ -3721,8 +4883,8 @@ fn companion_iris_blue_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.55, 0.85, 1.0),
-        emissive: LinearRgba::rgb(2.0, 7.0, 11.0),
+        base_color: Color::srgb(0.25, 0.55, 0.72),
+        emissive: LinearRgba::rgb(0.9, 3.2, 5.4),
         metallic: 0.0,
         perceptual_roughness: 0.05,
         ..default()
@@ -3739,8 +4901,8 @@ fn companion_iris_amber_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.85, 0.45),
-        emissive: LinearRgba::rgb(9.0, 5.5, 1.5),
+        base_color: Color::srgb(0.82, 0.55, 0.25),
+        emissive: LinearRgba::rgb(4.5, 2.6, 0.8),
         metallic: 0.0,
         perceptual_roughness: 0.05,
         ..default()
@@ -3813,8 +4975,8 @@ fn companion_antenna_tip_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.8, 0.6),
-        emissive: LinearRgba::rgb(8.0, 5.0, 2.0),
+        base_color: Color::srgb(0.85, 0.56, 0.32),
+        emissive: LinearRgba::rgb(3.5, 2.0, 0.8),
         metallic: 0.0,
         perceptual_roughness: 0.05,
         ..default()
@@ -3863,8 +5025,8 @@ fn companion_hover_ring_aura_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.4, 0.85, 1.0, 0.65),
-        emissive: LinearRgba::rgb(1.5, 5.0, 7.0),
+        base_color: Color::srgba(0.20, 0.62, 0.78, 0.50),
+        emissive: LinearRgba::rgb(0.8, 2.8, 4.2),
         alpha_mode: AlphaMode::Add,
         unlit: true,
         ..default()
@@ -3881,8 +5043,8 @@ fn companion_hover_ring_bolt_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.7, 0.35, 0.65),
-        emissive: LinearRgba::rgb(7.0, 4.0, 1.5),
+        base_color: Color::srgba(0.72, 0.46, 0.22, 0.50),
+        emissive: LinearRgba::rgb(3.4, 1.9, 0.7),
         alpha_mode: AlphaMode::Add,
         unlit: true,
         ..default()
@@ -3935,8 +5097,8 @@ fn companion_iris_highlight_material(
         return h.clone();
     }
     let h = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 1.0, 1.0),
-        emissive: LinearRgba::rgb(8.0, 8.0, 8.0),
+        base_color: Color::srgb(0.62, 0.70, 0.72),
+        emissive: LinearRgba::rgb(1.2, 1.5, 1.6),
         unlit: true,
         ..default()
     });
@@ -3946,15 +5108,15 @@ fn companion_iris_highlight_material(
 
 fn bot_role_color(role: BotRole) -> Color {
     match role {
-        BotRole::CompanionGuide => Color::srgb(0.82, 0.96, 1.0),
-        BotRole::CompanionMaker => Color::srgb(0.62, 0.88, 1.0),
-        BotRole::Planner => Color::srgb(0.20, 0.95, 1.0),
-        BotRole::Surveyor => Color::srgb(0.25, 1.0, 0.60),
-        BotRole::Builder => Color::srgb(1.0, 0.70, 0.20),
-        BotRole::Architect => Color::srgb(1.0, 0.15, 0.85),
-        BotRole::RoadCrew => Color::srgb(0.90, 0.95, 1.0),
-        BotRole::ParkKeeper => Color::srgb(0.20, 0.95, 0.35),
-        BotRole::RepairTech => Color::srgb(1.0, 0.35, 0.20),
+        BotRole::CompanionGuide => Color::srgb(0.30, 0.39, 0.42),
+        BotRole::CompanionMaker => Color::srgb(0.25, 0.36, 0.40),
+        BotRole::Planner => Color::srgb(0.22, 0.33, 0.41),
+        BotRole::Surveyor => Color::srgb(0.18, 0.38, 0.35),
+        BotRole::Builder => Color::srgb(0.46, 0.31, 0.12),
+        BotRole::Architect => Color::srgb(0.36, 0.20, 0.28),
+        BotRole::RoadCrew => Color::srgb(0.38, 0.42, 0.44),
+        BotRole::ParkKeeper => Color::srgb(0.21, 0.34, 0.23),
+        BotRole::RepairTech => Color::srgb(0.43, 0.20, 0.12),
     }
 }
 
@@ -3962,9 +5124,11 @@ fn bot_role_color(role: BotRole) -> Color {
 fn tick_friendly_world(
     time: Res<Time>,
     mut brain: ResMut<FriendlyWorldBrain>,
+    mut command_executor: ResMut<BotCommandExecutor>,
     mut world: ResMut<VoxelWorld>,
     mut history: ResMut<BuilderHistory>,
     budget: Res<RuntimeBudget>,
+    runtime: Res<BotRuntimeControl>,
     active: Option<Res<ActiveWorld>>,
     city: Option<Res<crate::city::CityState>>,
     player_q: Query<&Transform, With<Player>>,
@@ -3988,16 +5152,21 @@ fn tick_friendly_world(
             && sync_user_city_roads(&mut brain.save, &city.roads)
         {
             brain.force_city_idea = true;
-            brain.dirty = true;
+            brain.mark_dirty();
         }
     }
 
-    keep_bots_visible_and_busy(&mut brain, &world, player_pos);
+    let perception_ids = &runtime.schedule.perception;
+    keep_bots_visible_and_busy(&mut brain, &world, player_pos, perception_ids);
     if !brain.queued_commands.is_empty() {
-        brain.save.autonomy.bots_active = true;
-        brain.save.autonomy.enabled = false;
+        let mode = if brain.save.autonomy.active_work_area.is_some() {
+            BotFleetMode::MarkedArea
+        } else {
+            BotFleetMode::ManualQueue
+        };
+        brain.save.autonomy.set_fleet_mode(mode);
         process_queued_commands(&mut brain, &world, player_pos, &ship_positions);
-        brain.dirty = true;
+        brain.mark_dirty();
     }
     if !brain.save.autonomy.bots_active {
         if brain.message_cooldown <= 0.0 {
@@ -4014,10 +5183,11 @@ fn tick_friendly_world(
         || allow_road_front_infill
         || open_projects_before_planning == 0
         || brain.force_city_idea;
-    if brain.force_city_idea || (brain.save.autonomy.enabled && brain.plan_timer <= 0.0) {
+    if should_run_city_planner(&brain) {
         brain.plan_timer = planner_interval(&brain.save);
-        let urgent = brain.force_city_idea;
+        let urgent = brain.force_city_idea || brain.one_shot_plan_request;
         brain.force_city_idea = false;
+        brain.one_shot_plan_request = false;
         if allow_planner_tick
             && run_city_planner(
                 &mut brain,
@@ -4028,43 +5198,55 @@ fn tick_friendly_world(
                 &budget,
             )
         {
-            brain.dirty = true;
+            brain.mark_dirty();
         } else if !allow_new_city_work && brain.message_cooldown <= 0.0 {
             brain.hud_message = "Bot city paused while terrain and mesh streaming catch up.".into();
             brain.message_cooldown = VISIBLE_MESSAGE_COOLDOWN;
         }
     }
 
-    move_bot_memories(&mut brain.save, &world, dt);
-
     let mut completed = Vec::new();
     let mut blocked = Vec::new();
-    let open_projects = planner_project_count(&brain.save);
-    let frame_edit_budget = bot_frame_edit_budget(&budget, open_projects);
-    let per_project_budget = bot_project_slice_budget(frame_edit_budget, open_projects);
-    let project_scan_budget = bot_project_scan_budget(open_projects);
+    let active_limit = active_project_limit_for_budget(&brain.save, &budget);
+    let scheduled = scheduled_project_indices(&brain.save, brain.project_scan_cursor, active_limit);
+    park_unscheduled_active_projects(&mut brain.save, &scheduled);
+    for &idx in &scheduled {
+        ensure_project_crew_for_index(&mut brain.save, idx);
+    }
+    let workfronts = scheduled
+        .iter()
+        .filter_map(|idx| {
+            let project = brain.save.projects.get(*idx)?;
+            let exact_plan = command_executor.plan_for_project(project.id);
+            next_project_workfront(project, &world, exact_plan.as_ref())
+                .map(|workfront| (*idx, workfront))
+        })
+        .collect::<Vec<_>>();
+    for (idx, workfront) in &workfronts {
+        retarget_project_crew(&mut brain.save, *idx, *workfront, &world);
+    }
+    move_bot_memories(&mut brain.save, &world, dt, perception_ids);
+
+    let running_projects = scheduled.len();
+    let frame_edit_budget = bot_frame_edit_budget(&budget, running_projects);
+    let per_project_budget = bot_project_slice_budget(frame_edit_budget, running_projects);
     let mut changed_total = 0usize;
     let bounds = brain.save.primary_bounds();
 
     if frame_edit_budget > 0 {
         let project_len = brain.save.projects.len();
-        let scan_limit = project_len.min(project_scan_budget);
-        let start = if project_len == 0 {
-            0
-        } else {
-            brain.project_scan_cursor % project_len
-        };
-        let mut scanned = 0usize;
-        while scanned < scan_limit {
-            let idx = (start + scanned) % project_len;
-            scanned += 1;
-            if brain.save.projects[idx].status.is_done() {
-                continue;
-            }
+        for &idx in &scheduled {
             let remaining = frame_edit_budget.saturating_sub(changed_total);
             if remaining == 0 {
                 break;
             }
+            let project_id = brain.save.projects[idx].id;
+            let exact_plan = command_executor.plan_for_project(project_id);
+            let workfront = workfronts.iter().find_map(|(workfront_idx, workfront)| {
+                (*workfront_idx == idx).then_some(*workfront)
+            });
+            let builder_position = workfront
+                .and_then(|workfront| arrived_project_builder(&brain.save, idx, workfront));
             let result = advance_project_slice(
                 &mut brain.save.projects[idx],
                 &mut world,
@@ -4073,8 +5255,15 @@ fn tick_friendly_world(
                 &ship_positions,
                 bounds,
                 remaining.min(per_project_budget),
+                builder_position,
+                exact_plan.as_ref(),
             );
             changed_total += result.changed;
+            command_executor.record_project_progress(
+                project_id,
+                result.changed,
+                result.touched_chunks.iter().copied(),
+            );
             if result.completed {
                 completed.push(idx);
             } else if result.blocked {
@@ -4087,7 +5276,7 @@ fn tick_friendly_world(
         brain.project_scan_cursor = if project_len == 0 {
             0
         } else {
-            (start + scanned).min(start + project_len) % project_len
+            (brain.project_scan_cursor + 1) % project_len
         };
     } else if brain.message_cooldown <= 0.0 {
         brain.hud_message = "Bot builders are yielding to max-distance world streaming.".into();
@@ -4102,27 +5291,33 @@ fn tick_friendly_world(
             format!("{label} complete. Bot city is growing."),
             8,
         );
-        if allow_new_city_work {
+        if allow_new_city_work && brain.save.autonomy.enabled {
             brain.force_city_idea = true;
             brain.plan_timer = 0.0;
         } else {
             brain.plan_timer = brain.plan_timer.max(planner_interval(&brain.save) * 2.0);
         }
-        brain.dirty = true;
+        brain.mark_dirty();
     }
 
     for idx in blocked {
         let label = brain.save.projects[idx].label.clone();
         let reason = brain.save.projects[idx].blocked_reason.clone();
         show_city_message(&mut brain, format!("{label} blocked: {reason}"), 7);
-        brain.dirty = true;
+        brain.mark_dirty();
     }
 
+    compact_project_history(&mut brain.save);
     sync_bot_task_progress(&mut brain.save);
     brain.save.journal.truncate(128);
     if changed_total > 0 {
-        brain.dirty = true;
+        brain.mark_dirty();
     }
+}
+
+fn should_run_city_planner(brain: &FriendlyWorldBrain) -> bool {
+    brain.one_shot_plan_request
+        || (brain.save.autonomy.enabled && (brain.force_city_idea || brain.plan_timer <= 0.0))
 }
 
 fn process_queued_commands(
@@ -4179,12 +5374,12 @@ fn process_queued_commands(
                     .journal
                     .push(BotJournalEntry::new(message.clone()));
                 brain.hud_message = message;
-                brain.dirty = true;
+                brain.mark_dirty();
             }
             Err(reason) => {
                 brain.save.last_blocked_reason = reason.clone();
                 brain.hud_message = format!("Task rejected: {reason}");
-                brain.dirty = true;
+                brain.mark_dirty();
             }
         }
     }
@@ -4205,6 +5400,16 @@ fn add_project_with_site_search(
     player_pos: Option<Vec3>,
     ship_positions: &[Vec3],
 ) -> Result<u64, String> {
+    if manual {
+        if let Some(bot_id) = assigned_bot {
+            if !bot_can_accept_project(save, bot_id, save.next_project_id, None) {
+                return Err(format!(
+                    "{} is already assigned; choose an idle bot or finish its current task first",
+                    bot_label(save, bot_id)
+                ));
+            }
+        }
+    }
     let seq = save.projects.len() + save.completed_projects as usize;
     let site_search_player_anchor = if manual { player_pos } else { None };
     let candidates = command_site_candidates(
@@ -4286,7 +5491,7 @@ fn command_site_candidates(
     for (anchor_idx, anchor) in anchors.into_iter().enumerate() {
         for step in 0..24 {
             let player_clearance_ring =
-                size[0].max(size[2]) as f32 * 0.72 + BOT_PLAYER_PROJECT_MARGIN;
+                size[0].max(size[2]) as f32 * 0.72 + BOT_PLAYER_ADMISSION_CLEARANCE;
             let anchor_needs_clearance_ring = player_clearance_pos
                 .map(|player| {
                     Vec2::new(anchor.x - player.x, anchor.z - player.z).length()
@@ -4305,7 +5510,13 @@ fn command_site_candidates(
             let center = anchor + Vec3::new(angle.cos() * ring, 0.0, angle.sin() * ring);
             let target_origin = clamp_to_bounds(bounds, center - half);
             let origin = project_origin(world, target_origin);
-            if !bounds.contains_box(origin, size) || !project_anchor_loaded(world, origin, size) {
+            if !bounds.contains_box(origin, size)
+                || save
+                    .autonomy
+                    .active_work_area
+                    .is_some_and(|area| !area.contains_box(origin, size))
+                || !project_anchor_loaded(world, origin, size)
+            {
                 continue;
             }
             if !out.contains(&origin) {
@@ -4408,12 +5619,13 @@ fn keep_bots_visible_and_busy(
     brain: &mut FriendlyWorldBrain,
     world: &VoxelWorld,
     player_pos: Option<Vec3>,
+    perception_ids: &BotIdBudget<BOT_MAX_FRAME_PERCEPTION_BOTS>,
 ) {
     if brain.save.agents.is_empty() {
         return;
     }
     if brain.save.agents.iter().any(|b| b.companion) {
-        update_companion_targets(&mut brain.save, world, player_pos);
+        update_companion_targets(&mut brain.save, world, player_pos, perception_ids);
         return;
     }
 
@@ -4468,13 +5680,22 @@ fn keep_bots_visible_and_busy(
     );
 }
 
-fn update_companion_targets(save: &mut BotWorldSave, world: &VoxelWorld, player_pos: Option<Vec3>) {
+fn update_companion_targets(
+    save: &mut BotWorldSave,
+    world: &VoxelWorld,
+    player_pos: Option<Vec3>,
+    perception_ids: &BotIdBudget<BOT_MAX_FRAME_PERCEPTION_BOTS>,
+) {
     let Some(player_pos) = player_pos else {
         return;
     };
     let elapsed = now_epoch() as f32 * 0.001;
     let companion_count = save.agents.iter().filter(|b| b.companion).count().max(1) as f32;
-    for bot in save.agents.iter_mut().filter(|b| b.companion) {
+    for bot in save
+        .agents
+        .iter_mut()
+        .filter(|bot| bot.companion && perception_ids.contains(&bot.id))
+    {
         bot.memory.preferred_follow_distance = bot
             .memory
             .preferred_follow_distance
@@ -4588,12 +5809,19 @@ fn set_bot_air_target(bot: &mut BotAgent, world: &VoxelWorld, target: Vec3, min_
 
 fn draw_companion_preview_gizmos(
     brain: Res<FriendlyWorldBrain>,
+    runtime: Res<BotRuntimeControl>,
     mut gizmos: Gizmos,
     time: Res<Time>,
 ) {
     let elapsed = time.elapsed_seconds();
     let pulse = (elapsed * 3.4).sin() * 0.5 + 0.5;
-    for bot in brain.save.agents.iter().filter(|b| b.companion) {
+    let fx_ids = &runtime.schedule.fx;
+    for bot in brain
+        .save
+        .agents
+        .iter()
+        .filter(|bot| bot.companion && fx_ids.contains(&bot.id))
+    {
         let pos = vec3_from_arr(bot.position);
         let target = vec3_from_arr(bot.target);
         match bot.companion_mode {
@@ -4780,6 +6008,7 @@ fn active_project_limit(save: &BotWorldSave) -> usize {
         .max_active_projects
         .clamp(1, MAX_ACTIVE_PROJECTS_LIMIT)
         .min(intensity_limit)
+        .min(BOT_ACTIVE_AREA_HARD_LIMIT)
 }
 
 fn active_project_limit_for_budget(save: &BotWorldSave, budget: &RuntimeBudget) -> usize {
@@ -4805,6 +6034,66 @@ fn planner_project_count(save: &BotWorldSave) -> usize {
         .iter()
         .filter(|project| !project.status.is_done())
         .count()
+}
+
+fn project_schedule_status_rank(status: BotProjectStatus) -> u8 {
+    match status {
+        BotProjectStatus::Active => 0,
+        BotProjectStatus::WaitingForCrew => 1,
+        BotProjectStatus::WaitingForPlayer => 2,
+        BotProjectStatus::WaitingForChunks => 3,
+        BotProjectStatus::Queued => 4,
+        BotProjectStatus::CommandHeld | BotProjectStatus::Complete | BotProjectStatus::Blocked => 5,
+    }
+}
+
+fn scheduled_project_indices(save: &BotWorldSave, cursor: usize, limit: usize) -> Vec<usize> {
+    if limit == 0 || save.projects.is_empty() {
+        return Vec::new();
+    }
+    let len = save.projects.len();
+    let mut candidates = save
+        .projects
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| {
+            !project.status.is_done() && project.status != BotProjectStatus::CommandHeld
+        })
+        .map(|(index, project)| {
+            let rotated_order = (index + len - cursor % len) % len;
+            (
+                index,
+                project.priority,
+                project_schedule_status_rank(project.status),
+                rotated_order,
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    candidates
+        .into_iter()
+        .take(limit.min(BOT_ACTIVE_AREA_HARD_LIMIT))
+        .map(|(index, _, _, _)| index)
+        .collect()
+}
+
+fn park_unscheduled_active_projects(save: &mut BotWorldSave, scheduled: &[usize]) {
+    let scheduled = scheduled.iter().copied().collect::<HashSet<_>>();
+    for (index, project) in save.projects.iter_mut().enumerate() {
+        if project.status == BotProjectStatus::Active && !scheduled.contains(&index) {
+            project.status = BotProjectStatus::Queued;
+            project.blocked_reason = "waiting for a higher-priority fleet slot".into();
+        }
+    }
+}
+
+fn scheduled_project_count(save: &BotWorldSave) -> usize {
+    planner_project_count(save).min(active_project_limit(save))
 }
 
 fn open_access_road_project_count(save: &BotWorldSave) -> usize {
@@ -4884,12 +6173,14 @@ fn bot_project_slice_budget(frame_budget: usize, open_projects: usize) -> usize 
 }
 
 fn bot_project_scan_budget(open_projects: usize) -> usize {
-    if open_projects <= DEFAULT_MAX_ACTIVE_PROJECTS {
-        96
+    if open_projects == 0 {
+        0
+    } else if open_projects <= DEFAULT_MAX_ACTIVE_PROJECTS {
+        64
     } else if open_projects <= MAX_ACTIVE_PROJECTS_LIMIT {
-        128
+        48
     } else {
-        160
+        32
     }
 }
 
@@ -7416,6 +8707,11 @@ fn add_project_unchecked(
     priority: u8,
     manual: bool,
 ) -> Result<u64, String> {
+    if let Some(area) = save.autonomy.active_work_area {
+        if !area.contains_box(origin, size) {
+            return Err("outside the player-marked bot work area".into());
+        }
+    }
     let id = save.next_project_id;
     save.next_project_id += 1;
     let total_steps = (size[0].max(1) * size[1].max(1) * size[2].max(1)) as u32;
@@ -7425,6 +8721,9 @@ fn add_project_unchecked(
         format!("Auto {} #{id}", kind.label())
     };
     let crew_id = create_project_crew(save, id, kind, assigned_bot, origin);
+    let assigned_bot = crew_id
+        .and_then(|crew_id| save.crews.iter().find(|crew| crew.id == crew_id))
+        .and_then(|crew| crew.bot_ids.first().copied());
     let concept = build_project_concept(
         save,
         kind,
@@ -7458,6 +8757,237 @@ fn add_project_unchecked(
     save.journal
         .push(BotJournalEntry::new(format!("Queued {label}.")));
     Ok(id)
+}
+
+/// Create one project for the exact bot IDs frozen in an approved command.
+///
+/// This path intentionally bypasses `pick_crew_bots`: no leader, swarm
+/// member, role fallback, or extra idle bot may be added to an approved
+/// recipient set.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_project_for_exact_bots(
+    save: &mut BotWorldSave,
+    world: &VoxelWorld,
+    source_command_id: u64,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    theme: BotTheme,
+    bot_ids: &[u64],
+    priority: u8,
+    player_pos: Option<Vec3>,
+    ship_positions: &[Vec3],
+) -> Result<u64, String> {
+    validate_project_for_exact_bots(
+        save,
+        world,
+        kind,
+        origin,
+        size,
+        bot_ids,
+        player_pos,
+        ship_positions,
+    )?;
+
+    let project_id = save.next_project_id;
+    let next_project_id = project_id
+        .checked_add(1)
+        .ok_or_else(|| "bot project id space exhausted".to_owned())?;
+    let crew_id = save.next_crew_id;
+    let next_crew_id = crew_id
+        .checked_add(1)
+        .ok_or_else(|| "bot crew id space exhausted".to_owned())?;
+    let volume = i64::from(size[0])
+        .checked_mul(i64::from(size[1]))
+        .and_then(|value| value.checked_mul(i64::from(size[2])))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "project volume does not fit the execution cursor".to_owned())?;
+    let assigned_bot = bot_ids.first().copied();
+    let label = format!(
+        "Agent command #{source_command_id}: {} #{project_id}",
+        kind.label()
+    );
+
+    save.next_project_id = next_project_id;
+    save.next_crew_id = next_crew_id;
+    save.crews.push(BotCrew {
+        id: crew_id,
+        role_focus: kind.preferred_role(),
+        bot_ids: bot_ids.to_vec(),
+        project_id,
+        active: true,
+    });
+    for (index, bot_id) in bot_ids.iter().copied().enumerate() {
+        let bot = save
+            .agents
+            .iter_mut()
+            .find(|bot| bot.id == bot_id)
+            .expect("exact bot recipients were validated before mutation");
+        bot.crew_id = Some(crew_id);
+        bot.state = BotState::Planning;
+        let offset = crew_offset(index);
+        bot.target = [
+            origin[0] as f32 + offset.x,
+            origin[1] as f32 + 2.0,
+            origin[2] as f32 + offset.z,
+        ];
+    }
+
+    let concept = build_project_concept(
+        save,
+        kind,
+        theme,
+        origin,
+        size,
+        &label,
+        true,
+        assigned_bot,
+        Some(crew_id),
+    );
+    save.projects.push(BotProject {
+        id: project_id,
+        kind,
+        label: label.clone(),
+        origin,
+        size,
+        theme,
+        status: BotProjectStatus::Queued,
+        cursor: 0,
+        total_steps: volume,
+        assigned_bot,
+        district_id: None,
+        crew_id: Some(crew_id),
+        idea_id: None,
+        blocked_reason: String::new(),
+        priority,
+        concept,
+    });
+    save.exact_command_project_ids.push(project_id);
+    assign_crew_task(
+        save,
+        Some(crew_id),
+        assigned_bot,
+        project_id,
+        kind,
+        &label,
+        origin,
+    );
+    save.journal
+        .push(BotJournalEntry::new(format!("Queued {label}.")));
+    Ok(project_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_project_for_exact_bots(
+    save: &BotWorldSave,
+    world: &VoxelWorld,
+    kind: BotTaskKind,
+    origin: [i32; 3],
+    size: [i32; 3],
+    bot_ids: &[u64],
+    player_pos: Option<Vec3>,
+    ship_positions: &[Vec3],
+) -> Result<(), String> {
+    validate_project_request(save, world, origin, size, player_pos, ship_positions)?;
+    validate_exact_project_bots(save, bot_ids)?;
+
+    if project_footprint_reserved(save, origin, size, kind) {
+        return Err("target overlaps an existing reserved bot project".into());
+    }
+    if road_project_blocks_city_footprint(save, origin, size, kind) {
+        return Err("target road would cross a reserved city footprint".into());
+    }
+    if let Some(district) = nearest_district(save, project_center(origin, size)) {
+        if project_footprint_blocks_road_corridor(save, district, origin, size, kind) {
+            return Err("target would block an existing road corridor".into());
+        }
+        if road_project_duplicates_existing_corridor(save, district, origin, size, kind) {
+            return Err("target duplicates an existing road corridor".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_exact_project_bots(
+    save: &BotWorldSave,
+    bot_ids: &[u64],
+) -> Result<(), String> {
+    if bot_ids.is_empty() {
+        return Err("exact bot command requires at least one recipient".into());
+    }
+    if bot_ids.len() > MAX_CREW_BOTS_PER_PROJECT {
+        return Err(format!(
+            "exact bot command has {} recipients; the safe maximum is {}",
+            bot_ids.len(),
+            MAX_CREW_BOTS_PER_PROJECT
+        ));
+    }
+
+    let mut seen = HashSet::with_capacity(bot_ids.len());
+    for &bot_id in bot_ids {
+        if bot_id == 0 {
+            return Err("bot id 0 is not a valid exact recipient".into());
+        }
+        if !seen.insert(bot_id) {
+            return Err(format!("bot recipient {bot_id} appears more than once"));
+        }
+        let bot = save
+            .agents
+            .iter()
+            .find(|bot| bot.id == bot_id)
+            .ok_or_else(|| format!("bot recipient {bot_id} does not exist"))?;
+        let active_crew = save
+            .crews
+            .iter()
+            .any(|crew| crew.active && crew.bot_ids.contains(&bot_id));
+        if bot.current_task.is_some() || bot.crew_id.is_some() || active_crew {
+            return Err(format!("bot recipient {bot_id} is already assigned"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn retire_exact_bot_project(save: &mut BotWorldSave, project_id: u64, reason: &str) {
+    let requested_crew_id = save
+        .projects
+        .iter_mut()
+        .find(|project| project.id == project_id)
+        .and_then(|project| {
+            project.status = BotProjectStatus::Blocked;
+            project.blocked_reason = reason.to_owned();
+            project.crew_id
+        });
+
+    let crew_id = requested_crew_id.filter(|crew_id| {
+        save.crews
+            .iter()
+            .any(|crew| crew.id == *crew_id && crew.project_id == project_id)
+    });
+    if let Some(crew_id) = crew_id {
+        if let Some(crew) = save
+            .crews
+            .iter_mut()
+            .find(|crew| crew.id == crew_id && crew.project_id == project_id)
+        {
+            crew.active = false;
+        }
+    }
+    for bot in &mut save.agents {
+        let owns_project = bot
+            .current_task
+            .as_ref()
+            .is_some_and(|task| task.project_id == project_id);
+        let owns_crew = crew_id.is_some_and(|id| bot.crew_id == Some(id));
+        if owns_project && owns_crew {
+            bot.current_task = None;
+            bot.crew_id = None;
+            bot.state = BotState::Inspecting;
+            if bot.companion {
+                bot.companion_mode = BotCompanionMode::AwaitingInstruction;
+            }
+            bot.memory.last_message = format!("Exact project stopped: {reason}");
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8196,6 +9726,11 @@ fn validate_project_shape_and_bounds(
     if !bounds.contains_box(origin, size) {
         return Err("outside the 1024 block bot city boundary".into());
     }
+    if let Some(area) = save.autonomy.active_work_area {
+        if !area.contains_box(origin, size) {
+            return Err("outside the player-marked bot work area".into());
+        }
+    }
     Ok(())
 }
 
@@ -8220,7 +9755,7 @@ fn create_project_crew(
     assigned_bot: Option<u64>,
     origin: [i32; 3],
 ) -> Option<u64> {
-    let bot_ids = pick_crew_bots(save, kind.preferred_role(), assigned_bot);
+    let bot_ids = pick_crew_bots(save, project_id, kind, assigned_bot);
     if bot_ids.is_empty() {
         return None;
     }
@@ -8248,27 +9783,97 @@ fn create_project_crew(
     Some(id)
 }
 
-fn pick_crew_bots(save: &BotWorldSave, preferred: BotRole, assigned_bot: Option<u64>) -> Vec<u64> {
+fn regular_crew_size(kind: BotTaskKind) -> usize {
+    match kind {
+        BotTaskKind::BuildResidentialBlock
+        | BotTaskKind::BuildTower
+        | BotTaskKind::BuildGlassTower
+        | BotTaskKind::MakeTaller
+        | BotTaskKind::BuildPlaza
+        | BotTaskKind::ExpandRoadGrid
+        | BotTaskKind::UpgradeDistrict => BOT_REGULAR_CREW_LIMIT,
+        BotTaskKind::BuildRoad
+        | BotTaskKind::RecolorRoad
+        | BotTaskKind::ClearFlatten
+        | BotTaskKind::LandingPad
+        | BotTaskKind::BuildServicePad
+        | BotTaskKind::TargetRange => 2,
+        BotTaskKind::BuildHome
+        | BotTaskKind::BuildPark
+        | BotTaskKind::AddLights
+        | BotTaskKind::DecorateStreet => 1,
+    }
+}
+
+fn bot_can_accept_project(
+    save: &BotWorldSave,
+    bot_id: u64,
+    project_id: u64,
+    crew_id: Option<u64>,
+) -> bool {
+    let Some(bot) = save.agents.iter().find(|bot| bot.id == bot_id) else {
+        return false;
+    };
+    if bot
+        .current_task
+        .as_ref()
+        .is_some_and(|task| task.project_id != project_id)
+    {
+        return false;
+    }
+    if let Some(existing_crew_id) = bot.crew_id {
+        let same_crew = crew_id == Some(existing_crew_id);
+        let same_project = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == existing_crew_id)
+            .is_some_and(|crew| crew.project_id == project_id);
+        if !same_crew && !same_project {
+            return false;
+        }
+    }
+    !save
+        .crews
+        .iter()
+        .any(|crew| crew.active && crew.project_id != project_id && crew.bot_ids.contains(&bot_id))
+}
+
+fn pick_crew_bots(
+    save: &BotWorldSave,
+    project_id: u64,
+    kind: BotTaskKind,
+    assigned_bot: Option<u64>,
+) -> Vec<u64> {
+    let preferred = kind.preferred_role();
+    let limit = regular_crew_size(kind);
     let mut out = Vec::new();
     if let Some(id) = assigned_bot {
-        out.push(id);
+        if bot_can_accept_project(save, id, project_id, None) {
+            out.push(id);
+        }
         let leader_id = save
             .agents
             .iter()
             .find(|bot| bot.id == id)
             .and_then(|bot| bot.swarm_leader_id)
             .unwrap_or(id);
-        if leader_id != id && !out.contains(&leader_id) {
+        if leader_id != id
+            && !out.contains(&leader_id)
+            && bot_can_accept_project(save, leader_id, project_id, None)
+        {
             out.push(leader_id);
         }
         let mut swarm: Vec<&BotAgent> = save
             .agents
             .iter()
-            .filter(|bot| bot.swarm_leader_id == Some(leader_id) && bot.current_task.is_none())
+            .filter(|bot| {
+                bot.swarm_leader_id == Some(leader_id)
+                    && bot_can_accept_project(save, bot.id, project_id, None)
+            })
             .collect();
         swarm.sort_by_key(|bot| (bot.role != preferred, bot.swarm_index));
         for bot in swarm {
-            if out.len() >= MAX_CREW_BOTS_PER_PROJECT {
+            if out.len() >= limit {
                 break;
             }
             if !out.contains(&bot.id) {
@@ -8286,28 +9891,34 @@ fn pick_crew_bots(save: &BotWorldSave, preferred: BotRole, assigned_bot: Option<
         BotRole::ParkKeeper,
         BotRole::RepairTech,
     ] {
-        if let Some(id) = pick_bot(save, role) {
-            if !out.contains(&id) {
-                out.push(id);
+        for bot in save.agents.iter().filter(|bot| bot.role == role) {
+            if out.len() >= limit {
+                break;
+            }
+            if !out.contains(&bot.id) && bot_can_accept_project(save, bot.id, project_id, None) {
+                out.push(bot.id);
             }
         }
     }
     for bot in &save.agents {
-        if out.len() >= MAX_CREW_BOTS_PER_PROJECT {
+        if out.len() >= limit {
             break;
         }
-        if bot.current_task.is_none() && !bot.companion && !out.contains(&bot.id) {
+        if !bot.companion
+            && !out.contains(&bot.id)
+            && bot_can_accept_project(save, bot.id, project_id, None)
+        {
             out.push(bot.id);
         }
     }
-    out.truncate(MAX_CREW_BOTS_PER_PROJECT);
+    out.truncate(limit);
     out
 }
 
 fn assign_crew_task(
     save: &mut BotWorldSave,
     crew_id: Option<u64>,
-    assigned_bot: Option<u64>,
+    _assigned_bot: Option<u64>,
     project_id: u64,
     kind: BotTaskKind,
     label: &str,
@@ -8317,13 +9928,10 @@ fn assign_crew_task(
         .and_then(|id| save.crews.iter().find(|c| c.id == id))
         .map(|c| c.bot_ids.clone())
         .unwrap_or_default();
-    if let Some(bot_id) = assigned_bot {
-        if !bot_ids.contains(&bot_id) {
-            bot_ids.push(bot_id);
-        }
-    }
+    bot_ids.retain(|bot_id| bot_can_accept_project(save, *bot_id, project_id, crew_id));
     for (n, bot_id) in bot_ids.into_iter().enumerate() {
         if let Some(bot) = save.agents.iter_mut().find(|b| b.id == bot_id) {
+            bot.crew_id = crew_id;
             bot.state = BotState::Planning;
             let offset = crew_offset(n);
             bot.target = [
@@ -8331,17 +9939,93 @@ fn assign_crew_task(
                 origin[1] as f32 + 2.0,
                 origin[2] as f32 + offset.z,
             ];
-            bot.current_task = Some(BotTask {
-                task_type: kind,
-                project_id,
-                label: label.into(),
-                progress: 0.0,
-            });
+            if bot.current_task.is_none() {
+                bot.current_task = Some(BotTask {
+                    task_type: kind,
+                    project_id,
+                    label: label.into(),
+                    progress: 0.0,
+                });
+            }
             if bot.companion {
                 bot.companion_mode = BotCompanionMode::AssistingTask;
             }
             bot.memory.last_message = format!("Crew planning {label}.");
         }
+    }
+}
+
+fn ensure_project_crew_for_index(save: &mut BotWorldSave, project_idx: usize) {
+    let Some(project) = save.projects.get(project_idx) else {
+        return;
+    };
+    if project.status.is_done() || project.status == BotProjectStatus::CommandHeld {
+        return;
+    }
+    let project_id = project.id;
+    let kind = project.kind;
+    let assigned_bot = project.assigned_bot;
+    let origin = project.origin;
+    let label = project.label.clone();
+    let mut crew_id = project.crew_id.filter(|crew_id| {
+        save.crews.iter().any(|crew| {
+            crew.id == *crew_id
+                && crew.project_id == project_id
+                && crew.active
+                && !crew.bot_ids.is_empty()
+        })
+    });
+
+    if let Some(id) = crew_id {
+        assign_crew_task(
+            save,
+            Some(id),
+            assigned_bot,
+            project_id,
+            kind,
+            &label,
+            origin,
+        );
+        let usable = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == id)
+            .is_some_and(|crew| {
+                crew.bot_ids.iter().any(|bot_id| {
+                    save.agents
+                        .iter()
+                        .find(|bot| bot.id == *bot_id)
+                        .is_some_and(|bot| {
+                            bot.crew_id == Some(id)
+                                && bot
+                                    .current_task
+                                    .as_ref()
+                                    .is_some_and(|task| task.project_id == project_id)
+                        })
+                })
+            });
+        if !usable {
+            if let Some(crew) = save.crews.iter_mut().find(|crew| crew.id == id) {
+                crew.active = false;
+            }
+            crew_id = None;
+        }
+    }
+
+    if crew_id.is_none() {
+        crew_id = create_project_crew(save, project_id, kind, assigned_bot, origin);
+        assign_crew_task(
+            save,
+            crew_id,
+            assigned_bot,
+            project_id,
+            kind,
+            &label,
+            origin,
+        );
+    }
+    if let Some(project) = save.projects.get_mut(project_idx) {
+        project.crew_id = crew_id;
     }
 }
 
@@ -8366,18 +10050,45 @@ fn complete_project_at(save: &mut BotWorldSave, idx: usize) {
             idea.status = BotIdeaStatus::Built;
         }
     }
-    if let Some(crew_id) = project.crew_id {
-        if let Some(crew) = save.crews.iter_mut().find(|c| c.id == crew_id) {
+    let matching_crew_id = project.crew_id.filter(|crew_id| {
+        save.crews
+            .iter()
+            .any(|crew| crew.id == *crew_id && crew.project_id == project.id)
+    });
+    if let Some(crew_id) = matching_crew_id {
+        if let Some(crew) = save
+            .crews
+            .iter_mut()
+            .find(|crew| crew.id == crew_id && crew.project_id == project.id)
+        {
             crew.active = false;
         }
     }
-    let crew_bot_ids = project
-        .crew_id
+    let crew_bot_ids = matching_crew_id
         .and_then(|id| save.crews.iter().find(|c| c.id == id))
         .map(|c| c.bot_ids.clone())
-        .unwrap_or_else(|| project.assigned_bot.into_iter().collect());
+        .unwrap_or_else(|| {
+            if project.crew_id.is_none() {
+                project.assigned_bot.into_iter().collect()
+            } else {
+                Vec::new()
+            }
+        });
     for bot_id in crew_bot_ids {
         if let Some(bot) = save.agents.iter_mut().find(|b| b.id == bot_id) {
+            let owns_task = bot
+                .current_task
+                .as_ref()
+                .is_some_and(|task| task.project_id == project.id);
+            let owns_crew = matching_crew_id.is_some_and(|crew_id| bot.crew_id == Some(crew_id));
+            let coherent_ownership = if matching_crew_id.is_some() {
+                owns_task && owns_crew
+            } else {
+                owns_task && bot.crew_id.is_none()
+            };
+            if !coherent_ownership {
+                continue;
+            }
             bot.state = BotState::Inspecting;
             bot.crew_id = None;
             bot.memory.completed_tasks = bot.memory.completed_tasks.saturating_add(1);
@@ -8474,10 +10185,124 @@ fn autonomous_project_size(kind: BotTaskKind) -> [i32; 3] {
 #[derive(Default)]
 struct ProjectAdvance {
     changed: usize,
+    touched_chunks: HashSet<ChunkPos>,
     completed: bool,
     blocked: bool,
 }
 
+fn next_project_workfront(
+    project: &BotProject,
+    world: &VoxelWorld,
+    exact_plan: Option<&ExactBotCommandPlan>,
+) -> Option<IVec3> {
+    let scan_end = project
+        .cursor
+        .saturating_add(BOT_WORKFRONT_SCAN_LIMIT)
+        .min(project.total_steps);
+    for cursor in project.cursor..scan_end {
+        let local = cursor_to_local(cursor, project.size);
+        let voxel = match exact_plan {
+            Some(plan) => project_voxel_with_plan(project, local, world, Some(plan)),
+            None => project_voxel(project, local, world),
+        };
+        if let Some((position, _)) = voxel {
+            return Some(position);
+        }
+    }
+    None
+}
+
+fn retarget_project_crew(
+    save: &mut BotWorldSave,
+    project_idx: usize,
+    workfront: IVec3,
+    world: &VoxelWorld,
+) {
+    let Some(project) = save.projects.get(project_idx) else {
+        return;
+    };
+    let Some(crew_id) = project.crew_id else {
+        return;
+    };
+    let project_id = project.id;
+    let bot_ids = save
+        .crews
+        .iter()
+        .find(|crew| crew.id == crew_id && crew.project_id == project_id && crew.active)
+        .map(|crew| crew.bot_ids.clone())
+        .unwrap_or_default();
+    let workfront_center = workfront.as_vec3() + Vec3::splat(0.5);
+
+    for (index, bot_id) in bot_ids.into_iter().enumerate() {
+        let Some(bot) = save.agents.iter_mut().find(|bot| bot.id == bot_id) else {
+            continue;
+        };
+        let owns_project = bot.crew_id == Some(crew_id)
+            && bot
+                .current_task
+                .as_ref()
+                .is_some_and(|task| task.project_id == project_id);
+        if !owns_project {
+            continue;
+        }
+        let offset = crew_offset(index) * 0.55;
+        let target_x = workfront_center.x + offset.x;
+        let target_z = workfront_center.z + offset.z;
+        let terrain_y =
+            world.surface_height_at(target_x.round() as i32, target_z.round() as i32) as f32;
+        let target_y = terrain_y + if bot.companion { 4.0 } else { 2.1 };
+        bot.target = [target_x, target_y, target_z];
+        let position = vec3_from_arr(bot.position);
+        let flat_distance = Vec2::new(
+            position.x - workfront_center.x,
+            position.z - workfront_center.z,
+        )
+        .length();
+        bot.state = if flat_distance <= BOT_WORKFRONT_REACH {
+            BotState::Building
+        } else {
+            BotState::Planning
+        };
+    }
+}
+
+fn arrived_project_builder(
+    save: &BotWorldSave,
+    project_idx: usize,
+    workfront: IVec3,
+) -> Option<Vec3> {
+    let project = save.projects.get(project_idx)?;
+    let crew_id = project.crew_id?;
+    let crew = save
+        .crews
+        .iter()
+        .find(|crew| crew.id == crew_id && crew.project_id == project.id && crew.active)?;
+    let workfront_center = workfront.as_vec3() + Vec3::splat(0.5);
+    crew.bot_ids
+        .iter()
+        .filter_map(|bot_id| {
+            let bot = save.agents.iter().find(|bot| bot.id == *bot_id)?;
+            if bot.crew_id != Some(crew_id)
+                || !bot
+                    .current_task
+                    .as_ref()
+                    .is_some_and(|task| task.project_id == project.id)
+            {
+                return None;
+            }
+            let position = vec3_from_arr(bot.position);
+            let distance = Vec2::new(
+                position.x - workfront_center.x,
+                position.z - workfront_center.z,
+            )
+            .length();
+            (distance <= BOT_WORKFRONT_REACH).then_some((position, distance))
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(position, _)| position)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn advance_project_slice(
     project: &mut BotProject,
     world: &mut VoxelWorld,
@@ -8486,6 +10311,8 @@ fn advance_project_slice(
     ship_positions: &[Vec3],
     bounds: BotCityBounds,
     budget: usize,
+    builder_position: Option<Vec3>,
+    exact_plan: Option<&ExactBotCommandPlan>,
 ) -> ProjectAdvance {
     let mut out = ProjectAdvance::default();
     if budget == 0 {
@@ -8505,7 +10332,11 @@ fn advance_project_slice(
     while project.cursor < project.total_steps && out.changed < budget && attempts < budget * 3 {
         attempts += 1;
         let local = cursor_to_local(project.cursor, project.size);
-        let Some((pos, voxel)) = project_voxel(project, local, world) else {
+        let voxel = match exact_plan {
+            Some(plan) => project_voxel_with_plan(project, local, world, Some(plan)),
+            None => project_voxel(project, local, world),
+        };
+        let Some((pos, voxel)) = voxel else {
             project.cursor += 1;
             continue;
         };
@@ -8520,9 +10351,26 @@ fn advance_project_slice(
             project.blocked_reason = "waiting for the next build column to stream in".into();
             break;
         }
+        let workfront_center = pos.as_vec3() + Vec3::splat(0.5);
+        let builder_in_reach = builder_position.is_some_and(|builder| {
+            Vec2::new(
+                builder.x - workfront_center.x,
+                builder.z - workfront_center.z,
+            )
+            .length()
+                <= BOT_WORKFRONT_REACH
+        });
+        if !builder_in_reach {
+            project.status = BotProjectStatus::WaitingForCrew;
+            project.blocked_reason =
+                "waiting for the assigned builder to reach the current workfront".into();
+            break;
+        }
         if protected_position(pos, player_pos, ship_positions) {
-            project.cursor += 1;
-            continue;
+            project.status = BotProjectStatus::WaitingForPlayer;
+            project.blocked_reason =
+                "waiting until player and shuttle clear the next build voxel".into();
+            break;
         }
         let before = world.voxel_at(pos.x, pos.y, pos.z);
         if before != voxel {
@@ -8532,6 +10380,8 @@ fn advance_project_slice(
             {
                 changes.push((pos, before, voxel));
                 out.changed += 1;
+                out.touched_chunks
+                    .insert(world_to_chunk(pos.x, pos.y, pos.z).0);
             }
         }
         project.cursor += 1;
@@ -8782,7 +10632,25 @@ fn civic_deck_base_y(world: &VoxelWorld, origin: IVec3, x: i32, z: i32) -> i32 {
 }
 
 fn project_voxel(project: &BotProject, local: IVec3, world: &VoxelWorld) -> Option<(IVec3, Voxel)> {
+    project_voxel_with_plan(project, local, world, None)
+}
+
+fn project_voxel_with_plan(
+    project: &BotProject,
+    local: IVec3,
+    world: &VoxelWorld,
+    exact_plan: Option<&ExactBotCommandPlan>,
+) -> Option<(IVec3, Voxel)> {
     let origin = IVec3::new(project.origin[0], project.origin[1], project.origin[2]);
+    if let Some(ExactBotCommandPlan::ClearFlatten) = exact_plan {
+        let pos = origin + local;
+        let voxel = if local.y == 0 {
+            project.theme.floor()
+        } else {
+            AIR
+        };
+        return Some((pos, voxel));
+    }
     match project.kind {
         BotTaskKind::BuildRoad | BotTaskKind::RecolorRoad => {
             let x = origin.x + local.x;
@@ -9735,17 +11603,22 @@ fn protected_project_area(
     ships: &[Vec3],
 ) -> bool {
     if player
-        .map(|p| xz_distance_to_project(origin, size, p) < BOT_PLAYER_PROJECT_MARGIN)
+        .map(|p| xz_distance_to_project(origin, size, p) < BOT_PLAYER_ADMISSION_CLEARANCE)
         .unwrap_or(false)
     {
         return true;
     }
     ships
         .iter()
-        .any(|s| xz_distance_to_project(origin, size, *s) < BOT_SHIP_PROJECT_MARGIN)
+        .any(|s| xz_distance_to_project(origin, size, *s) < BOT_SHIP_ADMISSION_CLEARANCE)
 }
 
-fn move_bot_memories(save: &mut BotWorldSave, world: &VoxelWorld, dt: f32) {
+fn move_bot_memories(
+    save: &mut BotWorldSave,
+    world: &VoxelWorld,
+    dt: f32,
+    terrain_probe_ids: &BotIdBudget<BOT_MAX_FRAME_PERCEPTION_BOTS>,
+) {
     for bot in &mut save.agents {
         let pos = vec3_from_arr(bot.position);
         let target = vec3_from_arr(bot.target);
@@ -9770,11 +11643,11 @@ fn move_bot_memories(save: &mut BotWorldSave, world: &VoxelWorld, dt: f32) {
         } else {
             pos
         };
-        if !bot.companion {
+        if !bot.companion && terrain_probe_ids.contains(&bot.id) {
             let sx = next.x.round() as i32;
             let sz = next.z.round() as i32;
             next.y = world.surface_height_at(sx, sz) as f32 + 2.1;
-        } else {
+        } else if bot.companion && terrain_probe_ids.contains(&bot.id) {
             // Soft floor: never let a companion clip the terrain.
             let sx = next.x.round() as i32;
             let sz = next.z.round() as i32;
@@ -9848,11 +11721,14 @@ fn process_companion_command(
 
     match command {
         CompanionCommand::BuildCityAutonomy => {
-            brain.save.autonomy.enabled = true;
-            brain.save.autonomy.bots_active = true;
+            brain
+                .save
+                .autonomy
+                .set_fleet_mode(BotFleetMode::ContinuousAutonomy);
             brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(6);
             if let Some(settlement) = brain.save.settlements.first_mut() {
-                settlement.bounds.max_active_projects = AUTONOMY_BURST_ACTIVE_PROJECTS;
+                settlement.bounds.max_active_projects =
+                    AUTONOMY_BURST_ACTIVE_PROJECTS.min(BOT_ACTIVE_AREA_HARD_LIMIT);
             }
             let queued_now = queue_mega_city_starter_projects(
                 &mut brain.save,
@@ -9875,7 +11751,7 @@ fn process_companion_command(
             } else {
                 "Mega city autonomy online, but no loaded safe starter site was found yet.".into()
             };
-            brain.dirty = true;
+            brain.mark_dirty();
             return;
         }
         CompanionCommand::PreviewAssist(assist) => {
@@ -9893,7 +11769,7 @@ fn process_companion_command(
             brain.save.companion_preview = Some(preview);
             set_companion_preview_mode(&mut brain.save, selected, valid);
             brain.hud_message = msg;
-            brain.dirty = true;
+            brain.mark_dirty();
             return;
         }
         CompanionCommand::ExecutePreview => {
@@ -9912,7 +11788,7 @@ fn process_companion_command(
                 }
             }
             brain.hud_message = "Companion preview cleared.".into();
-            brain.dirty = true;
+            brain.mark_dirty();
             return;
         }
         _ => {}
@@ -9935,7 +11811,7 @@ fn process_companion_command(
     } else {
         format!("Companion command applied to {affected} helper(s).")
     };
-    brain.dirty = true;
+    brain.mark_dirty();
 }
 
 fn apply_companion_command(
@@ -9946,11 +11822,15 @@ fn apply_companion_command(
 ) {
     let order = bot.companion_order as f32;
     let angle = order * std::f32::consts::TAU / 10.0 - std::f32::consts::FRAC_PI_2;
-    let radius = 4.5 + (bot.companion_order / 5) as f32 * 2.0;
+    let radius = bot
+        .memory
+        .preferred_follow_distance
+        .clamp(COMPANION_FOLLOW_MIN, COMPANION_FOLLOW_MAX)
+        + (bot.companion_order / 4) as f32 * 3.0;
     let formation = player_pos
         + Vec3::new(
             angle.cos() * radius,
-            4.6 + (bot.companion_order % 3) as f32 * 0.45,
+            5.2 + (bot.companion_order % 3) as f32 * 0.55,
             angle.sin() * radius,
         );
     match command {
@@ -10064,7 +11944,7 @@ fn create_companion_preview(
     let mut command = assist.command();
     command.bot_id = author_id.unwrap_or(0);
     let size = command_size(command);
-    let target = companion_preview_target(player_tf, assist);
+    let target = companion_preview_target(player_tf, size);
     let origin = centered_project_origin(world, target, size);
     let validation = validate_project_request(
         save,
@@ -10102,7 +11982,7 @@ fn create_companion_preview(
     }
 }
 
-fn companion_preview_target(player_tf: &Transform, assist: CompanionAssistKind) -> Vec3 {
+fn companion_preview_target(player_tf: &Transform, size: [i32; 3]) -> Vec3 {
     let forward = player_tf.rotation.mul_vec3(Vec3::NEG_Z);
     let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
     let forward = if flat.length_squared() > 0.0 {
@@ -10110,16 +11990,11 @@ fn companion_preview_target(player_tf: &Transform, assist: CompanionAssistKind) 
     } else {
         Vec3::Z
     };
-    let distance = match assist {
-        CompanionAssistKind::Road | CompanionAssistKind::Lights | CompanionAssistKind::Recolor => {
-            14.0
-        }
-        CompanionAssistKind::LandingPad
-        | CompanionAssistKind::Repair
-        | CompanionAssistKind::Beautify
-        | CompanionAssistKind::TargetRange => 22.0,
-        CompanionAssistKind::ClearFlatten => 12.0,
-    };
+    let half_x = size[0].max(1) as f32 * 0.5;
+    let half_z = size[2].max(1) as f32 * 0.5;
+    let directional_support = forward.x.abs() * half_x + forward.z.abs() * half_z;
+    let clearance = BOT_PLAYER_ADMISSION_CLEARANCE.max(BOT_SHIP_ADMISSION_CLEARANCE);
+    let distance = directional_support + clearance + 2.0;
     player_tf.translation + forward * distance
 }
 
@@ -10189,7 +12064,7 @@ fn execute_companion_preview(
                 bot.memory.last_message = format!("{label} approved. Building with undo safety.");
             }
             brain.hud_message = format!("{label} approved as project #{project_id}.");
-            brain.dirty = true;
+            brain.mark_dirty();
         }
         Err(reason) => {
             let author_id = preview.author_id;
@@ -10200,7 +12075,7 @@ fn execute_companion_preview(
             });
             set_companion_preview_mode(&mut brain.save, author_id, false);
             brain.hud_message = format!("Preview blocked: {reason}");
-            brain.dirty = true;
+            brain.mark_dirty();
         }
     }
 }
@@ -10217,42 +12092,59 @@ fn process_bot_visit_request(
         brain.hud_message = "Player not ready for bot visit.".into();
         return;
     };
-    let Some((label, target)) = visit_destination(&brain.save, request, transform.translation)
-    else {
+    let Some(destination) = visit_destination(&brain.save, request, transform.translation) else {
         brain.hud_message = "No bot build destination available yet.".into();
         return;
     };
-    let visit_pos = safe_visit_position(&world, transform.translation, target);
+    let visit_pos = safe_visit_position(&world, transform.translation, &destination);
     transform.translation = visit_pos;
     player.velocity = Vec3::ZERO;
     player.flying = true;
     player.placed_on_surface = true;
-    face_player_toward(&mut transform, &mut player, target);
-    brain.hud_message = format!("Visiting {label}. Friendly builders are nearby.");
+    face_player_toward(&mut transform, &mut player, destination.look_at);
+    brain.hud_message = format!(
+        "Visiting {}. Friendly builders are nearby.",
+        destination.label
+    );
+}
+
+struct BotVisitDestination {
+    label: String,
+    look_at: Vec3,
+    footprint: Option<([i32; 3], [i32; 3])>,
 }
 
 fn visit_destination(
     save: &BotWorldSave,
     request: BotVisitTarget,
     current_player_pos: Vec3,
-) -> Option<(String, Vec3)> {
+) -> Option<BotVisitDestination> {
     match request {
-        BotVisitTarget::CityHub => save
-            .settlements
-            .first()
-            .map(|s| (s.name.clone(), vec3_from_arr(s.hub))),
+        BotVisitTarget::CityHub => save.settlements.first().map(|s| BotVisitDestination {
+            label: s.name.clone(),
+            look_at: vec3_from_arr(s.hub),
+            footprint: None,
+        }),
         BotVisitTarget::ActiveBuild => save
             .projects
             .iter()
             .filter(|p| !p.status.is_done())
             .max_by_key(|p| p.priority)
-            .map(|p| (p.label.clone(), project_center(p.origin, p.size)))
+            .map(|p| BotVisitDestination {
+                label: p.label.clone(),
+                look_at: project_center(p.origin, p.size),
+                footprint: Some((p.origin, p.size)),
+            })
             .or_else(|| {
                 save.projects
                     .iter()
                     .rev()
                     .find(|p| p.status == BotProjectStatus::Complete)
-                    .map(|p| (p.label.clone(), project_center(p.origin, p.size)))
+                    .map(|p| BotVisitDestination {
+                        label: p.label.clone(),
+                        look_at: project_center(p.origin, p.size),
+                        footprint: Some((p.origin, p.size)),
+                    })
             }),
         BotVisitTarget::NearestBot => save
             .agents
@@ -10262,36 +12154,96 @@ fn visit_destination(
                 let db = vec3_from_arr(b.position).distance_squared(current_player_pos);
                 da.total_cmp(&db)
             })
-            .map(|b| {
-                (
-                    format!("{} // {}", b.name, b.role.label()),
-                    vec3_from_arr(b.position),
-                )
+            .map(|b| BotVisitDestination {
+                label: format!("{} // {}", b.name, b.role.label()),
+                look_at: vec3_from_arr(b.position),
+                footprint: None,
             }),
-        BotVisitTarget::SelectedBot(id) => save.agents.iter().find(|b| b.id == id).map(|b| {
-            (
-                format!("{} // {}", b.name, b.role.label()),
-                vec3_from_arr(b.position),
-            )
-        }),
-        BotVisitTarget::SelectedDistrict(id) => save
-            .districts
-            .iter()
-            .find(|d| d.id == id)
-            .map(|d| (d.name.clone(), vec3_from_arr(d.center))),
+        BotVisitTarget::SelectedBot(id) => {
+            save.agents
+                .iter()
+                .find(|b| b.id == id)
+                .map(|b| BotVisitDestination {
+                    label: format!("{} // {}", b.name, b.role.label()),
+                    look_at: vec3_from_arr(b.position),
+                    footprint: None,
+                })
+        }
+        BotVisitTarget::SelectedDistrict(id) => {
+            save.districts
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| BotVisitDestination {
+                    label: d.name.clone(),
+                    look_at: vec3_from_arr(d.center),
+                    footprint: None,
+                })
+        }
     }
 }
 
-fn safe_visit_position(world: &VoxelWorld, current: Vec3, target: Vec3) -> Vec3 {
-    let mut flat = Vec2::new(current.x - target.x, current.z - target.z);
-    if flat.length_squared() < 0.01 {
-        flat = Vec2::new(0.0, -1.0);
-    }
-    let dir = flat.normalize_or_zero();
-    let x = (target.x + dir.x * 14.0).round() as i32;
-    let z = (target.z + dir.y * 14.0).round() as i32;
+fn safe_visit_position(
+    world: &VoxelWorld,
+    current: Vec3,
+    destination: &BotVisitDestination,
+) -> Vec3 {
+    let (x, z) = if let Some((origin, size)) = destination.footprint {
+        safe_project_visit_xz(current, origin, size)
+    } else {
+        let target = destination.look_at;
+        let mut flat = Vec2::new(current.x - target.x, current.z - target.z);
+        if flat.length_squared() < 0.01 {
+            flat = Vec2::new(0.0, -1.0);
+        }
+        let dir = flat.normalize_or_zero();
+        (
+            (target.x + dir.x * BOT_OBSERVER_STANDOFF).round() as i32,
+            (target.z + dir.y * BOT_OBSERVER_STANDOFF).round() as i32,
+        )
+    };
     let y = world.surface_height_at(x, z) as f32 + 5.0;
     Vec3::new(x as f32 + 0.5, y, z as f32 + 0.5)
+}
+
+fn safe_project_visit_xz(current: Vec3, origin: [i32; 3], size: [i32; 3]) -> (i32, i32) {
+    let min_x = origin[0] as f32;
+    let max_x = (origin[0] + size[0].max(1)) as f32;
+    let min_z = origin[2] as f32;
+    let max_z = (origin[2] + size[2].max(1)) as f32;
+    let center = project_center(origin, size);
+    let direction = Vec2::new(current.x - center.x, current.z - center.z);
+    let standoff = BOT_OBSERVER_STANDOFF + 1.0;
+
+    let current_xz = Vec2::new(current.x, current.z);
+    let candidate_points = [
+        (min_x - standoff, current.z.clamp(min_z, max_z)),
+        (max_x + standoff, current.z.clamp(min_z, max_z)),
+        (current.x.clamp(min_x, max_x), min_z - standoff),
+        (current.x.clamp(min_x, max_x), max_z + standoff),
+    ];
+    let candidates = candidate_points.map(|point| {
+        (
+            point,
+            current_xz.distance_squared(Vec2::new(point.0, point.1)),
+        )
+    });
+    let preferred = if direction.length_squared() < 0.01 {
+        2
+    } else if direction.x.abs() > direction.y.abs() {
+        usize::from(direction.x >= 0.0)
+    } else {
+        2 + usize::from(direction.y >= 0.0)
+    };
+    let chosen = if xz_distance_to_project(origin, size, current) > 0.0 {
+        candidates
+            .iter()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|candidate| candidate.0)
+            .unwrap_or(candidates[preferred].0)
+    } else {
+        candidates[preferred].0
+    };
+    (chosen.0.round() as i32, chosen.1.round() as i32)
 }
 
 fn face_player_toward(transform: &mut Transform, player: &mut Player, target: Vec3) {
@@ -10313,13 +12265,21 @@ fn face_player_toward(transform: &mut Transform, player: &mut Player, target: Ve
 fn animate_worker_bots(
     time: Res<Time>,
     brain: Res<FriendlyWorldBrain>,
+    runtime: Res<BotRuntimeControl>,
     player_q: Query<&Transform, (With<Player>, Without<WorkerBotPart>)>,
+    rigs: Query<(&BotDetailedRig, &Children)>,
     mut parts: Query<(&WorkerBotPart, &mut Transform), Without<Player>>,
 ) {
     let elapsed = time.elapsed_seconds();
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
-    for (part, mut tf) in &mut parts {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == part.bot_id) else {
+    let animation_ids = &runtime.schedule.animation;
+    if animation_ids.is_empty() {
+        return;
+    }
+
+    let mut poses = [None; BOT_MAX_FRAME_ANIMATED_RIGS];
+    for (pose_slot, bot_id) in poses.iter_mut().zip(animation_ids.iter()) {
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == bot_id) else {
             continue;
         };
         if bot.companion {
@@ -10329,24 +12289,21 @@ fn animate_worker_bots(
         let target = vec3_from_arr(bot.target);
         let to_target = target - p;
         let move_speed = Vec3::new(to_target.x, 0.0, to_target.z).length().min(6.0);
-        let phase = elapsed * 2.4 + part.bot_id as f32 * 0.73;
+        let phase = elapsed * 2.4 + bot_id as f32 * 0.73;
         let walking = move_speed > 0.25;
         let gait = if walking {
-            (elapsed * 7.5 + part.bot_id as f32 * 1.31).sin()
+            (elapsed * 7.5 + bot_id as f32 * 1.31).sin()
         } else {
             0.0
         };
-        // Activity intensity for emissive / vent pulses.
         let activity = match bot.state {
             BotState::Building => 1.0,
             BotState::Surveying | BotState::Inspecting => 0.75,
             BotState::Planning | BotState::Returning => 0.4,
             BotState::Idle => 0.18,
         };
-        let pulse = (elapsed * 4.2 + part.bot_id as f32 * 1.7).sin() * 0.5 + 0.5;
+        let pulse = (elapsed * 4.2 + bot_id as f32 * 1.7).sin() * 0.5 + 0.5;
 
-        // What the bot wants to look at: nearest player when idle/returning,
-        // otherwise its work target.
         let look_world = match bot.state {
             BotState::Idle | BotState::Returning => player_pos.unwrap_or(target),
             _ => target,
@@ -10371,126 +12328,164 @@ fn animate_worker_bots(
         };
         let head_yaw_local = head_yaw_local.clamp(-0.9, 0.9);
 
-        match part.part {
-            WorkerPart::Head => {
-                tf.translation =
-                    part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
-                let pitch = (elapsed * 1.1 + part.bot_id as f32).sin() * 0.05;
-                tf.rotation =
-                    Quat::from_rotation_y(head_yaw_local * 0.85) * Quat::from_rotation_x(pitch);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::Visor => {
-                tf.translation =
-                    part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
-                tf.rotation = Quat::from_rotation_y(head_yaw_local * 0.85);
-                // Scanning shimmer when surveying/inspecting.
-                let scan = if matches!(bot.state, BotState::Surveying | BotState::Inspecting) {
-                    1.0 + pulse * 0.18
-                } else {
-                    1.0 + pulse * 0.04
-                };
-                tf.scale = part.base_scale * Vec3::new(scan, 1.0, 1.0);
-            }
-            WorkerPart::EyeL | WorkerPart::EyeR => {
-                tf.translation =
-                    part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
-                tf.rotation = Quat::from_rotation_y(head_yaw_local * 0.85);
-                let s = 1.0 + 0.18 * pulse * activity + 0.05 * (elapsed * 9.0).sin();
-                tf.scale = part.base_scale * s;
-            }
-            WorkerPart::AntennaTip => {
-                let sway = Vec3::new(
-                    (elapsed * 2.3 + part.bot_id as f32).sin() * 0.05,
-                    (elapsed * 3.1).sin() * 0.02,
-                    (elapsed * 1.9 + part.bot_id as f32 * 0.5).cos() * 0.05,
-                );
-                tf.translation = part.base_translation + sway;
-                let s = 1.0 + 0.35 * pulse * activity;
-                tf.scale = part.base_scale * s;
-            }
-            WorkerPart::ShoulderL => {
-                tf.translation = part.base_translation;
-                tf.rotation = Quat::from_rotation_x(gait * 0.18);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ShoulderR => {
-                tf.translation = part.base_translation;
-                tf.rotation = Quat::from_rotation_x(-gait * 0.18);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ArmUpperL => {
-                tf.translation = part.base_translation;
-                let work_swing = if matches!(bot.state, BotState::Building) {
-                    (elapsed * 9.5).sin() * 0.7
-                } else {
-                    gait * 0.55
-                };
-                tf.rotation = Quat::from_rotation_x(work_swing);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ArmUpperR => {
-                tf.translation = part.base_translation;
-                let work_swing = if matches!(bot.state, BotState::Building) {
-                    (elapsed * 9.5 + std::f32::consts::PI).sin() * 0.7
-                } else {
-                    -gait * 0.55
-                };
-                tf.rotation = Quat::from_rotation_x(work_swing);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ArmForeL => {
-                tf.translation = part.base_translation;
-                let bend = if matches!(bot.state, BotState::Building) {
-                    0.6 + (elapsed * 9.5).sin().abs() * 0.4
-                } else {
-                    0.25 + gait.abs() * 0.15
-                };
-                tf.rotation = Quat::from_rotation_x(bend);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ArmForeR => {
-                tf.translation = part.base_translation;
-                let bend = if matches!(bot.state, BotState::Building) {
-                    0.6 + (elapsed * 9.5 + std::f32::consts::PI).sin().abs() * 0.4
-                } else {
-                    0.25 + gait.abs() * 0.15
-                };
-                tf.rotation = Quat::from_rotation_x(bend);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::HoverRing => {
-                let breathe = 1.0 + 0.06 * (elapsed * 2.0 + part.bot_id as f32).sin();
-                tf.translation = part.base_translation + Vec3::Y * ((elapsed * 1.4).sin() * 0.015);
-                tf.scale = part.base_scale * Vec3::new(breathe, 1.0, breathe);
-            }
-            WorkerPart::BackpackVent => {
-                let intensity = 0.85 + 0.55 * pulse * activity;
-                tf.translation = part.base_translation;
-                tf.scale = part.base_scale * Vec3::new(intensity, intensity, 1.0);
-            }
-            WorkerPart::ChestPanel => {
-                let s = 1.0 + 0.06 * pulse * activity;
-                tf.translation = part.base_translation;
-                tf.scale = part.base_scale * Vec3::new(s, s, 1.0);
-            }
-            WorkerPart::Torso => {
-                tf.translation =
-                    part.base_translation + Vec3::Y * (gait.abs() * 0.03 + phase.sin() * 0.01);
-                let lean = if walking { gait * 0.05 } else { 0.0 };
-                tf.rotation = Quat::from_rotation_z(lean);
-                tf.scale = part.base_scale;
-            }
-            WorkerPart::ToolL => {
-                tf.translation = part.base_translation;
-                let visible = matches!(
-                    bot.state,
-                    BotState::Building | BotState::Surveying | BotState::Inspecting
-                );
-                let s = if visible { 1.0 + 0.45 * pulse } else { 0.001 };
-                tf.scale = part.base_scale * s;
-                if visible {
-                    tf.rotation = Quat::from_rotation_z((elapsed * 6.0).sin() * 0.4);
+        *pose_slot = Some((
+            bot_id,
+            WorkerAnimationPose {
+                phase,
+                gait,
+                activity,
+                pulse,
+                head_yaw_local,
+                walking,
+                state: bot.state,
+            },
+        ));
+    }
+
+    for (rig, children) in &rigs {
+        let Some((_, pose)) = poses
+            .iter()
+            .flatten()
+            .find(|(bot_id, _)| *bot_id == rig.bot_id)
+            .copied()
+        else {
+            continue;
+        };
+        for &child in children.iter() {
+            let Ok((part, mut tf)) = parts.get_mut(child) else {
+                continue;
+            };
+            let WorkerAnimationPose {
+                phase,
+                gait,
+                activity,
+                pulse,
+                head_yaw_local,
+                walking,
+                state,
+            } = pose;
+            match part.part {
+                WorkerPart::Head => {
+                    tf.translation =
+                        part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
+                    let pitch = (elapsed * 1.1 + part.bot_id as f32).sin() * 0.05;
+                    tf.rotation =
+                        Quat::from_rotation_y(head_yaw_local * 0.85) * Quat::from_rotation_x(pitch);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::Visor => {
+                    tf.translation =
+                        part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
+                    tf.rotation = Quat::from_rotation_y(head_yaw_local * 0.85);
+                    // Scanning shimmer when surveying/inspecting.
+                    let scan = if matches!(state, BotState::Surveying | BotState::Inspecting) {
+                        1.0 + pulse * 0.18
+                    } else {
+                        1.0 + pulse * 0.04
+                    };
+                    tf.scale = part.base_scale * Vec3::new(scan, 1.0, 1.0);
+                }
+                WorkerPart::EyeL | WorkerPart::EyeR => {
+                    tf.translation =
+                        part.base_translation + Vec3::Y * (phase.sin() * 0.018 + gait.abs() * 0.04);
+                    tf.rotation = Quat::from_rotation_y(head_yaw_local * 0.85);
+                    let s = 1.0 + 0.18 * pulse * activity + 0.05 * (elapsed * 9.0).sin();
+                    tf.scale = part.base_scale * s;
+                }
+                WorkerPart::AntennaTip => {
+                    let sway = Vec3::new(
+                        (elapsed * 2.3 + part.bot_id as f32).sin() * 0.05,
+                        (elapsed * 3.1).sin() * 0.02,
+                        (elapsed * 1.9 + part.bot_id as f32 * 0.5).cos() * 0.05,
+                    );
+                    tf.translation = part.base_translation + sway;
+                    let s = 1.0 + 0.35 * pulse * activity;
+                    tf.scale = part.base_scale * s;
+                }
+                WorkerPart::ShoulderL => {
+                    tf.translation = part.base_translation;
+                    tf.rotation = Quat::from_rotation_x(gait * 0.18);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ShoulderR => {
+                    tf.translation = part.base_translation;
+                    tf.rotation = Quat::from_rotation_x(-gait * 0.18);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ArmUpperL => {
+                    tf.translation = part.base_translation;
+                    let work_swing = if matches!(state, BotState::Building) {
+                        (elapsed * 9.5).sin() * 0.7
+                    } else {
+                        gait * 0.55
+                    };
+                    tf.rotation = Quat::from_rotation_x(work_swing);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ArmUpperR => {
+                    tf.translation = part.base_translation;
+                    let work_swing = if matches!(state, BotState::Building) {
+                        (elapsed * 9.5 + std::f32::consts::PI).sin() * 0.7
+                    } else {
+                        -gait * 0.55
+                    };
+                    tf.rotation = Quat::from_rotation_x(work_swing);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ArmForeL => {
+                    tf.translation = part.base_translation;
+                    let bend = if matches!(state, BotState::Building) {
+                        0.6 + (elapsed * 9.5).sin().abs() * 0.4
+                    } else {
+                        0.25 + gait.abs() * 0.15
+                    };
+                    tf.rotation = Quat::from_rotation_x(bend);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ArmForeR => {
+                    tf.translation = part.base_translation;
+                    let bend = if matches!(state, BotState::Building) {
+                        0.6 + (elapsed * 9.5 + std::f32::consts::PI).sin().abs() * 0.4
+                    } else {
+                        0.25 + gait.abs() * 0.15
+                    };
+                    tf.rotation = Quat::from_rotation_x(bend);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::HoverRing => {
+                    let breathe = 1.0 + 0.06 * (elapsed * 2.0 + part.bot_id as f32).sin();
+                    tf.translation =
+                        part.base_translation + Vec3::Y * ((elapsed * 1.4).sin() * 0.015);
+                    tf.scale = part.base_scale * Vec3::new(breathe, 1.0, breathe);
+                }
+                WorkerPart::BackpackVent => {
+                    let intensity = 0.85 + 0.55 * pulse * activity;
+                    tf.translation = part.base_translation;
+                    tf.scale = part.base_scale * Vec3::new(intensity, intensity, 1.0);
+                }
+                WorkerPart::ChestPanel => {
+                    let s = 1.0 + 0.06 * pulse * activity;
+                    tf.translation = part.base_translation;
+                    tf.scale = part.base_scale * Vec3::new(s, s, 1.0);
+                }
+                WorkerPart::Torso => {
+                    tf.translation =
+                        part.base_translation + Vec3::Y * (gait.abs() * 0.03 + phase.sin() * 0.01);
+                    let lean = if walking { gait * 0.05 } else { 0.0 };
+                    tf.rotation = Quat::from_rotation_z(lean);
+                    tf.scale = part.base_scale;
+                }
+                WorkerPart::ToolL => {
+                    tf.translation = part.base_translation;
+                    let visible = matches!(
+                        state,
+                        BotState::Building | BotState::Surveying | BotState::Inspecting
+                    );
+                    let s = if visible { 1.0 + 0.45 * pulse } else { 0.001 };
+                    tf.scale = part.base_scale * s;
+                    if visible {
+                        tf.rotation = Quat::from_rotation_z((elapsed * 6.0).sin() * 0.4);
+                    }
                 }
             }
         }
@@ -10500,6 +12495,7 @@ fn animate_worker_bots(
 fn sync_bot_visuals(
     time: Res<Time>,
     brain: Res<FriendlyWorldBrain>,
+    runtime: Res<BotRuntimeControl>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     player_q: Query<&Transform, (With<Player>, Without<FriendlyBotEntity>)>,
     mut bot_q: Query<
@@ -10619,16 +12615,24 @@ fn sync_bot_visuals(
     let elapsed = time.elapsed_seconds();
     let dt = time.delta_seconds().clamp(0.0, 0.1);
     let player_pos = player_q.get_single().ok().map(|t| t.translation);
+    let root_sync_ids = &runtime.schedule.root_sync;
+    let animation_ids = &runtime.schedule.animation;
 
-    // Per-bot world rotation cache so head/iris systems can transform world
-    // vectors into local space (used for eye tracking + head tilt direction).
-    let mut bot_world_rot: HashMap<u64, Quat> = HashMap::new();
-    let mut bot_pos: HashMap<u64, Vec3> = HashMap::new();
+    let mut companion_poses = [None; MAX_COMPANION_TEAM];
+    let mut companion_pose_len = 0usize;
 
     for (entity, mut transform) in &mut bot_q {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == entity.id) else {
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == entity.id) else {
             continue;
         };
+        if !root_sync_ids.contains(&entity.id) {
+            if bot.companion && companion_pose_len < companion_poses.len() {
+                companion_poses[companion_pose_len] =
+                    Some((entity.id, transform.rotation, transform.translation));
+                companion_pose_len += 1;
+            }
+            continue;
+        }
         let p = vec3_from_arr(bot.position);
         let target = vec3_from_arr(bot.target);
 
@@ -10678,8 +12682,11 @@ fn sync_bot_visuals(
                 .rotation
                 .slerp(desired_rot, (8.0 * dt).clamp(0.0, 1.0));
 
-            bot_world_rot.insert(entity.id, transform.rotation);
-            bot_pos.insert(entity.id, transform.translation);
+            if companion_pose_len < companion_poses.len() {
+                companion_poses[companion_pose_len] =
+                    Some((entity.id, transform.rotation, transform.translation));
+                companion_pose_len += 1;
+            }
         } else {
             // Worker droid body — smooth follow toward sim position, slerp
             // rotation toward movement direction (or the player when idle so
@@ -10739,13 +12746,18 @@ fn sync_bot_visuals(
 
     // Head tilt — pitch toward the look target a few degrees.
     for (head, mut tf) in &mut head_q {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == head.bot_id) else {
+        if !animation_ids.contains(&head.bot_id) {
+            continue;
+        }
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == head.bot_id) else {
             continue;
         };
-        let Some(world_rot) = bot_world_rot.get(&head.bot_id).copied() else {
-            continue;
-        };
-        let Some(world_pos) = bot_pos.get(&head.bot_id).copied() else {
+        let Some((_, world_rot, world_pos)) = companion_poses
+            .iter()
+            .flatten()
+            .find(|(bot_id, _, _)| *bot_id == head.bot_id)
+            .copied()
+        else {
             continue;
         };
         let to = look_target(bot) - world_pos;
@@ -10775,13 +12787,18 @@ fn sync_bot_visuals(
 
     // Iris tracking + blink. Each bot blinks on its own deterministic phase.
     for (iris, mut tf) in &mut iris_q {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == iris.bot_id) else {
+        if !animation_ids.contains(&iris.bot_id) {
+            continue;
+        }
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == iris.bot_id) else {
             continue;
         };
-        let Some(world_rot) = bot_world_rot.get(&iris.bot_id).copied() else {
-            continue;
-        };
-        let Some(world_pos) = bot_pos.get(&iris.bot_id).copied() else {
+        let Some((_, world_rot, world_pos)) = companion_poses
+            .iter()
+            .flatten()
+            .find(|(bot_id, _, _)| *bot_id == iris.bot_id)
+            .copied()
+        else {
             continue;
         };
         let to = look_target(bot) - world_pos;
@@ -10822,7 +12839,10 @@ fn sync_bot_visuals(
     // active companion mode. Each `CompanionMoodLight` has its OWN material so
     // mutating one doesn't affect the other companion.
     for mood in &mood_q {
-        let Some(bot) = brain.save.agents.iter().find(|b| b.id == mood.bot_id) else {
+        if !animation_ids.contains(&mood.bot_id) {
+            continue;
+        }
+        let Some(bot) = brain.save.agents.iter().find(|bot| bot.id == mood.bot_id) else {
             continue;
         };
         let Some(mat) = materials.get_mut(&mood.mat) else {
@@ -10846,12 +12866,18 @@ fn sync_bot_visuals(
 
     // Antenna tip — soft pulse that matches the mood-light cadence.
     for (tip, mut tf) in &mut antenna_q {
+        if !animation_ids.contains(&tip.bot_id) {
+            continue;
+        }
         let s = tip.base_scale * (1.0 + (elapsed * 2.6 + tip.bot_id as f32).sin() * 0.10);
         tf.scale = Vec3::splat(s);
     }
 
     // Ear caps — slow rotation around their axis (chunky, characterful).
     for (ear, mut tf) in &mut ear_q {
+        if !animation_ids.contains(&ear.bot_id) {
+            continue;
+        }
         let speed = 0.6 * ear.side as f32;
         tf.rotate_local_y(speed * dt);
     }
@@ -10861,22 +12887,76 @@ fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t.clamp(0.0, 1.0)
 }
 
-fn manual_save_bot_world(
-    keys: Res<ButtonInput<KeyCode>>,
-    active: Option<Res<ActiveWorld>>,
-    mut brain: ResMut<FriendlyWorldBrain>,
-    mut world: ResMut<VoxelWorld>,
-) {
-    if !keys.just_pressed(KeyCode::F5) {
-        return;
+pub(crate) fn save_world_transaction_after_edit_store(
+    world_name: &str,
+    generation_identity: WorldGenerationIdentity,
+    brain: &mut FriendlyWorldBrain,
+    world: &mut VoxelWorld,
+    dependent_write: impl FnOnce(&WorldEditManifest) -> Result<(), String>,
+) -> Result<WorldEditManifest, String> {
+    if !world
+        .edit_store_status
+        .is_compatible_with(generation_identity)
+    {
+        return Err(format!(
+            "edit authority is {} for the active generation identity",
+            world.edit_store_status.label()
+        ));
     }
-    let Some(active) = active else {
-        return;
-    };
-    save_bot_world_files(&active.meta.name, &brain.save);
-    save_edited_overrides_for_world(&active.meta.name, &world);
-    brain.dirty = false;
-    world.edit_save_dirty = false;
+    let capture = capture_edited_overrides_for_world(world_name, generation_identity, world);
+    let bot_snapshot = brain.save.clone();
+    let bot_revision = brain.save_revision;
+    match commit_edited_override_capture_with(capture, |manifest| {
+        save_bot_world_files(world_name, &bot_snapshot)?;
+        dependent_write(manifest)
+    }) {
+        OrderedEditedOverrideSaveOutcome::Committed(receipt) => {
+            let manifest = receipt.manifest.clone();
+            world.edit_store_status = WorldEditStoreStatus::Compatible {
+                generation_identity,
+                edited_chunks: manifest.edited_chunks,
+            };
+            let latest_receipt = receipt.is_latest_confirmed();
+            if !world.confirm_edited_override_save(&receipt) {
+                warn!(
+                    "bots: save receipt {} no longer matches the newest edit revision for '{}'",
+                    receipt.token(),
+                    world_name
+                );
+            }
+            brain.confirm_save_revision(bot_revision, latest_receipt);
+            Ok(manifest)
+        }
+        OrderedEditedOverrideSaveOutcome::Superseded {
+            capture_token,
+            latest_capture_token,
+        } => Err(format!(
+            "save capture {capture_token} was superseded by capture {latest_capture_token}"
+        )),
+        OrderedEditedOverrideSaveOutcome::AuthorityBlocked { reason } => {
+            world.edit_store_status = WorldEditStoreStatus::Blocked {
+                generation_identity,
+                reason_code: "authority_validation_failed",
+                detail: reason.clone(),
+            };
+            Err(reason)
+        }
+        OrderedEditedOverrideSaveOutcome::DependentWriteFailed { manifest, reason } => {
+            world.edit_store_status = WorldEditStoreStatus::Compatible {
+                generation_identity,
+                edited_chunks: manifest.edited_chunks,
+            };
+            Err(reason)
+        }
+    }
+}
+
+fn save_bot_snapshot_after_edit_store(
+    world_name: &str,
+    save: &BotWorldSave,
+    capture: EditedOverrideSaveCapture,
+) -> OrderedEditedOverrideSaveOutcome {
+    commit_edited_override_capture_with(capture, |_| save_bot_world_files(world_name, save))
 }
 
 fn autosave_bot_world(
@@ -10884,152 +12964,272 @@ fn autosave_bot_world(
     active: Option<Res<ActiveWorld>>,
     mut brain: ResMut<FriendlyWorldBrain>,
     mut world: ResMut<VoxelWorld>,
+    completion: Res<BotAutosaveCompletion>,
 ) {
+    let Some(active) = active else {
+        return;
+    };
+    let generation_identity = active.meta.generation_identity();
+    if let Some(completed) = completion.take() {
+        if completed.world_name == active.meta.name
+            && completed.generation_identity == generation_identity
+        {
+            match completed.result {
+                OrderedEditedOverrideSaveOutcome::Committed(receipt) => {
+                    world.edit_store_status = WorldEditStoreStatus::Compatible {
+                        generation_identity,
+                        edited_chunks: receipt.manifest.edited_chunks,
+                    };
+                    let latest_receipt = receipt.is_latest_confirmed();
+                    world.confirm_edited_override_save(&receipt);
+                    brain.confirm_save_revision(completed.bot_revision, latest_receipt);
+                }
+                OrderedEditedOverrideSaveOutcome::Superseded {
+                    capture_token,
+                    latest_capture_token,
+                } => {
+                    brain.autosave_timer = 4.0;
+                    info!(
+                        "bots: autosave capture {capture_token} for '{}' was superseded by {latest_capture_token}",
+                        active.meta.name
+                    );
+                }
+                OrderedEditedOverrideSaveOutcome::AuthorityBlocked { reason } => {
+                    world.edit_store_status = WorldEditStoreStatus::Blocked {
+                        generation_identity,
+                        reason_code: "authority_validation_failed",
+                        detail: reason.clone(),
+                    };
+                    brain.autosave_timer = 4.0;
+                    brain.hud_message = format!("Autosave blocked: {reason}");
+                    warn!(
+                        "bots: autosave blocked before bot journal write for '{}': {reason}",
+                        active.meta.name
+                    );
+                }
+                OrderedEditedOverrideSaveOutcome::DependentWriteFailed { manifest, reason } => {
+                    world.edit_store_status = WorldEditStoreStatus::Compatible {
+                        generation_identity,
+                        edited_chunks: manifest.edited_chunks,
+                    };
+                    brain.autosave_timer = 4.0;
+                    brain.hud_message = format!("Autosave failed: {reason}");
+                    warn!(
+                        "bots: autosave dependent write failed for '{}': {reason}",
+                        active.meta.name
+                    );
+                }
+            }
+        } else {
+            info!(
+                "bots: discarded autosave completion for inactive world '{}'",
+                completed.world_name
+            );
+        }
+    }
+
     brain.autosave_timer -= time.delta_seconds();
     if brain.autosave_timer > 0.0 {
         return;
     }
     brain.autosave_timer = 30.0;
-    let Some(active) = active else {
-        return;
-    };
     if !brain.dirty && !world.edit_save_dirty {
         return;
     }
 
-    let edited_overrides = if world.edit_save_dirty {
-        Some(world.edited_overrides.clone())
-    } else {
-        None
-    };
-    if queue_bot_world_save(
-        active.meta.name.clone(),
-        brain.save.clone(),
-        edited_overrides,
-    ) {
-        brain.dirty = false;
-        world.edit_save_dirty = false;
-    } else {
-        // A previous save is still flushing to disk. Try again soon,
-        // but do not serialize on the gameplay frame.
+    // Runtime load/preflight must have approved this exact identity. Avoid
+    // allocating a dense override clone when the authority is already known
+    // to be unchecked or blocked.
+    if !world
+        .edit_store_status
+        .is_compatible_with(generation_identity)
+    {
         brain.autosave_timer = 4.0;
+        warn!(
+            "bots: autosave held because edit-store authority for '{}' is {}",
+            active.meta.name,
+            world.edit_store_status.label()
+        );
+        return;
+    }
+
+    let bot_revision = brain.save_revision;
+    let capture = if world.edit_save_dirty {
+        capture_edited_overrides_for_world(&active.meta.name, generation_identity, &world)
+    } else {
+        capture_existing_edited_override_authority(&active.meta.name, generation_identity, &world)
+    };
+    match queue_bot_world_save(
+        active.meta.name.clone(),
+        generation_identity,
+        brain.save.clone(),
+        capture,
+        completion.as_ref().clone(),
+        bot_revision,
+    ) {
+        BotSaveEnqueueOutcome::Accepted => {
+            // Edit dirty remains true until the matching newest receipt comes
+            // back. Later edits advance the world revision and cannot be
+            // cleared by this completion.
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        BotSaveEnqueueOutcome::Busy => {
+            // A previous save is still flushing to disk. Try again soon,
+            // but do not serialize on the gameplay frame.
+            brain.autosave_timer = 4.0;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        BotSaveEnqueueOutcome::Failed(reason) => {
+            brain.autosave_timer = 4.0;
+            brain.hud_message = format!("Autosave failed: {reason}");
+            warn!(
+                "bots: autosave failed before bot journal write for '{}': {reason}",
+                active.meta.name
+            );
+        }
+    }
+}
+
+pub(crate) fn save_bot_world_on_world_unload(
+    active: Option<Res<ActiveWorld>>,
+    mut brain: ResMut<FriendlyWorldBrain>,
+    mut world: ResMut<VoxelWorld>,
+) {
+    let Some(active) = active else {
+        return;
+    };
+    match save_world_transaction_after_edit_store(
+        &active.meta.name,
+        active.meta.generation_identity(),
+        &mut brain,
+        &mut world,
+        |_| Ok(()),
+    ) {
+        Ok(_) => {}
+        Err(reason) => {
+            warn!(
+                "bots: world-unload save blocked before bot journal write for '{}': {reason}",
+                active.meta.name
+            );
+        }
     }
 }
 
 fn save_bot_world_on_exit(
     mut exit: EventReader<AppExit>,
     active: Option<Res<ActiveWorld>>,
-    brain: Res<FriendlyWorldBrain>,
-    world: Res<VoxelWorld>,
+    mut commands: ResMut<BotCommandStateMachine>,
+    mut executor: ResMut<BotCommandExecutor>,
+    mut brain: ResMut<FriendlyWorldBrain>,
+    mut world: ResMut<VoxelWorld>,
 ) {
     if exit.read().next().is_none() {
         return;
     }
+    retire_all_bot_command_jobs(
+        &mut commands,
+        &mut executor,
+        &mut brain,
+        "application exited before exact execution completed",
+    );
     let Some(active) = active else {
         return;
     };
-    save_bot_world_files(&active.meta.name, &brain.save);
-    save_edited_overrides_for_world(&active.meta.name, &world);
+    match save_world_transaction_after_edit_store(
+        &active.meta.name,
+        active.meta.generation_identity(),
+        &mut brain,
+        &mut world,
+        |_| Ok(()),
+    ) {
+        Ok(_) => {}
+        Err(reason) => {
+            warn!(
+                "bots: exit save blocked before bot journal write for '{}': {reason}",
+                active.meta.name
+            );
+        }
+    }
 }
 
-pub fn save_bot_world_files(world_name: &str, save: &BotWorldSave) {
+pub fn save_bot_world_files(world_name: &str, save: &BotWorldSave) -> Result<(), String> {
     #[cfg(target_arch = "wasm32")]
     {
-        match ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default()) {
-            Ok(text) => {
-                if let Err(e) =
-                    crate::platform::browser_storage_set(&browser_bot_world_key(world_name), &text)
-                {
-                    warn!("{e}");
-                }
-            }
-            Err(e) => warn!("bots: failed serialising browser bot state: {e}"),
-        }
-        return;
+        let text = ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("bots: failed serialising browser bot state: {e}"))?;
+        return crate::platform::browser_storage_set(&browser_bot_world_key(world_name), &text);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
         let root = bot_root(world_name);
-        let agents = root.join("agents");
-        let projects = root.join("projects");
-        if let Err(e) = fs::create_dir_all(&agents) {
-            warn!("bots: failed creating {}: {e}", agents.display());
-            return;
-        }
-        if let Err(e) = fs::create_dir_all(&projects) {
-            warn!("bots: failed creating {}: {e}", projects.display());
-            return;
-        }
-        if let Ok(text) = ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default()) {
-            let _ = crate::settings::atomic_write_text(&root.join("journal.ron"), &text);
-        }
-        let mut expected_agents = HashSet::new();
-        for bot in &save.agents {
-            let path = agents.join(format!("bot_{}.ron", bot.id));
-            expected_agents.insert(path.clone());
-            if let Ok(text) = ron::ser::to_string_pretty(bot, ron::ser::PrettyConfig::default()) {
-                let _ = crate::settings::atomic_write_text(&path, &text);
-            }
-        }
-        cleanup_stale_ron(&agents, &expected_agents);
-
-        let mut expected_projects = HashSet::new();
-        for project in &save.projects {
-            let path = projects.join(format!("project_{}.ron", project.id));
-            expected_projects.insert(path.clone());
-            if let Ok(text) = ron::ser::to_string_pretty(project, ron::ser::PrettyConfig::default())
-            {
-                let _ = crate::settings::atomic_write_text(&path, &text);
-            }
-        }
-        cleanup_stale_ron(&projects, &expected_projects);
+        fs::create_dir_all(&root)
+            .map_err(|e| format!("bots: failed creating {}: {e}", root.display()))?;
+        let text = ron::ser::to_string_pretty(save, ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("bots: failed serialising bot state: {e}"))?;
+        crate::settings::atomic_write_text(&root.join("journal.ron"), &text)
+            .map_err(|e| format!("bots: failed writing journal for '{world_name}': {e}"))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn queue_bot_world_save(
     world_name: String,
+    generation_identity: WorldGenerationIdentity,
     save: BotWorldSave,
-    edited_overrides: Option<AHashMap<crate::chunk::ChunkPos, EditedChunkOverride>>,
-) -> bool {
+    capture: EditedOverrideSaveCapture,
+    completion: BotAutosaveCompletion,
+    bot_revision: u64,
+) -> BotSaveEnqueueOutcome {
     if BOT_SAVE_IN_FLIGHT
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return false;
+        return BotSaveEnqueueOutcome::Busy;
     }
 
+    let completion_world_name = world_name.clone();
     let spawn = thread::Builder::new()
         .name("voxel-native-autosave".into())
         .spawn(move || {
-            save_bot_world_files(&world_name, &save);
-            if let Some(overrides) = edited_overrides {
-                save_edited_overrides_snapshot(&world_name, overrides);
-            }
+            let result = save_bot_snapshot_after_edit_store(&world_name, &save, capture);
+            completion.publish(BotAutosaveCompletionRecord {
+                world_name,
+                generation_identity,
+                bot_revision,
+                result,
+            });
             BOT_SAVE_IN_FLIGHT.store(false, Ordering::SeqCst);
         });
 
     if let Err(e) = spawn {
         BOT_SAVE_IN_FLIGHT.store(false, Ordering::SeqCst);
         warn!("bots: failed starting background autosave: {e}");
-        return false;
+        return BotSaveEnqueueOutcome::Failed(format!(
+            "failed starting autosave worker for '{completion_world_name}': {e}"
+        ));
     }
 
-    true
+    BotSaveEnqueueOutcome::Accepted
 }
 
 #[cfg(target_arch = "wasm32")]
 fn queue_bot_world_save(
     world_name: String,
+    generation_identity: WorldGenerationIdentity,
     save: BotWorldSave,
-    edited_overrides: Option<AHashMap<crate::chunk::ChunkPos, EditedChunkOverride>>,
-) -> bool {
-    save_bot_world_files(&world_name, &save);
-    if let Some(overrides) = edited_overrides {
-        save_edited_overrides_snapshot(&world_name, overrides);
-    }
-    true
+    capture: EditedOverrideSaveCapture,
+    completion: BotAutosaveCompletion,
+    bot_revision: u64,
+) -> BotSaveEnqueueOutcome {
+    let result = save_bot_snapshot_after_edit_store(&world_name, &save, capture);
+    completion.publish(BotAutosaveCompletionRecord {
+        world_name,
+        generation_identity,
+        bot_revision,
+        result,
+    });
+    BotSaveEnqueueOutcome::Accepted
 }
 
 pub fn load_bot_world_files(world_name: &str) -> Option<BotWorldSave> {
@@ -11056,24 +13256,275 @@ fn browser_bot_world_key(world_name: &str) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn cleanup_stale_ron(dir: &Path, expected: &HashSet<PathBuf>) {
-    let Ok(read) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in read.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("ron") && !expected.contains(&path) {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn bot_root(world_name: &str) -> PathBuf {
     PathBuf::from(SAVES_DIR).join(format!(
         "{}_bots",
         crate::settings::world_storage_stem(world_name)
     ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompanionDockAxis {
+    Vertical,
+    Horizontal,
+}
+
+#[derive(Debug, Clone)]
+struct CompanionDockEntry {
+    id: u64,
+    name: String,
+    mode: BotCompanionMode,
+    role: BotRole,
+    order: u8,
+    last_message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FleetDockTone {
+    Parked,
+    Queue,
+    Area,
+    Autonomy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FleetDockPresentation {
+    status_icon: crate::icons::Icon,
+    status_label: &'static str,
+    action_icon: crate::icons::Icon,
+    action_label: &'static str,
+    action_tooltip: &'static str,
+    tone: FleetDockTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompanionDockAction {
+    icon: crate::icons::Icon,
+    label: &'static str,
+    tooltip: &'static str,
+    active_mode: Option<BotCompanionMode>,
+    command: CompanionCommand,
+}
+
+impl CompanionDockAction {
+    fn is_active(self, mode: BotCompanionMode) -> bool {
+        self.active_mode == Some(mode)
+    }
+}
+
+const COMPANION_PRIMARY_ACTIONS: [CompanionDockAction; 5] = [
+    CompanionDockAction {
+        icon: crate::icons::Icon::Teleport,
+        label: "Here",
+        tooltip: "Come stand next to me",
+        active_mode: Some(BotCompanionMode::AwaitingInstruction),
+        command: CompanionCommand::PlaceSelectedNearPlayer,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Follow,
+        label: "Follow",
+        tooltip: "Fly with me",
+        active_mode: Some(BotCompanionMode::FollowingPlayer),
+        command: CompanionCommand::FollowSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Hold,
+        label: "Wait",
+        tooltip: "Stay put right here",
+        active_mode: Some(BotCompanionMode::HoldingPosition),
+        command: CompanionCommand::HoldSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Scan,
+        label: "Scan",
+        tooltip: "Look around the current area",
+        active_mode: Some(BotCompanionMode::ScanningArea),
+        command: CompanionCommand::ScanSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Pin,
+        label: "Mark",
+        tooltip: "Drop a waypoint at my position",
+        active_mode: None,
+        command: CompanionCommand::MarkWaypointSelected,
+    },
+];
+
+const COMPANION_SECONDARY_ACTIONS: [CompanionDockAction; 4] = [
+    CompanionDockAction {
+        icon: crate::icons::Icon::Follow,
+        label: "Closer",
+        tooltip: "Tighten follow distance",
+        active_mode: None,
+        command: CompanionCommand::CloserSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Follow,
+        label: "Farther",
+        tooltip: "Widen follow distance",
+        active_mode: None,
+        command: CompanionCommand::FartherSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Loop,
+        label: "Patrol",
+        tooltip: "Orbit me on a wide patrol arc",
+        active_mode: Some(BotCompanionMode::Patrolling),
+        command: CompanionCommand::PatrolSelected,
+    },
+    CompanionDockAction {
+        icon: crate::icons::Icon::Globe,
+        label: "Survey",
+        tooltip: "Run a wide-area survey sweep",
+        active_mode: Some(BotCompanionMode::SurveySweep),
+        command: CompanionCommand::SurveySelected,
+    },
+];
+
+fn companion_dock_axis(position: crate::settings::CompanionDockPosition) -> CompanionDockAxis {
+    match position {
+        crate::settings::CompanionDockPosition::Left
+        | crate::settings::CompanionDockPosition::Right => CompanionDockAxis::Vertical,
+        crate::settings::CompanionDockPosition::Bottom => CompanionDockAxis::Horizontal,
+    }
+}
+
+fn companion_menu_width(
+    viewport_width: f32,
+    position: crate::settings::CompanionDockPosition,
+) -> f32 {
+    let safe_viewport = if viewport_width.is_finite() {
+        (viewport_width - 32.0).max(1.0)
+    } else {
+        304.0
+    };
+    let preferred: f32 = match companion_dock_axis(position) {
+        CompanionDockAxis::Vertical => 304.0,
+        CompanionDockAxis::Horizontal => 420.0,
+    };
+    preferred.min(safe_viewport)
+}
+
+fn companion_action_columns(width: f32) -> usize {
+    if width >= 380.0 {
+        3
+    } else if width >= 250.0 {
+        2
+    } else {
+        1
+    }
+}
+
+fn companion_action_width(available_width: f32, spacing: f32) -> f32 {
+    let columns = companion_action_columns(available_width);
+    let gaps = spacing.max(0.0) * columns.saturating_sub(1) as f32;
+    ((available_width - gaps) / columns as f32).clamp(
+        crate::theme::KANSO_LAYOUT.icon_action_min_width,
+        crate::theme::KANSO_LAYOUT.icon_action_max_width,
+    )
+}
+
+fn fleet_dock_presentation(mode: BotFleetMode) -> FleetDockPresentation {
+    use crate::icons::Icon;
+
+    match mode {
+        BotFleetMode::Parked => FleetDockPresentation {
+            status_icon: Icon::Hold,
+            status_label: "PARKED",
+            action_icon: Icon::Play,
+            action_label: "Run Queue",
+            action_tooltip: "Run the saved queue without inventing new projects",
+            tone: FleetDockTone::Parked,
+        },
+        BotFleetMode::ManualQueue => FleetDockPresentation {
+            status_icon: Icon::Builder,
+            status_label: "MANUAL QUEUE",
+            action_icon: Icon::Pause,
+            action_label: "Park Fleet",
+            action_tooltip: "Park the fleet and preserve queued work",
+            tone: FleetDockTone::Queue,
+        },
+        BotFleetMode::MarkedArea => FleetDockPresentation {
+            status_icon: Icon::Grid,
+            status_label: "MARKED AREA",
+            action_icon: Icon::Pause,
+            action_label: "Park Fleet",
+            action_tooltip: "Park the fleet and preserve queued work",
+            tone: FleetDockTone::Area,
+        },
+        BotFleetMode::ContinuousAutonomy => FleetDockPresentation {
+            status_icon: Icon::Optimize,
+            status_label: "AUTONOMY",
+            action_icon: Icon::Pause,
+            action_label: "Park Fleet",
+            action_tooltip: "Park the fleet and preserve queued work",
+            tone: FleetDockTone::Autonomy,
+        },
+    }
+}
+
+fn next_fleet_mode_for_toggle(current: BotFleetMode, has_work_area: bool) -> BotFleetMode {
+    if current != BotFleetMode::Parked {
+        BotFleetMode::Parked
+    } else if has_work_area {
+        BotFleetMode::MarkedArea
+    } else {
+        BotFleetMode::ManualQueue
+    }
+}
+
+fn toggle_fleet_from_ui(brain: &mut FriendlyWorldBrain) {
+    let current = brain.save.autonomy.fleet_mode();
+    let next = next_fleet_mode_for_toggle(current, brain.save.autonomy.active_work_area.is_some());
+    brain.save.autonomy.set_fleet_mode(next);
+    brain.mark_dirty();
+    brain.hud_message = if next == BotFleetMode::Parked {
+        "Fleet parked. Queued projects and progress are preserved.".into()
+    } else {
+        "Fleet running only the saved priority queue; no new projects are invented.".into()
+    };
+}
+
+fn dock_neon_feedback_amount(ctx: &egui::Context, id: egui::Id, highlighted: bool) -> f32 {
+    crate::theme::animate_bool_finite(
+        ctx,
+        id.with("dock_neon_feedback"),
+        highlighted,
+        crate::theme::MotionRole::Feedback,
+    )
+}
+
+fn paint_dock_neon_feedback(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    color: egui::Color32,
+    highlighted: bool,
+) {
+    let target = highlighted
+        || response.hovered()
+        || response.has_focus()
+        || response.is_pointer_button_down_on()
+        || response.clicked();
+    let amount = dock_neon_feedback_amount(ui.ctx(), response.id, target);
+    let glow = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 64);
+    crate::theme::paint_neon_outline(
+        ui.painter(),
+        response.rect,
+        crate::theme::KANSO_VISUALS.corner_radius,
+        glow,
+        color,
+        amount,
+    );
+}
+
+fn fleet_dock_tone_color(tone: FleetDockTone, theme: crate::theme::ThemeSettings) -> egui::Color32 {
+    let colors = theme.semantic();
+    match tone {
+        FleetDockTone::Parked => colors.text_muted,
+        FleetDockTone::Queue => colors.info,
+        FleetDockTone::Area => colors.warning,
+        FleetDockTone::Autonomy => colors.success,
+    }
 }
 
 fn draw_companion_quick_dock(
@@ -11085,9 +13536,14 @@ fn draw_companion_quick_dock(
     if !settings.companion_ui.show_companion_dock {
         return;
     }
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let theme = settings.theme;
-    let (anchor, offset) = match settings.companion_ui.dock_position {
+    let position = settings.companion_ui.dock_position;
+    let axis = companion_dock_axis(position);
+    let viewport_width = ctx.screen_rect().width();
+    let (anchor, offset) = match position {
         crate::settings::CompanionDockPosition::Left => {
             (egui::Align2::LEFT_CENTER, egui::vec2(14.0, 0.0))
         }
@@ -11100,203 +13556,232 @@ fn draw_companion_quick_dock(
     };
     let menu_key = egui::Id::new("companion_dock_open_id");
     let mut open_id = ctx.data(|d| d.get_temp::<u64>(menu_key)).unwrap_or(0);
-    let companions: Vec<(u64, String, BotCompanionMode, BotRole, u8, String)> = brain
+    let companions: Vec<CompanionDockEntry> = brain
         .save
         .agents
         .iter()
         .filter(|b| b.companion)
-        .map(|b| {
-            (
-                b.id,
-                b.name.clone(),
-                b.companion_mode,
-                b.role,
-                b.companion_order,
-                b.memory.last_message.clone(),
-            )
+        .map(|b| CompanionDockEntry {
+            id: b.id,
+            name: b.name.clone(),
+            mode: b.companion_mode,
+            role: b.role,
+            order: b.companion_order,
+            last_message: b.memory.last_message.clone(),
         })
         .collect();
+    if open_id != 0 && !companions.iter().any(|entry| entry.id == open_id) {
+        open_id = 0;
+    }
 
     egui::Area::new(egui::Id::new("voxel_native_companion_dock"))
         .anchor(anchor, offset)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
-            let colors = theme.semantic();
-            let frame = egui::Frame::none()
-                .fill(egui::Color32::from_rgba_unmultiplied(
-                    colors.surface_strong.r(),
-                    colors.surface_strong.g(),
-                    colors.surface_strong.b(),
-                    188,
-                ))
-                .stroke(egui::Stroke::new(1.15, colors.info))
-                .inner_margin(egui::Margin::symmetric(8.0, 8.0))
-                .rounding(egui::Rounding::same(10.0))
-                .shadow(egui::epaint::Shadow {
-                    offset: egui::vec2(0.0, 10.0),
-                    blur: 24.0,
-                    spread: 0.0,
-                    color: egui::Color32::from_black_alpha(126),
-                });
+            let frame = crate::theme::command_frame(theme)
+                .inner_margin(egui::Margin::symmetric(10.0, 10.0));
             frame.show(ui, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                let horizontal = matches!(
-                    settings.companion_ui.dock_position,
-                    crate::settings::CompanionDockPosition::Bottom
-                );
-                if horizontal {
-                    ui.horizontal(|ui| {
-                        draw_editor_dock_icon(ui, &mut editor, theme);
-                        for (id, name, mode, role, order, last) in &companions {
-                            if companion_dock_icon(
-                                ui,
-                                name,
-                                *mode,
-                                *role,
-                                *order,
-                                open_id == *id,
-                                &last,
-                            )
-                            .clicked()
-                            {
-                                brain.selected_bot = *id;
-                                open_id = if open_id == *id { 0 } else { *id };
+                ui.spacing_mut().item_spacing = theme.density.item_spacing();
+                let clicked_companion = match axis {
+                    CompanionDockAxis::Horizontal => {
+                        ui.set_max_width((viewport_width - 32.0).max(1.0));
+                        ui.horizontal_wrapped(|ui| {
+                            draw_fleet_dock_controls(ui, &mut brain, theme);
+                            draw_editor_dock_button(ui, &mut editor, theme);
+                            let mut clicked = None;
+                            for entry in &companions {
+                                if draw_companion_dock_button(ui, entry, open_id == entry.id, theme)
+                                    .clicked()
+                                {
+                                    clicked = Some(entry.id);
+                                }
                             }
-                        }
-                        draw_companion_dock_settings(ui, &mut settings);
-                    });
-                } else {
-                    draw_editor_dock_icon(ui, &mut editor, theme);
-                    for (id, name, mode, role, order, last) in &companions {
-                        if companion_dock_icon(
-                            ui,
-                            name,
-                            *mode,
-                            *role,
-                            *order,
-                            open_id == *id,
-                            &last,
-                        )
-                        .clicked()
-                        {
-                            brain.selected_bot = *id;
-                            open_id = if open_id == *id { 0 } else { *id };
-                        }
+                            draw_companion_dock_settings(ui, &mut settings, theme);
+                            clicked
+                        })
+                        .inner
                     }
-                    draw_companion_dock_settings(ui, &mut settings);
+                    CompanionDockAxis::Vertical => {
+                        draw_fleet_dock_controls(ui, &mut brain, theme);
+                        ui.horizontal(|ui| {
+                            draw_editor_dock_button(ui, &mut editor, theme);
+                            draw_companion_dock_settings(ui, &mut settings, theme);
+                        });
+                        let mut clicked = None;
+                        ui.vertical_centered(|ui| {
+                            for entry in &companions {
+                                if draw_companion_dock_button(ui, entry, open_id == entry.id, theme)
+                                    .clicked()
+                                {
+                                    clicked = Some(entry.id);
+                                }
+                            }
+                        });
+                        clicked
+                    }
+                };
+
+                if let Some(id) = clicked_companion {
+                    brain.selected_bot = id;
+                    open_id = if open_id == id { 0 } else { id };
                 }
 
                 if open_id != 0 {
-                    ui.separator();
-                    draw_companion_quick_menu(ui, &mut brain, open_id, theme);
+                    crate::ui_kit::compact_separator(ui, theme);
+                    draw_companion_quick_menu(ui, &mut brain, open_id, theme, position);
                 }
             });
         });
     ctx.data_mut(|d| d.insert_temp(menu_key, open_id));
 }
 
-fn draw_editor_dock_icon(
+fn draw_fleet_dock_controls(
     ui: &mut egui::Ui,
-    editor: &mut ResMut<EditorState>,
+    brain: &mut FriendlyWorldBrain,
     theme: crate::theme::ThemeSettings,
 ) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(54.0, 54.0), egui::Sense::click());
-    let painter = ui.painter_at(rect);
-    let fill = if editor.open {
-        egui::Color32::from_rgb(0, 210, 235)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(16, 36, 48, 202)
-    };
-    painter.rect_filled(rect, egui::Rounding::same(8.0), fill);
-    painter.rect_filled(
-        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.center().y)),
-        egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(230, 250, 255, 30),
-    );
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.4, theme.color.primary()),
-    );
-    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(25.0, 25.0));
-    crate::icons::paint_icon(
-        &painter,
-        icon_rect,
+    let mode = brain.save.autonomy.fleet_mode();
+    let presentation = fleet_dock_presentation(mode);
+    let tone_color = fleet_dock_tone_color(presentation.tone, theme);
+
+    ui.horizontal(|ui| {
+        let status = ui.scope(|ui| {
+            crate::ui_kit::status_chip(
+                ui,
+                presentation.status_icon,
+                "FLEET",
+                presentation.status_label,
+                theme,
+            );
+        });
+        let status_response = status
+            .response
+            .on_hover_text(format!("Fleet state: {}", presentation.status_label));
+        let glow = egui::Color32::from_rgba_unmultiplied(
+            tone_color.r(),
+            tone_color.g(),
+            tone_color.b(),
+            52,
+        );
+        crate::theme::paint_neon_outline(
+            ui.painter(),
+            status_response.rect,
+            crate::theme::KANSO_VISUALS.corner_radius,
+            glow,
+            tone_color,
+            if mode == BotFleetMode::Parked {
+                0.28
+            } else {
+                0.56
+            },
+        );
+
+        let tooltip = format!(
+            "{}: {}",
+            presentation.action_label, presentation.action_tooltip
+        );
+        let action = crate::ui_kit::icon_square(
+            ui,
+            presentation.action_icon,
+            mode != BotFleetMode::Parked,
+            theme,
+            &tooltip,
+        );
+        paint_dock_neon_feedback(ui, &action, tone_color, mode != BotFleetMode::Parked);
+        if action.clicked() {
+            toggle_fleet_from_ui(brain);
+        }
+    });
+}
+
+fn draw_editor_dock_button(
+    ui: &mut egui::Ui,
+    editor: &mut EditorState,
+    theme: crate::theme::ThemeSettings,
+) {
+    let selected = editor.open && editor.tab == EditorTab::Bots;
+    let response = crate::ui_kit::icon_square(
+        ui,
         crate::icons::Icon::Wand,
-        if editor.open {
-            egui::Color32::from_rgb(5, 12, 18)
-        } else {
-            theme.color.primary()
-        },
+        selected,
+        theme,
+        "Open editor on the companion tab",
     );
-    painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 7.0),
-        egui::Align2::CENTER_BOTTOM,
-        "ED",
-        egui::FontId::monospace(9.0),
-        if editor.open {
-            egui::Color32::from_rgb(5, 12, 18)
-        } else {
-            egui::Color32::from_gray(210)
-        },
-    );
+    paint_dock_neon_feedback(ui, &response, theme.semantic().accent, selected);
     if response.clicked() {
         editor.open = true;
         editor.tab = EditorTab::Bots;
     }
-    response.on_hover_text("Open editor on the companion tab");
 }
 
-fn companion_dock_icon(
-    ui: &mut egui::Ui,
-    name: &str,
+fn companion_mode_icon(mode: BotCompanionMode) -> crate::icons::Icon {
+    use crate::icons::Icon;
+
+    match mode {
+        BotCompanionMode::AwaitingInstruction => Icon::Approve,
+        BotCompanionMode::FollowingPlayer => Icon::Follow,
+        BotCompanionMode::HoldingPosition => Icon::Hold,
+        BotCompanionMode::ScanningArea => Icon::Scan,
+        BotCompanionMode::PreviewingEdit => Icon::Eye,
+        BotCompanionMode::AssistingTask => Icon::Builder,
+        BotCompanionMode::Blocked => Icon::Close,
+        BotCompanionMode::Patrolling => Icon::Loop,
+        BotCompanionMode::SurveySweep => Icon::Globe,
+    }
+}
+
+fn companion_mode_ui_color(
     mode: BotCompanionMode,
     role: BotRole,
-    order: u8,
+    theme: crate::theme::ThemeSettings,
+) -> egui::Color32 {
+    let colors = theme.semantic();
+    match mode {
+        BotCompanionMode::AwaitingInstruction => colors.text_muted,
+        BotCompanionMode::FollowingPlayer | BotCompanionMode::ScanningArea => colors.info,
+        BotCompanionMode::HoldingPosition | BotCompanionMode::Patrolling => colors.warning,
+        BotCompanionMode::PreviewingEdit => colors.accent,
+        BotCompanionMode::AssistingTask => match role {
+            BotRole::CompanionMaker => colors.accent,
+            _ => colors.success,
+        },
+        BotCompanionMode::Blocked => colors.danger,
+        BotCompanionMode::SurveySweep => colors.success,
+    }
+}
+
+fn draw_companion_dock_button(
+    ui: &mut egui::Ui,
+    entry: &CompanionDockEntry,
     selected: bool,
-    last_message: &str,
+    theme: crate::theme::ThemeSettings,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(54.0, 54.0), egui::Sense::click());
-    let painter = ui.painter_at(rect);
-    let color = companion_mode_color(mode, role);
-    painter.rect_filled(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(16, 36, 48, 202),
+    let tooltip = format!(
+        "{} // {}\n{}",
+        entry.name,
+        entry.mode.label(),
+        entry.last_message
     );
-    painter.rect_filled(
-        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.center().y)),
-        egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(230, 250, 255, 28),
+    let response = crate::ui_kit::icon_square(
+        ui,
+        companion_mode_icon(entry.mode),
+        selected,
+        theme,
+        &tooltip,
     );
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(if selected { 2.4 } else { 1.2 }, color),
+    let color = companion_mode_ui_color(entry.mode, entry.role, theme);
+    paint_dock_neon_feedback(ui, &response, color, selected);
+
+    let badge_center = response.rect.right_top() + egui::vec2(-4.5, 4.5);
+    ui.painter().circle_filled(badge_center, 6.0, color);
+    ui.painter().text(
+        badge_center,
+        egui::Align2::CENTER_CENTER,
+        (entry.order as usize + 1).to_string(),
+        egui::FontId::monospace(8.0),
+        theme.text_on(color),
     );
-    painter.circle_filled(
-        rect.center() + egui::vec2(0.0, -3.0),
-        14.0,
-        egui::Color32::from_rgb(232, 240, 242),
-    );
-    painter.rect_filled(
-        egui::Rect::from_center_size(rect.center() + egui::vec2(0.0, -3.0), egui::vec2(21.0, 9.0)),
-        egui::Rounding::same(5.0),
-        color,
-    );
-    painter.circle_filled(
-        rect.center() + egui::vec2(if order == 0 { -4.0 } else { 4.0 }, -3.0),
-        2.0,
-        egui::Color32::from_rgb(2, 8, 12),
-    );
-    painter.text(
-        rect.center_bottom() - egui::vec2(0.0, 6.0),
-        egui::Align2::CENTER_BOTTOM,
-        name.chars().take(2).collect::<String>().to_uppercase(),
-        egui::FontId::monospace(9.0),
-        egui::Color32::from_gray(230),
-    );
-    response.on_hover_text(format!("{} // {}\n{}", name, mode.label(), last_message))
+    response
 }
 
 fn companion_mode_color(mode: BotCompanionMode, role: BotRole) -> egui::Color32 {
@@ -11316,25 +13801,19 @@ fn companion_mode_color(mode: BotCompanionMode, role: BotRole) -> egui::Color32 
     }
 }
 
-fn draw_companion_dock_settings(ui: &mut egui::Ui, settings: &mut ResMut<WorldSettings>) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(54.0, 28.0), egui::Sense::click());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        egui::Rounding::same(6.0),
-        egui::Color32::from_rgba_unmultiplied(20, 30, 38, 220),
-    );
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(6.0),
-        egui::Stroke::new(1.0, egui::Color32::from_gray(110)),
-    );
-    crate::icons::paint_icon(
-        &painter,
-        rect.shrink(6.0),
+fn draw_companion_dock_settings(
+    ui: &mut egui::Ui,
+    settings: &mut WorldSettings,
+    theme: crate::theme::ThemeSettings,
+) {
+    let response = crate::ui_kit::icon_square(
+        ui,
         crate::icons::Icon::Layout,
-        egui::Color32::from_gray(210),
+        false,
+        theme,
+        "Move companion dock",
     );
+    paint_dock_neon_feedback(ui, &response, theme.semantic().focus, false);
     if response.clicked() {
         settings.companion_ui.dock_position = match settings.companion_ui.dock_position {
             crate::settings::CompanionDockPosition::Left => {
@@ -11349,7 +13828,6 @@ fn draw_companion_dock_settings(ui: &mut egui::Ui, settings: &mut ResMut<WorldSe
         };
         settings.save();
     }
-    response.on_hover_text("Move companion dock");
 }
 
 fn draw_companion_quick_menu(
@@ -11357,6 +13835,7 @@ fn draw_companion_quick_menu(
     brain: &mut FriendlyWorldBrain,
     companion_id: u64,
     theme: crate::theme::ThemeSettings,
+    position: crate::settings::CompanionDockPosition,
 ) {
     let Some((name, mode, role)) = brain
         .save
@@ -11367,132 +13846,95 @@ fn draw_companion_quick_menu(
     else {
         return;
     };
-    ui.set_min_width(296.0);
-    let mood_color = companion_mode_color(mode, role);
-    let mood_glyph = companion_mode_glyph(mode);
+    let menu_width = companion_menu_width(ui.ctx().screen_rect().width(), position);
+    ui.set_width(menu_width);
+    let mood_color = companion_mode_ui_color(mode, role, theme);
     let mood_word = companion_mode_word(mode);
 
-    // ---- Mood header strip ----
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(280.0, 34.0), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Color32::from_rgba_unmultiplied(14, 22, 30, 230),
-    );
-    painter.rect_stroke(
-        rect,
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.4, mood_color.gamma_multiply(0.85)),
-    );
-    // Pulse dot (left side).
-    let dot_c = egui::pos2(rect.left() + 18.0, rect.center().y);
-    painter.circle_filled(dot_c, 7.0, mood_color);
-    painter.circle_stroke(
-        dot_c,
-        9.0,
-        egui::Stroke::new(1.0, mood_color.gamma_multiply(0.55)),
-    );
-    // Name (white) + mood label (mood-color).
-    painter.text(
-        egui::pos2(rect.left() + 34.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        name.to_uppercase(),
-        egui::FontId::monospace(13.0),
-        theme.color.primary(),
-    );
-    painter.text(
-        egui::pos2(rect.right() - 10.0, rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        format!("{mood_glyph} {mood_word}"),
-        egui::FontId::monospace(11.0),
+    let header = ui.horizontal_wrapped(|ui| {
+        crate::ui_kit::status_chip(
+            ui,
+            crate::icons::Icon::Follow,
+            "COMPANION",
+            &name.to_uppercase(),
+            theme,
+        );
+        crate::ui_kit::status_chip(ui, companion_mode_icon(mode), "MODE", mood_word, theme);
+    });
+    let glow =
+        egui::Color32::from_rgba_unmultiplied(mood_color.r(), mood_color.g(), mood_color.b(), 52);
+    crate::theme::paint_neon_outline(
+        ui.painter(),
+        header.response.rect,
+        crate::theme::KANSO_VISUALS.corner_radius,
+        glow,
         mood_color,
+        if mode == BotCompanionMode::Blocked {
+            0.82
+        } else {
+            0.42
+        },
     );
 
-    ui.add_space(4.0);
-
-    // ---- 5 BIG primary buttons ----
-    let primary: [(&str, &str, &str, BotCompanionMode, CompanionCommand); 5] = [
-        (
-            "⤓",
-            "HERE",
-            "Come stand next to me",
-            BotCompanionMode::AwaitingInstruction,
-            CompanionCommand::PlaceSelectedNearPlayer,
-        ),
-        (
-            "➤",
-            "FOLLOW",
-            "Fly with me",
-            BotCompanionMode::FollowingPlayer,
-            CompanionCommand::FollowSelected,
-        ),
-        (
-            "■",
-            "WAIT",
-            "Stay put right here",
-            BotCompanionMode::HoldingPosition,
-            CompanionCommand::HoldSelected,
-        ),
-        (
-            "◎",
-            "SCAN",
-            "Look around for stuff",
-            BotCompanionMode::ScanningArea,
-            CompanionCommand::ScanSelected,
-        ),
-        (
-            "⚑",
-            "MARK",
-            "Drop a flag at my spot",
-            BotCompanionMode::AwaitingInstruction, // never highlighted
-            CompanionCommand::MarkWaypointSelected,
-        ),
-    ];
+    let action_width = companion_action_width(menu_width, ui.spacing().item_spacing.x);
     ui.horizontal_wrapped(|ui| {
-        for (glyph, caption, tooltip, active_mode, cmd) in primary {
-            // Don't highlight "MARK" — it's a one-shot action, not a mode.
-            let is_active = caption != "MARK" && mode == active_mode;
-            if dock_big_button(ui, glyph, caption, tooltip, is_active, mood_color).clicked() {
+        for action in COMPANION_PRIMARY_ACTIONS {
+            let active = action.is_active(mode);
+            let response =
+                draw_companion_primary_action(ui, action, active, action_width, mood_color, theme);
+            if response.clicked() {
                 brain.selected_bot = companion_id;
-                brain.companion_command = Some(cmd);
+                brain.companion_command = Some(action.command);
             }
         }
     });
 
-    // ---- Collapsible MORE drawer ----
-    egui::CollapsingHeader::new(
-        egui::RichText::new("MORE…")
-            .monospace()
-            .size(11.0)
-            .color(egui::Color32::from_rgb(170, 200, 220)),
-    )
-    .default_open(false)
-    .show(ui, |ui| {
+    let more_key = egui::Id::new(("companion_quick_more", companion_id));
+    let mut more_open = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(more_key))
+        .unwrap_or(false);
+    let more_toggle = crate::ui_kit::icon_action_sized(
+        ui,
+        crate::icons::Icon::Drawer,
+        if more_open { "Less" } else { "More" },
+        more_open,
+        action_width,
+        theme,
+    );
+    if more_toggle.clicked() {
+        more_open = !more_open;
+    }
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(more_key, more_open));
+
+    if more_open {
         ui.horizontal_wrapped(|ui| {
-            if dock_command_button(ui, "CLOSER", "Tighten follow distance").clicked() {
-                brain.selected_bot = companion_id;
-                brain.companion_command = Some(CompanionCommand::CloserSelected);
+            for action in COMPANION_SECONDARY_ACTIONS {
+                let response = crate::ui_kit::icon_action(
+                    ui,
+                    action.icon,
+                    action.label,
+                    action.is_active(mode),
+                    theme,
+                )
+                .on_hover_text(action.tooltip);
+                if response.clicked() {
+                    brain.selected_bot = companion_id;
+                    brain.companion_command = Some(action.command);
+                }
             }
-            if dock_command_button(ui, "FARTHER", "Widen follow distance").clicked() {
-                brain.selected_bot = companion_id;
-                brain.companion_command = Some(CompanionCommand::FartherSelected);
-            }
-            if dock_command_button(ui, "CITY TEAM", "Enable autonomous city and road building")
-                .clicked()
+            if crate::ui_kit::icon_action(
+                ui,
+                crate::icons::Icon::Optimize,
+                "City Autonomy",
+                brain.save.autonomy.fleet_mode() == BotFleetMode::ContinuousAutonomy,
+                theme,
+            )
+            .on_hover_text("Enable autonomous city and road building")
+            .clicked()
             {
                 brain.companion_command = Some(CompanionCommand::BuildCityAutonomy);
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            if dock_command_button(ui, "PATROL", "Orbit me on a wide patrol arc").clicked() {
-                brain.selected_bot = companion_id;
-                brain.companion_command = Some(CompanionCommand::PatrolSelected);
-            }
-            if dock_command_button(ui, "SURVEY", "Wide-area survey sweep for the planner").clicked()
-            {
-                brain.selected_bot = companion_id;
-                brain.companion_command = Some(CompanionCommand::SurveySelected);
             }
         });
         ui.horizontal_wrapped(|ui| {
@@ -11502,32 +13944,62 @@ fn draw_companion_quick_menu(
                 CompanionAssistKind::Lights,
                 CompanionAssistKind::ClearFlatten,
             ] {
-                if dock_command_button(ui, assist.label(), "Preview editor assist").clicked() {
+                if crate::ui_kit::icon_action(
+                    ui,
+                    companion_assist_icon(assist),
+                    assist.label(),
+                    false,
+                    theme,
+                )
+                .on_hover_text("Preview editor assist")
+                .clicked()
+                {
                     brain.selected_bot = companion_id;
                     brain.companion_command = Some(CompanionCommand::PreviewAssist(assist));
                 }
             }
         });
-    });
+    }
 
-    if let Some(preview) = &brain.save.companion_preview {
-        ui.label(egui::RichText::new(&preview.message).size(10.5).color(
-            if preview.status.is_valid() {
-                egui::Color32::from_rgb(120, 240, 255)
+    if let Some((message, can_approve)) = brain
+        .save
+        .companion_preview
+        .as_ref()
+        .map(|preview| (preview.message.clone(), preview.status.is_valid()))
+    {
+        crate::ui_kit::status_chip(
+            ui,
+            if can_approve {
+                crate::icons::Icon::Approve
             } else {
-                egui::Color32::from_rgb(255, 120, 90)
+                crate::icons::Icon::Close
             },
-        ));
+            "PREVIEW",
+            if can_approve { "READY" } else { "BLOCKED" },
+            theme,
+        );
+        ui.label(
+            egui::RichText::new(message)
+                .size(10.5)
+                .color(if can_approve {
+                    theme.semantic().info
+                } else {
+                    theme.semantic().danger
+                }),
+        );
         ui.horizontal(|ui| {
-            let can_approve = preview.status.is_valid();
-            let approve = crate::ui_kit::icon_action(
-                ui,
-                crate::icons::Icon::Approve,
-                "Approve",
-                can_approve,
-                theme,
-            );
-            if can_approve && approve.clicked() {
+            let approve = ui
+                .add_enabled_ui(can_approve, |ui| {
+                    crate::ui_kit::icon_action(
+                        ui,
+                        crate::icons::Icon::Approve,
+                        "Approve",
+                        false,
+                        theme,
+                    )
+                })
+                .inner;
+            if approve.clicked() {
                 brain.companion_command = Some(CompanionCommand::ExecutePreview);
             }
             if crate::ui_kit::danger_action(ui, crate::icons::Icon::Delete, "Clear", theme)
@@ -11536,20 +14008,6 @@ fn draw_companion_quick_menu(
                 brain.companion_command = Some(CompanionCommand::ClearPreview);
             }
         });
-    }
-}
-
-fn companion_mode_glyph(mode: BotCompanionMode) -> &'static str {
-    match mode {
-        BotCompanionMode::AwaitingInstruction => "◉",
-        BotCompanionMode::FollowingPlayer => "➤",
-        BotCompanionMode::HoldingPosition => "■",
-        BotCompanionMode::ScanningArea => "◎",
-        BotCompanionMode::PreviewingEdit => "✦",
-        BotCompanionMode::AssistingTask => "✧",
-        BotCompanionMode::Blocked => "✕",
-        BotCompanionMode::Patrolling => "↻",
-        BotCompanionMode::SurveySweep => "⌬",
     }
 }
 
@@ -11567,91 +14025,33 @@ fn companion_mode_word(mode: BotCompanionMode) -> &'static str {
     }
 }
 
-fn dock_big_button(
+fn draw_companion_primary_action(
     ui: &mut egui::Ui,
-    glyph: &str,
-    caption: &str,
-    tooltip: &str,
+    action: CompanionDockAction,
     active: bool,
-    accent: egui::Color32,
+    width: f32,
+    mode_color: egui::Color32,
+    theme: crate::theme::ThemeSettings,
 ) -> egui::Response {
-    let icon = match caption {
-        "HERE" => crate::icons::Icon::Teleport,
-        "FOLLOW" => crate::icons::Icon::Follow,
-        "WAIT" => crate::icons::Icon::Hold,
-        "SCAN" => crate::icons::Icon::Scan,
-        "MARK" => crate::icons::Icon::Pin,
-        _ => crate::icons::Icon::Help,
-    };
-    let _ = glyph;
-    let size = egui::vec2(52.0, 52.0);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let hovered = response.hovered();
-    let painter = ui.painter_at(rect);
-    let bg = if active {
-        egui::Color32::from_rgba_unmultiplied(
-            (accent.r() as u16 * 60 / 255) as u8,
-            (accent.g() as u16 * 60 / 255) as u8,
-            (accent.b() as u16 * 60 / 255) as u8,
-            230,
-        )
-    } else if hovered {
-        egui::Color32::from_rgba_unmultiplied(34, 50, 64, 240)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(20, 30, 40, 230)
-    };
-    let stroke = if active {
-        egui::Stroke::new(2.0, accent)
-    } else {
-        egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(70, 100, 120, 200),
-        )
-    };
-    painter.rect_filled(rect, egui::Rounding::same(8.0), bg);
-    painter.rect_stroke(rect, egui::Rounding::same(8.0), stroke);
-    let glyph_color = if active {
-        accent
-    } else {
-        egui::Color32::from_rgb(220, 240, 255)
-    };
-    crate::icons::paint_icon(
-        &painter,
-        egui::Rect::from_center_size(
-            egui::pos2(rect.center().x, rect.top() + 19.0),
-            egui::vec2(20.0, 20.0),
-        ),
-        icon,
-        glyph_color,
-    );
-    painter.text(
-        egui::pos2(rect.center().x, rect.bottom() - 11.0),
-        egui::Align2::CENTER_CENTER,
-        caption,
-        egui::FontId::monospace(9.0),
-        egui::Color32::from_rgb(220, 240, 255),
-    );
-    response.on_hover_text(tooltip)
+    let response =
+        crate::ui_kit::icon_action_sized(ui, action.icon, action.label, active, width, theme);
+    paint_dock_neon_feedback(ui, &response, mode_color, active);
+    response.on_hover_text(action.tooltip)
 }
 
-fn dock_command_button(ui: &mut egui::Ui, label: &str, tooltip: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(label)
-                .monospace()
-                .size(10.0)
-                .strong()
-                .color(egui::Color32::from_rgb(230, 245, 255)),
-        )
-        .fill(egui::Color32::from_rgba_unmultiplied(22, 34, 44, 230))
-        .stroke(egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(80, 210, 230, 190),
-        ))
-        .rounding(egui::Rounding::same(5.0))
-        .min_size(egui::vec2(56.0, 26.0)),
-    )
-    .on_hover_text(tooltip)
+fn companion_assist_icon(assist: CompanionAssistKind) -> crate::icons::Icon {
+    use crate::icons::Icon;
+
+    match assist {
+        CompanionAssistKind::Road => Icon::Road,
+        CompanionAssistKind::LandingPad => Icon::Grid,
+        CompanionAssistKind::Lights => Icon::LightBulb,
+        CompanionAssistKind::ClearFlatten => Icon::Eraser,
+        CompanionAssistKind::Recolor => Icon::Pipette,
+        CompanionAssistKind::Repair => Icon::Wand,
+        CompanionAssistKind::Beautify => Icon::Brush,
+        CompanionAssistKind::TargetRange => Icon::Scan,
+    }
 }
 
 fn queue_smart_editor_task(
@@ -11674,8 +14074,12 @@ fn queue_smart_editor_task(
     };
     brain.command_draft = cmd;
     brain.queued_commands.push(cmd);
-    brain.save.autonomy.bots_active = true;
-    brain.save.autonomy.enabled = false;
+    let mode = if brain.save.autonomy.active_work_area.is_some() {
+        BotFleetMode::MarkedArea
+    } else {
+        BotFleetMode::ManualQueue
+    };
+    brain.save.autonomy.set_fleet_mode(mode);
     brain.hud_message = format!(
         "{} queued for {}. Manual mode: bots build only this command queue.",
         kind.label(),
@@ -11798,8 +14202,8 @@ fn queue_area_masterplan(
 
     let cancelled = cancel_open_projects_for_area_command(&mut brain.save);
     brain.queued_commands.clear();
-    brain.save.autonomy.bots_active = true;
-    brain.save.autonomy.enabled = false;
+    brain.save.autonomy.active_work_area = Some(BotWorkArea::from_corners(min, max));
+    brain.save.autonomy.set_fleet_mode(BotFleetMode::MarkedArea);
     brain.save.autonomy.intensity = brain.save.autonomy.intensity.max(5);
     set_companions_to_area_command(&mut brain.save);
     let district_id = install_player_city_area(&mut brain.save, min, max, world);
@@ -11812,6 +14216,9 @@ fn queue_area_masterplan(
                             theme: BotTheme,
                             priority: u8| {
         if size.iter().any(|v| *v <= 0) || !bounds.contains_box(origin, size) {
+            return;
+        }
+        if open_exact_project_overlaps(save, origin, size) {
             return;
         }
         let assigned = pick_bot(save, kind.preferred_role());
@@ -11848,7 +14255,7 @@ fn queue_area_masterplan(
         brain.hud_message = format!(
             "Bot city area accepted from {source_label}: {queued} project(s) queued inside the marked footprint; {cancelled} old active job(s) parked."
         );
-        brain.dirty = true;
+        brain.mark_dirty();
     } else {
         brain.hud_message = "Marked city area is outside bot city bounds or too small.".into();
     }
@@ -11856,9 +14263,14 @@ fn queue_area_masterplan(
 }
 
 fn cancel_open_projects_for_area_command(save: &mut BotWorldSave) -> usize {
+    let exact_project_ids = save
+        .exact_command_project_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
     let mut cancelled_ids = HashSet::new();
     for project in &mut save.projects {
-        if project.status.is_done() {
+        if project.status.is_done() || exact_project_ids.contains(&project.id) {
             continue;
         }
         project.status = BotProjectStatus::Blocked;
@@ -11869,19 +14281,41 @@ fn cancel_open_projects_for_area_command(save: &mut BotWorldSave) -> usize {
         return 0;
     }
 
+    let cancelled_crew_ids: HashSet<u64> = save
+        .crews
+        .iter()
+        .filter(|crew| cancelled_ids.contains(&crew.project_id))
+        .map(|crew| crew.id)
+        .collect();
     save.crews
         .retain(|crew| !cancelled_ids.contains(&crew.project_id));
     for bot in &mut save.agents {
-        if bot
+        let owns_cancelled_task = bot
             .current_task
             .as_ref()
-            .is_some_and(|task| cancelled_ids.contains(&task.project_id))
-        {
+            .is_some_and(|task| cancelled_ids.contains(&task.project_id));
+        let owns_cancelled_crew = bot
+            .crew_id
+            .is_some_and(|crew_id| cancelled_crew_ids.contains(&crew_id));
+        if owns_cancelled_task {
             bot.current_task = None;
+        }
+        if owns_cancelled_crew {
+            bot.crew_id = None;
+        }
+        if owns_cancelled_task || owns_cancelled_crew {
             bot.state = BotState::Idle;
         }
     }
     cancelled_ids.len()
+}
+
+fn open_exact_project_overlaps(save: &BotWorldSave, origin: [i32; 3], size: [i32; 3]) -> bool {
+    save.projects.iter().any(|project| {
+        save.exact_command_project_ids.contains(&project.id)
+            && !project.status.is_done()
+            && project_footprints_overlap(project.origin, project.size, origin, size, 0)
+    })
 }
 
 fn set_companions_to_area_command(save: &mut BotWorldSave) {
@@ -12324,7 +14758,7 @@ fn draw_city_control_center(
                 ui,
                 Icon::Builder,
                 "ACTIVE",
-                &brain.active_project_count().to_string(),
+                &scheduled_project_count(&brain.save).to_string(),
                 theme,
             );
             crate::ui_kit::status_chip(
@@ -12337,14 +14771,20 @@ fn draw_city_control_center(
             crate::ui_kit::status_chip(
                 ui,
                 Icon::Approve,
-                "WORKERS",
-                if brain.save.autonomy.bots_active {
-                    "ON"
-                } else {
-                    "OFF"
-                },
+                "FLEET",
+                brain.save.autonomy.fleet_mode().label(),
                 theme,
             );
+            if let Some(area) = brain.save.autonomy.active_work_area {
+                let size = area.dimensions();
+                crate::ui_kit::status_chip(
+                    ui,
+                    Icon::Grid,
+                    "WORK AREA",
+                    &format!("{} x {}", size.x, size.z),
+                    theme,
+                );
+            }
         });
 
         ui.horizontal_wrapped(|ui| {
@@ -12359,42 +14799,48 @@ fn draw_city_control_center(
         });
 
         ui.horizontal_wrapped(|ui| {
+            let fleet_mode = brain.save.autonomy.fleet_mode();
             if crate::ui_kit::icon_action(
                 ui,
-                Icon::Approve,
-                if brain.save.autonomy.bots_active {
-                    "Bots On"
+                if fleet_mode == BotFleetMode::Parked {
+                    Icon::Approve
                 } else {
-                    "Bots Off"
+                    Icon::Hold
                 },
-                brain.save.autonomy.bots_active,
+                if fleet_mode == BotFleetMode::Parked {
+                    "Run Queue"
+                } else {
+                    "Park Fleet"
+                },
+                fleet_mode != BotFleetMode::Parked,
                 theme,
             )
             .clicked()
             {
-                brain.save.autonomy.bots_active = !brain.save.autonomy.bots_active;
-                if brain.save.autonomy.bots_active {
-                    brain.save.autonomy.enabled = false;
-                }
-                brain.dirty = true;
-                brain.hud_message = if brain.save.autonomy.bots_active {
-                    "Bot workers resumed in manual mode. They continue queued/saved projects only."
-                        .into()
+                let next = if fleet_mode == BotFleetMode::Parked {
+                    if brain.save.autonomy.active_work_area.is_some() {
+                        BotFleetMode::MarkedArea
+                    } else {
+                        BotFleetMode::ManualQueue
+                    }
                 } else {
-                    "Bot workers paused. Project sheets and progress are saved.".into()
+                    BotFleetMode::Parked
                 };
-            }
-            if crate::ui_kit::icon_action(ui, Icon::City, "Start Mega City", false, theme).clicked()
-            {
-                brain.save.autonomy.bots_active = true;
-                brain.companion_command = Some(CompanionCommand::BuildCityAutonomy);
+                brain.save.autonomy.set_fleet_mode(next);
+                brain.mark_dirty();
+                brain.hud_message = if next == BotFleetMode::Parked {
+                    "Fleet parked. Queued projects and progress are preserved.".into()
+                } else {
+                    "Fleet running only the saved priority queue; no new projects are invented."
+                        .into()
+                };
             }
             if crate::ui_kit::icon_action(ui, Icon::Grid, "Selected Area", false, theme).clicked() {
                 queue_selected_area_masterplan(brain, selection);
             }
             if crate::ui_kit::icon_action(ui, Icon::Follow, "Add Bot", false, theme).clicked() {
                 let name = add_extra_companion(&mut brain.save);
-                brain.dirty = true;
+                brain.mark_dirty();
                 brain.hud_message = format!("{name} joined the swarm as a city specialist.");
             }
             if crate::ui_kit::icon_action(ui, Icon::Grid, "Road Grid", false, theme).clicked() {
@@ -12459,19 +14905,34 @@ fn draw_city_control_center(
             if crate::ui_kit::icon_action(
                 ui,
                 Icon::Optimize,
-                "Continuous Autonomy",
-                brain.save.autonomy.enabled,
+                "Autonomy (Opt-in)",
+                brain.save.autonomy.fleet_mode() == BotFleetMode::ContinuousAutonomy,
                 theme,
             )
             .clicked()
             {
-                brain.save.autonomy.enabled = !brain.save.autonomy.enabled;
-                if brain.save.autonomy.enabled {
-                    brain.save.autonomy.bots_active = true;
+                let enabling = brain.save.autonomy.fleet_mode() != BotFleetMode::ContinuousAutonomy;
+                if enabling {
+                    brain
+                        .save
+                        .autonomy
+                        .set_fleet_mode(BotFleetMode::ContinuousAutonomy);
                     brain.force_city_idea = true;
                     brain.plan_timer = 0.0;
+                    brain.hud_message =
+                        "Continuous autonomy enabled explicitly. Fleet may propose new work."
+                            .into();
+                } else {
+                    let next = if brain.save.autonomy.active_work_area.is_some() {
+                        BotFleetMode::MarkedArea
+                    } else {
+                        BotFleetMode::ManualQueue
+                    };
+                    brain.save.autonomy.set_fleet_mode(next);
+                    brain.hud_message =
+                        "Autonomy disabled. Fleet will finish only the existing queue.".into();
                 }
-                brain.dirty = true;
+                brain.mark_dirty();
             }
             ui.add(
                 egui::Slider::new(&mut brain.save.autonomy.intensity, 1..=10)
@@ -12481,7 +14942,7 @@ fn draw_city_control_center(
                 ui.add(
                     egui::Slider::new(
                         &mut settlement.bounds.max_active_projects,
-                        1..=MAX_ACTIVE_PROJECTS_LIMIT,
+                        1..=BOT_ACTIVE_AREA_HARD_LIMIT,
                     )
                     .text("simultaneous builds"),
                 );
@@ -12541,13 +15002,7 @@ fn draw_build_spreadsheet(
                 ui,
                 Icon::Approve,
                 "MODE",
-                if !brain.save.autonomy.bots_active {
-                    "paused"
-                } else if brain.save.autonomy.enabled {
-                    "continuous"
-                } else {
-                    "manual"
-                },
+                brain.save.autonomy.fleet_mode().label(),
                 theme,
             );
         });
@@ -12557,11 +15012,12 @@ fn draw_build_spreadsheet(
             .show(ui, |ui| {
                 egui::Grid::new("bot_build_spreadsheet_grid")
                     .striped(true)
-                    .num_columns(7)
+                    .num_columns(8)
                     .spacing(egui::vec2(12.0, 6.0))
                     .show(ui, |ui| {
                         ui.strong("PROJECT");
                         ui.strong("STATUS");
+                        ui.strong("PRIORITY");
                         ui.strong("PHASE");
                         ui.strong("OWNER");
                         ui.strong("MATERIAL");
@@ -12602,6 +15058,11 @@ fn draw_build_spreadsheet(
                                     format!("{:?}", project.status)
                                 } else {
                                     row.status.clone()
+                                });
+                                ui.label(if idx == 0 {
+                                    project.priority.to_string()
+                                } else {
+                                    String::new()
                                 });
                                 ui.label(&row.phase);
                                 ui.label(&row.owner);
@@ -12645,7 +15106,7 @@ pub fn draw_bots_editor(
                 ui,
                 Icon::Builder,
                 "ACTIVE",
-                &brain.active_project_count().to_string(),
+                &scheduled_project_count(&brain.save).to_string(),
                 theme,
             );
             crate::ui_kit::status_chip(
@@ -12851,31 +15312,47 @@ pub fn draw_bots_editor(
                 if crate::ui_kit::icon_action(
                     ui,
                     Icon::Optimize,
-                    "Autonomy",
-                    brain.save.autonomy.enabled,
+                    "Autonomy (Opt-in)",
+                    brain.save.autonomy.fleet_mode() == BotFleetMode::ContinuousAutonomy,
                     theme,
                 )
                 .clicked()
                 {
-                    brain.save.autonomy.enabled = !brain.save.autonomy.enabled;
-                    if brain.save.autonomy.enabled {
-                        brain.save.autonomy.bots_active = true;
+                    let enabling =
+                        brain.save.autonomy.fleet_mode() != BotFleetMode::ContinuousAutonomy;
+                    if enabling {
+                        brain
+                            .save
+                            .autonomy
+                            .set_fleet_mode(BotFleetMode::ContinuousAutonomy);
                         brain.force_city_idea = true;
                         brain.plan_timer = 0.0;
+                    } else {
+                        let next = if brain.save.autonomy.active_work_area.is_some() {
+                            BotFleetMode::MarkedArea
+                        } else {
+                            BotFleetMode::ManualQueue
+                        };
+                        brain.save.autonomy.set_fleet_mode(next);
                     }
-                    brain.hud_message = if brain.save.autonomy.enabled {
+                    brain.hud_message = if enabling {
                         "Bot city autonomy resumed.".into()
                     } else {
-                        "Bot city autonomy paused.".into()
+                        "Autonomy disabled; existing queue only.".into()
                     };
-                    brain.dirty = true;
+                    brain.mark_dirty();
                 }
                 if crate::ui_kit::icon_action(ui, Icon::Wand, "Queue Idea", false, theme).clicked()
                 {
-                    brain.save.autonomy.bots_active = true;
-                    brain.save.autonomy.enabled = false;
-                    brain.force_city_idea = true;
-                    brain.hud_message = "Companions queued an optional city idea.".into();
+                    let next = if brain.save.autonomy.active_work_area.is_some() {
+                        BotFleetMode::MarkedArea
+                    } else {
+                        BotFleetMode::ManualQueue
+                    };
+                    brain.save.autonomy.set_fleet_mode(next);
+                    brain.one_shot_plan_request = true;
+                    brain.hud_message =
+                        "One planner proposal requested; continuous autonomy remains off.".into();
                 }
             });
             ui.add(
@@ -12885,7 +15362,7 @@ pub fn draw_bots_editor(
             ui.add(
                 egui::Slider::new(
                     &mut brain.save.settlements[0].bounds.max_active_projects,
-                    1..=MAX_ACTIVE_PROJECTS_LIMIT,
+                    1..=BOT_ACTIVE_AREA_HARD_LIMIT,
                 )
                 .text("max active projects"),
             );
@@ -13039,7 +15516,14 @@ pub fn draw_bots_editor(
             let mut cmd = brain.command_draft;
             cmd.bot_id = brain.selected_bot;
             brain.queued_commands.push(cmd);
-            brain.hud_message = "Manual bot task queued.".into();
+            let mode = if brain.save.autonomy.active_work_area.is_some() {
+                BotFleetMode::MarkedArea
+            } else {
+                BotFleetMode::ManualQueue
+            };
+            brain.save.autonomy.set_fleet_mode(mode);
+            brain.hud_message = "Manual bot task queued; continuous autonomy is off.".into();
+            brain.mark_dirty();
         }
     });
 
@@ -13050,6 +15534,7 @@ pub fn draw_bots_editor(
             .show(ui, |ui| {
                 ui.label("Project");
                 ui.label("Status");
+                ui.label("Priority");
                 ui.label("Progress");
                 ui.end_row();
                 for project in brain.save.projects.iter().rev().take(12) {
@@ -13060,6 +15545,7 @@ pub fn draw_bots_editor(
                     };
                     ui.label(&project.label);
                     ui.label(format!("{:?}", project.status));
+                    ui.label(project.priority.to_string());
                     ui.label(format!("{:>3.0}%", progress.clamp(0.0, 1.0) * 100.0));
                     ui.end_row();
                 }
@@ -13072,7 +15558,6 @@ fn pick_bot(save: &BotWorldSave, preferred: BotRole) -> Option<u64> {
         .iter()
         .find(|b| b.role == preferred && b.current_task.is_none())
         .or_else(|| save.agents.iter().find(|b| b.current_task.is_none()))
-        .or_else(|| save.agents.first())
         .map(|b| b.id)
 }
 
@@ -13102,12 +15587,154 @@ fn despawn(commands: &mut Commands, entity: Entity) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bot_dirty_clears_only_for_latest_matching_capture_revision() {
+        let mut brain = FriendlyWorldBrain::default();
+        brain.mark_dirty();
+        let delayed_revision = brain.save_revision;
+        brain.mark_dirty();
+        let newest_revision = brain.save_revision;
+
+        assert!(!brain.confirm_save_revision(delayed_revision, true));
+        assert!(brain.dirty);
+        assert!(!brain.confirm_save_revision(newest_revision, false));
+        assert!(brain.dirty);
+        assert!(brain.confirm_save_revision(newest_revision, true));
+        assert!(!brain.dirty);
+    }
+
+    fn history_test_project(id: u64, status: BotProjectStatus) -> BotProject {
+        BotProject {
+            id,
+            kind: BotTaskKind::BuildRoad,
+            label: format!("History project {id}"),
+            origin: [id as i32, 90, 0],
+            size: [8, 2, 8],
+            theme: BotTheme::AmberStreet,
+            assigned_bot: None,
+            status,
+            cursor: 0,
+            total_steps: 1,
+            blocked_reason: String::new(),
+            priority: 1,
+            district_id: None,
+            idea_id: None,
+            crew_id: None,
+            concept: BotProjectConcept::default(),
+        }
+    }
+
     fn mark_test_city_columns_loaded(world: &mut VoxelWorld, min: i32, max: i32) {
         for cx in min..=max {
             for cz in min..=max {
                 world.loaded_column_counts.insert((cx, cz), 1);
             }
         }
+    }
+
+    #[test]
+    fn project_history_compaction_keeps_live_work_and_newest_finished_records() {
+        let mut save = BotWorldSave::default();
+        save.projects
+            .extend((1..=100).map(|id| history_test_project(id, BotProjectStatus::Complete)));
+        save.projects
+            .push(history_test_project(200, BotProjectStatus::Active));
+        save.projects.push(history_test_project(
+            201,
+            BotProjectStatus::WaitingForChunks,
+        ));
+        save.crews.extend([
+            BotCrew {
+                id: 1,
+                role_focus: BotRole::Builder,
+                project_id: 1,
+                bot_ids: Vec::new(),
+                active: false,
+            },
+            BotCrew {
+                id: 2,
+                role_focus: BotRole::Builder,
+                project_id: 100,
+                bot_ids: Vec::new(),
+                active: false,
+            },
+            BotCrew {
+                id: 3,
+                role_focus: BotRole::Builder,
+                project_id: 999,
+                bot_ids: Vec::new(),
+                active: true,
+            },
+        ]);
+
+        compact_project_history(&mut save);
+
+        let finished_ids = save
+            .projects
+            .iter()
+            .filter(|project| project.status.is_done())
+            .map(|project| project.id)
+            .collect::<Vec<_>>();
+        assert_eq!(finished_ids.len(), MAX_FINISHED_PROJECT_HISTORY);
+        assert_eq!(finished_ids.first(), Some(&37));
+        assert_eq!(finished_ids.last(), Some(&100));
+        assert!(save.projects.iter().any(|project| project.id == 200));
+        assert!(save.projects.iter().any(|project| project.id == 201));
+        assert!(!save.crews.iter().any(|crew| crew.id == 1));
+        assert!(save.crews.iter().any(|crew| crew.id == 2));
+        assert!(save.crews.iter().any(|crew| crew.id == 3));
+    }
+
+    #[test]
+    fn held_exact_project_fails_closed_when_a_save_is_normalized() {
+        let mut save = BotWorldSave::default();
+        save.projects
+            .push(history_test_project(1, BotProjectStatus::CommandHeld));
+
+        save.normalize();
+
+        assert_eq!(save.projects[0].status, BotProjectStatus::Blocked);
+        assert!(save.projects[0]
+            .blocked_reason
+            .contains("session ended before"));
+    }
+
+    #[test]
+    fn persisted_exact_project_without_a_permit_fails_closed_on_reload() {
+        let mut save = BotWorldSave::default();
+        let mut project = history_test_project(77, BotProjectStatus::Active);
+        project.kind = BotTaskKind::ClearFlatten;
+        project.assigned_bot = Some(3);
+        project.crew_id = Some(9);
+        save.projects.push(project);
+        save.exact_command_project_ids.extend([77, 77, 999]);
+        save.crews.push(BotCrew {
+            id: 9,
+            role_focus: BotRole::Builder,
+            bot_ids: vec![3],
+            project_id: 77,
+            active: true,
+        });
+        let mut bot = test_bot(3, "Exact", BotRole::Builder);
+        bot.crew_id = Some(9);
+        bot.current_task = Some(BotTask {
+            task_type: BotTaskKind::ClearFlatten,
+            project_id: 77,
+            label: "Exact command".into(),
+            progress: 0.5,
+        });
+        save.agents.push(bot);
+
+        save.normalize();
+
+        assert_eq!(save.projects[0].status, BotProjectStatus::Blocked);
+        assert!(save.projects[0]
+            .blocked_reason
+            .contains("authorization is unavailable after reload"));
+        assert_eq!(save.exact_command_project_ids, vec![77]);
+        assert!(save.crews.is_empty());
+        assert_eq!(save.agents[0].crew_id, None);
+        assert!(save.agents[0].current_task.is_none());
     }
 
     #[test]
@@ -13153,6 +15780,7 @@ mod tests {
         save.next_idea_id = 5;
         save.next_conversation_id = 6;
         save.next_crew_id = 7;
+        save.exact_command_project_ids.push(41);
         let text = ron::ser::to_string(&save).unwrap();
         let back: BotWorldSave = ron::from_str(&text).unwrap();
         assert_eq!(back.next_bot_id, 8);
@@ -13160,6 +15788,7 @@ mod tests {
         assert_eq!(back.next_idea_id, 5);
         assert_eq!(back.next_conversation_id, 6);
         assert_eq!(back.next_crew_id, 7);
+        assert_eq!(back.exact_command_project_ids, vec![41]);
         assert_eq!(back.agents[0].id, 7);
         assert_eq!(back.agents[0].memory.completed_tasks, 2);
         assert_eq!(back.agents[0].crew_id, Some(3));
@@ -13172,7 +15801,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_bot_world_loads_with_v2_defaults() {
+    fn legacy_v1_bot_world_loads_with_v3_defaults() {
         let text = r#"(
             version: 1,
             next_bot_id: 2,
@@ -13209,7 +15838,7 @@ mod tests {
         )"#;
         let mut save: BotWorldSave = ron::from_str(text).unwrap();
         save.normalize();
-        assert_eq!(save.version, 2);
+        assert_eq!(save.version, 3);
         assert_eq!(save.settlements[0].radius, MEGA_CITY_RADIUS);
         assert_eq!(save.settlements[0].bounds.radius, MEGA_CITY_RADIUS);
         assert!(!save.districts.is_empty());
@@ -13221,6 +15850,44 @@ mod tests {
         assert_eq!(save.agents[0].crew_id, None);
         assert_eq!(save.agents[0].memory.curiosity, default_curiosity());
         assert_eq!(save.agents[0].memory.work_focus, default_work_focus());
+        assert!(save.civic_population.residents.is_empty());
+        assert_eq!(
+            save.civic_population.authority,
+            crate::villagers::CivicAuthorityState::Uninitialized
+        );
+        assert!(save.civic_population.generation_identity.is_none());
+    }
+
+    #[test]
+    fn legacy_v2_bot_world_defaults_civic_population_and_migrates_to_v3() {
+        let text = r#"(
+            version: 2,
+            settlements: [(
+                id: 77,
+                name: "Legacy Settlement",
+                hub: (0.0, 90.0, 0.0),
+                theme: CyanAlloy,
+            )],
+        )"#;
+        let mut save: BotWorldSave = ron::from_str(text).unwrap();
+        assert_eq!(save.version, 2);
+        assert_eq!(save.civic_population.schema_version, 1);
+        assert!(save.civic_population.residents.is_empty());
+        assert_eq!(
+            save.civic_population.authority,
+            crate::villagers::CivicAuthorityState::Uninitialized
+        );
+        assert!(save.civic_population.generation_identity.is_none());
+
+        save.normalize();
+
+        assert_eq!(save.version, 3);
+        assert_eq!(save.civic_population.schema_version, 1);
+        assert!(save.civic_population.residents.is_empty());
+        assert_eq!(
+            save.civic_population.authority,
+            crate::villagers::CivicAuthorityState::Uninitialized
+        );
     }
 
     #[test]
@@ -13241,6 +15908,557 @@ mod tests {
             .iter()
             .filter(|bot| bot.companion)
             .all(|bot| bot.companion_mode == BotCompanionMode::AwaitingInstruction));
+    }
+
+    #[test]
+    fn fresh_bot_hub_uses_the_active_world_seed_not_a_stale_world_resource() {
+        // This river QA seed exposes the original race clearly: its channel at
+        // this focus is below water level, while VoxelWorld::new() still owns
+        // the unrelated bootstrap seed until world reinitialisation runs.
+        let active_seed = 0x48D2_09A1;
+        let focus = IVec2::new(-15, -31);
+        let active_generator = TerrainGenerator::new(active_seed);
+        let active_surface = active_generator.surface_height_at(focus.x, focus.y);
+        let stale_world = VoxelWorld::new();
+        let stale_surface = stale_world.surface_height_at(focus.x, focus.y);
+        assert!(active_surface <= crate::terrain::WATER_LEVEL - 2);
+        assert_ne!(active_surface, stale_surface);
+
+        let save = BotWorldSave::seed_for_active_world(
+            "active-seed-regression",
+            Vec3::new(focus.x as f32 + 0.5, 82.0, focus.y as f32 + 0.5),
+            WorldGenerationIdentity {
+                seed: active_seed,
+                world_profile: crate::settings::WorldProfile::Natural,
+                scenery_quality: crate::settings::SceneryQuality::Balanced,
+                terrain_grammar: crate::settings::TerrainGrammarVersion::CURRENT,
+            },
+        );
+        let hub = save.settlements[0].hub;
+        assert_eq!(hub[0], focus.x as f32 + 0.5);
+        assert_eq!(hub[1], (active_surface + 2) as f32);
+        assert_eq!(hub[2], focus.y as f32 + 0.5);
+        assert_ne!(hub[1], (stale_surface + 2) as f32);
+    }
+
+    #[test]
+    fn fresh_bot_hub_preserves_the_active_world_terrain_grammar() {
+        let legacy_identity = WorldGenerationIdentity {
+            seed: 12_345,
+            world_profile: crate::settings::WorldProfile::Natural,
+            scenery_quality: crate::settings::SceneryQuality::Off,
+            terrain_grammar: crate::settings::TerrainGrammarVersion::V1,
+        };
+        let current_identity = WorldGenerationIdentity {
+            terrain_grammar: crate::settings::TerrainGrammarVersion::V2,
+            ..legacy_identity
+        };
+        let legacy = TerrainGenerator::from_identity(legacy_identity);
+        let current = TerrainGenerator::from_identity(current_identity);
+        let (x, z, legacy_height, current_height) = (-192..=192)
+            .step_by(4)
+            .find_map(|z| {
+                (-192..=192).step_by(4).find_map(|x| {
+                    let legacy_height = legacy.surface_height_at(x, z);
+                    let current_height = current.surface_height_at(x, z);
+                    (legacy_height != current_height).then_some((
+                        x,
+                        z,
+                        legacy_height,
+                        current_height,
+                    ))
+                })
+            })
+            .expect("Natural V1 and V2 must expose a distinct bank column");
+
+        let save = BotWorldSave::seed_for_active_world(
+            "legacy-grammar-regression",
+            Vec3::new(x as f32 + 0.5, 82.0, z as f32 + 0.5),
+            legacy_identity,
+        );
+        let hub = save.settlements[0].hub;
+        assert_eq!(hub[1], (legacy_height + 2) as f32);
+        assert_ne!(hub[1], (current_height + 2) as f32);
+    }
+
+    #[test]
+    fn companion_dock_layout_adapts_to_anchor_and_viewport() {
+        use crate::settings::CompanionDockPosition::{Bottom, Left, Right};
+
+        assert_eq!(companion_dock_axis(Left), CompanionDockAxis::Vertical);
+        assert_eq!(companion_dock_axis(Right), CompanionDockAxis::Vertical);
+        assert_eq!(companion_dock_axis(Bottom), CompanionDockAxis::Horizontal);
+        assert_eq!(companion_menu_width(1_280.0, Left), 304.0);
+        assert_eq!(companion_menu_width(1_280.0, Bottom), 420.0);
+        assert_eq!(companion_menu_width(280.0, Bottom), 248.0);
+        assert_eq!(companion_action_columns(420.0), 3);
+        assert_eq!(companion_action_columns(304.0), 2);
+        assert_eq!(companion_action_columns(248.0), 1);
+
+        let width = companion_action_width(304.0, 7.0);
+        assert!((width - 148.5).abs() < f32::EPSILON);
+        assert!(width <= crate::theme::KANSO_LAYOUT.icon_action_max_width);
+    }
+
+    #[test]
+    fn companion_dock_primary_actions_are_distinct_and_mode_driven() {
+        for (index, action) in COMPANION_PRIMARY_ACTIONS.iter().enumerate() {
+            assert!(!action.label.is_empty());
+            assert!(!action.tooltip.is_empty());
+            assert!(companion_command_selected_only(action.command));
+            for other in COMPANION_PRIMARY_ACTIONS.iter().skip(index + 1) {
+                assert_ne!(action.label, other.label);
+                assert_ne!(action.command, other.command);
+            }
+        }
+
+        for mode in [
+            BotCompanionMode::AwaitingInstruction,
+            BotCompanionMode::FollowingPlayer,
+            BotCompanionMode::HoldingPosition,
+            BotCompanionMode::ScanningArea,
+            BotCompanionMode::PreviewingEdit,
+            BotCompanionMode::AssistingTask,
+            BotCompanionMode::Blocked,
+            BotCompanionMode::Patrolling,
+            BotCompanionMode::SurveySweep,
+        ] {
+            assert!(
+                COMPANION_PRIMARY_ACTIONS
+                    .iter()
+                    .filter(|action| action.is_active(mode))
+                    .count()
+                    <= 1
+            );
+        }
+        let mark = COMPANION_PRIMARY_ACTIONS
+            .iter()
+            .find(|action| action.command == CompanionCommand::MarkWaypointSelected)
+            .unwrap();
+        assert_eq!(
+            mark.active_mode, None,
+            "one-shot actions must not look latched"
+        );
+    }
+
+    #[test]
+    fn companion_dock_fleet_toggle_preserves_explicit_modes() {
+        assert_eq!(
+            next_fleet_mode_for_toggle(BotFleetMode::Parked, false),
+            BotFleetMode::ManualQueue
+        );
+        assert_eq!(
+            next_fleet_mode_for_toggle(BotFleetMode::Parked, true),
+            BotFleetMode::MarkedArea
+        );
+        for running in [
+            BotFleetMode::ManualQueue,
+            BotFleetMode::MarkedArea,
+            BotFleetMode::ContinuousAutonomy,
+        ] {
+            assert_eq!(
+                next_fleet_mode_for_toggle(running, true),
+                BotFleetMode::Parked
+            );
+            assert_eq!(fleet_dock_presentation(running).action_label, "Park Fleet");
+        }
+
+        let mut brain = FriendlyWorldBrain::default();
+        let projects_before = brain.save.projects.len();
+        toggle_fleet_from_ui(&mut brain);
+        assert_eq!(brain.save.autonomy.fleet_mode(), BotFleetMode::ManualQueue);
+        assert!(brain.dirty);
+        assert_eq!(brain.save.projects.len(), projects_before);
+        toggle_fleet_from_ui(&mut brain);
+        assert_eq!(brain.save.autonomy.fleet_mode(), BotFleetMode::Parked);
+        assert_eq!(brain.save.projects.len(), projects_before);
+    }
+
+    #[test]
+    fn companion_dock_neon_feedback_snaps_for_reduced_motion() {
+        let ctx = egui::Context::default();
+        crate::theme::set_reduced_motion(&ctx, true);
+        let id = egui::Id::new("companion_dock_reduced_motion_test");
+
+        assert_eq!(dock_neon_feedback_amount(&ctx, id, true), 1.0);
+        assert_eq!(dock_neon_feedback_amount(&ctx, id, false), 0.0);
+    }
+
+    #[test]
+    fn fleet_modes_require_explicit_user_control() {
+        let mut settings = BotAutonomySettings::default();
+        assert_eq!(settings.fleet_mode(), BotFleetMode::Parked);
+
+        settings.set_fleet_mode(BotFleetMode::ManualQueue);
+        assert_eq!(settings.fleet_mode(), BotFleetMode::ManualQueue);
+        assert!(!settings.enabled);
+
+        settings.active_work_area = Some(BotWorkArea::from_corners(
+            IVec3::new(-20, 80, -10),
+            IVec3::new(20, 100, 10),
+        ));
+        settings.set_fleet_mode(BotFleetMode::MarkedArea);
+        assert_eq!(settings.fleet_mode(), BotFleetMode::MarkedArea);
+        assert!(!settings.enabled);
+
+        settings.set_fleet_mode(BotFleetMode::ContinuousAutonomy);
+        assert_eq!(settings.fleet_mode(), BotFleetMode::ContinuousAutonomy);
+        settings.set_fleet_mode(BotFleetMode::Parked);
+        assert_eq!(settings.fleet_mode(), BotFleetMode::Parked);
+    }
+
+    #[test]
+    fn manual_fleet_does_not_run_planner_without_one_shot_request() {
+        let mut brain = FriendlyWorldBrain::default();
+        brain
+            .save
+            .autonomy
+            .set_fleet_mode(BotFleetMode::ManualQueue);
+        brain.force_city_idea = true;
+        brain.plan_timer = -1.0;
+        assert!(!should_run_city_planner(&brain));
+
+        brain.one_shot_plan_request = true;
+        assert!(should_run_city_planner(&brain));
+
+        brain.one_shot_plan_request = false;
+        brain
+            .save
+            .autonomy
+            .set_fleet_mode(BotFleetMode::ContinuousAutonomy);
+        assert!(should_run_city_planner(&brain));
+    }
+
+    #[test]
+    fn marked_work_area_rejects_projects_crossing_its_exact_rectangle() {
+        let mut save = BotWorldSave::default();
+        save.autonomy.active_work_area = Some(BotWorkArea::from_corners(
+            IVec3::new(-16, 70, -8),
+            IVec3::new(16, 110, 8),
+        ));
+
+        assert!(validate_project_shape_and_bounds(&save, [-16, 80, -8], [33, 4, 17]).is_ok());
+        assert_eq!(
+            validate_project_shape_and_bounds(&save, [10, 80, -4], [8, 4, 8]),
+            Err("outside the player-marked bot work area".into())
+        );
+    }
+
+    #[test]
+    fn project_scheduler_honors_priority_and_hard_parallel_limit() {
+        let mut save = BotWorldSave::default();
+        save.projects = (0..12)
+            .map(|index| {
+                let mut project = history_test_project(index as u64 + 1, BotProjectStatus::Queued);
+                project.priority = (index % 10 + 1) as u8;
+                project
+            })
+            .collect();
+        save.projects[1].status = BotProjectStatus::Active;
+        save.projects[1].priority = 2;
+        save.projects[5].priority = 10;
+        save.projects[9].priority = 10;
+
+        let scheduled = scheduled_project_indices(&save, 0, 3);
+        assert_eq!(scheduled.len(), 3);
+        assert_eq!(scheduled[0], 5);
+        assert_eq!(scheduled[1], 9);
+        assert!(save.projects[scheduled[2]].priority >= 9);
+        assert!(!scheduled.contains(&1));
+        assert!(
+            scheduled_project_indices(&save, 0, usize::MAX).len() <= BOT_ACTIVE_AREA_HARD_LIMIT
+        );
+    }
+
+    #[test]
+    fn v2_normalization_keeps_companion_team_small_and_removes_idle_helper_swarm() {
+        let world = VoxelWorld::new();
+        let mut save = BotWorldSave::seed("Manual", Vec3::new(0.0, 90.0, 0.0), &world);
+        save.version = 2;
+        for idx in 0..24 {
+            let mut bot = test_bot(100 + idx, &format!("Old Swarm {idx}"), BotRole::Builder);
+            bot.companion = false;
+            bot.swarm_leader_id = Some(1);
+            bot.swarm_index = (idx % 4 + 1) as u8;
+            bot.current_task = None;
+            save.agents.push(bot);
+        }
+
+        save.normalize();
+
+        assert!(
+            save.agents.iter().filter(|bot| bot.companion).count() <= MAX_COMPANION_TEAM,
+            "normalization should not recreate the old huge companion crowd"
+        );
+        assert!(
+            save.agents
+                .iter()
+                .all(|bot| bot.swarm_leader_id.is_none() || bot.current_task.is_some()),
+            "idle helper drones should not survive normalization as visible crowd actors"
+        );
+    }
+
+    #[test]
+    fn idle_swarm_helpers_are_not_spawned_as_visible_robot_rigs() {
+        let mut bot = test_bot(7, "Helper", BotRole::Builder);
+        bot.swarm_leader_id = Some(1);
+        bot.swarm_index = 2;
+        bot.current_task = None;
+
+        assert!(!bot_should_spawn_visual(&bot));
+
+        bot.current_task = Some(BotTask {
+            task_type: BotTaskKind::BuildTower,
+            project_id: 42,
+            label: "Build".into(),
+            progress: 0.0,
+        });
+
+        assert!(bot_should_spawn_visual(&bot));
+    }
+
+    #[test]
+    fn parked_idle_worker_bots_do_not_spawn_high_detail_rigs() {
+        let bot = test_bot(11, "Parked Worker", BotRole::Builder);
+
+        assert!(
+            !bot_should_spawn_visual(&bot),
+            "startup should not spawn every saved idle worker as an animated high-detail rig"
+        );
+    }
+
+    #[test]
+    fn companions_and_commanded_workers_stay_visible() {
+        let mut companion = test_bot(12, "Iris", BotRole::CompanionGuide);
+        companion.companion = true;
+        companion.companion_order = 0;
+        assert!(bot_should_spawn_visual(&companion));
+
+        let mut active = test_bot(13, "Builder", BotRole::Builder);
+        active.current_task = Some(BotTask {
+            task_type: BotTaskKind::BuildTower,
+            project_id: 99,
+            label: "Build".into(),
+            progress: 0.0,
+        });
+        assert!(bot_should_spawn_visual(&active));
+        assert!(!bot_should_materialize_visual(
+            &active,
+            BotRuntimeTier::Culled
+        ));
+        assert!(bot_should_materialize_visual(
+            &active,
+            BotRuntimeTier::Proxy
+        ));
+        assert!(bot_should_materialize_visual(
+            &companion,
+            BotRuntimeTier::Culled
+        ));
+    }
+
+    #[test]
+    fn bot_agent_index_resolves_visual_parts_by_id() {
+        let mut save = BotWorldSave::default();
+        save.agents.push(test_bot(9, "Nine", BotRole::Builder));
+        save.agents.push(test_bot(2, "Two", BotRole::Architect));
+
+        let index = bot_agent_index(&save);
+
+        assert_eq!(
+            bot_by_id(&save, &index, 2).map(|bot| bot.name.as_str()),
+            Some("Two")
+        );
+        assert_eq!(
+            bot_by_id(&save, &index, 9).map(|bot| bot.name.as_str()),
+            Some("Nine")
+        );
+        assert!(bot_by_id(&save, &index, 99).is_none());
+    }
+
+    #[test]
+    fn dense_nearby_bot_group_has_hard_lod_caps() {
+        let samples: Vec<BotLodSample> = (1..=64)
+            .map(|id| BotLodSample {
+                id,
+                distance_squared: 6.0 * 6.0,
+                companion: id <= 4,
+            })
+            .collect();
+
+        let tiers = assign_bot_runtime_tiers(&samples);
+        let count = |tier| tiers.values().filter(|&&value| value == tier).count();
+
+        assert_eq!(count(BotRuntimeTier::Full), BOT_FULL_DETAIL_LIMIT);
+        assert_eq!(count(BotRuntimeTier::Reduced), BOT_REDUCED_DETAIL_LIMIT);
+        assert_eq!(count(BotRuntimeTier::Proxy), BOT_PROXY_LIMIT);
+        assert_eq!(
+            count(BotRuntimeTier::Full) + count(BotRuntimeTier::Reduced),
+            BOT_FULL_DETAIL_LIMIT + BOT_REDUCED_DETAIL_LIMIT,
+            "proximity must not promote every bot to an expensive detail rig"
+        );
+        assert!(count(BotRuntimeTier::Culled) > 0);
+    }
+
+    #[test]
+    fn only_full_tier_uses_the_expensive_detailed_rig() {
+        assert!(bot_uses_detailed_rig(BotRuntimeTier::Full));
+        assert!(!bot_uses_proxy(BotRuntimeTier::Full));
+        for tier in [BotRuntimeTier::Reduced, BotRuntimeTier::Proxy] {
+            assert!(!bot_uses_detailed_rig(tier));
+            assert!(bot_uses_proxy(tier));
+        }
+        assert!(!bot_uses_detailed_rig(BotRuntimeTier::Culled));
+        assert!(!bot_uses_proxy(BotRuntimeTier::Culled));
+    }
+
+    #[test]
+    fn bot_lod_assignment_is_distance_aware_and_order_independent() {
+        let samples = vec![
+            BotLodSample {
+                id: 11,
+                distance_squared: 12.0 * 12.0,
+                companion: false,
+            },
+            BotLodSample {
+                id: 22,
+                distance_squared: 80.0 * 80.0,
+                companion: false,
+            },
+            BotLodSample {
+                id: 33,
+                distance_squared: 180.0 * 180.0,
+                companion: false,
+            },
+            BotLodSample {
+                id: 44,
+                distance_squared: 320.0 * 320.0,
+                companion: false,
+            },
+        ];
+        let mut reversed = samples.clone();
+        reversed.reverse();
+
+        let tiers = assign_bot_runtime_tiers(&samples);
+        assert_eq!(tiers, assign_bot_runtime_tiers(&reversed));
+        assert_eq!(tiers[&11], BotRuntimeTier::Full);
+        assert_eq!(tiers[&22], BotRuntimeTier::Reduced);
+        assert_eq!(tiers[&33], BotRuntimeTier::Proxy);
+        assert_eq!(tiers[&44], BotRuntimeTier::Culled);
+    }
+
+    #[test]
+    fn bot_update_cadence_staggers_groups_and_honors_frame_budgets() {
+        let dense_tiers: AHashMap<u64, BotRuntimeTier> =
+            (1..=96).map(|id| (id, BotRuntimeTier::Full)).collect();
+        for frame in 0..32 {
+            assert!(
+                budgeted_bot_update_ids(
+                    &dense_tiers,
+                    frame,
+                    BotRuntimeWork::Perception,
+                    BOT_MAX_FRAME_PERCEPTION_BOTS,
+                )
+                .len()
+                    <= BOT_MAX_FRAME_PERCEPTION_BOTS
+            );
+            assert_eq!(
+                budgeted_bot_update_ids(
+                    &dense_tiers,
+                    frame,
+                    BotRuntimeWork::Animation,
+                    BOT_MAX_FRAME_ANIMATED_RIGS,
+                )
+                .len(),
+                BOT_MAX_FRAME_ANIMATED_RIGS
+            );
+            assert!(
+                budgeted_bot_update_ids(
+                    &dense_tiers,
+                    frame,
+                    BotRuntimeWork::Fx,
+                    BOT_MAX_FRAME_FX_BOTS,
+                )
+                .len()
+                    <= BOT_MAX_FRAME_FX_BOTS
+            );
+        }
+
+        let bot_id = 31;
+        let reduced = AHashMap::from_iter([(bot_id, BotRuntimeTier::Reduced)]);
+        let due_frames: Vec<u64> = (0..24)
+            .filter(|&frame| {
+                budgeted_bot_update_ids(&reduced, frame, BotRuntimeWork::Animation, 1)
+                    .contains(&bot_id)
+            })
+            .collect();
+        assert_eq!(due_frames.len(), 6);
+        assert!(due_frames.windows(2).all(|pair| pair[1] - pair[0] == 4));
+
+        let groups: HashSet<u64> = (1..=64).map(bot_update_group).collect();
+        assert!(
+            groups.len() > 4,
+            "stable IDs should spread across update groups"
+        );
+    }
+
+    #[test]
+    fn bot_visual_variants_are_deterministic_and_not_uniform() {
+        let expected = bot_visual_variant(77, BotRole::Builder);
+        assert_eq!(expected, bot_visual_variant(77, BotRole::Builder));
+        assert_ne!(expected, bot_visual_variant(77, BotRole::Architect));
+
+        let variants: HashSet<BotVisualVariant> = (1..=48)
+            .map(|id| bot_visual_variant(id, BotRole::Builder))
+            .collect();
+        assert!(variants.len() >= 12);
+        assert!(variants.iter().all(|variant| {
+            variant.chassis < 3 && variant.armor < 3 && variant.sensor < 3 && variant.marking < 4
+        }));
+    }
+
+    #[test]
+    fn worker_materials_are_reused_per_role() {
+        let mut cache = BotVisualCache::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+
+        let first = worker_material_set(&mut cache, &mut materials, BotRole::Builder);
+        let asset_count = materials.len();
+        let second = worker_material_set(&mut cache, &mut materials, BotRole::Builder);
+
+        assert_eq!(materials.len(), asset_count);
+        assert_eq!(first.body, second.body);
+        assert_eq!(first.trim, second.trim);
+        assert_eq!(first.sensor, second.sensor);
+        let body = materials.get(&first.body).unwrap();
+        assert!(body.metallic >= 0.7);
+        assert!(body.perceptual_roughness >= 0.6);
+    }
+
+    #[test]
+    fn companion_shell_materials_read_as_serious_brushed_metal() {
+        let mut cache = BotVisualCache::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+
+        let aura = companion_aura_shell_material(&mut cache, &mut materials);
+        let bolt = companion_bolt_shell_material(&mut cache, &mut materials);
+        let aura = materials.get(&aura).unwrap();
+        let bolt = materials.get(&bolt).unwrap();
+
+        assert!(aura.metallic >= 0.9);
+        assert!(aura.perceptual_roughness >= 0.72);
+        assert_eq!(aura.base_color, Color::srgb(0.34, 0.36, 0.37));
+        assert!(bolt.metallic >= 0.9);
+        assert!(bolt.perceptual_roughness >= 0.78);
+        assert_eq!(bolt.base_color, Color::srgb(0.30, 0.27, 0.18));
+    }
+
+    #[test]
+    fn bot_rigs_are_emissive_only_and_do_not_spawn_point_lights() {
+        let source = include_str!("bots.rs");
+        assert!(
+            !source.contains(concat!("Point", "LightBundle")),
+            "robot proximity should not add live point lights; use emissive mesh parts for glow"
+        );
     }
 
     #[test]
@@ -13290,6 +16508,7 @@ mod tests {
         )
         .unwrap();
         brain.save.projects[0].status = BotProjectStatus::Active;
+        let stale_crew = brain.save.projects[0].crew_id;
         brain.queued_commands.push(BotTaskCommand::default());
 
         queue_city_area_masterplan(&mut brain, IVec3::new(-48, 90, -48), IVec3::new(48, 90, 48));
@@ -13302,6 +16521,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(stale_project.status, BotProjectStatus::Blocked);
+        assert!(brain
+            .save
+            .agents
+            .iter()
+            .all(|bot| stale_crew.is_none() || bot.crew_id != stale_crew));
         assert!(brain.queued_commands.is_empty());
         assert!(brain
             .save
@@ -13315,6 +16539,86 @@ mod tests {
             .iter()
             .filter(|bot| bot.companion)
             .all(|bot| bot.companion_mode == BotCompanionMode::AssistingTask));
+    }
+
+    #[test]
+    fn marked_area_command_preserves_running_exact_command_lease_and_footprint() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -4, 4);
+        let mut brain = FriendlyWorldBrain::default();
+        brain.save = BotWorldSave::seed("Exact Area", Vec3::new(0.0, 80.0, 0.0), &world);
+        let recipients = brain
+            .save
+            .agents
+            .iter()
+            .take(2)
+            .map(|bot| bot.id)
+            .collect::<Vec<_>>();
+        let exact_origin = [0, 80, 0];
+        let exact_size = [8, 2, 8];
+        let exact_project_id = add_project_for_exact_bots(
+            &mut brain.save,
+            &world,
+            91,
+            BotTaskKind::ClearFlatten,
+            exact_origin,
+            exact_size,
+            BotTheme::CyanAlloy,
+            &recipients,
+            10,
+            None,
+            &[],
+        )
+        .unwrap();
+        let exact_crew_id = brain
+            .save
+            .projects
+            .iter()
+            .find(|project| project.id == exact_project_id)
+            .and_then(|project| project.crew_id)
+            .unwrap();
+
+        queue_city_area_masterplan(&mut brain, IVec3::new(-48, 78, -48), IVec3::new(48, 96, 48));
+
+        let exact_project = brain
+            .save
+            .projects
+            .iter()
+            .find(|project| project.id == exact_project_id)
+            .unwrap();
+        assert!(!exact_project.status.is_done());
+        assert_eq!(exact_project.crew_id, Some(exact_crew_id));
+        assert!(brain
+            .save
+            .crews
+            .iter()
+            .find(|crew| crew.id == exact_crew_id && crew.project_id == exact_project_id)
+            .is_some_and(|crew| crew.active));
+        for bot_id in recipients {
+            let bot = brain
+                .save
+                .agents
+                .iter()
+                .find(|bot| bot.id == bot_id)
+                .unwrap();
+            assert_eq!(bot.crew_id, Some(exact_crew_id));
+            assert_eq!(
+                bot.current_task.as_ref().map(|task| task.project_id),
+                Some(exact_project_id)
+            );
+        }
+        assert!(brain
+            .save
+            .projects
+            .iter()
+            .filter(|project| project.id != exact_project_id && !project.status.is_done())
+            .all(|project| !project_footprints_overlap(
+                exact_origin,
+                exact_size,
+                project.origin,
+                project.size,
+                0
+            )));
     }
 
     #[test]
@@ -16797,6 +20101,59 @@ mod tests {
     }
 
     #[test]
+    fn completion_never_mutates_a_partially_mismatched_newer_lease() {
+        let make_save = |crew_project_id: u64, task_project_id: u64, bot_crew_id: u64| {
+            let mut save = BotWorldSave::default();
+            let mut project = history_test_project(1, BotProjectStatus::Complete);
+            project.crew_id = Some(10);
+            project.assigned_bot = Some(1);
+            save.projects.push(project);
+            save.crews.push(BotCrew {
+                id: 10,
+                role_focus: BotRole::Builder,
+                bot_ids: vec![1],
+                project_id: crew_project_id,
+                active: true,
+            });
+            let mut bot = test_bot(1, "Lease Guard", BotRole::Builder);
+            bot.crew_id = Some(bot_crew_id);
+            bot.current_task = Some(BotTask {
+                task_type: BotTaskKind::BuildTower,
+                project_id: task_project_id,
+                label: "Newer lease".into(),
+                progress: 0.77,
+            });
+            bot.memory.last_message = "Do not overwrite".into();
+            save.agents.push(bot);
+            save
+        };
+
+        for mut save in [
+            make_save(1, 2, 10),
+            make_save(1, 1, 20),
+            make_save(99, 1, 10),
+        ] {
+            complete_project_at(&mut save, 0);
+            let bot = &save.agents[0];
+            assert_eq!(bot.current_task.as_ref().map(|task| task.project_id), {
+                if bot.crew_id == Some(20) {
+                    Some(1)
+                } else if save.crews[0].project_id == 99 {
+                    Some(1)
+                } else {
+                    Some(2)
+                }
+            });
+            assert_eq!(bot.memory.completed_tasks, 0);
+            assert_eq!(bot.memory.last_message, "Do not overwrite");
+            assert_eq!(bot.state, BotState::Idle);
+            if save.crews[0].project_id == 99 {
+                assert!(save.crews[0].active);
+            }
+        }
+    }
+
+    #[test]
     fn waiting_projects_still_count_against_planner_capacity() {
         let mut save = BotWorldSave::default();
         save.projects.push(BotProject {
@@ -16818,6 +20175,8 @@ mod tests {
             concept: BotProjectConcept::default(),
         });
         assert_eq!(planner_project_count(&save), 1);
+        save.projects[0].status = BotProjectStatus::WaitingForCrew;
+        assert_eq!(planner_project_count(&save), 1);
         save.projects[0].status = BotProjectStatus::WaitingForPlayer;
         assert_eq!(planner_project_count(&save), 1);
         save.projects[0].status = BotProjectStatus::Complete;
@@ -16835,15 +20194,356 @@ mod tests {
         assert!(protected_project_area(
             [0, 90, 0],
             [40, 8, 40],
-            Some(Vec3::new(70.0, 100.0, 70.0)),
+            Some(Vec3::new(50.0, 100.0, 50.0)),
             &[]
         ));
         assert!(!protected_project_area(
             [0, 90, 0],
             [40, 8, 40],
-            Some(Vec3::new(180.0, 100.0, 180.0)),
+            Some(Vec3::new(70.0, 100.0, 70.0)),
             &[]
         ));
+    }
+
+    #[test]
+    fn companion_preview_standoff_scales_with_its_footprint_and_is_admissible() {
+        let world = VoxelWorld::new();
+        let player = Transform::from_xyz(0.0, 90.0, 0.0);
+        let small = [10, 4, 10];
+        let large = [64, 7, 12];
+        let small_target = companion_preview_target(&player, small);
+        let large_target = companion_preview_target(&player, large);
+
+        assert!(
+            large_target.distance(player.translation) > small_target.distance(player.translation)
+        );
+        for (target, size) in [(small_target, small), (large_target, large)] {
+            let origin = centered_project_origin(&world, target, size);
+            assert!(
+                xz_distance_to_project(origin, size, player.translation)
+                    >= BOT_SHIP_ADMISSION_CLEARANCE,
+                "preview footprint must remain outside the strictest admission clearance"
+            );
+            assert!(!protected_project_area(
+                origin,
+                size,
+                Some(player.translation),
+                &[]
+            ));
+        }
+    }
+
+    #[test]
+    fn active_build_visit_stays_outside_large_project_footprint() {
+        let world = VoxelWorld::new();
+        let origin = [0, 80, 0];
+        let size = [96, 8, 96];
+        let destination = BotVisitDestination {
+            label: "Large worksite".into(),
+            look_at: project_center(origin, size),
+            footprint: Some((origin, size)),
+        };
+        let visit = safe_visit_position(&world, Vec3::new(48.0, 90.0, 48.0), &destination);
+
+        assert!(xz_distance_to_project(origin, size, visit) >= BOT_OBSERVER_STANDOFF);
+        assert!(!protected_project_area(origin, size, Some(visit), &[]));
+
+        for (current, expected_axis, positive) in [
+            (Vec3::new(1_000.0, 90.0, 48.0), 0, true),
+            (Vec3::new(-1_000.0, 90.0, 48.0), 0, false),
+            (Vec3::new(48.0, 90.0, 1_000.0), 1, true),
+            (Vec3::new(48.0, 90.0, -1_000.0), 1, false),
+        ] {
+            let point = safe_visit_position(&world, current, &destination);
+            let outside_expected_face = match (expected_axis, positive) {
+                (0, true) => point.x > (origin[0] + size[0]) as f32,
+                (0, false) => point.x < origin[0] as f32,
+                (1, true) => point.z > (origin[2] + size[2]) as f32,
+                _ => point.z < origin[2] as f32,
+            };
+            assert!(outside_expected_face);
+        }
+    }
+
+    #[test]
+    fn regular_project_crews_are_small_exclusive_and_do_not_steal_busy_bots() {
+        let world = VoxelWorld::new();
+        let mut save = BotWorldSave::seed("Crew Test", Vec3::new(0.0, 80.0, 0.0), &world);
+        for id in 10..18 {
+            save.agents
+                .push(test_bot(id, &format!("Worker {id}"), BotRole::Builder));
+        }
+        save.agents[0].current_task = Some(BotTask {
+            task_type: BotTaskKind::BuildTower,
+            project_id: 999,
+            label: "Existing work".into(),
+            progress: 0.6,
+        });
+        let busy_id = save.agents[0].id;
+
+        let first = create_project_crew(
+            &mut save,
+            1,
+            BotTaskKind::BuildResidentialBlock,
+            Some(busy_id),
+            [0, 80, 0],
+        )
+        .unwrap();
+        assign_crew_task(
+            &mut save,
+            Some(first),
+            Some(busy_id),
+            1,
+            BotTaskKind::BuildResidentialBlock,
+            "First",
+            [0, 80, 0],
+        );
+        let second = create_project_crew(
+            &mut save,
+            2,
+            BotTaskKind::BuildResidentialBlock,
+            None,
+            [40, 80, 0],
+        )
+        .unwrap();
+        assign_crew_task(
+            &mut save,
+            Some(second),
+            None,
+            2,
+            BotTaskKind::BuildResidentialBlock,
+            "Second",
+            [40, 80, 0],
+        );
+
+        let first_ids = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == first)
+            .unwrap()
+            .bot_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let second_ids = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == second)
+            .unwrap()
+            .bot_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert!(first_ids.len() <= BOT_REGULAR_CREW_LIMIT);
+        assert!(second_ids.len() <= BOT_REGULAR_CREW_LIMIT);
+        assert!(first_ids.is_disjoint(&second_ids));
+        assert!(!first_ids.contains(&busy_id));
+        assert!(!second_ids.contains(&busy_id));
+        assert_eq!(
+            save.agents[0].current_task.as_ref().unwrap().project_id,
+            999,
+            "an existing lease must never be overwritten"
+        );
+        let manual = add_project_with_site_search(
+            &mut save,
+            &world,
+            BotTaskKind::BuildHome,
+            [13, 10, 13],
+            BotTheme::WhiteAlloy,
+            Some(busy_id),
+            8,
+            true,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            None,
+            &[],
+        );
+        assert!(manual.unwrap_err().contains("already assigned"));
+    }
+
+    #[test]
+    fn normalization_and_restore_preserve_core_companion_project_progress() {
+        let mut save = BotWorldSave::default();
+        save.settlements.push(BotSettlement {
+            id: 1,
+            name: "Restore City".into(),
+            hub: [0.0, 80.0, 0.0],
+            radius: MEGA_CITY_RADIUS,
+            bounds: BotCityBounds::default(),
+            theme: BotTheme::CyanAlloy,
+            road_count: 0,
+            building_count: 0,
+            park_count: 0,
+        });
+        for (id, name, project_id, crew_id, progress) in
+            [(1, "Emma", 11, 21, 0.42), (2, "David", 12, 22, 0.73)]
+        {
+            let mut bot = test_bot(id, name, BotRole::Builder);
+            bot.companion = true;
+            bot.crew_id = Some(crew_id);
+            bot.current_task = Some(BotTask {
+                task_type: BotTaskKind::ClearFlatten,
+                project_id,
+                label: format!("Project {project_id}"),
+                progress,
+            });
+            save.agents.push(bot);
+            let mut project = history_test_project(project_id, BotProjectStatus::Active);
+            project.kind = BotTaskKind::ClearFlatten;
+            project.crew_id = Some(crew_id);
+            project.assigned_bot = Some(id);
+            project.priority = 20_u8.saturating_sub(project_id as u8);
+            save.projects.push(project);
+            save.crews.push(BotCrew {
+                id: crew_id,
+                role_focus: BotRole::Builder,
+                bot_ids: vec![id],
+                project_id,
+                active: true,
+            });
+        }
+        let mut helper = test_bot(3, "Emma Swarm 1", BotRole::Surveyor);
+        helper.swarm_leader_id = Some(1);
+        helper.swarm_index = 1;
+        helper.crew_id = Some(23);
+        helper.current_task = Some(BotTask {
+            task_type: BotTaskKind::ClearFlatten,
+            project_id: 13,
+            label: "Project 13".into(),
+            progress: 0.31,
+        });
+        save.agents.push(helper);
+        let mut helper_project = history_test_project(13, BotProjectStatus::Active);
+        helper_project.kind = BotTaskKind::ClearFlatten;
+        helper_project.crew_id = Some(23);
+        helper_project.assigned_bot = Some(3);
+        helper_project.priority = 6;
+        save.projects.push(helper_project);
+        save.crews.push(BotCrew {
+            id: 23,
+            role_focus: BotRole::Surveyor,
+            bot_ids: vec![3],
+            project_id: 13,
+            active: true,
+        });
+
+        save.normalize();
+
+        assert!(save.next_crew_id > 22);
+        for (name, project_id, progress) in [
+            ("Emma", 11, 0.42),
+            ("David", 12, 0.73),
+            ("Emma Swarm 1", 13, 0.31),
+        ] {
+            let task = save
+                .agents
+                .iter()
+                .find(|bot| bot.name == name)
+                .and_then(|bot| bot.current_task.as_ref())
+                .expect("core companion task should survive normalization and repair");
+            assert_eq!(task.project_id, project_id);
+            assert!((task.progress - progress).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn only_the_owned_arrived_builder_unlocks_a_workfront() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let mut save = BotWorldSave::default();
+        save.agents.push(test_bot(1, "Assigned", BotRole::Builder));
+        save.agents.push(test_bot(2, "Bystander", BotRole::Builder));
+        let origin = [4, 80, 4];
+        let mut project = history_test_project(1, BotProjectStatus::Queued);
+        project.kind = BotTaskKind::ClearFlatten;
+        project.origin = origin;
+        project.size = [2, 2, 2];
+        project.total_steps = 8;
+        project.assigned_bot = Some(1);
+        project.crew_id = Some(1);
+        save.projects.push(project);
+        save.crews.push(BotCrew {
+            id: 1,
+            role_focus: BotRole::Builder,
+            bot_ids: vec![1],
+            project_id: 1,
+            active: true,
+        });
+        assign_crew_task(
+            &mut save,
+            Some(1),
+            Some(1),
+            1,
+            BotTaskKind::ClearFlatten,
+            "Exact workfront",
+            origin,
+        );
+        let workfront = IVec3::new(origin[0], origin[1], origin[2]);
+        save.agents[0].position = [200.0, 80.0, 200.0];
+        save.agents[1].position = workfront.as_vec3().to_array();
+
+        assert!(arrived_project_builder(&save, 0, workfront).is_none());
+        let mut history = BuilderHistory::default();
+        let waiting = advance_project_slice(
+            &mut save.projects[0],
+            &mut world,
+            &mut history,
+            None,
+            &[],
+            BotCityBounds::default(),
+            4,
+            None,
+            Some(&ExactBotCommandPlan::ClearFlatten),
+        );
+        assert_eq!(waiting.changed, 0);
+        assert_eq!(save.projects[0].cursor, 0);
+        assert_eq!(save.projects[0].status, BotProjectStatus::WaitingForCrew);
+
+        save.agents[0].position = (workfront.as_vec3() + Vec3::splat(0.5)).to_array();
+        let builder = arrived_project_builder(&save, 0, workfront);
+        assert!(builder.is_some());
+        let advanced = advance_project_slice(
+            &mut save.projects[0],
+            &mut world,
+            &mut history,
+            None,
+            &[],
+            BotCityBounds::default(),
+            4,
+            builder,
+            Some(&ExactBotCommandPlan::ClearFlatten),
+        );
+        assert!(advanced.changed > 0);
+        assert!(save.projects[0].cursor > 0);
+    }
+
+    #[test]
+    fn protected_workfront_holds_cursor_without_leaving_a_hole() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let origin = [4, 80, 4];
+        let mut project = history_test_project(1, BotProjectStatus::Active);
+        project.kind = BotTaskKind::ClearFlatten;
+        project.origin = origin;
+        project.size = [2, 2, 2];
+        project.total_steps = 8;
+        let builder = Vec3::new(4.5, 82.0, 4.5);
+        let mut history = BuilderHistory::default();
+
+        let result = advance_project_slice(
+            &mut project,
+            &mut world,
+            &mut history,
+            Some(builder),
+            &[],
+            BotCityBounds::default(),
+            4,
+            Some(builder),
+            Some(&ExactBotCommandPlan::ClearFlatten),
+        );
+        assert_eq!(result.changed, 0);
+        assert_eq!(project.cursor, 0);
+        assert_eq!(project.status, BotProjectStatus::WaitingForPlayer);
     }
 
     #[test]
@@ -16857,6 +20557,16 @@ mod tests {
 
         budget.render_distance = 41;
         assert!(bot_frame_edit_budget(&budget, 2) > 0);
+    }
+
+    #[test]
+    fn bot_project_scan_budget_is_small_for_crowded_saves() {
+        let scan = bot_project_scan_budget(MAX_ACTIVE_PROJECTS_LIMIT + 50);
+
+        assert!(
+            scan <= 48,
+            "crowded bot saves should scan a small rotating window, not {scan} projects in one frame"
+        );
     }
 
     #[test]
@@ -16879,6 +20589,435 @@ mod tests {
         assert_eq!(cp.x, 0);
         assert_eq!(cp.y, 0);
         assert_eq!(cp.z, 0);
+    }
+
+    #[test]
+    fn exact_project_preserves_recipient_order_and_adds_no_bots() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let mut save = BotWorldSave::default();
+        save.agents.extend([
+            test_bot(7, "Seven", BotRole::Builder),
+            test_bot(3, "Three", BotRole::Surveyor),
+            test_bot(9, "Nine", BotRole::Architect),
+        ]);
+
+        let project_id = add_project_for_exact_bots(
+            &mut save,
+            &world,
+            42,
+            BotTaskKind::ClearFlatten,
+            [0, 80, 0],
+            [4, 2, 4],
+            BotTheme::CyanAlloy,
+            &[9, 7],
+            10,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let project = save
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .unwrap();
+        let crew = save
+            .crews
+            .iter()
+            .find(|crew| crew.id == project.crew_id.unwrap())
+            .unwrap();
+        assert_eq!(crew.bot_ids, vec![9, 7]);
+        assert_eq!(project.assigned_bot, Some(9));
+        assert_eq!(project.origin, [0, 80, 0]);
+        assert_eq!(project.size, [4, 2, 4]);
+        assert_eq!(project.total_steps, 32);
+        assert_eq!(save.exact_command_project_ids, vec![project_id]);
+        assert!(save
+            .agents
+            .iter()
+            .find(|bot| bot.id == 3)
+            .unwrap()
+            .current_task
+            .is_none());
+        for bot_id in [9, 7] {
+            let bot = save.agents.iter().find(|bot| bot.id == bot_id).unwrap();
+            assert_eq!(bot.crew_id, Some(crew.id));
+            assert_eq!(
+                bot.current_task.as_ref().map(|task| task.project_id),
+                Some(project_id)
+            );
+        }
+    }
+
+    #[test]
+    fn exact_project_rejection_is_atomic_for_duplicate_unknown_and_busy_bots() {
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let mut save = BotWorldSave::default();
+        save.agents.extend([
+            test_bot(1, "One", BotRole::Builder),
+            test_bot(2, "Two", BotRole::Builder),
+        ]);
+        save.agents[1].current_task = Some(BotTask {
+            task_type: BotTaskKind::BuildRoad,
+            project_id: 99,
+            label: "existing".into(),
+            progress: 0.5,
+        });
+
+        for recipients in [vec![1, 1], vec![1, 404], vec![1, 2]] {
+            let next_project_id = save.next_project_id;
+            let next_crew_id = save.next_crew_id;
+            let project_count = save.projects.len();
+            let crew_count = save.crews.len();
+            let first_task_project = save.agents[0]
+                .current_task
+                .as_ref()
+                .map(|task| task.project_id);
+
+            assert!(add_project_for_exact_bots(
+                &mut save,
+                &world,
+                55,
+                BotTaskKind::ClearFlatten,
+                [0, 80, 0],
+                [2, 2, 2],
+                BotTheme::CyanAlloy,
+                &recipients,
+                10,
+                None,
+                &[],
+            )
+            .is_err());
+
+            assert_eq!(save.next_project_id, next_project_id);
+            assert_eq!(save.next_crew_id, next_crew_id);
+            assert_eq!(save.projects.len(), project_count);
+            assert_eq!(save.crews.len(), crew_count);
+            assert_eq!(
+                save.agents[0]
+                    .current_task
+                    .as_ref()
+                    .map(|task| task.project_id),
+                first_task_project
+            );
+            assert_eq!(save.agents[0].crew_id, None);
+        }
+    }
+
+    #[test]
+    fn exact_clear_flatten_never_moves_edits_outside_the_approved_box() {
+        let world = VoxelWorld::new();
+        let project = BotProject {
+            id: 1,
+            kind: BotTaskKind::ClearFlatten,
+            label: "Exact".into(),
+            origin: [-3, 70, 5],
+            size: [4, 3, 2],
+            theme: BotTheme::CyanAlloy,
+            status: BotProjectStatus::Active,
+            cursor: 0,
+            total_steps: 24,
+            assigned_bot: Some(1),
+            district_id: None,
+            crew_id: None,
+            idea_id: None,
+            blocked_reason: String::new(),
+            priority: 10,
+            concept: BotProjectConcept::default(),
+        };
+
+        for y in 0..project.size[1] {
+            for z in 0..project.size[2] {
+                for x in 0..project.size[0] {
+                    let local = IVec3::new(x, y, z);
+                    let (pos, voxel) = project_voxel_with_plan(
+                        &project,
+                        local,
+                        &world,
+                        Some(&ExactBotCommandPlan::ClearFlatten),
+                    )
+                    .unwrap();
+                    assert_eq!(pos, IVec3::new(-3 + x, 70 + y, 5 + z));
+                    if y == 0 {
+                        assert_ne!(voxel, AIR);
+                    } else {
+                        assert_eq!(voxel, AIR);
+                    }
+                }
+            }
+        }
+    }
+
+    fn exact_executor_test_app(size: IVec3) -> (App, crate::bot_command::CommandId, IVec3, IVec3) {
+        use crate::bot_command::{
+            BotCommandStateMachine, CommandOperation, CommandRecipients, CommandTarget,
+        };
+
+        let mut world = VoxelWorld::new();
+        mark_test_city_columns_loaded(&mut world, -2, 2);
+        let mut save = BotWorldSave::seed("Executor Test", Vec3::new(0.0, 80.0, 0.0), &world);
+        save.autonomy.bots_active = true;
+        save.autonomy.enabled = false;
+        let recipients = save
+            .agents
+            .iter()
+            .take(2)
+            .map(|bot| bot.id)
+            .collect::<Vec<_>>();
+        let min = IVec3::new(4, 80, 4);
+        let max = min + size - IVec3::ONE;
+
+        let mut command_state = BotCommandStateMachine::default();
+        let command_id = command_state
+            .create(
+                CommandOperation::ClearFlatten,
+                CommandTarget::Area { min, max },
+                CommandRecipients::Selected(recipients),
+            )
+            .unwrap();
+        command_state.prepare_preview(command_id).unwrap();
+        command_state.approve(command_id).unwrap();
+        command_state.request_execution(command_id).unwrap();
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(command_state)
+            .insert_resource(BotCommandExecutor::default())
+            .insert_resource(FriendlyWorldBrain {
+                save,
+                ..Default::default()
+            })
+            .insert_resource(world)
+            .insert_resource(BuilderHistory::default())
+            .insert_resource(RuntimeBudget::default())
+            .insert_resource(BotRuntimeControl::default())
+            .add_systems(
+                Update,
+                (
+                    dispatch_authorized_bot_commands,
+                    tick_friendly_world,
+                    finalize_authorized_bot_commands,
+                )
+                    .chain(),
+            );
+        (app, command_id, min, max)
+    }
+
+    fn settle_exact_test_crews(app: &mut App) {
+        let mut brain = app.world_mut().resource_mut::<FriendlyWorldBrain>();
+        for bot in &mut brain.save.agents {
+            if bot.current_task.is_some() {
+                bot.position = bot.target;
+            }
+        }
+    }
+
+    #[test]
+    fn approved_command_executes_real_voxels_and_completes_end_to_end() {
+        use crate::bot_command::{BotCommandStateMachine, CommandState};
+
+        let (mut app, command_id, min, max) = exact_executor_test_app(IVec3::new(2, 2, 2));
+
+        app.update();
+        {
+            let commands = app.world().resource::<BotCommandStateMachine>();
+            assert_eq!(
+                commands.command(command_id).unwrap().state(),
+                CommandState::Running
+            );
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            assert_eq!(brain.save.projects[0].cursor, 0);
+            assert_eq!(
+                brain.save.projects[0].status,
+                BotProjectStatus::WaitingForCrew
+            );
+        }
+        settle_exact_test_crews(&mut app);
+        app.update();
+
+        let commands = app.world().resource::<BotCommandStateMachine>();
+        let command = commands.command(command_id).unwrap();
+        assert_eq!(command.state(), CommandState::Completed);
+        let completion = command.completion().unwrap();
+        assert_eq!(completion.applied_voxel_edits, 4);
+        assert_eq!(completion.touched_chunks, 1);
+        assert_eq!(completion.spawned_projects, 1);
+
+        let world = app.world().resource::<VoxelWorld>();
+        for z in min.z..=max.z {
+            for x in min.x..=max.x {
+                assert_ne!(world.voxel_at(x, min.y, z), AIR);
+                assert_eq!(world.voxel_at(x, max.y, z), AIR);
+            }
+        }
+        let brain = app.world().resource::<FriendlyWorldBrain>();
+        assert_eq!(brain.save.projects.len(), 1);
+        assert_eq!(brain.save.projects[0].origin, [min.x, min.y, min.z]);
+        assert_eq!(brain.save.projects[0].size, [2, 2, 2]);
+        assert_eq!(brain.save.projects[0].status, BotProjectStatus::Complete);
+        assert!(brain.save.crews[0].bot_ids.iter().all(|bot_id| {
+            brain
+                .save
+                .agents
+                .iter()
+                .find(|bot| bot.id == *bot_id)
+                .is_some_and(|bot| bot.current_task.is_none() && bot.crew_id.is_none())
+        }));
+    }
+
+    #[test]
+    fn paused_exact_command_holds_cursor_and_resume_reuses_the_same_project() {
+        use crate::bot_command::{BotCommandStateMachine, CommandState};
+
+        let (mut app, command_id, _, _) = exact_executor_test_app(IVec3::new(8, 4, 8));
+        app.update();
+        {
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            assert_eq!(brain.save.projects[0].cursor, 0);
+            assert_eq!(
+                brain.save.projects[0].status,
+                BotProjectStatus::WaitingForCrew
+            );
+        }
+        settle_exact_test_crews(&mut app);
+        app.update();
+        let (project_id, crew_id, cursor, dispatch_key) = {
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            let commands = app.world().resource::<BotCommandStateMachine>();
+            assert_eq!(
+                commands.command(command_id).unwrap().state(),
+                CommandState::Running
+            );
+            let project = &brain.save.projects[0];
+            assert!(project.cursor > 0 && project.cursor < project.total_steps);
+            (
+                project.id,
+                project.crew_id,
+                project.cursor,
+                commands.command(command_id).unwrap().dispatch_key(),
+            )
+        };
+
+        app.world_mut()
+            .resource_mut::<BotCommandStateMachine>()
+            .pause(command_id)
+            .unwrap();
+        app.update();
+        {
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            let project = brain
+                .save
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .unwrap();
+            assert_eq!(project.status, BotProjectStatus::CommandHeld);
+            assert_eq!(project.cursor, cursor);
+            assert_eq!(brain.save.projects.len(), 1);
+            assert_eq!(project.crew_id, crew_id);
+        }
+
+        app.world_mut()
+            .resource_mut::<BotCommandStateMachine>()
+            .resume(command_id)
+            .unwrap();
+        for _ in 0..64 {
+            settle_exact_test_crews(&mut app);
+            app.update();
+            if app
+                .world()
+                .resource::<BotCommandStateMachine>()
+                .command(command_id)
+                .unwrap()
+                .state()
+                == CommandState::Completed
+            {
+                break;
+            }
+        }
+
+        let commands = app.world().resource::<BotCommandStateMachine>();
+        assert_eq!(
+            commands.command(command_id).unwrap().state(),
+            CommandState::Completed
+        );
+        assert_eq!(
+            commands.command(command_id).unwrap().dispatch_key(),
+            dispatch_key
+        );
+        let brain = app.world().resource::<FriendlyWorldBrain>();
+        assert_eq!(brain.save.projects.len(), 1);
+        assert_eq!(brain.save.projects[0].id, project_id);
+        assert_eq!(brain.save.projects[0].crew_id, crew_id);
+    }
+
+    #[test]
+    fn cancelled_exact_command_stops_slices_and_releases_its_exact_crew() {
+        use crate::bot_command::{BotCommandStateMachine, CommandState};
+
+        let (mut app, command_id, _, _) = exact_executor_test_app(IVec3::new(8, 4, 8));
+        app.update();
+        settle_exact_test_crews(&mut app);
+        app.update();
+        let (project_id, cursor, crew_id, bot_ids) = {
+            let brain = app.world().resource::<FriendlyWorldBrain>();
+            let project = &brain.save.projects[0];
+            let crew_id = project.crew_id.unwrap();
+            let bot_ids = brain
+                .save
+                .crews
+                .iter()
+                .find(|crew| crew.id == crew_id)
+                .unwrap()
+                .bot_ids
+                .clone();
+            assert!(project.cursor > 0);
+            (project.id, project.cursor, crew_id, bot_ids)
+        };
+
+        app.world_mut()
+            .resource_mut::<BotCommandStateMachine>()
+            .cancel(command_id)
+            .unwrap();
+        app.update();
+        app.update();
+
+        let commands = app.world().resource::<BotCommandStateMachine>();
+        assert_eq!(
+            commands.command(command_id).unwrap().state(),
+            CommandState::Cancelled
+        );
+        let brain = app.world().resource::<FriendlyWorldBrain>();
+        let project = brain
+            .save
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .unwrap();
+        assert_eq!(project.status, BotProjectStatus::Blocked);
+        assert_eq!(project.cursor, cursor);
+        assert!(project.blocked_reason.contains("cancelled"));
+        assert!(
+            !brain
+                .save
+                .crews
+                .iter()
+                .find(|crew| crew.id == crew_id)
+                .unwrap()
+                .active
+        );
+        for bot_id in bot_ids {
+            let bot = brain
+                .save
+                .agents
+                .iter()
+                .find(|bot| bot.id == bot_id)
+                .unwrap();
+            assert_eq!(bot.crew_id, None);
+            assert!(bot.current_task.is_none());
+        }
     }
 
     fn test_bot(id: u64, name: &str, role: BotRole) -> BotAgent {

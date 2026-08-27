@@ -12,7 +12,7 @@
 
 use bevy::math::{IVec3, Vec3};
 
-use crate::blocks::voxel_is_solid;
+use crate::blocks::{voxel_is_solid, BlockType, Voxel};
 use crate::world::VoxelWorld;
 
 /// Maximum number of grid cells to step before giving up. The previous
@@ -32,6 +32,35 @@ pub fn dda_voxel(
     origin: Vec3,
     dir: Vec3,
     max_dist: f32,
+) -> Option<(IVec3, IVec3)> {
+    dda_voxel_matching(world, origin, dir, max_dist, voxel_is_solid)
+}
+
+/// Select-only ray that can acquire a natural tree through its translucent
+/// canopy. Push/Pull intentionally keeps using [`dda_voxel`] so leaves never
+/// become solid construction faces.
+#[inline]
+pub fn dda_object_voxel(
+    world: &VoxelWorld,
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+) -> Option<(IVec3, IVec3)> {
+    dda_voxel_matching(world, origin, dir, max_dist, |voxel| {
+        voxel_is_solid(voxel)
+            || matches!(
+                BlockType::from_voxel(voxel),
+                BlockType::Leaves | BlockType::JungleLeaves | BlockType::BlossomLeaves
+            )
+    })
+}
+
+fn dda_voxel_matching(
+    world: &VoxelWorld,
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    accepts: impl Fn(Voxel) -> bool,
 ) -> Option<(IVec3, IVec3)> {
     if dir.length_squared() < 1e-6 {
         return None;
@@ -92,9 +121,58 @@ pub fn dda_voxel(
             z += step_z;
             tmz += t_delta_z;
         }
-        if voxel_is_solid(world.voxel_at(x, y, z)) {
+        if accepts(world.voxel_at(x, y, z)) {
             return Some((IVec3::new(x, y, z), prev));
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::WorldEditBatch;
+
+    fn world_with_ray_line(entries: &[(i32, BlockType)]) -> VoxelWorld {
+        let mut world = VoxelWorld::new();
+        let mut batch = WorldEditBatch::default();
+        for (x, block) in entries.iter().copied() {
+            world.edit_set_voxel_batched(x, 0, 0, Voxel::from(block), &mut batch);
+        }
+        world.finish_edit_batch(batch);
+        world
+    }
+
+    #[test]
+    fn object_ray_acquires_every_natural_foliage_while_solid_ray_reaches_stone() {
+        for foliage in [
+            BlockType::Leaves,
+            BlockType::JungleLeaves,
+            BlockType::BlossomLeaves,
+        ] {
+            let world = world_with_ray_line(&[(1, foliage), (2, BlockType::Stone)]);
+            let origin = Vec3::new(0.5, 0.5, 0.5);
+
+            assert_eq!(
+                dda_object_voxel(&world, origin, Vec3::X, 8.0),
+                Some((IVec3::new(1, 0, 0), IVec3::ZERO)),
+                "Select ray should acquire {foliage:?}"
+            );
+            assert_eq!(
+                dda_voxel(&world, origin, Vec3::X, 8.0),
+                Some((IVec3::new(2, 0, 0), IVec3::new(1, 0, 0))),
+                "construction ray should pass through {foliage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn object_and_solid_rays_both_ignore_water() {
+        let world = world_with_ray_line(&[(1, BlockType::Water), (2, BlockType::Stone)]);
+        let origin = Vec3::new(0.5, 0.5, 0.5);
+        let expected = Some((IVec3::new(2, 0, 0), IVec3::new(1, 0, 0)));
+
+        assert_eq!(dda_object_voxel(&world, origin, Vec3::X, 8.0), expected);
+        assert_eq!(dda_voxel(&world, origin, Vec3::X, 8.0), expected);
+    }
 }

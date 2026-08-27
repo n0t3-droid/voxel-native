@@ -1,26 +1,233 @@
-//! On-screen HUD: crosshair, FPS/position/time/biome overlay, hotbar,
-//! startup hint banner that fades once the cursor is captured.
+//! Adaptive in-game HUD: mission, vitals, hotbar and combat feedback.
 //!
-//! Port target: `components/Hotbar.tsx`, `components/InfoOverlay.tsx` and
-//! the corner text in `components/VoxelEngine.tsx`.
+//! Product layers are gated by the authoritative interaction mode. Diagnostics
+//! remain opt-in and never share the editor or overlay surfaces.
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts};
 
-use crate::chunk::to_i32_safe;
+use crate::chunk::{floor_to_i32_safe, to_i32_safe, CHUNK_SIZE};
 use crate::director::SimulationDirector;
-use crate::director::UnifiedTelemetry;
 use crate::icons::{paint_icon, Icon};
+use crate::neurocore::RuntimeProfile;
 use crate::player::{Player, SuitVitals};
 use crate::settings::{HudProfile, WorldSettings};
-use crate::terrain::Biome;
-use crate::toolbelt::ToolbeltTool;
-use crate::weapons::DestructionStats;
-use crate::world::{StreamingGovernor, VoxelWorld};
+use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
 
 pub struct HudPlugin;
+
+const ARRIVAL_TIMEOUT_SECONDS: f32 = 30.0;
+const ARRIVAL_MIN_VISIBLE_SECONDS: f32 = 0.34;
+const ARRIVAL_READY_HOLD_SECONDS: f32 = 0.54;
+const ARRIVAL_STATIC_READY_HOLD_SECONDS: f32 = 0.12;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WorldArrivalPhase {
+    #[default]
+    Linking,
+    Scanning,
+    Terrain,
+    Meshing,
+    Landing,
+    Ready,
+    Fallback,
+}
+
+impl WorldArrivalPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Linking => "WORLD LINK",
+            Self::Scanning => "SPAWN SURVEY",
+            Self::Terrain => "LOCAL TERRAIN",
+            Self::Meshing => "VISIBLE SURFACES",
+            Self::Landing => "PLAYER ARRIVAL",
+            Self::Ready => "WORLD READY",
+            Self::Fallback => "BACKGROUND STREAM",
+        }
+    }
+
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::Linking => "Opening the selected simulation",
+            Self::Scanning => "Prioritizing the world around your arrival point",
+            Self::Terrain => "Generating the local voxel landscape",
+            Self::Meshing => "Compiling nearby terrain for the renderer",
+            Self::Landing => "Placing you safely on the loaded surface",
+            Self::Ready => "Local world is stable and ready to explore",
+            Self::Fallback => "World is open; distant terrain continues in the background",
+        }
+    }
+
+    const fn is_complete(self) -> bool {
+        matches!(self, Self::Ready | Self::Fallback)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ArrivalSignals {
+    local_column_ready: bool,
+    local_mesh_ready: bool,
+    player_placed: bool,
+    frontier_complete: bool,
+    active_tasks: usize,
+    scan_ratio: f32,
+}
+
+impl ArrivalSignals {
+    fn is_playable(self) -> bool {
+        self.local_column_ready && self.local_mesh_ready && self.player_placed
+    }
+}
+
+/// Long-lived world-entry state. This is deliberately separate from
+/// `PendingWorldLoad`, which is a one-frame regeneration trigger.
+#[derive(Resource, Debug, Clone)]
+pub struct WorldArrival {
+    active: bool,
+    world_name: String,
+    phase: WorldArrivalPhase,
+    elapsed: f32,
+    progress: f32,
+    ready_hold: f32,
+}
+
+impl Default for WorldArrival {
+    fn default() -> Self {
+        Self {
+            active: false,
+            world_name: String::new(),
+            phase: WorldArrivalPhase::Linking,
+            elapsed: 0.0,
+            progress: 0.0,
+            ready_hold: 0.0,
+        }
+    }
+}
+
+impl WorldArrival {
+    pub fn begin(&mut self, world_name: impl Into<String>) {
+        self.active = true;
+        self.world_name = world_name.into();
+        self.phase = WorldArrivalPhase::Linking;
+        self.elapsed = 0.0;
+        self.progress = 0.02;
+        self.ready_hold = 0.0;
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HudSurface {
+    Hidden,
+    BuildAim,
+    Play,
+}
+
+fn hud_surface(in_game: bool, active_mode: Option<crate::mode::ActiveMode>) -> HudSurface {
+    if !in_game {
+        return HudSurface::Hidden;
+    }
+    match active_mode {
+        None | Some(crate::mode::ActiveMode::Combat) => HudSurface::Play,
+        Some(mode) if mode.is_build_live() => HudSurface::BuildAim,
+        _ => HudSurface::Hidden,
+    }
+}
+
+fn current_hud_surface(
+    state: &State<crate::menu::GameState>,
+    mode: Option<&crate::mode::ModeContext>,
+) -> HudSurface {
+    hud_surface(
+        *state.get() == crate::menu::GameState::InGame,
+        mode.map(|mode| mode.mode),
+    )
+}
+
+fn uses_static_hud_motion(settings: &WorldSettings) -> bool {
+    settings.reduce_motion || settings.runtime_profile == RuntimeProfile::LowSpec
+}
+
+fn product_hud_visible(surface: HudSurface, debug_visible: bool) -> bool {
+    surface == HudSurface::Play && !debug_visible
+}
+
+fn arrival_target(signals: ArrivalSignals) -> (WorldArrivalPhase, f32) {
+    let scan_ratio = if signals.scan_ratio.is_finite() {
+        signals.scan_ratio.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if signals.is_playable() {
+        return (WorldArrivalPhase::Ready, 1.0);
+    }
+    if !signals.local_column_ready {
+        let phase = if signals.active_tasks > 0 {
+            WorldArrivalPhase::Terrain
+        } else {
+            WorldArrivalPhase::Scanning
+        };
+        return (phase, 0.12 + scan_ratio * 0.38);
+    }
+    if !signals.local_mesh_ready {
+        let task_credit = if signals.active_tasks > 0 { 0.08 } else { 0.0 };
+        return (WorldArrivalPhase::Meshing, 0.62 + task_credit);
+    }
+    (WorldArrivalPhase::Landing, 0.88)
+}
+
+fn advance_world_arrival(
+    arrival: &mut WorldArrival,
+    delta_seconds: f32,
+    signals: ArrivalSignals,
+    static_motion: bool,
+) {
+    if !arrival.active {
+        return;
+    }
+    let delta_seconds = if delta_seconds.is_finite() {
+        delta_seconds.clamp(0.0, ARRIVAL_TIMEOUT_SECONDS)
+    } else {
+        0.0
+    };
+    arrival.elapsed += delta_seconds;
+
+    let (mut phase, target) = arrival_target(signals);
+    if arrival.elapsed >= ARRIVAL_TIMEOUT_SECONDS && !signals.is_playable() {
+        phase = WorldArrivalPhase::Fallback;
+    }
+    let continued_complete_phase = arrival.phase.is_complete() && arrival.phase == phase;
+    arrival.phase = phase;
+    let target = if phase == WorldArrivalPhase::Fallback {
+        1.0
+    } else {
+        target
+    };
+    arrival.progress = arrival.progress.max(target).clamp(0.0, 1.0);
+
+    if phase.is_complete() {
+        if continued_complete_phase {
+            arrival.ready_hold += delta_seconds;
+        } else {
+            arrival.ready_hold = 0.0;
+        }
+        let hold = if static_motion {
+            ARRIVAL_STATIC_READY_HOLD_SECONDS
+        } else {
+            ARRIVAL_READY_HOLD_SECONDS
+        };
+        if arrival.elapsed >= ARRIVAL_MIN_VISIBLE_SECONDS && arrival.ready_hold >= hold {
+            arrival.active = false;
+        }
+    } else {
+        arrival.ready_hold = 0.0;
+    }
+}
 
 /// Tracks whether the F3 debug overlay (FPS + pos + biome + time) is shown.
 #[derive(Resource)]
@@ -39,6 +246,7 @@ impl Plugin for HudPlugin {
         app.add_plugins(FrameTimeDiagnosticsPlugin)
             .insert_resource(HotbarState::default())
             .insert_resource(DebugOverlay::default())
+            .insert_resource(WorldArrival::default())
             .add_systems(
                 Startup,
                 (
@@ -52,15 +260,23 @@ impl Plugin for HudPlugin {
             )
             .add_systems(
                 Update,
+                update_world_arrival
+                    .run_if(in_state(crate::menu::GameState::InGame))
+                    .after(crate::world::WorldSet::Mesh),
+            )
+            .add_systems(
+                Update,
                 (
                     toggle_debug_overlay,
                     update_stats_text,
-                    draw_neon_combat_hud,
-                    draw_workflow_rail,
+                    draw_world_arrival.after(update_world_arrival),
+                    draw_play_hud.after(update_world_arrival),
                     update_hint,
                     hotbar_input.run_if(in_state(crate::menu::GameState::InGame)),
+                    refresh_hotbar_contents,
+                    adapt_hotbar_layout,
                     hotbar_highlight,
-                    toggle_hud_visibility,
+                    toggle_hud_visibility.after(update_world_arrival),
                     update_scope_overlay,
                     update_combo_text,
                     flash_crosshair_on_hit,
@@ -69,14 +285,15 @@ impl Plugin for HudPlugin {
     }
 }
 
-/// Shift+F3 toggles the debug stats overlay. Plain F3 is reserved for
-/// build/edit mode in `toolbelt.rs`.
+/// Shift+F3 toggles the debug stats overlay. Plain F3 is handled by `menu.rs`
+/// for the in-game engine editor.
 fn toggle_debug_overlay(
     keys: Res<ButtonInput<KeyCode>>,
     mut overlay: ResMut<DebugOverlay>,
     state: Res<State<crate::menu::GameState>>,
+    mode: Option<Res<crate::mode::ModeContext>>,
 ) {
-    if *state.get() != crate::menu::GameState::InGame {
+    if current_hud_surface(&state, mode.as_deref()) != HudSurface::Play {
         return;
     }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -90,6 +307,7 @@ fn toggle_debug_overlay(
 fn toggle_hud_visibility(
     state: Res<State<crate::menu::GameState>>,
     overlay: Res<DebugOverlay>,
+    arrival: Res<WorldArrival>,
     mode: Option<Res<crate::mode::ModeContext>>,
     mut crosshair_q: Query<
         &mut Visibility,
@@ -130,24 +348,20 @@ fn toggle_hud_visibility(
         ),
     >,
 ) {
-    let in_game = *state.get() == crate::menu::GameState::InGame;
-    let build_mode = mode.as_deref().map(|m| m.is_build()).unwrap_or(false);
-    let ship_mode = mode.as_deref().map(|m| m.is_ship()).unwrap_or(false);
-    let build_picker = mode
-        .as_deref()
-        .map(|m| m.is_build_picker())
-        .unwrap_or(false);
-    let stats_vis = if in_game && overlay.visible {
+    let surface = current_hud_surface(&state, mode.as_deref());
+    let arrival_active = arrival.is_active();
+    let stats_vis = if !arrival_active && surface == HudSurface::Play && overlay.visible {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    let crosshair_vis = if in_game && !build_picker {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
-    let hotbar_vis = if in_game && !build_mode && !ship_mode {
+    let crosshair_vis =
+        if !arrival_active && matches!(surface, HudSurface::Play | HudSurface::BuildAim) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    let hotbar_vis = if !arrival_active && product_hud_visible(surface, overlay.visible) {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -171,12 +385,10 @@ fn toggle_hud_visibility(
 #[derive(Component)]
 pub struct Crosshair;
 
-fn spawn_crosshair(mut commands: Commands) {
-    // Holographic reticle: 4 short phosphor bars around a central dot, with
-    // a tiny gap in the middle so it never occludes what you aim at.
-    // Matches the "HUD visor" aesthetic of sci-fi shooters.
-    let cyan = Color::srgba(0.20, 1.0, 0.62, 0.96);
-    let cyan_dim = Color::srgba(0.20, 1.0, 0.62, 0.50);
+fn spawn_crosshair(mut commands: Commands, settings: Res<WorldSettings>) {
+    let accent = settings.theme.color.primary();
+    let reticle = bevy_theme_color(accent, 0.92);
+    let reticle_dim = bevy_theme_color(accent, 0.48);
     commands
         .spawn((
             NodeBundle {
@@ -188,6 +400,7 @@ fn spawn_crosshair(mut commands: Commands) {
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
+                visibility: Visibility::Hidden,
                 ..default()
             },
             Crosshair,
@@ -206,7 +419,7 @@ fn spawn_crosshair(mut commands: Commands) {
                     },
                     ..default()
                 },
-                background_color: BackgroundColor(cyan),
+                background_color: BackgroundColor(reticle),
                 ..default()
             });
             // Bottom tick
@@ -222,7 +435,7 @@ fn spawn_crosshair(mut commands: Commands) {
                     },
                     ..default()
                 },
-                background_color: BackgroundColor(cyan),
+                background_color: BackgroundColor(reticle),
                 ..default()
             });
             // Left tick
@@ -238,7 +451,7 @@ fn spawn_crosshair(mut commands: Commands) {
                     },
                     ..default()
                 },
-                background_color: BackgroundColor(cyan),
+                background_color: BackgroundColor(reticle),
                 ..default()
             });
             // Right tick
@@ -254,7 +467,7 @@ fn spawn_crosshair(mut commands: Commands) {
                     },
                     ..default()
                 },
-                background_color: BackgroundColor(cyan),
+                background_color: BackgroundColor(reticle),
                 ..default()
             });
             // Center dot
@@ -265,7 +478,7 @@ fn spawn_crosshair(mut commands: Commands) {
                     position_type: PositionType::Absolute,
                     ..default()
                 },
-                background_color: BackgroundColor(cyan_dim),
+                background_color: BackgroundColor(reticle_dim),
                 ..default()
             });
         });
@@ -276,26 +489,26 @@ fn spawn_crosshair(mut commands: Commands) {
 #[derive(Component)]
 pub struct StatsText;
 
-fn spawn_stats_text(mut commands: Commands) {
-    commands.spawn((
-        TextBundle::from_section(
-            "",
-            TextStyle {
-                font_size: 15.0,
-                color: Color::srgba(0.74, 1.0, 0.82, 0.98),
-                ..default()
-            },
-        )
-        .with_style(Style {
-            position_type: PositionType::Absolute,
-            top: Val::Px(12.0),
-            left: Val::Px(14.0),
-            padding: UiRect::all(Val::Px(10.0)),
+fn spawn_stats_text(mut commands: Commands, settings: Res<WorldSettings>) {
+    let colors = settings.theme.semantic();
+    let mut bundle = TextBundle::from_section(
+        "",
+        TextStyle {
+            font_size: 12.0,
+            color: bevy_theme_color(colors.text, 0.96),
             ..default()
-        })
-        .with_background_color(Color::srgba(0.0, 0.02, 0.015, 0.68)),
-        StatsText,
-    ));
+        },
+    )
+    .with_style(Style {
+        position_type: PositionType::Absolute,
+        top: Val::Px(12.0),
+        left: Val::Px(14.0),
+        padding: UiRect::all(Val::Px(10.0)),
+        ..default()
+    })
+    .with_background_color(bevy_theme_color(settings.theme.panel_fill(0.76), 0.76));
+    bundle.visibility = Visibility::Hidden;
+    commands.spawn((bundle, StatsText));
 }
 
 fn update_stats_text(
@@ -306,11 +519,21 @@ fn update_stats_text(
     player_q: Query<(&Transform, &Player)>,
     pause: Option<Res<crate::editor::SimPause>>,
     director: Option<Res<SimulationDirector>>,
-    mut text_q: Query<&mut Text, With<StatsText>>,
+    brain: Option<Res<crate::bots::FriendlyWorldBrain>>,
+    overlay: Res<DebugOverlay>,
+    state: Res<State<crate::menu::GameState>>,
+    mode: Option<Res<crate::mode::ModeContext>>,
+    mut text_q: Query<(&mut Text, &mut BackgroundColor), With<StatsText>>,
 ) {
-    let Ok(mut text) = text_q.get_single_mut() else {
+    if !overlay.visible || current_hud_surface(&state, mode.as_deref()) != HudSurface::Play {
+        return;
+    }
+    let Ok((mut text, mut background)) = text_q.get_single_mut() else {
         return;
     };
+    let colors = settings.theme.semantic();
+    text.sections[0].style.color = bevy_theme_color(colors.text, 0.96);
+    background.0 = bevy_theme_color(settings.theme.panel_fill(0.76), 0.76);
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
@@ -338,35 +561,39 @@ fn update_stats_text(
     );
 
     let sim_mode = if pause.map(|p| p.paused).unwrap_or(false) {
-        "[|| EDIT]"
+        "SIM PAUSED"
     } else {
-        "[> PLAY]"
+        "LIVE"
     };
     let director_line = director
         .as_deref()
         .map(|d| d.cockpit_line())
-        .unwrap_or_else(|| "RANK -- no objective".into());
+        .unwrap_or_else(|| "No active mission".into());
+    let director_line = compact_hud_line(&director_line, 56);
+    let civic_line = brain
+        .as_deref()
+        .map(|brain| brain.save.civic_population.telemetry_line())
+        .unwrap_or_else(|| "not loaded".into());
 
-    // Write in-place into the existing String to avoid a 200-byte
-    // allocation + drop every frame (~14 MB/s alloc churn at 60fps
-    // over one hour). `write!` on String can only fail via OOM which
-    // would already be fatal; ignore the Result.
+    // Keep the opt-in diagnostic compact and update its existing buffer.
     use std::fmt::Write as _;
     let buf = &mut text.sections[0].value;
     buf.clear();
     let _ = write!(
         buf,
-        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nSKETCH LMB draw face  RMB cut  G push/pull  Tab tools  F1 deck  ESC pause",
-        governor.profile.label(),
-        governor.intent.label(),
-        governor.quality.label(),
+        "DEBUG  {sim_mode}\nFRAME  FPS {fps:>3.0}/{:>3.0}  PRESS {:>2.0}%  QUEUE {:>2.0}%  {} {} {}\nPOS    {:>7.1}  {:>6.1}  {:>7.1}  {:?}  {}\nWORLD  {hour:02}:{minute:02} {:?}  FOV {:.0}\nSTREAM RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nCIVIC  {}\nMISSION {}",
         settings.target_fps,
         governor.frame_pressure * 100.0,
         governor.queue_pressure * 100.0,
-        pos.x, pos.y, pos.z,
+        governor.profile.label(),
+        governor.intent.label(),
+        governor.quality.label(),
+        pos.x,
+        pos.y,
+        pos.z,
         biome,
-        settings.time_mode,
         if flying { "FLY" } else { "WALK" },
+        settings.time_mode,
         settings.fov_deg,
         governor.active_render_distance(settings.render_distance),
         settings.render_distance,
@@ -378,574 +605,528 @@ fn update_stats_text(
         governor.shadow_radius,
         governor.status,
         weather_line,
+        civic_line,
         director_line,
     );
 }
 
-fn draw_neon_combat_hud(
-    mut contexts: EguiContexts,
-    state: Res<State<crate::menu::GameState>>,
-    mode: Option<Res<crate::mode::ModeContext>>,
+#[derive(Debug, Clone, Copy)]
+struct MissionReadout {
+    label: &'static str,
+    distance_m: f32,
+    active_builds: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlayHudLayout {
+    mission: egui::Rect,
+    vitals: egui::Rect,
+}
+
+fn active_mission(
+    brain: Option<&crate::bots::FriendlyWorldBrain>,
+    player_position: Vec3,
+) -> Option<MissionReadout> {
+    let brain = brain?;
+    let active_builds = brain.active_project_count();
+    if active_builds == 0 {
+        return None;
+    }
+    let (label, destination) = brain.navigation_dest();
+    let distance_m = destination.distance(player_position);
+    Some(MissionReadout {
+        label,
+        distance_m: if distance_m.is_finite() {
+            distance_m.max(0.0)
+        } else {
+            0.0
+        },
+        active_builds,
+    })
+}
+
+fn play_hud_layout(screen: egui::Rect, mission_visible: bool) -> PlayHudLayout {
+    let stacked = screen.width() < 980.0 || screen.height() < 320.0;
+    let margin = if screen.width() < 720.0 || screen.height() < 400.0 {
+        12.0
+    } else {
+        18.0
+    };
+    let available_width = (screen.width() - margin * 2.0).max(1.0);
+    let mission_size = egui::vec2(available_width.min(360.0), 68.0);
+    let vitals_size = egui::vec2(available_width.min(248.0), 84.0);
+    let mission =
+        egui::Rect::from_min_size(screen.left_top() + egui::vec2(margin, margin), mission_size);
+    let vitals_y = if stacked {
+        screen.top()
+            + margin
+            + if mission_visible {
+                mission_size.y + 8.0
+            } else {
+                0.0
+            }
+    } else {
+        (screen.bottom() - margin - vitals_size.y).max(screen.top() + margin)
+    };
+    let vitals =
+        egui::Rect::from_min_size(egui::pos2(screen.left() + margin, vitals_y), vitals_size);
+    PlayHudLayout { mission, vitals }
+}
+
+fn vitals_visible(profile: HudProfile, suit: &SuitVitals) -> bool {
+    if profile != HudProfile::Focused {
+        return true;
+    }
+    normalized_vital(suit.health, 100.0) < 0.75
+        || normalized_vital(suit.shield, 60.0) < 0.50
+        || normalized_vital(suit.oxygen, 100.0) < 0.50
+}
+
+fn update_world_arrival(
+    time: Res<Time>,
     settings: Res<WorldSettings>,
     world: Res<VoxelWorld>,
-    governor: Res<StreamingGovernor>,
+    streamer: Res<ChunkStreamer>,
     player_q: Query<(&Transform, &Player)>,
-    director: Option<Res<SimulationDirector>>,
-    brain: Option<Res<crate::bots::FriendlyWorldBrain>>,
-    telemetry: Res<UnifiedTelemetry>,
-    mining: Res<DestructionStats>,
-    suit: Res<SuitVitals>,
+    mut arrival: ResMut<WorldArrival>,
 ) {
-    if *state.get() != crate::menu::GameState::InGame {
+    if !arrival.is_active() {
         return;
     }
-    if mode
-        .as_deref()
-        .map(|m| m.is_build() || m.is_ship())
-        .unwrap_or(false)
-    {
+
+    let player = player_q.get_single().ok();
+    let (wx, wz, player_placed) = player
+        .map(|(transform, player)| {
+            (
+                floor_to_i32_safe(transform.translation.x),
+                floor_to_i32_safe(transform.translation.z),
+                player.placed_on_surface,
+            )
+        })
+        .unwrap_or((0, 0, false));
+    let cx = wx.div_euclid(CHUNK_SIZE as i32);
+    let cz = wz.div_euclid(CHUNK_SIZE as i32);
+    let local_mesh_ready = streamer.entities.iter().any(|(position, entries)| {
+        !entries.is_empty() && (position.x - cx).abs() <= 1 && (position.z - cz).abs() <= 1
+    });
+    let scan_ratio = if streamer.load_offsets.is_empty() {
+        0.0
+    } else {
+        streamer.load_cursor as f32 / streamer.load_offsets.len() as f32
+    };
+    let active_tasks = streamer
+        .pending_terrain
+        .len()
+        .saturating_add(streamer.pending_meshes.len())
+        .saturating_add(streamer.dirty_queue.len());
+    let signals = ArrivalSignals {
+        local_column_ready: world.is_column_loaded(wx, wz),
+        local_mesh_ready,
+        player_placed,
+        frontier_complete: streamer.frontier_complete,
+        active_tasks,
+        scan_ratio,
+    };
+    advance_world_arrival(
+        &mut arrival,
+        time.delta_seconds(),
+        signals,
+        uses_static_hud_motion(&settings),
+    );
+}
+
+fn draw_world_arrival(
+    mut contexts: EguiContexts,
+    arrival: Res<WorldArrival>,
+    settings: Res<WorldSettings>,
+) {
+    if !arrival.is_active() {
         return;
     }
-    let Ok((player_tf, player)) = player_q.get_single() else {
+    let Some(ctx) = contexts.try_ctx_mut() else {
         return;
     };
-
-    let ctx = contexts.ctx_mut();
     let screen = ctx.screen_rect();
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("neon_combat_hud"),
-    ));
-
-    let colors = settings.theme.semantic();
-    let cyan = colors.info;
-    let magenta = egui::Color32::from_rgb(255, 46, 220);
-    let amber = colors.warning;
-    let green = colors.success;
-    let profile = settings.hud_profile;
-    let hud_opacity = settings.hud_panel_opacity;
-
-    let pos = player_tf.translation;
-    let biome = world.biome_at(to_i32_safe(pos.x), to_i32_safe(pos.z));
-    let objective = brain
-        .as_deref()
-        .map(|b| b.cockpit_line())
-        .or_else(|| director.as_deref().map(|d| d.cockpit_line()))
-        .unwrap_or_else(|| "COMPANIONS // awaiting your instructions".into());
-
-    let left_h = match profile {
-        HudProfile::Focused => 56.0,
-        HudProfile::Guided => 104.0,
-        HudProfile::Creator => 92.0,
-    };
-    let left_w = match profile {
-        HudProfile::Focused => 276.0,
-        HudProfile::Guided | HudProfile::Creator => 326.0,
-    };
-    let left = egui::Rect::from_min_size(
-        screen.left_top() + egui::vec2(22.0, 28.0),
-        egui::vec2(left_w, left_h),
-    );
-    crate::ui_kit::hud_panel(&painter, left, settings.theme, hud_opacity, cyan);
-    hud_text(
-        &painter,
-        left.left_top() + egui::vec2(16.0, 12.0),
-        match profile {
-            HudProfile::Creator => "CREATOR STATUS",
-            _ => "OBJECTIVE",
-        },
-        cyan,
-        15.0,
-    );
-    hud_text(
-        &painter,
-        left.left_top() + egui::vec2(16.0, 36.0),
-        &compact_hud_line(
-            &objective,
-            if profile == HudProfile::Focused {
-                28
-            } else {
-                34
-            },
-        ),
-        colors.text,
-        12.0,
-    );
-    if profile != HudProfile::Focused {
-        let biome_line = format!(
-            "{:?}  //  score {:>4.0}  bots {}  build {}",
-            biome,
-            telemetry.mission_score(),
-            brain.as_deref().map(|b| b.bot_count()).unwrap_or(0),
-            telemetry.build_actions
-        );
-        hud_text(
-            &painter,
-            left.left_top() + egui::vec2(16.0, 70.0),
-            &compact_hud_line(&biome_line, 38),
-            if biome.is_neon_showcase() {
-                green
-            } else {
-                amber
-            },
-            11.0,
-        );
-    }
-    let bot_tip = brain.as_deref().map(|brain| brain.nearest_bot_line(pos));
-    let tip = if let Some(bot_tip) = bot_tip.as_deref() {
-        bot_tip
-    } else if !settings.ship_skirmish_ai {
-        "Shuttle-KI aus  |  Gefecht: E → Inventar → KI-Gefecht"
-    } else if biome.is_neon_showcase() {
-        "Neon-Biom  |  Bloom+Sat aktiv — Spitzen leuchten stärker"
+    let theme = settings.theme;
+    let colors = theme.semantic();
+    let width = (screen.width() - 28.0).clamp(240.0, 540.0);
+    let height = (screen.height() - 28.0).clamp(152.0, 224.0);
+    let panel_rect = egui::Rect::from_center_size(screen.center(), egui::vec2(width, height));
+    let stage_value = format!("{:02}%", (arrival.progress * 100.0).round() as u32);
+    let terrain_value = if arrival.progress >= 0.62 {
+        "READY"
     } else {
-        "F5 Speichern  |  F1 Command Deck"
+        "WAIT"
     };
-    if profile != HudProfile::Focused {
-        hud_text(
-            &painter,
-            left.left_top() + egui::vec2(16.0, 84.0),
-            &compact_hud_line(tip, 48),
-            colors.text_muted,
-            10.0,
-        );
-    }
-
-    let top = egui::Rect::from_center_size(
-        egui::pos2(screen.center().x, screen.top() + 42.0),
-        egui::vec2(430.0, 54.0),
-    );
-    crate::ui_kit::hud_panel(&painter, top, settings.theme, hud_opacity * 0.72, cyan);
-    painter.line_segment(
-        [
-            egui::pos2(top.left() + 22.0, top.center().y),
-            egui::pos2(top.right() - 22.0, top.center().y),
-        ],
-        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 230, 255, 100)),
-    );
-    for i in 0..17 {
-        let x = top.left() + 28.0 + i as f32 * (top.width() - 56.0) / 16.0;
-        let tall = i % 4 == 0;
-        painter.line_segment(
-            [
-                egui::pos2(x, top.center().y - if tall { 14.0 } else { 7.0 }),
-                egui::pos2(x, top.center().y + if tall { 14.0 } else { 7.0 }),
-            ],
-            egui::Stroke::new(
-                1.0,
-                if tall {
-                    cyan
-                } else {
-                    egui::Color32::from_rgba_unmultiplied(0, 230, 255, 90)
-                },
-            ),
-        );
-    }
-    let compass = ["N", "NE", "E", "SE", "S"];
-    for (i, label) in compass.iter().enumerate() {
-        let x = top.left() + 45.0 + i as f32 * (top.width() - 90.0) / 4.0;
-        hud_text(
-            &painter,
-            egui::pos2(x - 8.0, top.top() + 4.0),
-            label,
-            cyan,
-            12.0,
-        );
-    }
-    let heading = ((player.yaw.to_degrees() % 360.0) + 360.0) % 360.0;
-    hud_text(
-        &painter,
-        egui::pos2(top.center().x - 44.0, top.bottom() - 17.0),
-        &format!("HDG {:03}", heading.round() as i32),
-        amber,
-        13.0,
-    );
-
-    // Combat suit bars (concept FPS readout).
-    let bl = egui::Rect::from_min_size(
-        egui::pos2(screen.left() + 20.0, screen.bottom() - 148.0),
-        egui::vec2(236.0, 98.0),
-    );
-    crate::ui_kit::hud_panel(&painter, bl, settings.theme, hud_opacity, cyan);
-    let sh_fill = (suit.shield / 60.0).clamp(0.0, 1.0);
-    let hp_fill = (suit.health / 100.0).clamp(0.0, 1.0);
-    let bw = bl.width() - 24.0;
-    let bh = 8.0_f32;
-    hud_text(
-        &painter,
-        bl.left_top() + egui::vec2(12.0, 8.0),
-        &format!("Shield {:>3.0}", suit.shield),
-        cyan,
-        12.0,
-    );
-    let b_sh =
-        egui::Rect::from_min_size(bl.left_top() + egui::vec2(12.0, 26.0), egui::vec2(bw, bh));
-    painter.rect_filled(
-        b_sh,
-        egui::Rounding::same(3.0),
-        egui::Color32::from_gray(26),
-    );
-    painter.rect_filled(
-        b_sh.with_max_x(b_sh.left() + bw * sh_fill),
-        egui::Rounding::same(3.0),
-        egui::Color32::from_rgb(50, 160, 255),
-    );
-    hud_text(
-        &painter,
-        bl.left_top() + egui::vec2(12.0, 38.0),
-        &format!("Health {:>3.0}", suit.health),
-        egui::Color32::from_rgb(255, 90, 90),
-        12.0,
-    );
-    let b_hp =
-        egui::Rect::from_min_size(bl.left_top() + egui::vec2(12.0, 54.0), egui::vec2(bw, bh));
-    painter.rect_filled(
-        b_hp,
-        egui::Rounding::same(3.0),
-        egui::Color32::from_gray(26),
-    );
-    painter.rect_filled(
-        b_hp.with_max_x(b_hp.left() + bw * hp_fill),
-        egui::Rounding::same(3.0),
-        egui::Color32::from_rgb(240, 60, 72),
-    );
-    let o2_fill = (suit.oxygen / 100.0).clamp(0.0, 1.0);
-    hud_text(
-        &painter,
-        bl.left_top() + egui::vec2(12.0, 68.0),
-        &format!("Oxygen {:>3.0}%", suit.oxygen),
-        cyan,
-        12.0,
-    );
-    let b_o2 = egui::Rect::from_min_size(
-        bl.left_top() + egui::vec2(116.0, 72.0),
-        egui::vec2(108.0, bh),
-    );
-    painter.rect_filled(
-        b_o2,
-        egui::Rounding::same(3.0),
-        egui::Color32::from_gray(26),
-    );
-    painter.rect_filled(
-        b_o2.with_max_x(b_o2.left() + 108.0 * o2_fill),
-        egui::Rounding::same(3.0),
-        cyan,
-    );
-
-    if profile == HudProfile::Creator {
-        let right = egui::Rect::from_min_size(
-            egui::pos2(screen.right() - 302.0, screen.top() + 28.0),
-            egui::vec2(280.0, 198.0),
-        );
-        crate::ui_kit::hud_panel(&painter, right, settings.theme, hud_opacity, magenta);
-        hud_text(
-            &painter,
-            right.left_top() + egui::vec2(16.0, 10.0),
-            "UNIFIED TELEMETRY",
-            magenta,
-            16.0,
-        );
-        let lum_c = egui::Color32::from_rgb(40, 210, 255);
-        let mag_c = egui::Color32::from_rgb(255, 140, 40);
-        let ird_c = egui::Color32::from_rgb(180, 60, 255);
-        hud_text(
-            &painter,
-            right.left_top() + egui::vec2(16.0, 36.0),
-            &format!("◆ Luminite Crystal   {:>5}", mining.luminite_units),
-            lum_c,
-            13.0,
-        );
-        hud_text(
-            &painter,
-            right.left_top() + egui::vec2(16.0, 54.0),
-            &format!("◆ Magnetite Ore      {:>5}", mining.magnetite_units),
-            mag_c,
-            13.0,
-        );
-        hud_text(
-            &painter,
-            right.left_top() + egui::vec2(16.0, 72.0),
-            &format!("◆ Iridium Vein       {:>5}", mining.iridium_units),
-            ird_c,
-            13.0,
-        );
-
-        let bar_w = right.width() - 32.0;
-        let bar_h = 7.0_f32;
-        let drill_fill = (suit.laser_drill_charge / 100.0).clamp(0.0, 1.0);
-        hud_text(
-            &painter,
-            right.left_top() + egui::vec2(16.0, 94.0),
-            &format!("Laser drill  {:>3.0}%", suit.laser_drill_charge),
-            amber,
-            12.0,
-        );
-        let b_drill = egui::Rect::from_min_size(
-            right.left_top() + egui::vec2(16.0, 112.0),
-            egui::vec2(bar_w, bar_h),
-        );
-        painter.rect_filled(
-            b_drill,
-            egui::Rounding::same(3.0),
-            egui::Color32::from_gray(28),
-        );
-        painter.rect_filled(
-            b_drill.with_max_x(b_drill.left() + bar_w * drill_fill),
-            egui::Rounding::same(3.0),
-            amber,
-        );
-
-        let o2_fill = (suit.oxygen / 100.0).clamp(0.0, 1.0);
-        hud_text(
-            &painter,
-            right.left_top() + egui::vec2(16.0, 126.0),
-            &format!("Oxygen       {:>3.0}%", suit.oxygen),
-            cyan,
-            12.0,
-        );
-        let b_o2 = egui::Rect::from_min_size(
-            right.left_top() + egui::vec2(16.0, 144.0),
-            egui::vec2(bar_w, bar_h),
-        );
-        painter.rect_filled(
-            b_o2,
-            egui::Rounding::same(3.0),
-            egui::Color32::from_gray(28),
-        );
-        painter.rect_filled(
-            b_o2.with_max_x(b_o2.left() + bar_w * o2_fill),
-            egui::Rounding::same(3.0),
-            cyan,
-        );
-
-        hud_text(
-            &painter,
-            right.left_top() + egui::vec2(16.0, 158.0),
-            &format!(
-                "XYZ {:>4.0},{:>4.0},{:>4.0}  {}  BOTS {:02}",
-                pos.x,
-                pos.y,
-                pos.z,
-                if player.flying { "FLT" } else { "GND" },
-                brain.as_deref().map(|b| b.bot_count()).unwrap_or(0)
-            ),
-            egui::Color32::from_gray(200),
-            11.0,
-        );
-    }
-
-    if profile != HudProfile::Focused {
-        let config = egui::Rect::from_min_size(
-            egui::pos2(screen.right() - 304.0, screen.bottom() - 246.0),
-            egui::vec2(282.0, 64.0),
-        );
-        crate::ui_kit::hud_panel(&painter, config, settings.theme, hud_opacity * 0.78, green);
-        hud_text(
-            &painter,
-            config.left_top() + egui::vec2(14.0, 9.0),
-            "LIQUID CORE CONFIG",
-            green,
-            13.0,
-        );
-        hud_text(
-            &painter,
-            config.left_top() + egui::vec2(14.0, 30.0),
-            &format!(
-                "{} {}  RD {}/{}",
-                governor.profile.label(),
-                governor.quality.label(),
-                governor.active_render_distance(settings.render_distance),
-                settings.render_distance
-            ),
-            colors.text,
-            11.0,
-        );
-        hud_text(
-            &painter,
-            config.left_top() + egui::vec2(14.0, 46.0),
-            &format!(
-                "TERR {}/{}  MESH {}/{}  UP {}",
-                governor.chunks_per_frame,
-                governor.max_in_flight_terrain,
-                governor.meshes_per_frame,
-                governor.max_in_flight_meshes,
-                governor.mesh_applies_per_frame
-            ),
-            colors.text_muted,
-            10.0,
-        );
-    }
-
-    draw_ground_minimap(
-        &painter,
-        screen,
-        &world,
-        to_i32_safe(pos.x),
-        to_i32_safe(pos.z),
-        player.yaw,
-    );
-
-    if let Some(mode) = mode.as_deref().filter(|m| m.transition_hint_t > 0.0) {
-        hud_text(
-            &painter,
-            egui::pos2(screen.center().x - 155.0, screen.bottom() - 180.0),
-            &mode.status,
-            cyan,
-            12.0,
-        );
-    }
-}
-
-#[derive(Clone, Copy)]
-struct WorkflowStep {
-    label: &'static str,
-    key: &'static str,
-    icon: Icon,
-}
-
-fn workflow_steps_for_profile(profile: HudProfile) -> Vec<WorkflowStep> {
-    if profile == HudProfile::Focused {
-        return Vec::new();
-    }
-    vec![
-        WorkflowStep {
-            label: "MOVE",
-            key: "WASD",
-            icon: Icon::Move,
-        },
-        WorkflowStep {
-            label: "BUILD",
-            key: "LMB/RMB",
-            icon: Icon::ModeBuild,
-        },
-        WorkflowStep {
-            label: "CITY",
-            key: "6-9",
-            icon: Icon::City,
-        },
-        WorkflowStep {
-            label: "BOTS",
-            key: "F1",
-            icon: Icon::Wand,
-        },
-        WorkflowStep {
-            label: "SAVE",
-            key: "F5",
-            icon: Icon::Save,
-        },
-    ]
-}
-
-fn active_workflow_label(mode: Option<&crate::mode::ModeContext>) -> &'static str {
-    let Some(mode) = mode else {
-        return "MOVE";
-    };
-    if let Some(tool) = mode.build_tool() {
-        if matches!(
-            tool,
-            ToolbeltTool::CityRoad
-                | ToolbeltTool::CityDistrict
-                | ToolbeltTool::CityBuilding
-                | ToolbeltTool::CityFacade
-                | ToolbeltTool::SmartTower
-        ) {
-            "CITY"
-        } else {
-            "BUILD"
-        }
-    } else if mode.allows_weapons() {
-        "MOVE"
+    let surface_value = if arrival.progress >= 0.88 {
+        "READY"
     } else {
-        "BOTS"
-    }
+        "WAIT"
+    };
+    let player_value = if arrival.phase.is_complete() {
+        "READY"
+    } else {
+        "WAIT"
+    };
+
+    egui::Area::new(egui::Id::new("r93g_world_arrival"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.set_min_size(screen.size());
+            let painter = ui.painter();
+            painter.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(232));
+
+            let scan_y = screen.top() + screen.height() * arrival.progress;
+            painter.line_segment(
+                [
+                    egui::pos2(screen.left(), scan_y),
+                    egui::pos2(screen.right(), scan_y),
+                ],
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(
+                        colors.accent.r(),
+                        colors.accent.g(),
+                        colors.accent.b(),
+                        58,
+                    ),
+                ),
+            );
+
+            ui.allocate_ui_at_rect(panel_rect, |ui| {
+                crate::ui_kit::toolbench_frame(theme).show(ui, |ui| {
+                    ui.set_min_width((panel_rect.width() - 36.0).max(220.0));
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("R93G // WORLD ARRIVAL")
+                                    .size(10.0)
+                                    .strong()
+                                    .monospace()
+                                    .color(colors.accent),
+                            );
+                            ui.label(
+                                egui::RichText::new(&arrival.world_name)
+                                    .size(19.0)
+                                    .strong()
+                                    .monospace()
+                                    .color(colors.text),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            crate::theme::metric_pill(ui, theme, "LINK", &stage_value);
+                        });
+                    });
+                    crate::ui_kit::compact_separator(ui, theme);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        crate::ui_kit::signal_reactor(ui, !arrival.phase.is_complete(), theme);
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.set_min_width((panel_rect.width() - 108.0).max(160.0));
+                            let loading = if arrival.phase.is_complete() {
+                                crate::ui_kit::LoadingState::Complete
+                            } else {
+                                crate::ui_kit::LoadingState::Progress(arrival.progress)
+                            };
+                            crate::ui_kit::activity_status(
+                                ui,
+                                loading,
+                                arrival.phase.label(),
+                                arrival.phase.detail(),
+                                theme,
+                            );
+                        });
+                    });
+                    ui.add_space(7.0);
+                    ui.horizontal_wrapped(|ui| {
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Chunk,
+                            "TERRAIN",
+                            terrain_value,
+                            theme,
+                        );
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Detail,
+                            "SURFACE",
+                            surface_value,
+                            theme,
+                        );
+                        crate::ui_kit::status_chip(
+                            ui,
+                            Icon::Player,
+                            "ARRIVAL",
+                            player_value,
+                            theme,
+                        );
+                    });
+                });
+            });
+        });
 }
 
-fn draw_workflow_rail(
+fn draw_play_hud(
     mut contexts: EguiContexts,
     state: Res<State<crate::menu::GameState>>,
-    settings: Res<WorldSettings>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    debug: Res<DebugOverlay>,
+    arrival: Res<WorldArrival>,
+    settings: Res<WorldSettings>,
+    player_q: Query<&Transform, With<Player>>,
+    brain: Option<Res<crate::bots::FriendlyWorldBrain>>,
+    suit: Res<SuitVitals>,
 ) {
-    if *state.get() != crate::menu::GameState::InGame {
+    let surface = current_hud_surface(&state, mode.as_deref());
+    if arrival.is_active() || !product_hud_visible(surface, debug.visible) {
         return;
     }
-    let steps = workflow_steps_for_profile(settings.hud_profile);
-    if steps.is_empty() {
+
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+
+    let player_position = player_q
+        .get_single()
+        .map(|transform| transform.translation)
+        .unwrap_or(Vec3::ZERO);
+    let mission = active_mission(brain.as_deref(), player_position);
+    let show_vitals = vitals_visible(settings.hud_profile, &suit);
+    if mission.is_none() && !show_vitals {
         return;
     }
-    let ctx = contexts.ctx_mut();
+
     let screen = ctx.screen_rect();
+    let layout = play_hud_layout(screen, mission.is_some());
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("workflow_rail"),
+        egui::Id::new("play_hud"),
     ));
-    let colors = settings.theme.semantic();
-    let mode_ref = mode.as_deref();
-    let active = active_workflow_label(mode_ref);
-    let rail_w = (steps.len() as f32 * 88.0 + 20.0).min(screen.width() - 44.0);
-    let rail_y = if mode_ref.map(|m| m.is_build()).unwrap_or(false) {
-        screen.bottom() - 124.0
-    } else {
-        screen.bottom() - 74.0
-    };
-    let rail = egui::Rect::from_center_size(
-        egui::pos2(screen.center().x, rail_y),
-        egui::vec2(rail_w, 48.0),
-    );
-    crate::ui_kit::hud_panel(
-        &painter,
-        rail,
-        settings.theme,
-        settings.hud_panel_opacity * 0.72,
-        colors.info,
-    );
-    let slot_w = (rail.width() - 18.0) / steps.len() as f32;
-    for (idx, step) in steps.iter().enumerate() {
-        let left = rail.left() + 9.0 + idx as f32 * slot_w;
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(left + 3.0, rail.top() + 7.0),
-            egui::vec2((slot_w - 6.0).max(54.0), 34.0),
-        );
-        let is_active = step.label == active;
-        let tint = if is_active {
-            colors.warning
-        } else {
-            colors.info.linear_multiply(0.72)
-        };
-        painter.rect_filled(
-            rect,
-            egui::Rounding::same(7.0),
-            if is_active {
-                egui::Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 48)
-            } else {
-                egui::Color32::from_rgba_unmultiplied(4, 18, 24, 118)
-            },
-        );
-        painter.rect_stroke(
-            rect,
-            egui::Rounding::same(7.0),
-            egui::Stroke::new(1.0, tint),
-        );
-        let icon_rect = egui::Rect::from_min_size(
-            rect.left_top() + egui::vec2(7.0, 8.0),
-            egui::vec2(18.0, 18.0),
-        );
-        paint_icon(&painter, icon_rect, step.icon, tint);
-        hud_text(
-            &painter,
-            rect.left_top() + egui::vec2(31.0, 5.0),
-            step.label,
-            tint,
-            10.5,
-        );
-        hud_text(
-            &painter,
-            rect.left_top() + egui::vec2(31.0, 19.0),
-            step.key,
-            colors.text_muted,
-            9.5,
-        );
+
+    if let Some(mission) = mission {
+        draw_mission_panel(&painter, layout.mission, mission, &settings);
     }
+    if show_vitals {
+        draw_vitals_panel(&painter, layout.vitals, &suit, &settings);
+    }
+}
+
+fn draw_mission_panel(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    mission: MissionReadout,
+    settings: &WorldSettings,
+) {
+    let colors = settings.theme.semantic();
+    crate::ui_kit::hud_panel(
+        painter,
+        rect,
+        settings.theme,
+        settings.hud_panel_opacity * 0.84,
+        colors.accent,
+    );
+
+    let icon_rect = egui::Rect::from_min_size(
+        rect.left_top() + egui::vec2(14.0, 24.0),
+        egui::vec2(18.0, 18.0),
+    );
+    paint_icon(painter, icon_rect, Icon::Bookmark, colors.accent);
+    hud_text(
+        painter,
+        rect.left_top() + egui::vec2(44.0, 9.0),
+        "ACTIVE MISSION",
+        colors.text_muted,
+        9.5,
+    );
+
+    let max_label_chars = (((rect.width() - 136.0) / 7.0).floor() as usize).max(8);
+    hud_text(
+        painter,
+        rect.left_top() + egui::vec2(44.0, 26.0),
+        &compact_hud_line(mission.label, max_label_chars),
+        colors.text,
+        13.5,
+    );
+    let distance = if mission.distance_m >= 1_000.0 {
+        format!("{:.1} km", mission.distance_m / 1_000.0)
+    } else {
+        format!("{:.0} m", mission.distance_m)
+    };
+    hud_text_right(
+        painter,
+        rect.right_top() + egui::vec2(-14.0, 26.0),
+        &distance,
+        colors.accent,
+        12.5,
+    );
+    let build_state = if mission.active_builds == 1 {
+        "1 ACTIVE BUILD".to_owned()
+    } else {
+        format!("{} ACTIVE BUILDS", mission.active_builds)
+    };
+    hud_text(
+        painter,
+        rect.left_top() + egui::vec2(44.0, 48.0),
+        &build_state,
+        colors.text_muted,
+        9.5,
+    );
+}
+
+fn draw_vitals_panel(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    suit: &SuitVitals,
+    settings: &WorldSettings,
+) {
+    let colors = settings.theme.semantic();
+    let health = normalized_vital(suit.health, 100.0);
+    let shield = normalized_vital(suit.shield, 60.0);
+    let oxygen = normalized_vital(suit.oxygen, 100.0);
+    let weakest = health.min(shield).min(oxygen);
+    let (status, accent) = if weakest <= 0.25 {
+        ("CRITICAL", colors.danger)
+    } else if weakest <= 0.50 {
+        ("CAUTION", colors.warning)
+    } else {
+        ("NOMINAL", colors.success)
+    };
+
+    crate::ui_kit::hud_panel(
+        painter,
+        rect,
+        settings.theme,
+        settings.hud_panel_opacity * 0.88,
+        accent,
+    );
+    let icon_rect = egui::Rect::from_min_size(
+        rect.left_top() + egui::vec2(12.0, 9.0),
+        egui::vec2(16.0, 16.0),
+    );
+    paint_icon(painter, icon_rect, Icon::Player, accent);
+    hud_text(
+        painter,
+        rect.left_top() + egui::vec2(36.0, 8.0),
+        "SUIT",
+        colors.text,
+        10.5,
+    );
+    hud_text_right(
+        painter,
+        rect.right_top() + egui::vec2(-12.0, 8.0),
+        status,
+        accent,
+        9.5,
+    );
+
+    draw_vital_row(
+        painter,
+        rect,
+        30.0,
+        "HP",
+        &format!("{:.0}", suit.health.max(0.0)),
+        health,
+        vital_tone(health, colors.success, colors),
+        colors,
+    );
+    draw_vital_row(
+        painter,
+        rect,
+        48.0,
+        "SHD",
+        &format!("{:.0}", suit.shield.max(0.0)),
+        shield,
+        vital_tone(shield, colors.info, colors),
+        colors,
+    );
+    draw_vital_row(
+        painter,
+        rect,
+        66.0,
+        "O2",
+        &format!("{:.0}%", suit.oxygen.max(0.0)),
+        oxygen,
+        vital_tone(oxygen, colors.accent, colors),
+        colors,
+    );
+}
+
+fn draw_vital_row(
+    painter: &egui::Painter,
+    panel: egui::Rect,
+    y: f32,
+    label: &str,
+    value: &str,
+    ratio: f32,
+    tone: egui::Color32,
+    colors: crate::theme::SemanticColors,
+) {
+    let origin = panel.left_top();
+    hud_text(
+        painter,
+        origin + egui::vec2(12.0, y - 3.0),
+        label,
+        colors.text_muted,
+        9.0,
+    );
+    let bar = egui::Rect::from_min_size(
+        origin + egui::vec2(48.0, y),
+        egui::vec2((panel.width() - 92.0).max(24.0), 5.0),
+    );
+    painter.rect_filled(bar, egui::Rounding::same(2.0), colors.surface);
+    painter.rect_filled(
+        bar.with_max_x(bar.left() + bar.width() * ratio),
+        egui::Rounding::same(2.0),
+        tone,
+    );
+    hud_text_right(
+        painter,
+        panel.right_top() + egui::vec2(-12.0, y - 4.0),
+        value,
+        colors.text,
+        9.5,
+    );
+}
+
+fn normalized_vital(value: f32, maximum: f32) -> f32 {
+    if value.is_finite() && maximum.is_finite() && maximum > 0.0 {
+        (value / maximum).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn vital_tone(
+    ratio: f32,
+    normal: egui::Color32,
+    colors: crate::theme::SemanticColors,
+) -> egui::Color32 {
+    if ratio <= 0.25 {
+        colors.danger
+    } else if ratio <= 0.50 {
+        colors.warning
+    } else {
+        normal
+    }
+}
+
+fn hud_text_right(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    text: &str,
+    color: egui::Color32,
+    size: f32,
+) {
+    painter.text(
+        pos,
+        egui::Align2::RIGHT_TOP,
+        text,
+        egui::FontId::monospace(size),
+        color,
+    );
 }
 
 fn compact_hud_line(text: &str, max_chars: usize) -> String {
@@ -960,19 +1141,293 @@ fn compact_hud_line(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::toolbelt::ToolbeltTool;
 
     #[test]
-    fn guided_workflow_exposes_the_core_engine_loop() {
-        let steps = workflow_steps_for_profile(HudProfile::Guided);
-        let labels: Vec<&str> = steps.iter().map(|step| step.label).collect();
-        assert_eq!(labels, vec!["MOVE", "BUILD", "CITY", "BOTS", "SAVE"]);
-        assert!(steps.iter().any(|step| step.key == "LMB/RMB"));
-        assert!(steps.iter().any(|step| step.key == "F1"));
+    fn play_layers_are_exclusive_to_combat() {
+        use crate::mode::ActiveMode;
+
+        assert_eq!(
+            hud_surface(true, Some(ActiveMode::Combat)),
+            HudSurface::Play
+        );
+        assert_eq!(hud_surface(true, None), HudSurface::Play);
+        assert!(product_hud_visible(HudSurface::Play, false));
+        assert!(!product_hud_visible(HudSurface::Play, true));
+        assert_eq!(
+            hud_surface(
+                true,
+                Some(ActiveMode::BuildLive {
+                    tool: ToolbeltTool::DrawRect,
+                })
+            ),
+            HudSurface::BuildAim
+        );
+        for mode in [
+            ActiveMode::BuildPicker {
+                tool: ToolbeltTool::DrawRect,
+            },
+            ActiveMode::Editor {
+                tab: crate::editor::EditorTab::World,
+            },
+            ActiveMode::Inventory,
+            ActiveMode::CommandPalette,
+            ActiveMode::Paused,
+        ] {
+            assert_eq!(hud_surface(true, Some(mode)), HudSurface::Hidden);
+        }
+        assert_eq!(
+            hud_surface(false, Some(ActiveMode::Combat)),
+            HudSurface::Hidden
+        );
     }
 
     #[test]
-    fn focused_hud_hides_workflow_rail() {
-        assert!(workflow_steps_for_profile(HudProfile::Focused).is_empty());
+    fn resume_hint_visibility_respects_cursor_capture_and_qa_policy() {
+        assert!(!resume_hint_visible(true, true, false));
+        assert!(resume_hint_visible(true, false, false));
+        assert!(!resume_hint_visible(true, false, true));
+        assert!(!resume_hint_visible(false, false, false));
+    }
+
+    #[test]
+    fn compact_layout_stacks_fixed_panels_inside_the_viewport() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 360.0));
+        let layout = play_hud_layout(screen, true);
+
+        assert!(screen.contains_rect(layout.mission));
+        assert!(screen.contains_rect(layout.vitals));
+        assert!(layout.mission.bottom() < layout.vitals.top());
+    }
+
+    #[test]
+    fn hotbar_breakpoints_keep_stable_geometry_inside_compact_windows() {
+        let compact = hotbar_metrics(640.0);
+        let wide = hotbar_metrics(1280.0);
+
+        assert!(compact.root_width <= 640.0 - 24.0);
+        assert_eq!(compact.slot_size, 38.0);
+        assert_eq!(wide.slot_size, 44.0);
+        assert!(wide.root_width > compact.root_width);
+    }
+
+    #[test]
+    fn focused_vitals_are_alert_driven() {
+        let mut suit = SuitVitals::default();
+        assert!(!vitals_visible(HudProfile::Focused, &suit));
+        assert!(vitals_visible(HudProfile::Guided, &suit));
+
+        suit.health = 70.0;
+        assert!(vitals_visible(HudProfile::Focused, &suit));
+    }
+
+    #[test]
+    fn low_spec_and_reduced_motion_use_static_feedback() {
+        let mut settings = WorldSettings::default();
+        assert!(!uses_static_hud_motion(&settings));
+
+        settings.reduce_motion = true;
+        assert!(uses_static_hud_motion(&settings));
+        settings.reduce_motion = false;
+        settings.runtime_profile = RuntimeProfile::LowSpec;
+        assert!(uses_static_hud_motion(&settings));
+        assert_eq!(scope_visual_amount(0.2, true, true), 1.0);
+        assert_eq!(scope_visual_amount(0.8, false, true), 0.0);
+        assert_eq!(feedback_alpha(0.1, 0.25, true), 1.0);
+    }
+
+    #[test]
+    fn arrival_waits_for_local_column_mesh_and_surface_placement() {
+        let mut arrival = WorldArrival::default();
+        arrival.begin("test_world");
+
+        advance_world_arrival(
+            &mut arrival,
+            0.1,
+            ArrivalSignals {
+                scan_ratio: 0.5,
+                active_tasks: 3,
+                ..default()
+            },
+            false,
+        );
+        assert!(arrival.is_active());
+        assert_eq!(arrival.phase, WorldArrivalPhase::Terrain);
+        assert!(arrival.progress < 1.0);
+
+        advance_world_arrival(
+            &mut arrival,
+            0.1,
+            ArrivalSignals {
+                local_column_ready: true,
+                local_mesh_ready: true,
+                player_placed: false,
+                ..default()
+            },
+            false,
+        );
+        assert_eq!(arrival.phase, WorldArrivalPhase::Landing);
+        assert!(arrival.is_active());
+
+        advance_world_arrival(
+            &mut arrival,
+            0.1,
+            ArrivalSignals {
+                local_column_ready: true,
+                local_mesh_ready: true,
+                player_placed: true,
+                ..default()
+            },
+            false,
+        );
+        assert_eq!(arrival.phase, WorldArrivalPhase::Ready);
+        assert!(arrival.is_active());
+    }
+
+    #[test]
+    fn arrival_progress_is_finite_monotonic_and_clamped() {
+        let mut arrival = WorldArrival::default();
+        arrival.begin("test_world");
+        let samples = [
+            ArrivalSignals {
+                scan_ratio: 0.9,
+                active_tasks: 4,
+                ..default()
+            },
+            ArrivalSignals {
+                scan_ratio: f32::NAN,
+                ..default()
+            },
+            ArrivalSignals {
+                local_column_ready: true,
+                ..default()
+            },
+            ArrivalSignals {
+                local_column_ready: true,
+                local_mesh_ready: true,
+                ..default()
+            },
+        ];
+        let mut previous = arrival.progress;
+        for signals in samples {
+            advance_world_arrival(&mut arrival, 0.05, signals, false);
+            assert!(arrival.progress.is_finite());
+            assert!((0.0..=1.0).contains(&arrival.progress));
+            assert!(arrival.progress >= previous);
+            previous = arrival.progress;
+        }
+    }
+
+    #[test]
+    fn arrival_timeout_never_traps_the_player() {
+        let mut arrival = WorldArrival::default();
+        arrival.begin("test_world");
+        advance_world_arrival(
+            &mut arrival,
+            ARRIVAL_TIMEOUT_SECONDS,
+            ArrivalSignals::default(),
+            true,
+        );
+        assert_eq!(arrival.phase, WorldArrivalPhase::Fallback);
+        assert!(arrival.is_active());
+        advance_world_arrival(
+            &mut arrival,
+            ARRIVAL_STATIC_READY_HOLD_SECONDS,
+            ArrivalSignals::default(),
+            true,
+        );
+        assert!(!arrival.is_active());
+    }
+
+    #[test]
+    fn frontier_completion_does_not_claim_local_readiness() {
+        let (phase, progress) = arrival_target(ArrivalSignals {
+            frontier_complete: true,
+            scan_ratio: 1.0,
+            ..default()
+        });
+        assert_ne!(phase, WorldArrivalPhase::Ready);
+        assert!(progress < 1.0);
+    }
+
+    #[test]
+    fn default_hotbar_keeps_typed_weapon_identity() {
+        let hotbar = HotbarState::default();
+
+        for (slot, kind) in hotbar.slots.iter().zip(crate::weapons::WeaponKind::ALL) {
+            assert_eq!(slot.item, HotbarItem::Weapon(kind));
+            assert_eq!(slot.label(), kind.name());
+        }
+    }
+
+    #[test]
+    fn creative_assignment_stores_the_selected_block_type() {
+        let mut hotbar = HotbarState::default();
+
+        assert!(hotbar.assign_block(2, crate::blocks::BlockType::ShojiLamp));
+        assert_eq!(
+            hotbar.slots[2].item,
+            HotbarItem::Block(crate::blocks::BlockType::ShojiLamp)
+        );
+        assert_eq!(hotbar.slots[2].label(), "Lantern");
+        assert_eq!(hotbar.active, 2);
+    }
+
+    #[test]
+    fn builder_hotbar_policy_routes_blocks_without_weapon_mirroring() {
+        use crate::mode::ActiveMode;
+
+        let block = crate::blocks::BlockType::ShojiLamp;
+        let weapon = crate::weapons::WeaponKind::PlasmaRifle;
+        for mode in [
+            ActiveMode::BuildPicker {
+                tool: ToolbeltTool::DrawRect,
+            },
+            ActiveMode::BuildLive {
+                tool: ToolbeltTool::DrawRect,
+            },
+            ActiveMode::Editor {
+                tab: crate::editor::EditorTab::World,
+            },
+        ] {
+            let policy = hotbar_mode_policy(Some(mode), false);
+
+            assert_eq!(policy, HotbarModePolicy::Builder);
+            assert!(!policy.accepts_number_keys());
+            assert_eq!(
+                hotbar_sync(policy, Some(HotbarItem::Block(block)), weapon),
+                HotbarSync::BuilderBlock(block)
+            );
+        }
+    }
+
+    #[test]
+    fn weapon_hotbar_policy_is_limited_to_weapon_capable_modes() {
+        use crate::mode::ActiveMode;
+
+        let weapon = crate::weapons::WeaponKind::PlasmaRifle;
+        let combat = hotbar_mode_policy(Some(ActiveMode::Combat), true);
+        assert_eq!(combat, HotbarModePolicy::Weapons);
+        assert!(combat.accepts_number_keys());
+        assert_eq!(
+            hotbar_sync(
+                combat,
+                Some(HotbarItem::Block(crate::blocks::BlockType::Stone)),
+                weapon,
+            ),
+            HotbarSync::Weapon(weapon)
+        );
+
+        for mode in [
+            ActiveMode::Inventory,
+            ActiveMode::Paused,
+            ActiveMode::CommandPalette,
+        ] {
+            let policy = hotbar_mode_policy(Some(mode), false);
+            assert_eq!(policy, HotbarModePolicy::Suppressed);
+            assert!(!policy.accepts_number_keys());
+            assert_eq!(hotbar_sync(policy, None, weapon), HotbarSync::None);
+        }
     }
 }
 
@@ -986,86 +1441,32 @@ fn hud_text(painter: &egui::Painter, pos: egui::Pos2, text: &str, color: egui::C
     );
 }
 
-fn biome_minimap_color(biome: Biome, surface_y: i32) -> egui::Color32 {
-    let lift = ((surface_y as i32).saturating_sub(48) / 8).clamp(0, 14) as u8;
-    match biome {
-        Biome::CrystalSpires => egui::Color32::from_rgb(20, 140 + lift, 200),
-        Biome::AlienReef => egui::Color32::from_rgb(120, 40, 180 + lift),
-        Biome::VolcanicWaste => egui::Color32::from_rgb(180 + lift, 50, 30),
-        Biome::GlacierShards => egui::Color32::from_rgb(180 + lift, 210, 240),
-        Biome::Mesa | Biome::Desert => egui::Color32::from_rgb(200, 120 + lift, 60),
-        Biome::Karst | Biome::Jungle | Biome::Forest => egui::Color32::from_rgb(30, 90 + lift, 45),
-        Biome::Ocean | Biome::Beach => egui::Color32::from_rgb(25, 80 + lift, 140),
-        Biome::Mountains | Biome::SnowyMountains => egui::Color32::from_rgb(90 + lift, 95, 110),
-        _ => egui::Color32::from_rgb(50 + lift, 70 + lift, 45),
-    }
+fn bevy_theme_color(color: egui::Color32, alpha: f32) -> Color {
+    let [red, green, blue, _] = color.to_srgba_unmultiplied();
+    Color::srgba(
+        red as f32 / 255.0,
+        green as f32 / 255.0,
+        blue as f32 / 255.0,
+        alpha.clamp(0.0, 1.0),
+    )
 }
 
-/// Tactical raster minimap (concept: circular field scanner bottom-right).
-fn draw_ground_minimap(
-    painter: &egui::Painter,
-    screen: egui::Rect,
-    world: &VoxelWorld,
-    px: i32,
-    pz: i32,
-    player_yaw: f32,
-) {
-    let center = egui::pos2(screen.right() - 92.0, screen.bottom() - 102.0);
-    let r = 54.0_f32;
-    let rim = egui::Color32::from_rgba_unmultiplied(0, 230, 255, 130);
-    painter.circle_filled(
-        center,
-        r + 4.0,
-        egui::Color32::from_rgba_unmultiplied(0, 4, 12, 200),
-    );
-    painter.circle_stroke(center, r + 4.0, egui::Stroke::new(1.0, rim));
-    painter.circle_stroke(
-        center,
-        r,
-        egui::Stroke::new(0.8, egui::Color32::from_rgba_unmultiplied(0, 230, 255, 70)),
-    );
-
-    let step = 12_i32;
-    let cells: i32 = 6;
-    let cell_px = (r * 2.0) / (cells as f32 * 2.0 + 1.0);
-    for iz in -cells..=cells {
-        for ix in -cells..=cells {
-            let wx = px + ix * step;
-            let wz = pz + iz * step;
-            let biome = world.biome_at(wx, wz);
-            let h = world.surface_height_at(wx, wz);
-            let col = biome_minimap_color(biome, h);
-            let fx = ix as f32 / (cells as f32 + 0.5);
-            let fz = iz as f32 / (cells as f32 + 0.5);
-            if fx * fx + fz * fz > 0.92 {
-                continue;
-            }
-            let mx = center.x + fx * (r - 2.0);
-            let my = center.y - fz * (r - 2.0);
-            painter.rect_filled(
-                egui::Rect::from_center_size(
-                    egui::pos2(mx, my),
-                    egui::vec2(cell_px.max(3.2), cell_px.max(3.2)),
-                ),
-                egui::Rounding::same(1.0),
-                col,
-            );
-        }
-    }
-
-    let a = -player_yaw - std::f32::consts::FRAC_PI_2;
-    let tip = center + egui::vec2(a.cos(), a.sin()) * 16.0;
-    painter.line_segment([center, tip], egui::Stroke::new(2.0, egui::Color32::WHITE));
-    painter.circle_filled(center, 3.0, egui::Color32::WHITE);
-    painter.circle_stroke(center, 3.0, egui::Stroke::new(1.0, rim));
-
-    hud_text(
-        painter,
-        center + egui::vec2(-28.0, -r - 18.0),
-        "TAC MAP",
-        rim,
-        10.0,
-    );
+fn mix_theme_colors(from: egui::Color32, to: egui::Color32, amount: f32, alpha: f32) -> Color {
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let [from_r, from_g, from_b, _] = from.to_srgba_unmultiplied();
+    let [to_r, to_g, to_b, _] = to.to_srgba_unmultiplied();
+    let mix =
+        |left: u8, right: u8| (left as f32 + (right as f32 - left as f32) * amount).round() / 255.0;
+    Color::srgba(
+        mix(from_r, to_r),
+        mix(from_g, to_g),
+        mix(from_b, to_b),
+        alpha.clamp(0.0, 1.0),
+    )
 }
 
 // ------------------------------ Hint banner -------------------------------
@@ -1073,61 +1474,142 @@ fn draw_ground_minimap(
 #[derive(Component)]
 pub struct HintBanner;
 
-fn spawn_hint(mut commands: Commands) {
-    commands.spawn((
-        TextBundle::from_section(
-            "LMB START -> ENDPOINT: BUILD  //  RMB: CUT  //  TAB: TOOLS",
-            TextStyle {
-                font_size: 16.0,
-                color: Color::srgba(0.72, 1.0, 0.80, 0.98),
-                ..default()
-            },
-        )
-        .with_style(Style {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(100.0),
-            left: Val::Auto,
-            right: Val::Auto,
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
+fn resume_hint_visible(
+    product_hud_visible: bool,
+    cursor_is_captured: bool,
+    qa_enabled: bool,
+) -> bool {
+    product_hud_visible && !cursor_is_captured && !qa_enabled
+}
+
+fn spawn_hint(mut commands: Commands, settings: Res<WorldSettings>) {
+    let colors = settings.theme.semantic();
+    let mut bundle = TextBundle::from_section(
+        "CLICK TO RESUME",
+        TextStyle {
+            font_size: 12.0,
+            color: bevy_theme_color(colors.text, 0.96),
             ..default()
-        })
-        .with_text_justify(JustifyText::Center)
-        .with_background_color(Color::srgba(0.0, 0.02, 0.01, 0.46)),
-        HintBanner,
-    ));
+        },
+    )
+    .with_style(Style {
+        position_type: PositionType::Absolute,
+        bottom: Val::Px(86.0),
+        left: Val::Percent(50.0),
+        width: Val::Px(180.0),
+        margin: UiRect {
+            left: Val::Px(-90.0),
+            ..default()
+        },
+        padding: UiRect {
+            left: Val::Px(8.0),
+            right: Val::Px(8.0),
+            top: Val::Px(5.0),
+            bottom: Val::Px(5.0),
+        },
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::Center,
+        ..default()
+    })
+    .with_text_justify(JustifyText::Center)
+    .with_background_color(bevy_theme_color(settings.theme.panel_fill(0.74), 0.74));
+    bundle.visibility = Visibility::Hidden;
+    commands.spawn((bundle, HintBanner));
 }
 
 fn update_hint(
     windows: Query<&Window, With<PrimaryWindow>>,
     state: Res<State<crate::menu::GameState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
-    mut q: Query<&mut Visibility, With<HintBanner>>,
+    debug: Res<DebugOverlay>,
+    settings: Res<WorldSettings>,
+    mut q: Query<(&mut Visibility, &mut Text, &mut BackgroundColor), With<HintBanner>>,
 ) {
-    let Ok(mut vis) = q.get_single_mut() else {
+    let Ok((mut vis, mut text, mut background)) = q.get_single_mut() else {
         return;
     };
-    if *state.get() != crate::menu::GameState::InGame
-        || mode
-            .as_deref()
-            .map(|m| m.is_build() || m.is_ship())
-            .unwrap_or(false)
-    {
+    if settings.is_changed() {
+        let colors = settings.theme.semantic();
+        text.sections[0].style.color = bevy_theme_color(colors.text, 0.96);
+        background.0 = bevy_theme_color(settings.theme.panel_fill(0.74), 0.74);
+    }
+    let surface = current_hud_surface(&state, mode.as_deref());
+    let product_hud_visible = product_hud_visible(surface, debug.visible);
+    let qa_enabled = crate::qa::qa_enabled();
+    if !product_hud_visible || qa_enabled {
         *vis = Visibility::Hidden;
         return;
     }
     let Ok(window) = windows.get_single() else {
+        *vis = Visibility::Hidden;
         return;
     };
-    *vis = if crate::mode::cursor_is_captured(window) {
-        Visibility::Hidden
-    } else {
+    *vis = if resume_hint_visible(
+        product_hud_visible,
+        crate::mode::cursor_is_captured(window),
+        qa_enabled,
+    ) {
         Visibility::Visible
+    } else {
+        Visibility::Hidden
     };
 }
 
 // -------------------------------- Hotbar ----------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotbarItem {
+    Weapon(crate::weapons::WeaponKind),
+    Block(crate::blocks::BlockType),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotbarModePolicy {
+    Builder,
+    Weapons,
+    Suppressed,
+}
+
+impl HotbarModePolicy {
+    fn accepts_number_keys(self) -> bool {
+        matches!(self, Self::Weapons)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotbarSync {
+    BuilderBlock(crate::blocks::BlockType),
+    Weapon(crate::weapons::WeaponKind),
+    None,
+}
+
+fn hotbar_mode_policy(
+    active_mode: Option<crate::mode::ActiveMode>,
+    legacy_blocks_weapons: bool,
+) -> HotbarModePolicy {
+    match active_mode {
+        Some(mode) if mode.is_build() => HotbarModePolicy::Builder,
+        Some(crate::mode::ActiveMode::Editor { .. }) => HotbarModePolicy::Builder,
+        Some(mode) if mode.allows_weapons() => HotbarModePolicy::Weapons,
+        Some(_) => HotbarModePolicy::Suppressed,
+        None if legacy_blocks_weapons => HotbarModePolicy::Builder,
+        None => HotbarModePolicy::Weapons,
+    }
+}
+
+fn hotbar_sync(
+    policy: HotbarModePolicy,
+    active_item: Option<HotbarItem>,
+    active_weapon: crate::weapons::WeaponKind,
+) -> HotbarSync {
+    match (policy, active_item) {
+        (HotbarModePolicy::Builder, Some(HotbarItem::Block(block))) => {
+            HotbarSync::BuilderBlock(block)
+        }
+        (HotbarModePolicy::Weapons, _) => HotbarSync::Weapon(active_weapon),
+        _ => HotbarSync::None,
+    }
+}
 
 #[derive(Resource, Debug, Clone)]
 pub struct HotbarState {
@@ -1137,22 +1619,52 @@ pub struct HotbarState {
 
 #[derive(Debug, Clone, Copy)]
 pub struct HotbarBlock {
+    pub item: HotbarItem,
     pub color: Color,
+}
+
+impl HotbarBlock {
+    pub fn weapon(kind: crate::weapons::WeaponKind) -> Self {
+        Self {
+            item: HotbarItem::Weapon(kind),
+            color: kind.color(),
+        }
+    }
+
+    pub fn block(block: crate::blocks::BlockType) -> Self {
+        let rgba = crate::blocks::voxel_color(block.into());
+        Self {
+            item: HotbarItem::Block(block),
+            color: Color::srgb(rgba[0], rgba[1], rgba[2]),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self.item {
+            HotbarItem::Weapon(kind) => kind.name(),
+            HotbarItem::Block(block) => crate::blocks::block_label(block),
+        }
+    }
+}
+
+impl HotbarState {
+    pub fn assign_block(&mut self, index: usize, block: crate::blocks::BlockType) -> bool {
+        let Some(slot) = self.slots.get_mut(index) else {
+            return false;
+        };
+        *slot = HotbarBlock::block(block);
+        self.active = index;
+        true
+    }
 }
 
 impl Default for HotbarState {
     fn default() -> Self {
-        // Weapons-only hotbar — 9 slots, each keyed to the WeaponKind
+        // The default loadout is weapons-only — 9 slots keyed to WeaponKind
         // with that index in `WeaponKind::ALL`. The slot colour mirrors
         // the weapon's accent tint so the gun silhouette, the muzzle
         // flash and the HUD chip all agree.
-        use crate::weapons::WeaponKind;
-        let mut slots = [HotbarBlock {
-            color: Color::WHITE,
-        }; 9];
-        for (i, k) in WeaponKind::ALL.iter().enumerate() {
-            slots[i] = HotbarBlock { color: k.color() };
-        }
+        let slots = crate::weapons::WeaponKind::ALL.map(HotbarBlock::weapon);
         Self { slots, active: 5 }
     }
 }
@@ -1163,26 +1675,65 @@ pub struct HotbarRoot;
 #[derive(Component)]
 pub struct HotbarSlot(pub usize);
 
-fn spawn_hotbar(mut commands: Commands, hotbar: Res<HotbarState>) {
-    // Slim command-deck hotbar: stable slot sizes, high contrast and
-    // compact labels that can be scanned without covering the world.
+#[derive(Component)]
+struct HotbarSlotFill(pub usize);
+
+#[derive(Component)]
+struct HotbarSlotLabel(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HotbarMetrics {
+    root_width: f32,
+    slot_size: f32,
+    gap: f32,
+    padding: f32,
+    bottom: f32,
+}
+
+fn hotbar_metrics(viewport_width: f32) -> HotbarMetrics {
+    let (slot_size, gap, padding, bottom) = if viewport_width < 720.0 {
+        (38.0, 3.0, 5.0, 10.0)
+    } else {
+        (44.0, 4.0, 6.0, 14.0)
+    };
+    HotbarMetrics {
+        root_width: slot_size * 9.0 + gap * 8.0 + padding * 2.0,
+        slot_size,
+        gap,
+        padding,
+        bottom,
+    }
+}
+
+fn spawn_hotbar(mut commands: Commands, hotbar: Res<HotbarState>, settings: Res<WorldSettings>) {
+    let metrics = hotbar_metrics(1280.0);
+    let colors = settings.theme.semantic();
     commands
         .spawn((
             NodeBundle {
                 style: Style {
                     position_type: PositionType::Absolute,
-                    bottom: Val::Px(18.0),
+                    bottom: Val::Px(metrics.bottom),
                     left: Val::Percent(50.0),
+                    width: Val::Px(metrics.root_width),
+                    height: Val::Px(metrics.slot_size + metrics.padding * 2.0),
                     margin: UiRect {
-                        left: Val::Px(-9.0 * 33.0),
+                        left: Val::Px(-metrics.root_width * 0.5),
                         ..default()
                     },
-                    column_gap: Val::Px(7.0),
-                    padding: UiRect::all(Val::Px(7.0)),
+                    column_gap: Val::Px(metrics.gap),
+                    padding: UiRect::all(Val::Px(metrics.padding)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    justify_content: JustifyContent::Center,
                     ..default()
                 },
-                background_color: BackgroundColor(Color::srgba(0.0, 0.02, 0.015, 0.72)),
+                background_color: BackgroundColor(bevy_theme_color(
+                    settings.theme.panel_fill(0.74),
+                    0.74,
+                )),
+                border_color: BorderColor(bevy_theme_color(colors.outline, 0.82)),
                 border_radius: BorderRadius::all(Val::Px(6.0)),
+                visibility: Visibility::Hidden,
                 ..default()
             },
             HotbarRoot,
@@ -1193,62 +1744,76 @@ fn spawn_hotbar(mut commands: Commands, hotbar: Res<HotbarState>) {
                 p.spawn((
                     NodeBundle {
                         style: Style {
-                            width: Val::Px(54.0),
-                            height: Val::Px(54.0),
-                            border: UiRect::all(Val::Px(2.0)),
+                            width: Val::Px(metrics.slot_size),
+                            height: Val::Px(metrics.slot_size),
+                            border: UiRect::all(Val::Px(1.0)),
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::Center,
-                            padding: UiRect::all(Val::Px(3.0)),
+                            padding: UiRect::all(Val::Px(2.0)),
                             ..default()
                         },
-                        background_color: BackgroundColor(Color::srgba(0.0, 0.015, 0.012, 0.92)),
-                        border_color: BorderColor(Color::srgba(0.20, 1.0, 0.62, 0.42)),
+                        background_color: BackgroundColor(bevy_theme_color(
+                            colors.surface_strong,
+                            0.92,
+                        )),
+                        border_color: BorderColor(bevy_theme_color(
+                            if i == hotbar.active {
+                                colors.warning
+                            } else {
+                                colors.outline
+                            },
+                            if i == hotbar.active { 0.96 } else { 0.72 },
+                        )),
                         border_radius: BorderRadius::all(Val::Px(6.0)),
                         ..default()
                     },
                     HotbarSlot(i),
                 ))
                 .with_children(|c| {
-                    use crate::weapons::WeaponKind;
-                    let kind = WeaponKind::ALL[i];
-                    // Inner weapon chip: dark background with the
+                    // Inner item chip: dark background with the
                     // accent colour as a glowing border strip.
-                    c.spawn(NodeBundle {
-                        style: Style {
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
-                            flex_direction: FlexDirection::Column,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::SpaceBetween,
-                            padding: UiRect::all(Val::Px(3.0)),
+                    c.spawn((
+                        NodeBundle {
+                            style: Style {
+                                width: Val::Percent(100.0),
+                                height: Val::Percent(100.0),
+                                flex_direction: FlexDirection::Column,
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::SpaceBetween,
+                                padding: UiRect::all(Val::Px(3.0)),
+                                ..default()
+                            },
+                            background_color: BackgroundColor(slot.color.with_alpha(0.16)),
+                            border_radius: BorderRadius::all(Val::Px(4.0)),
                             ..default()
                         },
-                        background_color: BackgroundColor(slot.color.with_alpha(0.22)),
-                        border_radius: BorderRadius::all(Val::Px(4.0)),
-                        ..default()
-                    })
+                        HotbarSlotFill(i),
+                    ))
                     .with_children(|cc| {
                         cc.spawn(TextBundle::from_section(
                             format!("{}", i + 1),
                             TextStyle {
-                                font_size: 11.0,
-                                color: Color::srgba(0.80, 1.0, 0.86, 0.90),
+                                font_size: 9.0,
+                                color: bevy_theme_color(colors.text_muted, 0.92),
                                 ..default()
                             },
                         ));
-                        cc.spawn(TextBundle::from_section(
-                            kind.name(),
-                            TextStyle {
-                                font_size: 10.0,
-                                color: slot.color,
-                                ..default()
-                            },
+                        cc.spawn((
+                            TextBundle::from_section(
+                                compact_hud_line(slot.label(), 7),
+                                TextStyle {
+                                    font_size: 8.0,
+                                    color: slot.color,
+                                    ..default()
+                                },
+                            ),
+                            HotbarSlotLabel(i),
                         ));
                         cc.spawn(TextBundle::from_section(
-                            "∞",
+                            "INF",
                             TextStyle {
-                                font_size: 14.0,
-                                color: Color::srgba(1.0, 0.86, 0.26, 0.95),
+                                font_size: 8.0,
+                                color: bevy_theme_color(colors.warning, 0.94),
                                 ..default()
                             },
                         ));
@@ -1258,10 +1823,70 @@ fn spawn_hotbar(mut commands: Commands, hotbar: Res<HotbarState>) {
         });
 }
 
+fn refresh_hotbar_contents(
+    hotbar: Res<HotbarState>,
+    mut fills: Query<(&HotbarSlotFill, &mut BackgroundColor)>,
+    mut labels: Query<(&HotbarSlotLabel, &mut Text)>,
+) {
+    if !hotbar.is_changed() {
+        return;
+    }
+
+    for (marker, mut background) in fills.iter_mut() {
+        let Some(slot) = hotbar.slots.get(marker.0) else {
+            continue;
+        };
+        background.0 = slot.color.with_alpha(0.16);
+    }
+
+    for (marker, mut text) in labels.iter_mut() {
+        let Some(slot) = hotbar.slots.get(marker.0) else {
+            continue;
+        };
+        let Some(section) = text.sections.first_mut() else {
+            continue;
+        };
+        section.value = compact_hud_line(slot.label(), 7);
+        section.style.color = slot.color;
+    }
+}
+
+fn adapt_hotbar_layout(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut root_q: Query<&mut Style, (With<HotbarRoot>, Without<HotbarSlot>)>,
+    mut slot_q: Query<&mut Style, (With<HotbarSlot>, Without<HotbarRoot>)>,
+) {
+    let Ok(window) = windows.get_single() else {
+        return;
+    };
+    let metrics = hotbar_metrics(window.width());
+    if let Ok(mut style) = root_q.get_single_mut() {
+        let desired_height = metrics.slot_size + metrics.padding * 2.0;
+        if style.width != Val::Px(metrics.root_width)
+            || style.height != Val::Px(desired_height)
+            || style.bottom != Val::Px(metrics.bottom)
+        {
+            style.width = Val::Px(metrics.root_width);
+            style.height = Val::Px(desired_height);
+            style.bottom = Val::Px(metrics.bottom);
+            style.margin.left = Val::Px(-metrics.root_width * 0.5);
+            style.column_gap = Val::Px(metrics.gap);
+            style.padding = UiRect::all(Val::Px(metrics.padding));
+        }
+    }
+    for mut style in slot_q.iter_mut() {
+        if style.width != Val::Px(metrics.slot_size) || style.height != Val::Px(metrics.slot_size) {
+            style.width = Val::Px(metrics.slot_size);
+            style.height = Val::Px(metrics.slot_size);
+        }
+    }
+}
+
 fn hotbar_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut hotbar: ResMut<HotbarState>,
     active: Res<crate::weapons::ActiveWeapon>,
+    mut builder: ResMut<crate::builder::BuilderState>,
     toolbelt: Option<Res<crate::toolbelt::ToolbeltState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
 ) {
@@ -1280,43 +1905,68 @@ fn hotbar_input(
         KeyCode::Digit8,
         KeyCode::Digit9,
     ];
-    let build_blocks_weapons = mode
+    let legacy_blocks_weapons = toolbelt
         .as_deref()
-        .map(|mode| !mode.allows_weapons())
-        .unwrap_or_else(|| {
-            toolbelt
-                .as_deref()
-                .map(|toolbelt| toolbelt.blocks_weapons())
-                .unwrap_or(false)
-        });
-    if !build_blocks_weapons {
+        .map(|toolbelt| toolbelt.blocks_weapons())
+        .unwrap_or(false);
+    let policy = hotbar_mode_policy(mode.as_deref().map(|mode| mode.mode), legacy_blocks_weapons);
+    if policy.accepts_number_keys() {
         for (i, k) in keys_list.iter().enumerate() {
             if keys.just_pressed(*k) {
                 hotbar.active = i;
             }
         }
     }
-    if let Some(idx) = crate::weapons::WeaponKind::ALL
-        .iter()
-        .position(|k| *k == active.kind)
-    {
-        if hotbar.active != idx {
-            hotbar.active = idx;
+
+    let active_item = hotbar.slots.get(hotbar.active).map(|slot| slot.item);
+    match hotbar_sync(policy, active_item, active.kind) {
+        HotbarSync::BuilderBlock(block) => {
+            if builder.block != block {
+                builder.block = block;
+            }
         }
+        HotbarSync::Weapon(kind) => {
+            if let Some(idx) = hotbar
+                .slots
+                .iter()
+                .position(|slot| slot.item == HotbarItem::Weapon(kind))
+            {
+                if hotbar.active != idx {
+                    hotbar.active = idx;
+                }
+            }
+        }
+        HotbarSync::None => {}
     }
 }
 
-fn hotbar_highlight(hotbar: Res<HotbarState>, mut slots: Query<(&HotbarSlot, &mut BorderColor)>) {
-    if !hotbar.is_changed() {
+fn hotbar_highlight(
+    hotbar: Res<HotbarState>,
+    settings: Res<WorldSettings>,
+    mut root_q: Query<
+        (&mut BackgroundColor, &mut BorderColor),
+        (With<HotbarRoot>, Without<HotbarSlot>),
+    >,
+    mut slots: Query<
+        (&HotbarSlot, &mut BackgroundColor, &mut BorderColor),
+        (With<HotbarSlot>, Without<HotbarRoot>),
+    >,
+) {
+    if !hotbar.is_changed() && !settings.is_changed() {
         return;
     }
-    for (slot, mut border) in slots.iter_mut() {
-        // Active slot: amber neon. Idle: dim cyan outline — keeps with
-        // the rest of the futuristic HUD palette.
+    let colors = settings.theme.semantic();
+    if let Ok((mut background, mut border)) = root_q.get_single_mut() {
+        background.0 = bevy_theme_color(settings.theme.panel_fill(0.74), 0.74);
+        border.0 = bevy_theme_color(colors.outline, 0.82);
+    }
+    for (slot, mut background, mut border) in slots.iter_mut() {
+        background.0 = bevy_theme_color(colors.surface_strong, 0.92);
+        // Selection and idle outlines follow the active semantic palette.
         *border = if slot.0 == hotbar.active {
-            BorderColor(Color::srgb(1.0, 0.82, 0.2))
+            BorderColor(bevy_theme_color(colors.warning, 0.96))
         } else {
-            BorderColor(Color::srgba(0.20, 1.0, 0.62, 0.42))
+            BorderColor(bevy_theme_color(colors.outline, 0.72))
         };
     }
 }
@@ -1351,10 +2001,15 @@ pub enum ScopeChannel {
     Border,
 }
 
-fn spawn_scope_overlay(mut commands: Commands) {
+fn spawn_scope_overlay(mut commands: Commands, settings: Res<WorldSettings>) {
+    let colors = settings.theme.semantic();
     let black = Color::srgba(0.0, 0.0, 0.0, 0.0);
-    let ring_cyan = Color::srgba(0.6, 0.95, 1.0, 0.0);
-    let reticle_cyan = Color::srgba(0.3, 1.0, 1.0, 0.0);
+    let ring = bevy_theme_color(colors.accent, 0.0);
+    let ring_solid = bevy_theme_color(colors.accent, 1.0);
+    let reticle = bevy_theme_color(colors.info, 0.0);
+    let reticle_solid = bevy_theme_color(colors.info, 1.0);
+    let danger = bevy_theme_color(colors.danger, 0.0);
+    let danger_solid = bevy_theme_color(colors.danger, 1.0);
 
     commands
         .spawn((
@@ -1470,13 +2125,13 @@ fn spawn_scope_overlay(mut commands: Commands) {
                         ..default()
                     },
                     background_color: BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
-                    border_color: BorderColor(ring_cyan),
+                    border_color: BorderColor(ring),
                     border_radius: BorderRadius::all(Val::Percent(50.0)),
                     ..default()
                 },
                 ScopePanel {
                     base_alpha: 0.85,
-                    color: Color::srgba(0.6, 0.95, 1.0, 1.0),
+                    color: ring_solid,
                     channel: ScopeChannel::Border,
                 },
             ));
@@ -1492,12 +2147,12 @@ fn spawn_scope_overlay(mut commands: Commands) {
                         margin: UiRect::top(Val::Px(-0.5)),
                         ..default()
                     },
-                    background_color: BackgroundColor(reticle_cyan),
+                    background_color: BackgroundColor(reticle),
                     ..default()
                 },
                 ScopePanel {
                     base_alpha: 0.75,
-                    color: Color::srgba(0.3, 1.0, 1.0, 1.0),
+                    color: reticle_solid,
                     channel: ScopeChannel::Background,
                 },
             ));
@@ -1513,12 +2168,12 @@ fn spawn_scope_overlay(mut commands: Commands) {
                         margin: UiRect::left(Val::Px(-0.5)),
                         ..default()
                     },
-                    background_color: BackgroundColor(reticle_cyan),
+                    background_color: BackgroundColor(reticle),
                     ..default()
                 },
                 ScopePanel {
                     base_alpha: 0.75,
-                    color: Color::srgba(0.3, 1.0, 1.0, 1.0),
+                    color: reticle_solid,
                     channel: ScopeChannel::Background,
                 },
             ));
@@ -1538,13 +2193,13 @@ fn spawn_scope_overlay(mut commands: Commands) {
                         },
                         ..default()
                     },
-                    background_color: BackgroundColor(Color::srgba(1.0, 0.4, 0.4, 0.0)),
+                    background_color: BackgroundColor(danger),
                     border_radius: BorderRadius::all(Val::Percent(50.0)),
                     ..default()
                 },
                 ScopePanel {
                     base_alpha: 1.0,
-                    color: Color::srgba(1.0, 0.4, 0.4, 1.0),
+                    color: danger_solid,
                     channel: ScopeChannel::Background,
                 },
             ));
@@ -1565,12 +2220,12 @@ fn spawn_scope_overlay(mut commands: Commands) {
                             },
                             ..default()
                         },
-                        background_color: BackgroundColor(reticle_cyan),
+                        background_color: BackgroundColor(reticle),
                         ..default()
                     },
                     ScopePanel {
                         base_alpha: 0.8,
-                        color: Color::srgba(0.3, 1.0, 1.0, 1.0),
+                        color: reticle_solid,
                         channel: ScopeChannel::Background,
                     },
                 ));
@@ -1578,9 +2233,24 @@ fn spawn_scope_overlay(mut commands: Commands) {
         });
 }
 
+fn scope_visual_amount(progress: f32, active: bool, static_motion: bool) -> f32 {
+    if static_motion {
+        return if active { 1.0 } else { 0.0 };
+    }
+    let progress = if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    progress * progress * (3.0 - 2.0 * progress)
+}
+
 fn update_scope_overlay(
     scope: Res<crate::weapons::ScopeState>,
     state: Res<State<crate::menu::GameState>>,
+    mode: Option<Res<crate::mode::ModeContext>>,
+    settings: Res<WorldSettings>,
+    mut last_amount: Local<Option<f32>>,
     mut root_q: Query<&mut Visibility, With<ScopeOverlay>>,
     mut panel_q: Query<
         (
@@ -1591,19 +2261,23 @@ fn update_scope_overlay(
         Without<ScopeOverlay>,
     >,
 ) {
-    let in_game = matches!(state.get(), crate::menu::GameState::InGame);
-    // Fade in a bit earlier than full ADS so the scope reads smoothly.
-    let p = if in_game {
-        scope.progress.clamp(0.0, 1.0)
+    let play = current_hud_surface(&state, mode.as_deref()) == HudSurface::Play;
+    let amount = if play {
+        scope_visual_amount(
+            scope.progress,
+            scope.active,
+            uses_static_hud_motion(&settings),
+        )
     } else {
         0.0
     };
-    // Ease progress so the overlay snaps in near the top of the ADS
-    // curve — keeps the transition feeling deliberate.
-    let eased = (p * p * (3.0 - 2.0 * p)).clamp(0.0, 1.0);
+    if last_amount.is_some_and(|last| (last - amount).abs() <= f32::EPSILON) {
+        return;
+    }
+    *last_amount = Some(amount);
 
     if let Ok(mut vis) = root_q.get_single_mut() {
-        *vis = if eased > 0.01 {
+        *vis = if amount > 0.01 {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -1611,7 +2285,7 @@ fn update_scope_overlay(
     }
 
     for (panel, bg, border) in panel_q.iter_mut() {
-        let a = panel.base_alpha * eased;
+        let a = panel.base_alpha * amount;
         let lin = panel.color.to_linear();
         let c = Color::srgba(lin.red, lin.green, lin.blue, a);
         match panel.channel {
@@ -1636,26 +2310,27 @@ fn update_scope_overlay(
 #[derive(Component)]
 pub struct ComboText;
 
-fn spawn_combo_text(mut commands: Commands) {
+fn spawn_combo_text(mut commands: Commands, settings: Res<WorldSettings>) {
+    let colors = settings.theme.semantic();
     commands.spawn((
         TextBundle::from_section(
             "",
             TextStyle {
-                font_size: 58.0,
-                color: Color::srgba(1.0, 0.9, 0.2, 0.0),
+                font_size: 24.0,
+                color: bevy_theme_color(colors.warning, 0.0),
                 ..default()
             },
         )
         .with_text_justify(JustifyText::Center)
         .with_style(Style {
             position_type: PositionType::Absolute,
-            top: Val::Percent(42.0),
+            top: Val::Percent(44.0),
             left: Val::Percent(50.0),
             margin: UiRect {
-                left: Val::Px(-140.0),
+                left: Val::Px(-90.0),
                 ..default()
             },
-            width: Val::Px(280.0),
+            width: Val::Px(180.0),
             ..default()
         }),
         ComboText,
@@ -1666,46 +2341,93 @@ fn spawn_combo_text(mut commands: Commands) {
 fn update_combo_text(
     stats: Res<crate::weapons::DestructionStats>,
     feedback: Res<crate::weapons::HitFeedback>,
+    state: Res<State<crate::menu::GameState>>,
+    mode: Option<Res<crate::mode::ModeContext>>,
+    debug: Res<DebugOverlay>,
+    settings: Res<WorldSettings>,
     mut q: Query<&mut Text, With<ComboText>>,
 ) {
     let Ok(mut text) = q.get_single_mut() else {
         return;
     };
     let section = &mut text.sections[0];
-    use std::fmt::Write as _;
-    section.value.clear();
-    if stats.combo >= 3 {
-        let _ = write!(section.value, "x{}  COMBO", stats.combo);
-        // Alpha tracks combo_timer (2.5s decay). Colour shifts from
-        // yellow to orange to red as the combo gets meatier.
-        let a = (stats.combo_timer / 2.5).clamp(0.0, 1.0);
-        let c = stats.combo.min(40) as f32 / 40.0;
-        section.style.color = Color::srgba(1.0, 0.9 - c * 0.7, 0.2 - c * 0.2, a);
+    let colors = settings.theme.semantic();
+    let surface = current_hud_surface(&state, mode.as_deref());
+    let static_motion = uses_static_hud_motion(&settings);
+    let (value, color) = if !product_hud_visible(surface, debug.visible) {
+        (None, bevy_theme_color(colors.warning, 0.0))
+    } else if stats.combo >= 3 {
+        let alpha = feedback_alpha(stats.combo_timer, 2.5, static_motion);
+        let intensity = stats.combo.min(40) as f32 / 40.0;
+        (
+            Some(format!("COMBO x{}", stats.combo)),
+            mix_theme_colors(colors.warning, colors.danger, intensity, alpha),
+        )
     } else if feedback.flash_t > 0.0 && feedback.last_hit_blocks > 0 {
-        let _ = write!(section.value, "+{}", feedback.last_hit_blocks);
-        let a = (feedback.flash_t / 0.25).clamp(0.0, 1.0);
-        section.style.color = Color::srgba(0.9, 1.0, 0.6, a);
+        let alpha = feedback_alpha(feedback.flash_t, 0.25, static_motion);
+        (
+            Some(format!("+{}", feedback.last_hit_blocks)),
+            bevy_theme_color(colors.success, alpha),
+        )
     } else {
-        section.style.color = Color::srgba(1.0, 0.9, 0.2, 0.0);
+        (None, bevy_theme_color(colors.warning, 0.0))
+    };
+    if let Some(value) = value {
+        if section.value != value {
+            section.value = value;
+        }
+    } else if !section.value.is_empty() {
+        section.value.clear();
+    }
+    if section.style.color != color {
+        section.style.color = color;
     }
 }
 
-/// Pulse the crosshair white for a few frames after a hit.
+fn feedback_alpha(remaining: f32, duration: f32, static_motion: bool) -> f32 {
+    if !remaining.is_finite() || remaining <= 0.0 {
+        0.0
+    } else if static_motion {
+        1.0
+    } else if duration.is_finite() && duration > 0.0 {
+        (remaining / duration).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Briefly changes the reticle tone after a hit.
 fn flash_crosshair_on_hit(
     feedback: Res<crate::weapons::HitFeedback>,
-    mut q: Query<&Children, With<Crosshair>>,
+    state: Res<State<crate::menu::GameState>>,
+    mode: Option<Res<crate::mode::ModeContext>>,
+    settings: Res<WorldSettings>,
+    mut last_colour: Local<Option<Color>>,
+    q: Query<&Children, With<Crosshair>>,
     mut bg_q: Query<&mut BackgroundColor>,
 ) {
-    let Ok(children) = q.get_single_mut() else {
+    let Ok(children) = q.get_single() else {
         return;
     };
-    // Interpolate from cyan (rest) to white (flash).
-    let t = (feedback.flash_t / 0.25).clamp(0.0, 1.0);
-    let r = 0.0 + t * 1.0;
-    let g = 0.95 + t * 0.05;
-    let b = 1.0;
-    let a = 0.95;
-    let colour = Color::srgba(r, g, b, a);
+    let play = current_hud_surface(&state, mode.as_deref()) == HudSurface::Play;
+    let flash = if play {
+        feedback_alpha(feedback.flash_t, 0.25, uses_static_hud_motion(&settings))
+    } else {
+        0.0
+    };
+    let colour = mix_theme_colors(
+        settings.theme.color.primary(),
+        egui::Color32::WHITE,
+        flash,
+        0.92,
+    );
+    if last_colour
+        .as_ref()
+        .is_some_and(|previous| *previous == colour)
+    {
+        return;
+    }
+    *last_colour = Some(colour);
     for &child in children.iter() {
         if let Ok(mut bg) = bg_q.get_mut(child) {
             bg.0 = colour;

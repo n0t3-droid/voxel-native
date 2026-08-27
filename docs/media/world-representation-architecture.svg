@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Voxel Native world representation and evidence architecture</title>
+  <desc id="desc">Deterministic generation identity feeds both the live near voxel field and the six-ring far clipmap, while sparse live voxel edits remain authoritative only in the near field and are not reproduced by far terrain. A virtual voxel hierarchy is shown with a dashed border because it is implemented as a pure data layer but is not live-integrated. Native QA produces RON reports and screenshots; candidate evidence is translated manually because a manifest-to-typed-graph adapter is not implemented.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#081317"/>
+      <stop offset="1" stop-color="#0d1c22"/>
+    </linearGradient>
+    <linearGradient id="authority" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#183a3b"/>
+      <stop offset="1" stop-color="#10262d"/>
+    </linearGradient>
+    <linearGradient id="live" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123238"/>
+      <stop offset="1" stop-color="#10222d"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#5fdcc3"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#64aee8"/>
+    </marker>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#8cb8c6" stroke-opacity="0.04"/>
+    </pattern>
+  </defs>
+
+  <rect width="1600" height="900" rx="24" fill="url(#bg)"/>
+  <rect width="1600" height="900" rx="24" fill="url(#grid)"/>
+
+  <g font-family="Helvetica">
+    <text x="72" y="65" fill="#70f5d3" font-size="18" font-weight="bold" letter-spacing="4">AUTHORITY · REPRESENTATION · EVIDENCE</text>
+    <text x="72" y="114" fill="#f2fbff" font-size="38" font-weight="bold">One world. Several bounded views.</text>
+    <text x="72" y="150" fill="#9dbdc9" font-size="20">Representation may become coarser; authority never becomes ambiguous.</text>
+
+    <g transform="translate(70 207)">
+      <rect width="330" height="326" rx="20" fill="url(#authority)" stroke="#5ce9c9" stroke-width="2"/>
+      <rect x="22" y="22" width="108" height="27" rx="13" fill="#6bf1d1"/>
+      <text x="76" y="41" fill="#071418" font-size="13" font-weight="bold" text-anchor="middle" letter-spacing="1">AUTHORITIES</text>
+
+      <text x="25" y="86" fill="#f0fbff" font-size="23" font-weight="bold">Procedural generation</text>
+      <text x="25" y="115" fill="#a9c8d2" font-size="17">grammar + seed + profile</text>
+      <text x="25" y="141" fill="#79e6ce" font-size="16">identity feeds near + far</text>
+
+      <path d="M25 161H305" stroke="#31545c"/>
+      <text x="25" y="197" fill="#f0fbff" font-size="22" font-weight="bold">Sparse live edit authority</text>
+      <text x="25" y="226" fill="#a9c8d2" font-size="17">exact voxel deltas persist</text>
+      <text x="25" y="252" fill="#f0c77b" font-size="16">near only · far does not replay edits</text>
+
+      <path d="M25 272H305" stroke="#31545c"/>
+      <text x="25" y="300" fill="#d8edf3" font-size="18" font-weight="bold">World epoch + versions</text>
+      <text x="25" y="321" fill="#97b5c0" font-size="15">invalid or out-of-scope work is rejected</text>
+    </g>
+
+    <!-- Generation and sparse edits merge at the near-field center. Only generation reaches far terrain. -->
+    <g stroke="#5fdcc3" stroke-width="3" fill="none">
+      <path d="M400 284H430V273"/>
+      <path d="M400 416H430V273"/>
+      <circle cx="430" cy="273" r="5" fill="#5fdcc3" stroke="none"/>
+      <path d="M430 273H475" marker-end="url(#arrow)"/>
+      <path d="M400 324H449V597H475" marker-end="url(#arrow)"/>
+    </g>
+
+    <g transform="translate(480 203)">
+      <rect width="320" height="140" rx="18" fill="url(#live)" stroke="#65eccd" stroke-width="2"/>
+      <rect x="20" y="18" width="59" height="24" rx="12" fill="#173f3c" stroke="#4cd8bd"/>
+      <text x="49" y="35" fill="#8af9de" font-size="12" font-weight="bold" text-anchor="middle">LIVE</text>
+      <text x="20" y="77" fill="#edfaff" font-size="23" font-weight="bold">Near voxel field</text>
+      <text x="20" y="106" fill="#a5c4cf" font-size="16">16³ chunks · editable · collision</text>
+      <text x="20" y="130" fill="#a5c4cf" font-size="16">simulation · saves · exact materials</text>
+    </g>
+
+    <g transform="translate(480 365)">
+      <rect width="320" height="140" rx="18" fill="#101c24" stroke="#73909b" stroke-width="2" stroke-dasharray="9 7"/>
+      <rect x="20" y="18" width="137" height="24" rx="12" fill="#1e2930" stroke="#6f8c96"/>
+      <text x="88" y="35" fill="#b7ccd3" font-size="12" font-weight="bold" text-anchor="middle">PURE DATA LAYER</text>
+      <text x="20" y="77" fill="#edfaff" font-size="23" font-weight="bold">Virtual voxel hierarchy</text>
+      <text x="20" y="106" fill="#9ab5bf" font-size="16">8³ summaries · fixed 512-brick cap</text>
+      <text x="20" y="130" fill="#f0c77b" font-size="16">implemented · not live-integrated</text>
+    </g>
+
+    <g transform="translate(480 527)">
+      <rect width="320" height="140" rx="18" fill="url(#live)" stroke="#65bdf0" stroke-width="2"/>
+      <rect x="20" y="14" width="280" height="32" rx="12" fill="#15364b" stroke="#58ace0"/>
+      <text x="160" y="27" fill="#a9ddff" font-size="12" font-weight="bold" text-anchor="middle">LIVE · ASTRAL DEFAULT</text>
+      <text x="160" y="40" fill="#a9ddff" font-size="12" font-weight="bold" text-anchor="middle">NATURAL GATED</text>
+      <text x="20" y="77" fill="#edfaff" font-size="23" font-weight="bold">Planetary far field</text>
+      <text x="20" y="106" fill="#a5c4cf" font-size="16">6 levels · 15.36 km L∞ radius</text>
+      <text x="20" y="130" fill="#a5c4cf" font-size="16">render-only · no live voxel edit replay</text>
+    </g>
+
+    <g transform="translate(856 203)">
+      <rect width="304" height="464" rx="20" fill="#0a171c" stroke="#2b4a54"/>
+      <text x="25" y="43" fill="#d9edf3" font-size="18" font-weight="bold" letter-spacing="2">CONSUMERS</text>
+
+      <g transform="translate(22 70)">
+        <rect width="260" height="95" rx="14" fill="#10262c" stroke="#2e545c"/>
+        <text x="18" y="34" fill="#78f0d4" font-size="18" font-weight="bold">Interaction</text>
+        <text x="18" y="62" fill="#9dbac4" font-size="15">player · tools · collision</text>
+        <text x="18" y="82" fill="#9dbac4" font-size="15">bots · combat · persistence</text>
+      </g>
+      <g transform="translate(22 184)">
+        <rect width="260" height="95" rx="14" fill="#10232d" stroke="#2d4e61"/>
+        <text x="18" y="34" fill="#7ac6f5" font-size="18" font-weight="bold">Presentation</text>
+        <text x="18" y="62" fill="#9dbac4" font-size="15">mesh assets · materials</text>
+        <text x="18" y="82" fill="#9dbac4" font-size="15">hydro · horizon · atmosphere</text>
+      </g>
+      <g transform="translate(22 298)">
+        <rect width="260" height="120" rx="14" fill="#161e22" stroke="#4d5550"/>
+        <text x="18" y="34" fill="#d8eaa5" font-size="18" font-weight="bold">Non-authority rule</text>
+        <text x="18" y="62" fill="#aebfc2" font-size="15">a far mesh cannot collide, edit,</text>
+        <text x="18" y="83" fill="#aebfc2" font-size="15">save, navigate, or certify a</text>
+        <text x="18" y="104" fill="#aebfc2" font-size="15">near-world object.</text>
+      </g>
+    </g>
+
+    <g stroke="#64aee8" stroke-width="3" fill="none" marker-end="url(#arrowBlue)">
+      <path d="M800 273H849"/>
+      <path d="M800 597H849"/>
+    </g>
+    <path d="M800 435H828V470H849" fill="none" stroke="#708d97" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#arrowBlue)"/>
+
+    <g transform="translate(1213 203)">
+      <rect width="317" height="464" rx="20" fill="#0c171b" stroke="#334850"/>
+      <text x="24" y="43" fill="#d9edf3" font-size="18" font-weight="bold" letter-spacing="2">PRESSURE POLICY</text>
+      <path d="M45 91V227" stroke="#31505a" stroke-width="2" stroke-dasharray="5 5"/>
+      <g font-size="14" font-weight="bold" text-anchor="middle">
+        <circle cx="45" cy="91" r="15" fill="#163b39" stroke="#65e3c9"/>
+        <text x="45" y="96" fill="#8af4db">1</text>
+        <circle cx="45" cy="159" r="15" fill="#153147" stroke="#65b9e9"/>
+        <text x="45" y="164" fill="#a8ddff">2</text>
+        <circle cx="45" cy="227" r="15" fill="#293326" stroke="#b4df75"/>
+        <text x="45" y="232" fill="#d9f7a3">3</text>
+      </g>
+      <g font-size="15">
+        <text x="76" y="96" fill="#cde1e7">reduce material detail</text>
+        <text x="76" y="164" fill="#cde1e7">coalesce rebuilds</text>
+        <text x="76" y="232" fill="#cde1e7">keep valid parent visible</text>
+      </g>
+      <path d="M30 266H287" stroke="#344a51"/>
+      <text x="30" y="303" fill="#f1d78d" font-size="17" font-weight="bold">Never under pressure</text>
+      <g fill="#a8c0c8" font-size="15">
+        <text x="30" y="337">• grow entity populations</text>
+        <text x="30" y="365">• install a stale epoch</text>
+        <text x="30" y="393">• infer empty from missing data</text>
+        <text x="30" y="421">• turn render distance into</text>
+        <text x="45" y="444">global simulation distance</text>
+      </g>
+    </g>
+
+    <g transform="translate(70 724)">
+      <rect width="1460" height="146" rx="18" fill="#0b181d" stroke="#2a4650"/>
+      <text x="22" y="32" fill="#d9edf3" font-size="17" font-weight="bold" letter-spacing="2">EVIDENCE LANE</text>
+      <g font-size="16" text-anchor="middle">
+        <rect x="22" y="50" width="190" height="44" rx="12" fill="#14282e" stroke="#396069"/>
+        <text x="117" y="77" fill="#cde3e9">adversarial tests</text>
+        <rect x="258" y="50" width="190" height="44" rx="12" fill="#14282e" stroke="#396069"/>
+        <text x="353" y="77" fill="#cde3e9">native QA route</text>
+        <rect x="494" y="50" width="210" height="44" rx="12" fill="#14282e" stroke="#396069"/>
+        <text x="599" y="77" fill="#cde3e9">RON + screenshots</text>
+        <rect x="750" y="50" width="190" height="44" rx="12" fill="#14282e" stroke="#396069"/>
+        <text x="845" y="77" fill="#cde3e9">hashed manifest</text>
+        <rect x="1198" y="50" width="224" height="44" rx="12" fill="#17272a" stroke="#57654d"/>
+        <text x="1310" y="77" fill="#d9ecb0">typed evidence graph</text>
+      </g>
+      <g stroke="#5fdcc3" stroke-width="2" fill="none" marker-end="url(#arrow)">
+        <path d="M212 72H248"/><path d="M448 72H484"/><path d="M704 72H740"/>
+      </g>
+      <path d="M940 72H1188" fill="none" stroke="#7f9ca5" stroke-width="2" stroke-dasharray="8 7" marker-end="url(#arrowBlue)"/>
+      <g fill="#b5c9cf" font-size="14" text-anchor="middle">
+        <text x="1064" y="118">manual explicit candidate translation</text>
+        <text x="1064" y="136" fill="#f0c77b">adapter not implemented</text>
+      </g>
+    </g>
+
+    <g transform="translate(1195 687)" font-size="14">
+      <rect width="15" height="15" rx="3" fill="#173f3c" stroke="#4cd8bd"/>
+      <text x="23" y="13" fill="#9ebac4">live</text>
+      <rect x="72" width="15" height="15" rx="3" fill="#101c24" stroke="#73909b" stroke-dasharray="3 2"/>
+      <text x="95" y="13" fill="#9ebac4">implemented, not integrated</text>
+    </g>
+  </g>
+</svg>

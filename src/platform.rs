@@ -37,7 +37,37 @@ fn browser_local_storage() -> Result<web_sys::Storage, String> {
 
 #[cfg(target_arch = "wasm32")]
 pub fn browser_storage_get(key: &str) -> Option<String> {
-    browser_local_storage().ok()?.get_item(key).ok().flatten()
+    browser_storage_get_checked(key).ok().flatten()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn browser_storage_get_checked(key: &str) -> Result<Option<String>, String> {
+    browser_local_storage()?
+        .get_item(key)
+        .map_err(|_| format!("localStorage read failed for {key}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn browser_storage_keys_checked(max_keys: usize) -> Result<Vec<String>, String> {
+    let storage = browser_local_storage()?;
+    let len = storage
+        .length()
+        .map_err(|_| "localStorage length read failed".to_owned())? as usize;
+    if len > max_keys {
+        return Err(format!(
+            "localStorage has {len} keys; authority scan limit is {max_keys}"
+        ));
+    }
+    let mut keys = Vec::with_capacity(len);
+    for index in 0..len {
+        if let Some(key) = storage
+            .key(index as u32)
+            .map_err(|_| format!("localStorage key read failed at index {index}"))?
+        {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
 }
 
 #[cfg(target_arch = "wasm32")]

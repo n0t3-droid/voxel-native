@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/n0t3-droid/voxel-native/security/policy
+    about: Follow the private-report guidance and never publish sensitive details in an issue.

@@ -1,0 +1,5 @@
+# Scientific image-analysis stack used by analyze_l0_provenance.py.
+# Python 3.10 or newer is required by the analyzer source.
+Pillow>=10.0,<13
+numpy>=1.26,<3
+scipy>=1.11,<2

@@ -20,17 +20,47 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::blocks::{voxel_color, voxel_is_solid, voxel_is_weapon_target, AIR};
-use crate::chunk::{ChunkPos, CHUNK_SIZE_I};
 use crate::director::UnifiedTelemetry;
 use crate::menu::GameState;
-use crate::neurocore::RuntimeBudget;
-use crate::player::Player;
+use crate::neurocore::{RuntimeBudget, RuntimeProfile};
+use crate::player::{Player, PlayerMotionSet};
 use crate::settings::WorldSettings;
-use crate::world::{ChunkStreamer, VoxelWorld};
+use crate::world::{VoxelWorld, WorldEditBatch};
 
 // ---------------------------------------------------------------------
 // Shared FX asset cache
 // ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ViewmodelMaterialTone {
+    DarkBody,
+    Gunmetal,
+    Chrome,
+    Grip,
+    Accent,
+    Core,
+    OpticGlass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WeaponVisualDetail {
+    Core,
+    Full,
+}
+
+impl WeaponVisualDetail {
+    fn for_profile(profile: RuntimeProfile) -> Self {
+        if profile == RuntimeProfile::LowSpec {
+            Self::Core
+        } else {
+            Self::Full
+        }
+    }
+
+    fn includes_decorative_parts(self) -> bool {
+        self == Self::Full
+    }
+}
 //
 // Before this existed, EVERY debris shard, falling block, projectile,
 // tracer, impact-puff and explosion allocated a fresh
@@ -77,6 +107,11 @@ pub struct WeaponFxCache {
     halo_mesh: std::collections::HashMap<WeaponKind, Handle<Mesh>>,
     core_mesh: std::collections::HashMap<WeaponKind, Handle<Mesh>>,
     warhead_mesh: std::collections::HashMap<WeaponKind, Handle<Mesh>>,
+    viewmodel_cube_mesh: Option<Handle<Mesh>>,
+    viewmodel_mats: std::collections::HashMap<
+        (ViewmodelMaterialTone, Option<WeaponKind>),
+        Handle<StandardMaterial>,
+    >,
     /// Pending full-screen flash requests, drained by
     /// `update_screen_flash`. Using a queue (rather than spawning a
     /// fresh `NodeBundle` on the spot) lets us collapse multiple
@@ -87,6 +122,92 @@ pub struct WeaponFxCache {
 }
 
 impl WeaponFxCache {
+    fn viewmodel_cube_shared(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        self.viewmodel_cube_mesh
+            .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
+            .clone()
+    }
+
+    fn viewmodel_mat_for(
+        &mut self,
+        tone: ViewmodelMaterialTone,
+        kind: WeaponKind,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        let keyed_kind = matches!(
+            tone,
+            ViewmodelMaterialTone::Accent | ViewmodelMaterialTone::Core
+        )
+        .then_some(kind);
+        let key = (tone, keyed_kind);
+        if let Some(handle) = self.viewmodel_mats.get(&key) {
+            return handle.clone();
+        }
+
+        let accent_color = kind.color().to_linear();
+        let material = match tone {
+            ViewmodelMaterialTone::DarkBody => StandardMaterial {
+                base_color: Color::srgb(0.07, 0.08, 0.10),
+                perceptual_roughness: 0.42,
+                metallic: 0.68,
+                ..default()
+            },
+            ViewmodelMaterialTone::Gunmetal => StandardMaterial {
+                base_color: Color::srgb(0.24, 0.27, 0.31),
+                perceptual_roughness: 0.26,
+                metallic: 0.92,
+                ..default()
+            },
+            ViewmodelMaterialTone::Chrome => StandardMaterial {
+                base_color: Color::srgb(0.82, 0.85, 0.92),
+                perceptual_roughness: 0.12,
+                metallic: 1.0,
+                ..default()
+            },
+            ViewmodelMaterialTone::Grip => StandardMaterial {
+                base_color: Color::srgb(0.05, 0.06, 0.08),
+                perceptual_roughness: 0.85,
+                metallic: 0.1,
+                ..default()
+            },
+            ViewmodelMaterialTone::Accent => StandardMaterial {
+                base_color: Color::srgb(0.035, 0.045, 0.06),
+                emissive: LinearRgba::rgb(
+                    accent_color.red * 3.0,
+                    accent_color.green * 3.0,
+                    accent_color.blue * 3.0,
+                ),
+                perceptual_roughness: 0.34,
+                metallic: 0.55,
+                ..default()
+            },
+            ViewmodelMaterialTone::Core => StandardMaterial {
+                base_color: Color::srgb(
+                    (accent_color.red * 0.6).min(1.0),
+                    (accent_color.green * 0.6).min(1.0),
+                    (accent_color.blue * 0.6).min(1.0),
+                ),
+                emissive: LinearRgba::rgb(
+                    accent_color.red * 14.0 + 1.0,
+                    accent_color.green * 14.0 + 1.0,
+                    accent_color.blue * 14.0 + 1.0,
+                ),
+                unlit: true,
+                ..default()
+            },
+            ViewmodelMaterialTone::OpticGlass => StandardMaterial {
+                base_color: Color::srgb(0.025, 0.09, 0.11),
+                emissive: LinearRgba::rgb(0.12, 0.65, 0.85),
+                perceptual_roughness: 0.18,
+                metallic: 0.35,
+                ..default()
+            },
+        };
+        let handle = materials.add(material);
+        self.viewmodel_mats.insert(key, handle.clone());
+        handle
+    }
+
     fn debris_mat_for(
         &mut self,
         voxel: crate::blocks::Voxel,
@@ -405,6 +526,7 @@ struct FireControlParams<'w> {
     time: Res<'w, Time>,
     mouse: Res<'w, ButtonInput<MouseButton>>,
     agent: Option<Res<'w, crate::agent_control::AgentControlState>>,
+    budget: Res<'w, RuntimeBudget>,
 }
 
 impl Plugin for WeaponsPlugin {
@@ -425,6 +547,7 @@ impl Plugin for WeaponsPlugin {
                     reload_input,
                     (fire_weapon, flush_drill_heat_to_suit)
                         .chain()
+                        .after(PlayerMotionSet)
                         .run_if(in_state(GameState::InGame)),
                     animate_viewmodel,
                     update_muzzle_flash,
@@ -554,6 +677,31 @@ struct TracerFxProfile {
     life: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ViewmodelTuning {
+    rest_translation: Vec3,
+    muzzle_offset: Vec3,
+    recoil_offset: Vec3,
+    recoil_pitch: f32,
+    muzzle_light_life: f32,
+    muzzle_light_range: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RifleSilhouette {
+    barrel_len: f32,
+    optic_len: f32,
+    optic_radius: f32,
+}
+
+fn viewmodel_recoil_amount(remaining: f32, duration: f32) -> f32 {
+    if !remaining.is_finite() || !duration.is_finite() || duration <= 0.0 {
+        return 0.0;
+    }
+    let normalized = (remaining / duration).clamp(0.0, 1.0);
+    normalized * normalized * (3.0 - 2.0 * normalized)
+}
+
 // ---------------------------------------------------------------------
 // Weapon kinds + stats
 // ---------------------------------------------------------------------
@@ -609,6 +757,103 @@ impl WeaponKind {
             WeaponKind::Blaster => Color::srgb(0.2, 0.8, 1.0),
             WeaponKind::RocketLauncher => Color::srgb(1.0, 0.6, 0.1),
             WeaponKind::GrenadeLauncher => Color::srgb(0.8, 1.0, 0.3),
+        }
+    }
+
+    fn viewmodel_tuning(self) -> ViewmodelTuning {
+        match self {
+            WeaponKind::Pistol => ViewmodelTuning {
+                rest_translation: Vec3::new(0.17, -0.14, -0.35),
+                muzzle_offset: Vec3::new(0.0, 0.008, -0.27),
+                recoil_offset: Vec3::new(0.0, 0.012, 0.075),
+                recoil_pitch: 0.10,
+                muzzle_light_life: 0.065,
+                muzzle_light_range: 10.0,
+            },
+            WeaponKind::AssaultRifle => ViewmodelTuning {
+                rest_translation: Vec3::new(0.22, -0.18, -0.52),
+                muzzle_offset: Vec3::new(0.0, 0.006, -0.55),
+                recoil_offset: Vec3::new(0.0, 0.014, 0.085),
+                recoil_pitch: 0.12,
+                muzzle_light_life: 0.055,
+                muzzle_light_range: 12.0,
+            },
+            WeaponKind::Sniper => ViewmodelTuning {
+                rest_translation: Vec3::new(0.22, -0.16, -0.55),
+                muzzle_offset: Vec3::new(0.0, 0.006, -0.71),
+                recoil_offset: Vec3::new(0.0, 0.030, 0.18),
+                recoil_pitch: 0.22,
+                muzzle_light_life: 0.085,
+                muzzle_light_range: 18.0,
+            },
+            WeaponKind::Shotgun => ViewmodelTuning {
+                rest_translation: Vec3::new(0.22, -0.18, -0.48),
+                muzzle_offset: Vec3::new(0.0, 0.014, -0.58),
+                recoil_offset: Vec3::new(0.0, 0.022, 0.17),
+                recoil_pitch: 0.18,
+                muzzle_light_life: 0.080,
+                muzzle_light_range: 16.0,
+            },
+            WeaponKind::Minigun => ViewmodelTuning {
+                rest_translation: Vec3::new(0.26, -0.22, -0.50),
+                muzzle_offset: Vec3::new(0.0, 0.005, -0.54),
+                recoil_offset: Vec3::new(0.0, 0.008, 0.040),
+                recoil_pitch: 0.07,
+                muzzle_light_life: 0.045,
+                muzzle_light_range: 9.0,
+            },
+            WeaponKind::PlasmaRifle => ViewmodelTuning {
+                rest_translation: Vec3::new(0.22, -0.18, -0.52),
+                muzzle_offset: Vec3::new(0.0, 0.0, -0.55),
+                recoil_offset: Vec3::new(0.0, 0.016, 0.10),
+                recoil_pitch: 0.14,
+                muzzle_light_life: 0.070,
+                muzzle_light_range: 14.0,
+            },
+            WeaponKind::Blaster => ViewmodelTuning {
+                rest_translation: Vec3::new(0.22, -0.18, -0.52),
+                muzzle_offset: Vec3::new(0.0, 0.006, -0.47),
+                recoil_offset: Vec3::new(0.0, 0.014, 0.09),
+                recoil_pitch: 0.12,
+                muzzle_light_life: 0.060,
+                muzzle_light_range: 13.0,
+            },
+            WeaponKind::RocketLauncher => ViewmodelTuning {
+                rest_translation: Vec3::new(0.24, -0.20, -0.56),
+                muzzle_offset: Vec3::new(0.0, 0.0, -0.65),
+                recoil_offset: Vec3::new(0.0, 0.030, 0.18),
+                recoil_pitch: 0.22,
+                muzzle_light_life: 0.090,
+                muzzle_light_range: 18.0,
+            },
+            WeaponKind::GrenadeLauncher => ViewmodelTuning {
+                rest_translation: Vec3::new(0.24, -0.20, -0.56),
+                muzzle_offset: Vec3::new(0.0, 0.012, -0.53),
+                recoil_offset: Vec3::new(0.0, 0.022, 0.16),
+                recoil_pitch: 0.18,
+                muzzle_light_life: 0.085,
+                muzzle_light_range: 17.0,
+            },
+        }
+    }
+
+    fn rifle_silhouette(self) -> RifleSilhouette {
+        match self {
+            WeaponKind::Sniper => RifleSilhouette {
+                barrel_len: 0.50,
+                optic_len: 0.26,
+                optic_radius: 0.034,
+            },
+            WeaponKind::Blaster => RifleSilhouette {
+                barrel_len: 0.26,
+                optic_len: 0.12,
+                optic_radius: 0.024,
+            },
+            _ => RifleSilhouette {
+                barrel_len: 0.34,
+                optic_len: 0.17,
+                optic_radius: 0.028,
+            },
         }
     }
 
@@ -1195,6 +1440,11 @@ struct Explosion {
     max_scale: f32,
 }
 
+const MAX_PROJECTILE_LIFETIME_SECS: f32 = 6.0;
+const PROJECTILE_ARRIVAL_GRACE_SECS: f32 = 0.25;
+const WEAPON_MAX_RANGE: f32 = 10_000.0;
+const MUZZLE_RAY_EPSILON: f32 = 0.05;
+
 /// A travelling projectile carrying its delayed impact data. On
 /// arrival the stored payload is applied: break a sphere of blocks,
 /// spawn debris, and (for explosives) spawn a fireball.
@@ -1202,6 +1452,9 @@ struct Explosion {
 struct Projectile {
     dir: Vec3,
     speed: f32,
+    /// Safety horizon for shots into unloaded/empty space. Distant hits
+    /// still resolve when this expires, while misses simply disappear.
+    life: f32,
     /// Remaining distance along `dir` until it reaches the pre-computed
     /// impact point (or its max range, if the ray missed everything).
     remaining: f32,
@@ -1211,6 +1464,103 @@ struct Projectile {
     hit_block: Option<(i32, i32, i32)>,
     /// World-space impact position (block centre or end-of-range).
     impact_pos: Vec3,
+}
+
+fn projectile_lifetime_secs(remaining: f32, speed: f32) -> f32 {
+    if !remaining.is_finite() || !speed.is_finite() || speed <= 0.0 {
+        return MAX_PROJECTILE_LIFETIME_SECS;
+    }
+    (remaining.max(0.0) / speed + PROJECTILE_ARRIVAL_GRACE_SECS)
+        .clamp(PROJECTILE_ARRIVAL_GRACE_SECS, MAX_PROJECTILE_LIFETIME_SECS)
+}
+
+fn should_spawn_projectile_light(kind: WeaponKind, fx_scale: f32, shot_number: u64) -> bool {
+    let fx_scale = if fx_scale.is_finite() {
+        fx_scale.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let stride = match kind {
+        WeaponKind::RocketLauncher | WeaponKind::GrenadeLauncher if fx_scale >= 0.20 => 1,
+        WeaponKind::PlasmaRifle if fx_scale >= 0.75 => 1,
+        WeaponKind::PlasmaRifle if fx_scale >= 0.35 => 2,
+        WeaponKind::Sniper if fx_scale >= 0.55 => 1,
+        WeaponKind::Blaster if fx_scale >= 0.80 => 2,
+        WeaponKind::Blaster if fx_scale >= 0.55 => 3,
+        WeaponKind::Pistol | WeaponKind::Shotgun if fx_scale >= 0.85 => 2,
+        WeaponKind::AssaultRifle if fx_scale >= 0.85 => 3,
+        WeaponKind::Minigun if fx_scale >= 0.85 => 5,
+        _ => return false,
+    };
+    shot_number % stride == 0
+}
+
+fn should_spawn_muzzle_light(kind: WeaponKind, fx_scale: f32, shot_number: u64) -> bool {
+    let fx_scale = if fx_scale.is_finite() {
+        fx_scale.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if fx_scale <= 0.20 {
+        return false;
+    }
+
+    // Keep deliberate shots luminous while bounding overlapping dynamic
+    // lights from rapid-fire weapons. LowSpec normally supplies 0.65 here.
+    let stride = match kind {
+        WeaponKind::Minigun if fx_scale < 0.80 => 3,
+        WeaponKind::Minigun => 2,
+        WeaponKind::AssaultRifle if fx_scale < 0.80 => 2,
+        _ => 1,
+    };
+    shot_number % stride == 0
+}
+
+fn projectile_visual_layer_count(fx_scale: f32) -> usize {
+    let fx_scale = if fx_scale.is_finite() {
+        fx_scale.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if fx_scale >= 0.75 {
+        3
+    } else if fx_scale >= 0.35 {
+        2
+    } else {
+        1
+    }
+}
+
+fn debris_spawn_cap(fx_scale: f32) -> u32 {
+    let fx_scale = if fx_scale.is_finite() {
+        fx_scale.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if fx_scale <= 0.10 {
+        0
+    } else {
+        (40.0 * fx_scale * fx_scale).round().clamp(4.0, 40.0) as u32
+    }
+}
+
+fn falling_block_spawn_cap(kind: WeaponKind, fx_scale: f32) -> u32 {
+    let fx_scale = if fx_scale.is_finite() {
+        fx_scale.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if fx_scale <= 0.10 {
+        return 0;
+    }
+    let full_cap = match kind {
+        WeaponKind::RocketLauncher | WeaponKind::GrenadeLauncher => 768.0,
+        WeaponKind::PlasmaRifle | WeaponKind::Blaster => 512.0,
+        _ => 256.0,
+    };
+    (full_cap * fx_scale * fx_scale)
+        .round()
+        .clamp(16.0, full_cap) as u32
 }
 
 fn despawn_recursive_if_exists(commands: &mut Commands, entity: Entity) {
@@ -1227,13 +1577,23 @@ fn setup_weapon(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut fx: ResMut<WeaponFxCache>,
+    settings: Res<WorldSettings>,
     camera_q: Query<Entity, (With<Camera3d>, With<Player>)>,
     active: Res<ActiveWeapon>,
 ) {
     let Ok(cam) = camera_q.get_single() else {
         return;
     };
-    build_viewmodel(&mut commands, &mut meshes, &mut materials, cam, active.kind);
+    build_viewmodel(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut fx,
+        cam,
+        active.kind,
+        WeaponVisualDetail::for_profile(settings.runtime_profile),
+    );
     info!(
         "Weapon viewmodel ({}) attached to player camera.",
         active.kind.name()
@@ -1248,6 +1608,8 @@ fn switch_weapon(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut fx: ResMut<WeaponFxCache>,
+    settings: Res<WorldSettings>,
     camera_q: Query<Entity, (With<Camera3d>, With<Player>)>,
     weapons_q: Query<Entity, With<Weapon>>,
 ) {
@@ -1302,90 +1664,45 @@ fn switch_weapon(
     let Ok(cam) = camera_q.get_single() else {
         return;
     };
-    build_viewmodel(&mut commands, &mut meshes, &mut materials, cam, active.kind);
+    build_viewmodel(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut fx,
+        cam,
+        active.kind,
+        WeaponVisualDetail::for_profile(settings.runtime_profile),
+    );
 }
 
 fn build_viewmodel(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    fx: &mut WeaponFxCache,
     cam: Entity,
     kind: WeaponKind,
+    detail: WeaponVisualDetail,
 ) {
-    let dark_body = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.08, 0.09, 0.12),
-        perceptual_roughness: 0.28,
-        metallic: 0.82,
-        ..default()
-    });
-    let gunmetal = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.22, 0.24, 0.28),
-        perceptual_roughness: 0.32,
-        metallic: 0.92,
-        ..default()
-    });
+    let cube = fx.viewmodel_cube_shared(meshes);
+    let cube = &cube;
+    let dark_body = fx.viewmodel_mat_for(ViewmodelMaterialTone::DarkBody, kind, materials);
+    let gunmetal = fx.viewmodel_mat_for(ViewmodelMaterialTone::Gunmetal, kind, materials);
     // Bright polished chrome for barrel tips, slide rails, muzzle
     // compensators — catches the scene light and reads "fusion-era".
-    let chrome = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.82, 0.85, 0.92),
-        perceptual_roughness: 0.12,
-        metallic: 1.0,
-        ..default()
-    });
+    let chrome = fx.viewmodel_mat_for(ViewmodelMaterialTone::Chrome, kind, materials);
     // Rubberised grip with a faint sheen.
-    let grip = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.05, 0.06, 0.08),
-        perceptual_roughness: 0.85,
-        metallic: 0.1,
-        ..default()
-    });
-    let accent_color = kind.color().to_linear();
-    let accent = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.04, 0.06, 0.09),
-        emissive: LinearRgba::rgb(
-            accent_color.red * 3.5,
-            accent_color.green * 3.5,
-            accent_color.blue * 3.5,
-        ),
-        ..default()
-    });
+    let grip = fx.viewmodel_mat_for(ViewmodelMaterialTone::Grip, kind, materials);
+    let accent = fx.viewmodel_mat_for(ViewmodelMaterialTone::Accent, kind, materials);
     // Ultra-bright energy core — for plasma cells, cooling vents, bolt
     // loading points. Pure weapon-tint, high HDR value for bloom.
-    let core = materials.add(StandardMaterial {
-        base_color: Color::srgb(
-            (accent_color.red * 0.6).min(1.0),
-            (accent_color.green * 0.6).min(1.0),
-            (accent_color.blue * 0.6).min(1.0),
-        ),
-        emissive: LinearRgba::rgb(
-            accent_color.red * 14.0 + 1.0,
-            accent_color.green * 14.0 + 1.0,
-            accent_color.blue * 14.0 + 1.0,
-        ),
-        unlit: true,
-        ..default()
-    });
-    // Fully transparent scope lenses: just a faint cyan rim halo so
-    // you can see a glint from the side, but looking THROUGH the
-    // scope while ADS you see the world cleanly — every gun's scope
-    // is now see-through.
-    let scope_glass = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.15, 0.95, 1.0, 0.10),
-        emissive: LinearRgba::rgb(0.1, 0.5, 0.8),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        ..default()
-    });
+    let core = fx.viewmodel_mat_for(ViewmodelMaterialTone::Core, kind, materials);
+    // Dark voxel optic: a restrained cyan glint separates glass from
+    // the metal housing without transparent overlap in first person.
+    let optic_glass = fx.viewmodel_mat_for(ViewmodelMaterialTone::OpticGlass, kind, materials);
 
-    let (offset_x, offset_y, offset_z) = match kind {
-        WeaponKind::Pistol => (0.17, -0.14, -0.35),
-        WeaponKind::Sniper => (0.22, -0.16, -0.55),
-        WeaponKind::RocketLauncher | WeaponKind::GrenadeLauncher => (0.24, -0.20, -0.56),
-        WeaponKind::Shotgun => (0.22, -0.18, -0.48),
-        WeaponKind::Minigun => (0.26, -0.22, -0.50),
-        _ => (0.22, -0.18, -0.52),
-    };
-    let rest = Transform::from_xyz(offset_x, offset_y, offset_z)
+    let presentation = kind.viewmodel_tuning();
+    let rest = Transform::from_translation(presentation.rest_translation)
         .with_rotation(Quat::from_rotation_y(-0.08) * Quat::from_rotation_x(0.02));
 
     commands.entity(cam).insert(VisibilityBundle::default());
@@ -1418,7 +1735,7 @@ fn build_viewmodel(
             // Slide + receiver
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.065,
                 0.085,
@@ -1429,7 +1746,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.072,
                 0.028,
@@ -1441,7 +1758,7 @@ fn build_viewmodel(
             // Polished barrel protruding through the slide.
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.016,
                 0.16,
@@ -1452,7 +1769,7 @@ fn build_viewmodel(
             // Grip with checker panel.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.055,
                 0.14,
@@ -1463,7 +1780,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.058,
                 0.015,
@@ -1475,7 +1792,7 @@ fn build_viewmodel(
             // Trigger guard loop (approximated by a thin ring of cuboids).
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.018,
                 0.018,
@@ -1487,7 +1804,7 @@ fn build_viewmodel(
             // Top rail with glowing sight strip + front dot.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.012,
                 0.016,
@@ -1498,7 +1815,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.008,
                 0.003,
@@ -1509,7 +1826,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.006,
                 0.008,
@@ -1519,33 +1836,26 @@ fn build_viewmodel(
                 &core,
             );
             // Side vents / energy cell window glowing.
-            spawn_cuboid(
-                commands,
-                meshes,
-                root,
-                0.004,
-                0.020,
-                0.035,
-                Vec3::new(0.034, 0.005, 0.04),
-                Quat::IDENTITY,
-                &core,
-            );
-            spawn_cuboid(
-                commands,
-                meshes,
-                root,
-                0.004,
-                0.020,
-                0.035,
-                Vec3::new(-0.034, 0.005, 0.04),
-                Quat::IDENTITY,
-                &core,
-            );
+            if detail.includes_decorative_parts() {
+                for x in [-0.034_f32, 0.034] {
+                    spawn_cuboid(
+                        commands,
+                        cube,
+                        root,
+                        0.004,
+                        0.020,
+                        0.035,
+                        Vec3::new(x, 0.005, 0.04),
+                        Quat::IDENTITY,
+                        &core,
+                    );
+                }
+            }
         }
         WeaponKind::AssaultRifle | WeaponKind::Blaster => {
             assemble_rifle(
                 commands,
-                meshes,
+                cube,
                 root,
                 &dark_body,
                 &gunmetal,
@@ -1553,14 +1863,15 @@ fn build_viewmodel(
                 &grip,
                 &accent,
                 &core,
-                &scope_glass,
-                false,
+                &optic_glass,
+                kind,
+                detail,
             );
         }
         WeaponKind::Sniper => {
             assemble_rifle(
                 commands,
-                meshes,
+                cube,
                 root,
                 &dark_body,
                 &gunmetal,
@@ -1568,15 +1879,16 @@ fn build_viewmodel(
                 &grip,
                 &accent,
                 &core,
-                &scope_glass,
-                true,
+                &optic_glass,
+                kind,
+                detail,
             );
         }
         WeaponKind::Shotgun => {
             // Double-barrel receiver with polished twin tubes.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.105,
                 0.065,
@@ -1587,7 +1899,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.024,
                 0.40,
@@ -1597,7 +1909,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.024,
                 0.40,
@@ -1608,7 +1920,7 @@ fn build_viewmodel(
             // Muzzle brake / chokes.
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.030,
                 0.05,
@@ -1618,7 +1930,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.030,
                 0.05,
@@ -1629,7 +1941,7 @@ fn build_viewmodel(
             // Stock with rubberised cheek pad.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.075,
                 0.055,
@@ -1640,7 +1952,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.062,
                 0.020,
@@ -1652,7 +1964,7 @@ fn build_viewmodel(
             // Pump-grip handle.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.055,
                 0.04,
@@ -1664,7 +1976,7 @@ fn build_viewmodel(
             // Sight rail strip.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.003,
                 0.014,
@@ -1675,7 +1987,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.006,
                 0.010,
@@ -1685,23 +1997,25 @@ fn build_viewmodel(
                 &core,
             );
             // Shell ejection port glowing orange.
-            spawn_cuboid(
-                commands,
-                meshes,
-                root,
-                0.015,
-                0.008,
-                0.04,
-                Vec3::new(0.046, 0.018, 0.02),
-                Quat::IDENTITY,
-                &core,
-            );
+            if detail.includes_decorative_parts() {
+                spawn_cuboid(
+                    commands,
+                    cube,
+                    root,
+                    0.015,
+                    0.008,
+                    0.04,
+                    Vec3::new(0.046, 0.018, 0.02),
+                    Quat::IDENTITY,
+                    &core,
+                );
+            }
         }
         WeaponKind::Minigun => {
             // Main housing with side energy cells.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.16,
                 0.13,
@@ -1712,7 +2026,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.006,
                 0.06,
@@ -1723,7 +2037,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.006,
                 0.06,
@@ -1733,12 +2047,17 @@ fn build_viewmodel(
                 &core,
             );
             // Rotary barrel cluster (6 barrels + central shaft).
-            for i in 0..6 {
-                let a = i as f32 * std::f32::consts::TAU / 6.0;
+            let barrel_count = if detail.includes_decorative_parts() {
+                6
+            } else {
+                3
+            };
+            for i in 0..barrel_count {
+                let a = i as f32 * std::f32::consts::TAU / barrel_count as f32;
                 let r = 0.045;
                 spawn_cyl(
                     commands,
-                    meshes,
+                    cube,
                     root,
                     0.013,
                     0.38,
@@ -1749,7 +2068,7 @@ fn build_viewmodel(
             }
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.014,
                 0.36,
@@ -1760,7 +2079,7 @@ fn build_viewmodel(
             // Barrel shroud ring + muzzle comp.
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.062,
                 0.035,
@@ -1770,7 +2089,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.068,
                 0.05,
@@ -1781,7 +2100,7 @@ fn build_viewmodel(
             // Ammo drum underneath.
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.075,
                 0.12,
@@ -1791,7 +2110,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.055,
                 0.035,
@@ -1802,7 +2121,7 @@ fn build_viewmodel(
             // Handles.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.035,
                 0.10,
@@ -1813,7 +2132,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.035,
                 0.10,
@@ -1828,7 +2147,7 @@ fn build_viewmodel(
             // through the centre.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.095,
                 0.075,
@@ -1839,7 +2158,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.024,
                 0.40,
@@ -1850,7 +2169,7 @@ fn build_viewmodel(
             // Glass-windowed plasma chamber (chunky voxel bar of pure energy).
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.028,
                 0.028,
@@ -1862,7 +2181,7 @@ fn build_viewmodel(
             // Glowing energy cell cube near the receiver.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.042,
                 0.042,
@@ -1872,11 +2191,16 @@ fn build_viewmodel(
                 &core,
             );
             // Cooling fins along the top.
-            for i in 0..5 {
+            let fin_count = if detail.includes_decorative_parts() {
+                5
+            } else {
+                2
+            };
+            for i in 0..fin_count {
                 let z = -0.05 - i as f32 * 0.06;
                 spawn_cuboid(
                     commands,
-                    meshes,
+                    cube,
                     root,
                     0.06,
                     0.010,
@@ -1889,7 +2213,7 @@ fn build_viewmodel(
             // Side accent strips.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.005,
                 0.022,
@@ -1900,7 +2224,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.005,
                 0.022,
@@ -1912,7 +2236,7 @@ fn build_viewmodel(
             // Muzzle emitter.
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.032,
                 0.04,
@@ -1923,7 +2247,7 @@ fn build_viewmodel(
             // Pistol grip + stock.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.045,
                 0.11,
@@ -1934,7 +2258,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.055,
                 0.042,
@@ -1948,7 +2272,7 @@ fn build_viewmodel(
             // Big tube with polished launcher rim.
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.060,
                 0.76,
@@ -1958,7 +2282,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.078,
                 0.10,
@@ -1969,7 +2293,7 @@ fn build_viewmodel(
             // Warhead peeking from the front of the tube.
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.045,
                 0.15,
@@ -1979,7 +2303,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.022,
                 0.04,
@@ -1990,7 +2314,7 @@ fn build_viewmodel(
             // Top handle/scope rail.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.024,
                 0.03,
@@ -2001,7 +2325,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.018,
                 0.09,
@@ -2009,20 +2333,20 @@ fn build_viewmodel(
                 Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
                 &dark_body,
             );
-            spawn_cyl(
-                commands,
-                meshes,
-                root,
-                0.015,
-                0.012,
-                Vec3::new(0.0, 0.110, -0.31),
-                Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                &scope_glass,
-            );
+            if detail.includes_decorative_parts() {
+                spawn_optic_lens(
+                    commands,
+                    cube,
+                    root,
+                    0.015,
+                    Vec3::new(0.0, 0.110, -0.31),
+                    &optic_glass,
+                );
+            }
             // Shoulder cradle underneath.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.055,
                 0.06,
@@ -2034,7 +2358,7 @@ fn build_viewmodel(
             // Side fins (vents).
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.005,
                 0.050,
@@ -2045,7 +2369,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.005,
                 0.050,
@@ -2058,7 +2382,7 @@ fn build_viewmodel(
         WeaponKind::GrenadeLauncher => {
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.105,
                 0.085,
@@ -2069,7 +2393,7 @@ fn build_viewmodel(
             );
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.047,
                 0.34,
@@ -2080,7 +2404,7 @@ fn build_viewmodel(
             // Revolver drum with 6 chambers (glowing).
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.072,
                 0.090,
@@ -2088,12 +2412,17 @@ fn build_viewmodel(
                 Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
                 &dark_body,
             );
-            for i in 0..6 {
-                let a = i as f32 * std::f32::consts::TAU / 6.0;
+            let chamber_count = if detail.includes_decorative_parts() {
+                6
+            } else {
+                3
+            };
+            for i in 0..chamber_count {
+                let a = i as f32 * std::f32::consts::TAU / chamber_count as f32;
                 let r = 0.045;
                 spawn_cyl(
                     commands,
-                    meshes,
+                    cube,
                     root,
                     0.017,
                     0.094,
@@ -2105,7 +2434,7 @@ fn build_viewmodel(
             // Muzzle flash-hider.
             spawn_cyl(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.055,
                 0.035,
@@ -2116,7 +2445,7 @@ fn build_viewmodel(
             // Grip + stock.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.05,
                 0.12,
@@ -2127,7 +2456,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.058,
                 0.045,
@@ -2139,7 +2468,7 @@ fn build_viewmodel(
             // Top rail with sight.
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.016,
                 0.018,
@@ -2150,7 +2479,7 @@ fn build_viewmodel(
             );
             spawn_cuboid(
                 commands,
-                meshes,
+                cube,
                 root,
                 0.008,
                 0.010,
@@ -2166,7 +2495,7 @@ fn build_viewmodel(
 #[allow(clippy::too_many_arguments)]
 fn assemble_rifle(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
+    cube: &Handle<Mesh>,
     root: Entity,
     dark_body: &Handle<StandardMaterial>,
     gunmetal: &Handle<StandardMaterial>,
@@ -2174,17 +2503,25 @@ fn assemble_rifle(
     grip: &Handle<StandardMaterial>,
     accent: &Handle<StandardMaterial>,
     core: &Handle<StandardMaterial>,
-    scope_glass: &Handle<StandardMaterial>,
-    is_sniper: bool,
+    optic_glass: &Handle<StandardMaterial>,
+    kind: WeaponKind,
+    detail: WeaponVisualDetail,
 ) {
-    let barrel_len = if is_sniper { 0.50 } else { 0.34 };
-    let scope_len = if is_sniper { 0.26 } else { 0.17 };
-    let scope_r = if is_sniper { 0.034 } else { 0.028 };
+    let silhouette = kind.rifle_silhouette();
+    let barrel_len = silhouette.barrel_len;
+    let scope_len = silhouette.optic_len;
+    let scope_r = silhouette.optic_radius;
+    let is_sniper = kind == WeaponKind::Sniper;
+    let barrel_material = if kind == WeaponKind::Blaster {
+        accent
+    } else {
+        chrome
+    };
 
     // Receiver + handguard stack.
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.09,
         0.065,
@@ -2195,7 +2532,7 @@ fn assemble_rifle(
     );
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.11,
         0.042,
@@ -2207,17 +2544,17 @@ fn assemble_rifle(
     // Polished barrel + muzzle compensator.
     spawn_cyl(
         commands,
-        meshes,
+        cube,
         root,
         0.019,
         barrel_len,
         Vec3::new(0.0, 0.006, -0.16 - barrel_len / 2.0),
         Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        chrome,
+        barrel_material,
     );
     spawn_cyl(
         commands,
-        meshes,
+        cube,
         root,
         0.028,
         0.045,
@@ -2226,11 +2563,16 @@ fn assemble_rifle(
         gunmetal,
     );
     // Cooling vents on handguard (stacked fins).
-    for i in 0..4 {
+    let vent_count = if detail.includes_decorative_parts() {
+        4
+    } else {
+        2
+    };
+    for i in 0..vent_count {
         let z = -0.08 - i as f32 * 0.05;
         spawn_cuboid(
             commands,
-            meshes,
+            cube,
             root,
             0.118,
             0.004,
@@ -2243,7 +2585,7 @@ fn assemble_rifle(
     // Pistol grip (angled) + rubberised feel.
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.06,
         0.14,
@@ -2255,7 +2597,7 @@ fn assemble_rifle(
     // Stock.
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.070,
         0.050,
@@ -2266,7 +2608,7 @@ fn assemble_rifle(
     );
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.058,
         0.022,
@@ -2278,7 +2620,7 @@ fn assemble_rifle(
     // Magazine — long angular box under the receiver.
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.050,
         0.10,
@@ -2289,7 +2631,7 @@ fn assemble_rifle(
     );
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.004,
         0.065,
@@ -2301,7 +2643,7 @@ fn assemble_rifle(
     // Top rail.
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.05,
         0.028,
@@ -2313,7 +2655,7 @@ fn assemble_rifle(
     // Scope body: thick tube with front + rear lens caps.
     spawn_cyl(
         commands,
-        meshes,
+        cube,
         root,
         scope_r,
         scope_len,
@@ -2321,53 +2663,43 @@ fn assemble_rifle(
         Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
         dark_body,
     );
-    // Scope collars (two rings to anchor it on the rail).
-    spawn_cyl(
+    // Scope collars are decorative; the scope body remains in Core.
+    if detail.includes_decorative_parts() {
+        for z in [-0.3_f32, 0.3] {
+            spawn_cyl(
+                commands,
+                cube,
+                root,
+                scope_r + 0.008,
+                0.014,
+                Vec3::new(0.0, 0.088, -0.02 + scope_len * z),
+                Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                gunmetal,
+            );
+        }
+    }
+    // Single-cuboid lens caps keep the voxel optic readable and cheap.
+    spawn_optic_lens(
         commands,
-        meshes,
-        root,
-        scope_r + 0.008,
-        0.014,
-        Vec3::new(0.0, 0.088, -0.02 - scope_len * 0.3),
-        Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        gunmetal,
-    );
-    spawn_cyl(
-        commands,
-        meshes,
-        root,
-        scope_r + 0.008,
-        0.014,
-        Vec3::new(0.0, 0.088, -0.02 + scope_len * 0.3),
-        Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        gunmetal,
-    );
-    // Glass lens caps — transparent so ADS keeps the view clear.
-    spawn_cyl(
-        commands,
-        meshes,
+        cube,
         root,
         scope_r - 0.004,
-        0.008,
         Vec3::new(0.0, 0.088, -0.02 - scope_len / 2.0),
-        Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        scope_glass,
+        optic_glass,
     );
-    spawn_cyl(
+    spawn_optic_lens(
         commands,
-        meshes,
+        cube,
         root,
         scope_r - 0.004,
-        0.008,
         Vec3::new(0.0, 0.088, -0.02 + scope_len / 2.0),
-        Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        scope_glass,
+        optic_glass,
     );
     // Sniper extras: bipod + elevation turret knob.
-    if is_sniper {
+    if is_sniper && detail.includes_decorative_parts() {
         spawn_cyl(
             commands,
-            meshes,
+            cube,
             root,
             0.014,
             0.025,
@@ -2377,7 +2709,7 @@ fn assemble_rifle(
         );
         spawn_cyl(
             commands,
-            meshes,
+            cube,
             root,
             0.008,
             0.10,
@@ -2387,7 +2719,7 @@ fn assemble_rifle(
         );
         spawn_cyl(
             commands,
-            meshes,
+            cube,
             root,
             0.008,
             0.10,
@@ -2399,7 +2731,7 @@ fn assemble_rifle(
     // Accent emissive stripe along the side (the signature gun colour).
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.004,
         0.017,
@@ -2408,21 +2740,23 @@ fn assemble_rifle(
         Quat::IDENTITY,
         accent,
     );
-    spawn_cuboid(
-        commands,
-        meshes,
-        root,
-        0.004,
-        0.017,
-        0.28,
-        Vec3::new(-0.047, 0.0, -0.06),
-        Quat::IDENTITY,
-        accent,
-    );
+    if detail.includes_decorative_parts() {
+        spawn_cuboid(
+            commands,
+            cube,
+            root,
+            0.004,
+            0.017,
+            0.28,
+            Vec3::new(-0.047, 0.0, -0.06),
+            Quat::IDENTITY,
+            accent,
+        );
+    }
     // Forward energy cell indicator (small bright tab on top).
     spawn_cuboid(
         commands,
-        meshes,
+        cube,
         root,
         0.010,
         0.012,
@@ -2435,7 +2769,7 @@ fn assemble_rifle(
 
 fn spawn_cuboid(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
+    cube: &Handle<Mesh>,
     parent: Entity,
     sx: f32,
     sy: f32,
@@ -2444,20 +2778,43 @@ fn spawn_cuboid(
     rot: Quat,
     mat: &Handle<StandardMaterial>,
 ) {
-    let mesh = meshes.add(Cuboid::new(sx, sy, sz));
     let tf = Transform {
         translation: pos,
         rotation: rot,
-        scale: Vec3::ONE,
+        scale: Vec3::new(sx, sy, sz),
     };
     commands.entity(parent).with_children(|p| {
         p.spawn(PbrBundle {
-            mesh,
+            mesh: cube.clone(),
             material: mat.clone(),
             transform: tf,
             ..default()
         });
     });
+}
+
+/// One opaque square lens, avoiding duplicate transparent surfaces in
+/// the first-person view while retaining the voxel optic silhouette.
+fn spawn_optic_lens(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    parent: Entity,
+    radius: f32,
+    pos: Vec3,
+    mat: &Handle<StandardMaterial>,
+) {
+    let size = radius * 1.6;
+    spawn_cuboid(
+        commands,
+        cube,
+        parent,
+        size,
+        size,
+        0.006,
+        pos,
+        Quat::IDENTITY,
+        mat,
+    );
 }
 
 /// A "voxel cylinder" — two interleaved square cuboids rotated 45°
@@ -2468,7 +2825,7 @@ fn spawn_cuboid(
 /// around the *local* axis for the second cuboid.
 fn spawn_cyl(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
+    cube: &Handle<Mesh>,
     parent: Entity,
     radius: f32,
     height: f32,
@@ -2478,7 +2835,7 @@ fn spawn_cyl(
 ) {
     // Square cross-section sized so the circumscribed circle matches `radius`.
     let s = radius * 2.0 * 0.78;
-    let cube = meshes.add(Cuboid::new(s, height, s));
+    let scale = Vec3::new(s, height, s);
     commands.entity(parent).with_children(|p| {
         p.spawn(PbrBundle {
             mesh: cube.clone(),
@@ -2486,17 +2843,17 @@ fn spawn_cyl(
             transform: Transform {
                 translation: pos,
                 rotation: rot,
-                scale: Vec3::ONE,
+                scale,
             },
             ..default()
         });
         p.spawn(PbrBundle {
-            mesh: cube,
+            mesh: cube.clone(),
             material: mat.clone(),
             transform: Transform {
                 translation: pos,
                 rotation: rot * Quat::from_rotation_y(std::f32::consts::FRAC_PI_4),
-                scale: Vec3::ONE,
+                scale,
             },
             ..default()
         });
@@ -2516,8 +2873,8 @@ fn fire_weapon(
     world: Res<VoxelWorld>,
     scope: Res<ScopeState>,
     settings: Res<WorldSettings>,
-    mut player_q: Query<(&GlobalTransform, &mut Player)>,
-    mut weapon_q: Query<(&mut Weapon, &GlobalTransform)>,
+    mut player_q: Query<(&Transform, &mut Player)>,
+    mut weapon_q: Query<(&mut Weapon, &Transform)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -2529,7 +2886,7 @@ fn fire_weapon(
         .get_single()
         .map(crate::mode::cursor_is_captured)
         .unwrap_or(false);
-    let Ok((mut weapon, weapon_gtf)) = weapon_q.get_single_mut() else {
+    let Ok((mut weapon, weapon_tf)) = weapon_q.get_single_mut() else {
         return;
     };
     let dt = controls.time.delta_seconds();
@@ -2586,11 +2943,13 @@ fn fire_weapon(
     }
     // Spend a round.
     weapon.mag = weapon.mag.saturating_sub(1);
-    let Ok((player_gtf, mut player)) = player_q.get_single_mut() else {
+    let Ok((player_tf, mut player)) = player_q.get_single_mut() else {
         return;
     };
     let kind = weapon.kind;
+    let presentation = kind.viewmodel_tuning();
     weapon.cooldown = kind.cooldown();
+    let fx_scale = controls.budget.weapon_fx_scale.clamp(0.0, 1.0);
 
     // --- FUN JUICE ------------------------------------------------------
     // Each gun shakes the camera in proportion to its punch. The exact
@@ -2598,48 +2957,45 @@ fn fire_weapon(
     // stay in one place.
     shake.add(kind.fire_shake());
     stats.shots_fired = stats.shots_fired.saturating_add(1);
+    let shot_number = stats.shots_fired;
     weapon.recoil_t = kind.recoil_time();
     player.fov_bonus += kind.fov_kick();
     player.pitch = (player.pitch + kind.pitch_kick()).clamp(-1.54, 1.54);
 
-    let (_, wrot, wpos) = weapon_gtf.to_scale_rotation_translation();
-    let muzzle = wpos + wrot * Vec3::new(0.0, 0.0, -0.55);
+    let muzzle = weapon_muzzle_world(player_tf, weapon_tf, presentation.muzzle_offset);
 
     // Muzzle point-light only (no sphere mesh — the laser bolt itself
     // carries the visible flash, and a world-space sphere in front of
     // the camera turned into an ugly persistent yellow ball during
     // full-auto fire).
-    let accent_lin = kind.color().to_linear();
-    let light_intensity = kind.muzzle_light_intensity();
-    commands.spawn((
-        PointLightBundle {
-            point_light: PointLight {
-                color: Color::srgb(
-                    1.0,
-                    0.85 + accent_lin.green * 0.1,
-                    0.45 + accent_lin.blue * 0.35,
-                ),
-                intensity: light_intensity,
-                range: 18.0,
-                shadows_enabled: false,
+    if should_spawn_muzzle_light(kind, fx_scale, shot_number) {
+        let light_intensity = kind.muzzle_light_intensity() * fx_scale;
+        commands.spawn((
+            PointLightBundle {
+                point_light: PointLight {
+                    color: kind.color(),
+                    intensity: light_intensity,
+                    range: presentation.muzzle_light_range * fx_scale.clamp(0.55, 1.0),
+                    shadows_enabled: false,
+                    ..default()
+                },
+                transform: Transform::from_translation(muzzle),
                 ..default()
             },
-            transform: Transform::from_translation(muzzle),
-            ..default()
-        },
-        MuzzleFlashLight {
-            life: 0.10,
-            max_life: 0.10,
-            base_intensity: light_intensity,
-        },
-        Name::new("MuzzleFlashLight"),
-    ));
+            MuzzleFlashLight {
+                life: presentation.muzzle_light_life,
+                max_life: presentation.muzzle_light_life,
+                base_intensity: light_intensity,
+            },
+            Name::new("MuzzleFlashLight"),
+        ));
+    }
 
     let mut rng = ChaCha8Rng::seed_from_u64(
         (controls.time.elapsed_seconds_wrapped() * 100_000.0) as u64 ^ 0xFACE_FEED,
     );
 
-    let forward = player_gtf.forward();
+    let forward = player_tf.forward();
     let base_dir = Vec3::new(forward.x, forward.y, forward.z).normalize_or_zero();
     // Aiming down sight tightens the shot pattern dramatically —
     // scoped full-auto still drifts a little so it doesn't feel
@@ -2647,55 +3003,55 @@ fn fire_weapon(
     let spread_scale = 1.0 - 0.9 * scope.progress.clamp(0.0, 1.0);
     let effective_spread = kind.spread() * spread_scale;
 
-    for _ in 0..kind.pellets() {
-        let dir = if effective_spread > 0.0 {
+    for pellet_index in 0..kind.pellets() {
+        let camera_dir = if effective_spread > 0.0 {
             random_cone_dir(base_dir, effective_spread, &mut rng)
         } else {
             base_dir
         };
 
-        // Infinite range: every weapon carries across the entire
-        // loaded world. The DDA still bounds its iteration count for
-        // safety, and a 10_000-block cap is effectively infinite at
-        // voxel scale.
-        let max_range = 10_000.0_f32;
-        let hit = dda_voxel(&world, muzzle, dir, max_range);
-        let (impact_pos, hit_block, travel_dist) = match hit {
-            Some((hx, hy, hz)) => {
-                let p = Vec3::new(hx as f32 + 0.5, hy as f32 + 0.5, hz as f32 + 0.5);
-                let d = (p - muzzle).length().max(0.5);
-                (p, Some((hx, hy, hz)), d)
-            }
-            None => (muzzle + dir * max_range, None, max_range),
-        };
-
-        // Short muzzle-flash tracer: a very short glowing segment
-        // that pops out of the barrel and fades fast. The LONG beam
-        // that used to stretch to the impact is gone — we now spawn
-        // a travelling projectile instead so the player can actually
-        // see the bullet in flight.
-        let flash_end = muzzle + dir * kind.tracer_fx().length;
-        spawn_tracer(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut fx,
-            kind,
+        // The camera ray is authoritative because the crosshair is centred on
+        // it. The visual projectile then converges from the offset muzzle to
+        // that target. A second DDA from the muzzle prevents firing through
+        // close cover while preserving pixel-precise aim during Q/E rolls.
+        let shot = solve_shot_path(
+            &world,
+            player_tf.translation,
+            camera_dir,
             muzzle,
-            flash_end,
+            WEAPON_MAX_RANGE,
         );
 
+        // One short signature per trigger pull is enough to sell the muzzle.
+        // Pellet weapons still launch every projectile without stacked additive
+        // geometry at nearly identical positions.
+        if pellet_index == 0 && fx_scale > 0.10 {
+            let flash_end = muzzle + shot.direction * kind.tracer_fx().length;
+            spawn_tracer(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut fx,
+                kind,
+                muzzle,
+                flash_end,
+            );
+        }
+
+        // The travelling projectile carries this pellet's direction and hit.
         spawn_projectile(
             &mut commands,
             &mut meshes,
             &mut materials,
             &mut fx,
             muzzle,
-            dir,
-            travel_dist,
-            impact_pos,
-            hit_block,
+            shot.direction,
+            shot.travel_dist,
+            shot.impact_pos,
+            shot.hit_block,
             kind,
+            fx_scale,
+            pellet_index == 0 && should_spawn_projectile_light(kind, fx_scale, shot_number),
         );
     }
     // One thermal tick per trigger pull (not per pellet) — matches "laser drill" HUD.
@@ -2729,7 +3085,6 @@ fn random_cone_dir(base: Vec3, half_angle: f32, rng: &mut ChaCha8Rng) -> Vec3 {
 
 fn break_blocks(
     world: &mut VoxelWorld,
-    streamer: &mut ChunkStreamer,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -2743,10 +3098,26 @@ fn break_blocks(
     fx_scale: f32,
     stats: &mut DestructionStats,
 ) -> u32 {
-    break_blocks_inner(
-        world, streamer, commands, meshes, materials, fx, cx, cy, cz, radius, kind, rng, 0,
-        fx_scale, stats,
-    )
+    let mut edit_batch = WorldEditBatch::default();
+    let broken = break_blocks_inner(
+        world,
+        &mut edit_batch,
+        commands,
+        meshes,
+        materials,
+        fx,
+        cx,
+        cy,
+        cz,
+        radius,
+        kind,
+        rng,
+        0,
+        fx_scale,
+        stats,
+    );
+    world.finish_edit_batch(edit_batch);
+    broken
 }
 
 /// Internal break_blocks with a chain-depth guard — emissive/crystal
@@ -2754,7 +3125,7 @@ fn break_blocks(
 #[allow(clippy::too_many_arguments)]
 fn break_blocks_inner(
     world: &mut VoxelWorld,
-    streamer: &mut ChunkStreamer,
+    edit_batch: &mut WorldEditBatch,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -2777,14 +3148,11 @@ fn break_blocks_inner(
     let blast_center = Vec3::new(cx as f32 + 0.5, cy as f32 + 0.5, cz as f32 + 0.5);
     let blast_radius = radius.max(1) as f32 + 0.5;
     let mut broken = 0u32;
-    let debris_cap = 40;
+    let debris_cap = debris_spawn_cap(fx_scale);
     // Secondary blast locations — emissive ("crystal"/lava) voxels that
     // get caught in this explosion detonate after the main sphere
     // finishes clearing, so their shockwave propagates outward.
     let mut chain_sites: Vec<(i32, i32, i32)> = Vec::new();
-    // Track which chunks we've already enqueued as dirty so we don't
-    // spam the queue with duplicates for a single blast.
-    let mut touched: std::collections::HashSet<ChunkPos> = std::collections::HashSet::new();
     for dy in -radius..=radius {
         for dz in -radius..=radius {
             for dx in -radius..=radius {
@@ -2809,68 +3177,32 @@ fn break_blocks_inner(
                 {
                     chain_sites.push((bx, by, bz));
                 }
-                let (cp, lx, ly, lz) = crate::chunk::world_to_chunk(bx, by, bz);
-                let edge_x = lx == 0 || lx == crate::chunk::CHUNK_SIZE - 1;
-                let edge_y = ly == 0 || ly == crate::chunk::CHUNK_SIZE - 1;
-                let edge_z = lz == 0 || lz == crate::chunk::CHUNK_SIZE - 1;
-                if let Some(chunk) = world.chunks.get_mut(&cp) {
-                    let units = ore_units_for_mined_voxel(v);
-                    if units > 0 {
-                        match v {
-                            VOXEL_LUMINITE => {
-                                stats.luminite_units =
-                                    stats.luminite_units.saturating_add(u64::from(units));
-                            }
-                            VOXEL_MAGNETITE => {
-                                stats.magnetite_units =
-                                    stats.magnetite_units.saturating_add(u64::from(units));
-                            }
-                            VOXEL_IRIDIUM => {
-                                stats.iridium_units =
-                                    stats.iridium_units.saturating_add(u64::from(units));
-                            }
-                            _ => {}
+                if world
+                    .edit_set_voxel_batched(bx, by, bz, AIR, edit_batch)
+                    .is_none()
+                {
+                    continue;
+                }
+                let units = ore_units_for_mined_voxel(v);
+                if units > 0 {
+                    match v {
+                        VOXEL_LUMINITE => {
+                            stats.luminite_units =
+                                stats.luminite_units.saturating_add(u64::from(units));
                         }
-                    }
-                    chunk.set(lx, ly, lz, AIR);
-                }
-                // Queue this chunk (and any neighbours whose face this
-                // block touched) for remeshing.
-                if touched.insert(cp) {
-                    streamer.dirty_queue.insert(cp);
-                }
-                if edge_x {
-                    let nx = if lx == 0 { cp.x - 1 } else { cp.x + 1 };
-                    let n = ChunkPos::new(nx, cp.y, cp.z);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
+                        VOXEL_MAGNETITE => {
+                            stats.magnetite_units =
+                                stats.magnetite_units.saturating_add(u64::from(units));
+                        }
+                        VOXEL_IRIDIUM => {
+                            stats.iridium_units =
+                                stats.iridium_units.saturating_add(u64::from(units));
+                        }
+                        _ => {}
                     }
                 }
-                if edge_y {
-                    let ny = if ly == 0 { cp.y - 1 } else { cp.y + 1 };
-                    let n = ChunkPos::new(cp.x, ny, cp.z);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
-                    }
-                }
-                if edge_z {
-                    let nz = if lz == 0 { cp.z - 1 } else { cp.z + 1 };
-                    let n = ChunkPos::new(cp.x, cp.y, nz);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
-                    }
-                }
-                broken += 1;
-                if broken < debris_cap {
+                broken = broken.saturating_add(1);
+                if broken <= debris_cap {
                     spawn_debris(
                         commands,
                         meshes,
@@ -2994,11 +3326,7 @@ fn break_blocks_inner(
         }
     }
     // Every solid voxel NOT marked supported falls.
-    let falling_cap: u32 = match kind {
-        WeaponKind::RocketLauncher | WeaponKind::GrenadeLauncher => 768,
-        WeaponKind::PlasmaRifle | WeaponKind::Blaster => 512,
-        _ => 256,
-    };
+    let falling_cap = falling_block_spawn_cap(kind, fx_scale);
     let mut spawned_falling: u32 = 0;
     for by in y0..=y1 {
         for bz in z0..=z1 {
@@ -3014,62 +3342,28 @@ fn break_blocks_inner(
                 if !voxel_is_solid(v) {
                     continue;
                 }
-                let (cp, lx, ly, lz) = crate::chunk::world_to_chunk(bx, by, bz);
-                let edge_x = lx == 0 || lx == crate::chunk::CHUNK_SIZE - 1;
-                let edge_y = ly == 0 || ly == crate::chunk::CHUNK_SIZE - 1;
-                let edge_z = lz == 0 || lz == crate::chunk::CHUNK_SIZE - 1;
-                if let Some(chunk) = world.chunks.get_mut(&cp) {
-                    let units = ore_units_for_mined_voxel(v);
-                    if units > 0 {
-                        match v {
-                            VOXEL_LUMINITE => {
-                                stats.luminite_units =
-                                    stats.luminite_units.saturating_add(u64::from(units));
-                            }
-                            VOXEL_MAGNETITE => {
-                                stats.magnetite_units =
-                                    stats.magnetite_units.saturating_add(u64::from(units));
-                            }
-                            VOXEL_IRIDIUM => {
-                                stats.iridium_units =
-                                    stats.iridium_units.saturating_add(u64::from(units));
-                            }
-                            _ => {}
+                if world
+                    .edit_set_voxel_batched(bx, by, bz, AIR, edit_batch)
+                    .is_none()
+                {
+                    continue;
+                }
+                let units = ore_units_for_mined_voxel(v);
+                if units > 0 {
+                    match v {
+                        VOXEL_LUMINITE => {
+                            stats.luminite_units =
+                                stats.luminite_units.saturating_add(u64::from(units));
                         }
-                    }
-                    chunk.set(lx, ly, lz, AIR);
-                }
-                if touched.insert(cp) {
-                    streamer.dirty_queue.insert(cp);
-                }
-                if edge_x {
-                    let nx_c = if lx == 0 { cp.x - 1 } else { cp.x + 1 };
-                    let n = ChunkPos::new(nx_c, cp.y, cp.z);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
-                    }
-                }
-                if edge_y {
-                    let ny_c = if ly == 0 { cp.y - 1 } else { cp.y + 1 };
-                    let n = ChunkPos::new(cp.x, ny_c, cp.z);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
-                    }
-                }
-                if edge_z {
-                    let nz_c = if lz == 0 { cp.z - 1 } else { cp.z + 1 };
-                    let n = ChunkPos::new(cp.x, cp.y, nz_c);
-                    if let Some(c) = world.chunks.get_mut(&n) {
-                        c.dirty = true;
-                    }
-                    if touched.insert(n) {
-                        streamer.dirty_queue.insert(n);
+                        VOXEL_MAGNETITE => {
+                            stats.magnetite_units =
+                                stats.magnetite_units.saturating_add(u64::from(units));
+                        }
+                        VOXEL_IRIDIUM => {
+                            stats.iridium_units =
+                                stats.iridium_units.saturating_add(u64::from(units));
+                        }
+                        _ => {}
                     }
                 }
                 spawn_falling_block(
@@ -3088,8 +3382,6 @@ fn break_blocks_inner(
             }
         }
     }
-    let _ = CHUNK_SIZE_I; // keep import alive if unused elsewhere
-
     // --- CHAIN REACTION -------------------------------------------------
     // Detonate every emissive voxel caught in this blast with a small
     // secondary explosion. Depth is capped so a crystal-rich cave
@@ -3120,7 +3412,7 @@ fn break_blocks_inner(
             );
             broken = broken.saturating_add(break_blocks_inner(
                 world,
-                streamer,
+                edit_batch,
                 commands,
                 meshes,
                 materials,
@@ -3339,9 +3631,10 @@ fn spawn_projectile(
     impact_pos: Vec3,
     hit_block: Option<(i32, i32, i32)>,
     kind: WeaponKind,
+    fx_scale: f32,
+    spawn_light: bool,
 ) {
     let speed = kind.projectile_speed();
-    let color = kind.color();
     let is_explosive = matches!(
         kind,
         WeaponKind::RocketLauncher | WeaponKind::GrenadeLauncher
@@ -3354,7 +3647,6 @@ fn spawn_projectile(
     let halo_mat = fx.halo_mat_for(kind, materials);
     let core_mesh = fx.core_mesh_for(kind, meshes);
     let core_mat = fx.core_mat_for(kind, materials);
-    let lin = color.to_linear();
     // Orientation: Cuboid's long axis is +Z (we made z = bolt_len).
     // Rotate Z onto ndir (instead of Y onto ndir).
     let rot = Quat::from_rotation_arc(Vec3::Z, ndir);
@@ -3363,10 +3655,17 @@ fn spawn_projectile(
     } else {
         "LaserBolt"
     };
+    let remaining = (travel_dist - 0.6).max(0.0);
+    let visual_layers = projectile_visual_layer_count(fx_scale);
+    let root_mat = if visual_layers == 1 {
+        core_mat.clone()
+    } else {
+        halo_mat
+    };
     let mut proj = commands.spawn((
         PbrBundle {
             mesh: halo_mesh.clone(),
-            material: halo_mat,
+            material: root_mat,
             transform: Transform {
                 translation: spawn_pos,
                 rotation: rot,
@@ -3377,7 +3676,8 @@ fn spawn_projectile(
         Projectile {
             dir: ndir,
             speed,
-            remaining: (travel_dist - 0.6).max(0.0),
+            life: projectile_lifetime_secs(remaining, speed),
+            remaining,
             kind,
             hit_block,
             impact_pos,
@@ -3396,38 +3696,42 @@ fn spawn_projectile(
     };
     proj.with_children(|p| {
         // Second halo rotated 45° around Z for octagonal silhouette.
-        p.spawn(PbrBundle {
-            mesh: halo_mesh,
-            material: core_mat.clone(),
-            transform: Transform {
-                rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+        if visual_layers >= 3 {
+            p.spawn(PbrBundle {
+                mesh: halo_mesh,
+                material: core_mat.clone(),
+                transform: Transform {
+                    rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
+                    ..default()
+                },
                 ..default()
-            },
-            ..default()
-        });
+            });
+        }
         // Inner white-hot pill.
-        p.spawn(PbrBundle {
-            mesh: core_mesh,
-            material: core_mat,
-            transform: Transform::default(),
-            ..default()
-        });
-        // Travelling point light — paints walls as the bolt flies past.
-        p.spawn(PointLightBundle {
-            point_light: PointLight {
-                color: Color::srgb(
-                    (0.35 + lin.red * 0.65).min(1.0),
-                    (0.35 + lin.green * 0.65).min(1.0),
-                    (0.35 + lin.blue * 0.65).min(1.0),
-                ),
-                intensity: if is_explosive { 900_000.0 } else { 400_000.0 },
-                range: if is_explosive { 22.0 } else { 16.0 },
-                shadows_enabled: false,
+        if visual_layers >= 2 {
+            p.spawn(PbrBundle {
+                mesh: core_mesh,
+                material: core_mat,
+                transform: Transform::default(),
                 ..default()
-            },
-            transform: Transform::default(),
-            ..default()
-        });
+            });
+        }
+        // Keep the wall-lighting pass for signature shots, but cadence
+        // it by runtime tier so automatic fire does not create one live
+        // dynamic light per projectile.
+        if spawn_light {
+            p.spawn(PointLightBundle {
+                point_light: PointLight {
+                    color: kind.color(),
+                    intensity: if is_explosive { 900_000.0 } else { 400_000.0 },
+                    range: if is_explosive { 22.0 } else { 16.0 },
+                    shadows_enabled: false,
+                    ..default()
+                },
+                transform: Transform::default(),
+                ..default()
+            });
+        }
         // Explosive warhead: chunky glowing cube at the tip.
         if let (Some(orb_mesh), Some(orb_mat)) = (warhead_mesh, warhead_mat) {
             // Tip of the bolt in local space (+Z half-length).
@@ -3498,16 +3802,11 @@ fn spawn_impact_puff(
         ));
     }
     if profile.light_intensity > 0.0 && fx_scale > 0.45 {
-        let lin = kind.color().to_linear();
         let light_life = profile.puff_life.max(profile.halo_life).max(0.07);
         commands.spawn((
             PointLightBundle {
                 point_light: PointLight {
-                    color: Color::srgb(
-                        (0.35 + lin.red * 0.65).min(1.0),
-                        (0.35 + lin.green * 0.65).min(1.0),
-                        (0.35 + lin.blue * 0.65).min(1.0),
-                    ),
+                    color: kind.color(),
                     intensity: profile.light_intensity * fx_scale,
                     range: profile.light_range * fx_scale.clamp(0.55, 1.0),
                     shadows_enabled: false,
@@ -3594,23 +3893,23 @@ fn spawn_explosion(
     // globally; the material has to stay per-instance because
     // `update_shockwaves` mutates emissive/alpha as the ring expands.
     let ring_mesh = fx.shockwave_mesh_shared(meshes);
-    let ring_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(
-            profile.ring_base_rgb.x,
-            profile.ring_base_rgb.y,
-            profile.ring_base_rgb.z,
-            1.0,
-        ),
-        emissive: LinearRgba::rgb(
-            profile.ring_emissive_rgb.x,
-            profile.ring_emissive_rgb.y,
-            profile.ring_emissive_rgb.z,
-        ),
-        unlit: true,
-        alpha_mode: AlphaMode::Add,
-        ..default()
-    });
     if fx_scale > 0.25 {
+        let ring_mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(
+                profile.ring_base_rgb.x,
+                profile.ring_base_rgb.y,
+                profile.ring_base_rgb.z,
+                1.0,
+            ),
+            emissive: LinearRgba::rgb(
+                profile.ring_emissive_rgb.x,
+                profile.ring_emissive_rgb.y,
+                profile.ring_emissive_rgb.z,
+            ),
+            unlit: true,
+            alpha_mode: AlphaMode::Add,
+            ..default()
+        });
         commands.spawn((
             PbrBundle {
                 mesh: ring_mesh,
@@ -3680,24 +3979,10 @@ fn animate_viewmodel(
         // ------------------------------------------------------------
         // Recoil kick (sharp forward+upward punch after a shot).
         // ------------------------------------------------------------
-        let max_t = weapon.kind.recoil_time().max(0.001);
-        let r = (weapon.recoil_t / max_t).clamp(0.0, 1.0);
-        let kick = r * r * (3.0 - 2.0 * r);
-        let kick_z = match weapon.kind {
-            WeaponKind::RocketLauncher | WeaponKind::Sniper | WeaponKind::Shotgun => 0.18,
-            WeaponKind::Minigun => 0.03,
-            _ => 0.08,
-        };
-        let kick_y = match weapon.kind {
-            WeaponKind::RocketLauncher | WeaponKind::Sniper => 0.03,
-            _ => 0.012,
-        };
-        let kick_rot = match weapon.kind {
-            WeaponKind::RocketLauncher | WeaponKind::Sniper => 0.22,
-            _ => 0.12,
-        };
-        let recoil_offset = Vec3::new(0.0, kick_y * kick, kick_z * kick);
-        let recoil_rot = Quat::from_rotation_x(-kick_rot * kick);
+        let presentation = weapon.kind.viewmodel_tuning();
+        let kick = viewmodel_recoil_amount(weapon.recoil_t, weapon.kind.recoil_time());
+        let recoil_offset = presentation.recoil_offset * kick;
+        let recoil_rot = Quat::from_rotation_x(-presentation.recoil_pitch * kick);
 
         // ------------------------------------------------------------
         // ADS pose: centre the gun on the crosshair and pull back so
@@ -3982,7 +4267,6 @@ fn update_projectiles(
     budget: Res<RuntimeBudget>,
     mut commands: Commands,
     mut world: ResMut<VoxelWorld>,
-    mut streamer: ResMut<ChunkStreamer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut fx: ResMut<WeaponFxCache>,
@@ -3996,15 +4280,16 @@ fn update_projectiles(
     let mut rng =
         ChaCha8Rng::seed_from_u64((time.elapsed_seconds_wrapped() * 97_531.0) as u64 ^ 0xBABE_B00B);
     for (e, mut p, mut tf) in q.iter_mut() {
+        p.life -= dt;
         let step = p.speed * dt;
-        if step >= p.remaining {
-            // Arrived. Snap to impact, apply damage, despawn.
+        if step >= p.remaining || p.life <= 0.0 {
+            // Arrived or exceeded the visual safety horizon. A stored hit
+            // still resolves so lifetime culling never drops weapon damage.
             tf.translation = p.impact_pos;
             if let Some((bx, by, bz)) = p.hit_block {
                 let radius = p.kind.blast_radius();
                 let killed = break_blocks(
                     &mut world,
-                    &mut streamer,
                     &mut commands,
                     &mut meshes,
                     &mut materials,
@@ -4183,13 +4468,108 @@ fn update_explosions(
 // DDA voxel raycast (Amanatides-Woo)
 // ---------------------------------------------------------------------
 
-fn dda_voxel(
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VoxelRayHit {
+    block: (i32, i32, i32),
+    distance: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ShotPath {
+    direction: Vec3,
+    impact_pos: Vec3,
+    hit_block: Option<(i32, i32, i32)>,
+    travel_dist: f32,
+}
+
+fn normalized_direction(direction: Vec3, fallback: Vec3) -> Vec3 {
+    let direction = direction.normalize_or_zero();
+    if direction.length_squared() > 0.5 {
+        return direction;
+    }
+
+    let fallback = fallback.normalize_or_zero();
+    if fallback.length_squared() > 0.5 {
+        fallback
+    } else {
+        Vec3::NEG_Z
+    }
+}
+
+fn weapon_muzzle_world(
+    player_transform: &Transform,
+    weapon_transform: &Transform,
+    muzzle_offset: Vec3,
+) -> Vec3 {
+    (player_transform.compute_matrix() * weapon_transform.compute_matrix())
+        .transform_point3(muzzle_offset)
+}
+
+fn converged_muzzle_direction(muzzle: Vec3, target: Vec3, camera_direction: Vec3) -> Vec3 {
+    normalized_direction(target - muzzle, camera_direction)
+}
+
+fn voxel_center(block: (i32, i32, i32)) -> Vec3 {
+    Vec3::new(
+        block.0 as f32 + 0.5,
+        block.1 as f32 + 0.5,
+        block.2 as f32 + 0.5,
+    )
+}
+
+fn solve_shot_path(
+    world: &VoxelWorld,
+    camera_origin: Vec3,
+    camera_direction: Vec3,
+    muzzle: Vec3,
+    max_range: f32,
+) -> ShotPath {
+    let range = if max_range.is_finite() {
+        max_range.max(0.5)
+    } else {
+        WEAPON_MAX_RANGE
+    };
+    let camera_direction = normalized_direction(camera_direction, Vec3::NEG_Z);
+    let camera_hit = dda_voxel_hit(world, camera_origin, camera_direction, range);
+    let intended_target = camera_hit
+        .map(|hit| voxel_center(hit.block))
+        .unwrap_or(camera_origin + camera_direction * range);
+    let direction = converged_muzzle_direction(muzzle, intended_target, camera_direction);
+    let intended_distance = (intended_target - muzzle).length().max(0.05);
+
+    // Recast from the physical muzzle toward the camera-selected target.
+    // This catches nearby cover and prevents a viewmodel offset from becoming
+    // an accidental wall-penetration exploit.
+    if let Some(hit) = dda_voxel_hit(
+        world,
+        muzzle,
+        direction,
+        intended_distance + MUZZLE_RAY_EPSILON,
+    ) {
+        return ShotPath {
+            direction,
+            impact_pos: muzzle + direction * hit.distance,
+            hit_block: Some(hit.block),
+            travel_dist: hit.distance.max(0.05),
+        };
+    }
+
+    ShotPath {
+        direction,
+        impact_pos: intended_target,
+        hit_block: camera_hit.map(|hit| hit.block),
+        travel_dist: intended_distance,
+    }
+}
+
+fn dda_voxel_hit(
     world: &VoxelWorld,
     origin: Vec3,
     dir: Vec3,
     max_dist: f32,
-) -> Option<(i32, i32, i32)> {
-    if dir.length_squared() < 1e-6 {
+) -> Option<VoxelRayHit> {
+    let dir = dir.normalize_or_zero();
+    if dir.length_squared() < 1e-6 || !origin.is_finite() || !max_dist.is_finite() {
         return None;
     }
     let mut x = origin.x.floor() as i32;
@@ -4273,7 +4653,10 @@ fn dda_voxel(
             None => AIR,
         };
         if voxel_is_weapon_target(v) {
-            return Some((x, y, z));
+            return Some(VoxelRayHit {
+                block: (x, y, z),
+                distance: t,
+            });
         }
         steps += 1;
     }
@@ -4346,6 +4729,7 @@ fn update_shockwaves(
     for (e, mut sw, mut tf, mat_h) in q.iter_mut() {
         sw.life -= dt;
         if sw.life <= 0.0 {
+            mats.remove(mat_h.id());
             despawn_recursive_if_exists(&mut commands, e);
             continue;
         }
@@ -4466,4 +4850,220 @@ fn check_bounce_pad(world: Res<VoxelWorld>, mut player_q: Query<(&Transform, &mu
     // BOING! Scaled launch with a tiny bit of horizontal preserved.
     player.velocity.y = 22.0;
     player.on_ground = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projectile_lifetime_tracks_normal_travel_and_caps_long_shots() {
+        let normal = projectile_lifetime_secs(90.0, 90.0);
+        assert!((normal - 1.25).abs() < f32::EPSILON);
+        assert_eq!(
+            projectile_lifetime_secs(10_000.0, 45.0),
+            MAX_PROJECTILE_LIFETIME_SECS
+        );
+        assert_eq!(
+            projectile_lifetime_secs(-10.0, 90.0),
+            PROJECTILE_ARRIVAL_GRACE_SECS
+        );
+    }
+
+    #[test]
+    fn projectile_lifetime_fails_bounded_for_invalid_inputs() {
+        for (remaining, speed) in [
+            (f32::NAN, 90.0),
+            (90.0, f32::NAN),
+            (90.0, 0.0),
+            (90.0, -1.0),
+        ] {
+            assert_eq!(
+                projectile_lifetime_secs(remaining, speed),
+                MAX_PROJECTILE_LIFETIME_SECS
+            );
+        }
+    }
+
+    #[test]
+    fn off_axis_muzzle_converges_on_the_camera_crosshair() {
+        let muzzle = Vec3::new(0.42, -0.28, -0.75);
+        let target = Vec3::new(0.0, 0.0, -120.0);
+        let direction = converged_muzzle_direction(muzzle, target, Vec3::NEG_Z);
+        let target_t = (target.z - muzzle.z) / direction.z;
+        let crossing = muzzle + direction * target_t;
+
+        assert!((crossing.x - target.x).abs() < 1e-4);
+        assert!((crossing.y - target.y).abs() < 1e-4);
+        assert!((direction.length() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn degenerate_muzzle_target_uses_the_camera_direction() {
+        let muzzle = Vec3::new(2.0, 3.0, 4.0);
+        let camera_direction = Vec3::new(0.2, -0.1, -1.0).normalize();
+        let direction = converged_muzzle_direction(muzzle, muzzle, camera_direction);
+
+        assert!((direction - camera_direction).length() < 1e-6);
+    }
+
+    #[test]
+    fn muzzle_world_transform_inherits_camera_roll_without_lag() {
+        let player = Transform::from_xyz(10.0, 20.0, 30.0).with_rotation(
+            Quat::from_axis_angle(Vec3::Y, 0.6)
+                * Quat::from_axis_angle(Vec3::X, -0.2)
+                * Quat::from_axis_angle(Vec3::Z, 0.8),
+        );
+        let weapon = Transform::from_xyz(0.3, -0.2, -0.5);
+        let muzzle_offset = Vec3::new(0.0, 0.1, -0.4);
+        let actual = weapon_muzzle_world(&player, &weapon, muzzle_offset);
+        let expected =
+            (player.compute_matrix() * weapon.compute_matrix()).transform_point3(muzzle_offset);
+
+        assert!((actual - expected).length() < 1e-6);
+    }
+
+    #[test]
+    fn projectile_lights_preserve_signature_shots_and_thin_automatic_fire() {
+        assert!(should_spawn_projectile_light(
+            WeaponKind::RocketLauncher,
+            0.20,
+            1
+        ));
+        assert!(!should_spawn_projectile_light(
+            WeaponKind::RocketLauncher,
+            0.19,
+            1
+        ));
+        assert!(should_spawn_projectile_light(
+            WeaponKind::PlasmaRifle,
+            0.35,
+            2
+        ));
+        assert!(!should_spawn_projectile_light(
+            WeaponKind::PlasmaRifle,
+            0.35,
+            1
+        ));
+        assert!(should_spawn_projectile_light(WeaponKind::Minigun, 1.0, 5));
+        assert!(!should_spawn_projectile_light(WeaponKind::Minigun, 1.0, 4));
+        assert!(!should_spawn_projectile_light(WeaponKind::Minigun, 0.5, 5));
+        assert!(!should_spawn_projectile_light(
+            WeaponKind::PlasmaRifle,
+            f32::NAN,
+            2
+        ));
+    }
+
+    #[test]
+    fn viewmodel_tuning_stays_finite_and_bounded() {
+        for kind in WeaponKind::ALL {
+            let tuning = kind.viewmodel_tuning();
+            assert!(tuning.rest_translation.is_finite(), "{kind:?}");
+            assert!(tuning.muzzle_offset.is_finite(), "{kind:?}");
+            assert!(tuning.recoil_offset.is_finite(), "{kind:?}");
+            assert!(
+                (-0.75..=-0.25).contains(&tuning.muzzle_offset.z),
+                "{kind:?} muzzle {:?}",
+                tuning.muzzle_offset
+            );
+            assert!(tuning.recoil_offset.length() <= 0.20, "{kind:?}");
+            assert!((0.0..=0.24).contains(&tuning.recoil_pitch), "{kind:?}");
+            assert!(
+                (0.04..=0.10).contains(&tuning.muzzle_light_life),
+                "{kind:?}"
+            );
+            assert!(
+                (8.0..=18.0).contains(&tuning.muzzle_light_range),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn muzzle_offsets_follow_barrel_silhouettes() {
+        let muzzle_z = |kind: WeaponKind| kind.viewmodel_tuning().muzzle_offset.z;
+        assert!(muzzle_z(WeaponKind::Pistol) > muzzle_z(WeaponKind::Blaster));
+        assert!(muzzle_z(WeaponKind::Blaster) > muzzle_z(WeaponKind::AssaultRifle));
+        assert!(muzzle_z(WeaponKind::Sniper) < muzzle_z(WeaponKind::AssaultRifle));
+        assert!(muzzle_z(WeaponKind::RocketLauncher) < muzzle_z(WeaponKind::GrenadeLauncher));
+
+        let blaster = WeaponKind::Blaster.rifle_silhouette();
+        let rifle = WeaponKind::AssaultRifle.rifle_silhouette();
+        let sniper = WeaponKind::Sniper.rifle_silhouette();
+        assert!(blaster.barrel_len < rifle.barrel_len);
+        assert!(rifle.barrel_len < sniper.barrel_len);
+        assert!(blaster.optic_len < rifle.optic_len);
+        assert!(rifle.optic_len < sniper.optic_len);
+    }
+
+    #[test]
+    fn viewmodel_recoil_curve_clamps_invalid_and_out_of_range_inputs() {
+        assert_eq!(viewmodel_recoil_amount(0.2, 0.2), 1.0);
+        assert_eq!(viewmodel_recoil_amount(0.1, 0.2), 0.5);
+        assert_eq!(viewmodel_recoil_amount(-1.0, 0.2), 0.0);
+        assert_eq!(viewmodel_recoil_amount(1.0, 0.2), 1.0);
+        assert_eq!(viewmodel_recoil_amount(f32::NAN, 0.2), 0.0);
+        assert_eq!(viewmodel_recoil_amount(0.1, 0.0), 0.0);
+    }
+
+    #[test]
+    fn muzzle_lights_preserve_heavy_shots_and_thin_low_spec_automatic_fire() {
+        assert!(should_spawn_muzzle_light(
+            WeaponKind::RocketLauncher,
+            0.21,
+            1
+        ));
+        assert!(!should_spawn_muzzle_light(
+            WeaponKind::RocketLauncher,
+            0.20,
+            1
+        ));
+
+        assert!(should_spawn_muzzle_light(WeaponKind::Minigun, 1.0, 2));
+        assert!(!should_spawn_muzzle_light(WeaponKind::Minigun, 1.0, 1));
+        assert!(should_spawn_muzzle_light(WeaponKind::Minigun, 0.65, 3));
+        assert!(!should_spawn_muzzle_light(WeaponKind::Minigun, 0.65, 2));
+        assert!(should_spawn_muzzle_light(WeaponKind::AssaultRifle, 0.65, 2));
+        assert!(!should_spawn_muzzle_light(
+            WeaponKind::AssaultRifle,
+            0.65,
+            1
+        ));
+        assert!(should_spawn_muzzle_light(WeaponKind::Pistol, 0.65, 1));
+        assert!(!should_spawn_muzzle_light(WeaponKind::Pistol, f32::NAN, 1));
+    }
+
+    #[test]
+    fn low_spec_viewmodels_and_projectiles_use_bounded_detail_tiers() {
+        assert_eq!(
+            WeaponVisualDetail::for_profile(RuntimeProfile::LowSpec),
+            WeaponVisualDetail::Core
+        );
+        assert_eq!(
+            WeaponVisualDetail::for_profile(RuntimeProfile::Balanced),
+            WeaponVisualDetail::Full
+        );
+        assert_eq!(projectile_visual_layer_count(f32::NAN), 1);
+        assert_eq!(projectile_visual_layer_count(0.34), 1);
+        assert_eq!(projectile_visual_layer_count(0.35), 2);
+        assert_eq!(projectile_visual_layer_count(0.74), 2);
+        assert_eq!(projectile_visual_layer_count(0.75), 3);
+    }
+
+    #[test]
+    fn physical_fx_caps_scale_before_entities_are_spawned() {
+        assert_eq!(debris_spawn_cap(0.10), 0);
+        assert_eq!(debris_spawn_cap(1.0), 40);
+        assert!(debris_spawn_cap(0.65) < debris_spawn_cap(1.0));
+        assert_eq!(debris_spawn_cap(f32::NAN), 0);
+
+        let low_rocket = falling_block_spawn_cap(WeaponKind::RocketLauncher, 0.65);
+        let full_rocket = falling_block_spawn_cap(WeaponKind::RocketLauncher, 1.0);
+        let low_rifle = falling_block_spawn_cap(WeaponKind::AssaultRifle, 0.65);
+        assert!(low_rocket < full_rocket);
+        assert!(low_rocket > low_rifle);
+        assert_eq!(falling_block_spawn_cap(WeaponKind::Pistol, 0.10), 0);
+        assert_eq!(falling_block_spawn_cap(WeaponKind::Pistol, f32::NAN), 0);
+    }
 }

@@ -1,0 +1,219 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">World Look Continuum v1 causal visual contract</title>
+  <desc id="desc">A dark technical diagram showing the target Natural or Astral Look Profile driving material optics, render-class-authoritative and CPU-phased Near and Far water waves, CPU-phased analytic vegetation motion, implemented linear-light atmosphere, and the far horizon. Water custom IDs preserve edit and bucket identity while the canonical single Water material suppresses their base textures. Status labels distinguish implemented source with pending native QA from the future whole-pass runtime gate. All five visual branches converge on matched evidence, with fixed shader, uniform, asset, entity, and rollback budgets.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#061217"/>
+      <stop offset="0.52" stop-color="#0a1b22"/>
+      <stop offset="1" stop-color="#071319"/>
+    </linearGradient>
+    <linearGradient id="profileFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#123a3b"/>
+      <stop offset="1" stop-color="#0b252d"/>
+    </linearGradient>
+    <linearGradient id="evidenceFill" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#102d31"/>
+      <stop offset="0.5" stop-color="#102631"/>
+      <stop offset="1" stop-color="#231c32"/>
+    </linearGradient>
+    <linearGradient id="continuumLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#69e7ca"/>
+      <stop offset="0.5" stop-color="#6fc5f0"/>
+      <stop offset="1" stop-color="#b9a4ff"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#8cb8c6" stroke-opacity="0.045"/>
+    </pattern>
+    <filter id="shadow" x="-15%" y="-20%" width="130%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#69e7ca"/>
+    </marker>
+    <marker id="arrowEvidence" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L11 5.5L0 11Z" fill="#83c9ef"/>
+    </marker>
+    <style>
+      .kicker { font: 700 15px Helvetica, Arial, sans-serif; letter-spacing: 3.2px; fill: #69e7ca; }
+      .heading { font: 700 38px Helvetica, Arial, sans-serif; fill: #eff9fc; }
+      .subhead { font: 400 18px Helvetica, Arial, sans-serif; fill: #9ab8c3; }
+      .cardTitle { font: 700 21px Helvetica, Arial, sans-serif; fill: #eef9fb; }
+      .cardKicker { font: 700 12px Helvetica, Arial, sans-serif; letter-spacing: 2px; }
+      .body { font: 400 15px Helvetica, Arial, sans-serif; fill: #a8c2ca; }
+      .bodyStrong { font: 700 15px Helvetica, Arial, sans-serif; fill: #e5f3f6; }
+      .micro { font: 400 12px Helvetica, Arial, sans-serif; fill: #7898a3; }
+      .mono { font: 400 14px "Courier New", monospace; fill: #d7edf2; }
+      .monoStrong { font: 700 15px "Courier New", monospace; fill: #f0d38a; }
+      .chip { font: 700 12px Helvetica, Arial, sans-serif; letter-spacing: 1px; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" rx="26" fill="url(#background)"/>
+  <rect width="1600" height="900" rx="26" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1598" height="898" rx="25" fill="none" stroke="#385762" stroke-opacity="0.7" stroke-width="2"/>
+
+  <g transform="translate(64 48)">
+    <text class="kicker">WORLD LOOK CONTINUUM V1 · CAUSAL VISUAL CONTRACT</text>
+    <text class="heading" y="49">One profile. Five bounded views. One evidence gate.</text>
+    <text class="subhead" y="88">Contract target across Near and Far · status labels separate source truth from future gates.</text>
+  </g>
+
+  <g transform="translate(1190 36)" filter="url(#shadow)">
+    <rect width="342" height="108" rx="18" fill="#0c2027" stroke="#4a6974"/>
+    <text x="22" y="27" class="cardKicker" fill="#efc77a">RECORDED BASELINE</text>
+    <text x="22" y="58" class="monoStrong">38 / 44</text>
+    <text x="116" y="57" class="bodyStrong">built-ins share one flat PBR profile</text>
+    <text x="22" y="83" class="micro">Water · Lava · 4 foliage materials are the six exceptions.</text>
+  </g>
+
+  <!-- Causal fan-out from the single look profile. -->
+  <g fill="none" stroke="#69e7ca" stroke-width="2.4" stroke-opacity="0.88" marker-end="url(#arrow)">
+    <path d="M368 280H420"/>
+    <path d="M368 246H394V176H945V194"/>
+    <path d="M368 222H382V162H1336V194"/>
+    <path d="M368 500H420"/>
+    <path d="M368 548H396V396H945V414"/>
+  </g>
+
+  <!-- The canonical source. -->
+  <g transform="translate(64 194)" filter="url(#shadow)">
+    <rect width="304" height="442" rx="22" fill="url(#profileFill)" stroke="#69e7ca" stroke-width="2"/>
+    <rect x="20" y="20" width="126" height="26" rx="13" fill="#67e5ca"/>
+    <text x="83" y="38" class="chip" text-anchor="middle" fill="#062018">TARGET PROFILE</text>
+    <text x="22" y="84" class="cardTitle">Look Profile · future</text>
+    <text x="22" y="110" class="body">Not wired in the current source snapshot</text>
+
+    <g transform="translate(22 137)">
+      <rect width="121" height="36" rx="10" fill="#153d35" stroke="#72d99f"/>
+      <circle cx="18" cy="18" r="5" fill="#8beaaf"/>
+      <text x="32" y="23" class="bodyStrong">NATURAL</text>
+      <rect x="137" width="121" height="36" rx="10" fill="#242546" stroke="#a99cf6"/>
+      <circle cx="155" cy="18" r="5" fill="#c4a8ff"/>
+      <text x="169" y="23" class="bodyStrong">ASTRAL</text>
+    </g>
+
+    <g transform="translate(22 199)">
+      <text class="cardKicker" fill="#8fded0">FINITE INPUTS</text>
+      <text y="30" class="body">linear palette + optical family</text>
+      <text y="54" class="body">CPU phase delta + sun elevation</text>
+      <text y="78" class="body">weather strength + wind direction</text>
+      <text y="102" class="body">four stable water-mode records</text>
+      <text y="126" class="body">future cache/version + rollback gate</text>
+    </g>
+
+    <path d="M22 348H282" stroke="#3e6870"/>
+    <g transform="translate(22 370)">
+      <rect width="260" height="48" rx="12" fill="#0a1c22" stroke="#efc77a" stroke-opacity="0.75"/>
+      <text x="130" y="20" class="cardKicker" fill="#efc77a" text-anchor="middle">PRESENTATION ONLY</text>
+      <text x="130" y="38" class="micro" text-anchor="middle">no voxel · collision · save · force authority</text>
+    </g>
+  </g>
+
+  <!-- Five bounded consumers. -->
+  <g transform="translate(420 194)" filter="url(#shadow)">
+    <rect width="330" height="184" rx="18" fill="#0d2329" stroke="#67d9b9"/>
+    <rect width="330" height="5" rx="3" fill="#67d9b9"/>
+    <text x="22" y="35" class="cardKicker" fill="#7fe5c6">01 · MATERIAL · QA PENDING</text>
+    <text x="22" y="68" class="cardTitle">Optical families</text>
+    <text x="22" y="97" class="body">soil · rock · fibre · ice · crystal</text>
+    <text x="22" y="121" class="body">dielectric · metal · emissive casing</text>
+    <rect x="22" y="140" width="286" height="27" rx="8" fill="#102f31"/>
+    <text x="165" y="159" class="mono" text-anchor="middle">Roughness · F0-control · Metallic</text>
+  </g>
+
+  <g transform="translate(780 194)" filter="url(#shadow)">
+    <rect width="330" height="184" rx="18" fill="#0c222d" stroke="#6ebcf0"/>
+    <rect width="330" height="5" rx="3" fill="#6ebcf0"/>
+    <text x="22" y="35" class="cardKicker" fill="#7fc8f5">02 · WATER · QA PENDING</text>
+    <text x="22" y="68" class="cardTitle">Class-routed water optics</text>
+    <text x="22" y="98" class="monoStrong">ω = √(g₀ k) · CPU φ mod 2π</text>
+    <text x="22" y="124" class="mono">F₀ = ((n₁ − n₂)/(n₁ + n₂))²</text>
+    <g transform="translate(22 141)">
+      <rect width="132" height="27" rx="8" fill="#102e3e"/>
+      <text x="66" y="18" class="chip" fill="#9bddff" text-anchor="middle">NEAR 4 · 128 B</text>
+      <rect x="145" width="140" height="27" rx="8" fill="#102e3e"/>
+      <text x="215" y="18" class="chip" fill="#9bddff" text-anchor="middle">FAR 2 · 96 B</text>
+    </g>
+  </g>
+
+  <g transform="translate(1140 194)" filter="url(#shadow)">
+    <rect width="392" height="184" rx="18" fill="#15232b" stroke="#b8a0ff"/>
+    <rect width="392" height="5" rx="3" fill="#b8a0ff"/>
+    <text x="22" y="35" class="cardKicker" fill="#c3b0ff">03 · VEGETATION · QA PENDING</text>
+    <text x="22" y="68" class="cardTitle">Motion and light agree</text>
+    <text x="22" y="97" class="body">per-species CPU phase · 3 Vec4 / 48 B</text>
+    <text x="22" y="121" class="body">analytic derivatives · 5 sin + 5 cos · no renderer time</text>
+    <rect x="22" y="140" width="348" height="27" rx="8" fill="#24213b"/>
+    <text x="196" y="159" class="mono" text-anchor="middle">n′ = normalize(cofactor(J) n) · det &gt; 0.88</text>
+  </g>
+
+  <g transform="translate(420 414)" filter="url(#shadow)">
+    <rect width="330" height="184" rx="18" fill="#10272a" stroke="#b7df79"/>
+    <rect width="330" height="5" rx="3" fill="#b7df79"/>
+    <text x="22" y="35" class="cardKicker" fill="#c8ec92">04 · ATMOSPHERE · QA PENDING</text>
+    <text x="22" y="68" class="cardTitle">Shared value hierarchy</text>
+    <text x="22" y="97" class="body">linear sky · light · fog · profile grade</text>
+    <text x="22" y="121" class="body">Natural + Astral without authority drift</text>
+    <rect x="22" y="140" width="286" height="27" rx="8" fill="#1c3028"/>
+    <text x="165" y="159" class="mono" text-anchor="middle">linear RGB · luminance-relative</text>
+  </g>
+
+  <g transform="translate(780 414)" filter="url(#shadow)">
+    <rect width="330" height="184" rx="18" fill="#10242e" stroke="#77c9e7"/>
+    <rect width="330" height="5" rx="3" fill="#77c9e7"/>
+    <text x="22" y="35" class="cardKicker" fill="#8bd7f2">05 · FAR HORIZON · QA PENDING</text>
+    <text x="22" y="68" class="cardTitle">Controlled information loss</text>
+    <text x="22" y="97" class="body">canonical palette · copied CPU phase</text>
+    <text x="22" y="121" class="body">2 Near modes · full phase copy · wrapped UV</text>
+    <rect x="22" y="140" width="286" height="27" rx="8" fill="#102f3c"/>
+    <text x="165" y="159" class="mono" text-anchor="middle">Near → Play → Horizon</text>
+  </g>
+
+  <g transform="translate(1140 414)" filter="url(#shadow)">
+    <rect width="392" height="184" rx="18" fill="#211d24" stroke="#efc77a"/>
+    <rect width="392" height="5" rx="3" fill="#efc77a"/>
+    <text x="22" y="35" class="cardKicker" fill="#f4d38c">FIXED ENVELOPE</text>
+    <text x="22" y="67" class="bodyStrong">+0 entities · +0 draws · +0 images</text>
+    <text x="22" y="94" class="body">≤ 2 shaders · ≤ 4 steady materials</text>
+    <text x="22" y="118" class="body">416 B current payload · ≤ 512 B contract</text>
+    <text x="22" y="142" class="body">no new mesh, render target, job, or save state</text>
+    <text x="22" y="165" class="micro">Near 128 B · Far 96 B · foliage 4 × 48 B</text>
+  </g>
+
+  <!-- Every visual branch must terminate in evidence. -->
+  <g fill="none" stroke="#83c9ef" stroke-width="2.2" stroke-opacity="0.8" marker-end="url(#arrowEvidence)">
+    <path d="M585 378V396H398V632H520V654"/>
+    <path d="M945 378V396H766V632H800V654"/>
+    <path d="M1336 378V396H1550V632H1420V654"/>
+    <path d="M585 598V654"/>
+    <path d="M945 598V654"/>
+  </g>
+
+  <g transform="translate(420 654)" filter="url(#shadow)">
+    <rect width="1112" height="166" rx="21" fill="url(#evidenceFill)" stroke="url(#continuumLine)" stroke-width="2"/>
+    <rect x="22" y="20" width="122" height="27" rx="13" fill="#72c8ec"/>
+    <text x="83" y="39" class="chip" fill="#071820" text-anchor="middle">EVIDENCE GATE</text>
+    <text x="22" y="82" class="cardTitle">Future paired gate · same binary · same seed · baseline ↔ v1</text>
+    <text x="22" y="112" class="body">Natural + Astral · Near + Play + Horizon · calm + storm · noon + night + fog</text>
+
+    <g transform="translate(22 128)">
+      <circle cx="5" cy="0" r="5" fill="#70e6c8"/>
+      <text x="18" y="5" class="micro">terminal PNG dimensions</text>
+      <circle cx="202" cy="0" r="5" fill="#7bcaf0"/>
+      <text x="215" y="5" class="micro">shader/log truth</text>
+      <circle cx="370" cy="0" r="5" fill="#c0e985"/>
+      <text x="383" y="5" class="micro">asset + entity peaks</text>
+      <circle cx="574" cy="0" r="5" fill="#f0c97e"/>
+      <text x="587" y="5" class="micro">frame-time distribution</text>
+      <circle cx="795" cy="0" r="5" fill="#c0a9ff"/>
+      <text x="808" y="5" class="micro">manual visual disposition</text>
+    </g>
+  </g>
+
+  <g transform="translate(64 848)">
+    <path d="M0 0H1468" stroke="url(#continuumLine)" stroke-opacity="0.55"/>
+    <text y="25" class="micro">Source contract: docs/WORLD_LOOK_CONTINUUM_V1.md</text>
+    <text x="1468" y="25" class="micro" text-anchor="end">Render-only · fixed budget · future reversible gate · no acceptance inferred</text>
+  </g>
+</svg>

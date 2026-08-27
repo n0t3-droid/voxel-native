@@ -13,21 +13,24 @@ use crate::animation::{AnimationStudio, Interp, KeyFrame};
 use crate::blocks::{block_label, block_palette_catalog, BlockPaletteEntry, BlockType};
 use crate::builder::{BuildAction, BuilderClipboard, BuilderHistory, BuilderState};
 use crate::icons::Icon;
-use crate::neurocore::RuntimeProfile;
+use crate::neurocore::{NeuroCore, QualityState, RuntimeProfile};
 use crate::player::Player;
 use crate::settings::{
-    GraphicsMode, HudProfile, TimeMode, WeatherPreset, WorldModeCard, WorldSettings,
-    SAFE_MAX_CHUNKS_PER_FRAME, SAFE_MAX_IN_FLIGHT_MESHES, SAFE_MAX_IN_FLIGHT_TERRAIN,
-    SAFE_MAX_MESHES_PER_FRAME, SAFE_MAX_MESH_APPLIES_PER_FRAME, SAFE_MAX_RENDER_DISTANCE,
-    SAFE_MAX_VERTICAL_CHUNKS, SAFE_MIN_CHUNKS_PER_FRAME, SAFE_MIN_IN_FLIGHT_MESHES,
-    SAFE_MIN_IN_FLIGHT_TERRAIN, SAFE_MIN_MESHES_PER_FRAME, SAFE_MIN_MESH_APPLIES_PER_FRAME,
-    SAFE_MIN_RENDER_DISTANCE, SAFE_MIN_VERTICAL_CHUNKS,
+    ActiveWorld, GraphicsMode, HudProfile, SceneryQuality, TimeMode, WeatherPreset, WorldModeCard,
+    WorldSettings, SAFE_MAX_CHUNKS_PER_FRAME, SAFE_MAX_IN_FLIGHT_MESHES,
+    SAFE_MAX_IN_FLIGHT_TERRAIN, SAFE_MAX_MESHES_PER_FRAME, SAFE_MAX_MESH_APPLIES_PER_FRAME,
+    SAFE_MAX_RENDER_DISTANCE, SAFE_MAX_VERTICAL_CHUNKS, SAFE_MIN_CHUNKS_PER_FRAME,
+    SAFE_MIN_IN_FLIGHT_MESHES, SAFE_MIN_IN_FLIGHT_TERRAIN, SAFE_MIN_MESHES_PER_FRAME,
+    SAFE_MIN_MESH_APPLIES_PER_FRAME, SAFE_MIN_RENDER_DISTANCE, SAFE_MIN_VERTICAL_CHUNKS,
 };
 use crate::textures::{bake_all_block_swatches, BlockSwatch, TEX_DIR};
 use crate::theme::{
-    apply_hacker_theme, draw_banner, draw_status_bar, paint_scanlines, section_box, status_line,
-    term_button, ThemeColor, ThemeStyle, UiDensity, ALERT, AMBER,
+    animate_bool_finite, apply_hacker_theme, draw_banner, draw_status_bar, draw_theme_preview_card,
+    paint_neon_outline, paint_scanlines, section_box, selected_theme_preset,
+    set_motion_preferences, status_line, term_button, MotionRole, ThemeColor, ThemeSettings,
+    ThemeStyle, UiDensity, AMBER, KANSO_VISUALS, THEME_PRESETS,
 };
+use crate::ui_kit::LoadingState;
 use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
 
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
@@ -41,6 +44,7 @@ pub enum EditorTab {
     Textures,
     Builder,
     Animation,
+    Assets,
     City,
     Bots,
     System,
@@ -57,6 +61,7 @@ impl EditorTab {
             EditorTab::Textures => "TEXTUREN",
             EditorTab::Builder => "BAUEN",
             EditorTab::Animation => "ANIM",
+            EditorTab::Assets => "OBJEKTE",
             EditorTab::City => "STADT",
             EditorTab::Bots => "COMP",
             EditorTab::System => "SYSTEM",
@@ -73,12 +78,13 @@ impl EditorTab {
             EditorTab::Textures => Icon::Textures,
             EditorTab::Builder => Icon::Builder,
             EditorTab::Animation => Icon::Animation,
+            EditorTab::Assets => Icon::Cube,
             EditorTab::City => Icon::City,
             EditorTab::Bots => Icon::Wand,
             EditorTab::System => Icon::System,
         }
     }
-    fn all() -> [EditorTab; 11] {
+    fn all() -> [EditorTab; 12] {
         [
             EditorTab::World,
             EditorTab::Graphics,
@@ -88,6 +94,7 @@ impl EditorTab {
             EditorTab::Textures,
             EditorTab::Builder,
             EditorTab::Animation,
+            EditorTab::Assets,
             EditorTab::City,
             EditorTab::Bots,
             EditorTab::System,
@@ -150,6 +157,13 @@ pub struct TextureLibrary {
 
 pub struct EditorPlugin;
 
+#[derive(Resource, Debug, Default)]
+struct AppliedUiStyle {
+    theme: Option<ThemeSettings>,
+    reduced_motion: Option<bool>,
+    low_spec_motion: Option<bool>,
+}
+
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin)
@@ -157,11 +171,12 @@ impl Plugin for EditorPlugin {
             .insert_resource(TextureLibrary::default())
             .insert_resource(SimPause::default())
             .insert_resource(FpsHistory::default())
-            .add_systems(Startup, style_egui)
+            .init_resource::<AppliedUiStyle>()
+            .add_systems(Startup, sync_global_ui_style)
             .add_systems(
                 Update,
                 (
-                    restyle_on_change,
+                    sync_global_ui_style,
                     toggle_editor,
                     toggle_sim_pause,
                     sample_fps_history,
@@ -180,20 +195,51 @@ struct EditorWorldTools<'w> {
     city: ResMut<'w, crate::city::CityState>,
     bots: ResMut<'w, crate::bots::FriendlyWorldBrain>,
     selection: Res<'w, crate::selection::SelectionState>,
+    object_lab: ResMut<'w, crate::object_lab::ObjectLabState>,
 }
 
-/// Apply the hacker terminal theme. Re-runs whenever the user picks a
-/// new colour variant in the SYSTEM tab so the change is instant.
-fn style_egui(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
-    apply_hacker_theme(contexts.ctx_mut(), settings.theme);
+fn effective_low_spec_ui_motion(
+    profile: RuntimeProfile,
+    neurocore_enabled: bool,
+    quality: QualityState,
+) -> bool {
+    profile == RuntimeProfile::LowSpec
+        || (neurocore_enabled
+            && profile == RuntimeProfile::Auto
+            && matches!(quality, QualityState::Critical | QualityState::Throttled))
 }
 
-/// Re-apply theme when the user changes the colour / scanline / beep
-/// settings. Cheap (one-shot Visuals + Style replacement, no per-frame
-/// cost) so we just listen for `WorldSettings` changes.
-fn restyle_on_change(mut contexts: EguiContexts, settings: Res<WorldSettings>) {
-    if settings.is_changed() {
-        apply_hacker_theme(contexts.ctx_mut(), settings.theme);
+/// Keep every egui surface on one motion and theme policy. The cache avoids
+/// rebuilding the complete egui style when unrelated world settings change.
+fn sync_global_ui_style(
+    mut contexts: EguiContexts,
+    settings: Res<WorldSettings>,
+    neurocore: Option<Res<NeuroCore>>,
+    mut applied: ResMut<AppliedUiStyle>,
+) {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    let quality = neurocore
+        .as_deref()
+        .map(|core| core.quality)
+        .unwrap_or(QualityState::Nominal);
+    let low_spec = effective_low_spec_ui_motion(
+        settings.runtime_profile,
+        settings.neurocore_enabled,
+        quality,
+    );
+
+    let motion_changed = applied.reduced_motion != Some(settings.reduce_motion)
+        || applied.low_spec_motion != Some(low_spec);
+    if motion_changed {
+        set_motion_preferences(ctx, settings.reduce_motion, low_spec);
+        applied.reduced_motion = Some(settings.reduce_motion);
+        applied.low_spec_motion = Some(low_spec);
+    }
+    if motion_changed || applied.theme != Some(settings.theme) {
+        apply_hacker_theme(ctx, settings.theme);
+        applied.theme = Some(settings.theme);
     }
 }
 
@@ -260,22 +306,42 @@ fn draw_editor(
     fps_hist: Res<FpsHistory>,
     mut tools: EditorWorldTools,
 ) {
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     handle_editor_keyboard(&tools.keys, &mut state);
 
-    let anim = ctx.animate_bool_with_time(egui::Id::new("editor_open"), state.open, 0.18);
+    let anim = animate_bool_finite(
+        ctx,
+        egui::Id::new("editor_open"),
+        state.open,
+        MotionRole::Panel,
+    );
     if anim <= 0.001 {
         return;
     }
     let eased = 1.0 - (1.0 - anim).powi(3);
 
     let screen_rect = ctx.screen_rect();
-    let panel_w = (screen_rect.width() * 0.60)
-        .clamp(640.0, 860.0)
-        .min(screen_rect.width() - 32.0);
-    let panel_h = (screen_rect.height() * 0.78)
-        .clamp(560.0, 720.0)
-        .min(screen_rect.height() - 42.0);
+    let asset_workbench = state.tab == EditorTab::Assets;
+    let panel_w = if asset_workbench {
+        (screen_rect.width() * 0.88)
+            .clamp(980.0, 1480.0)
+            .min(screen_rect.width() - 32.0)
+    } else {
+        (screen_rect.width() * 0.60)
+            .clamp(640.0, 860.0)
+            .min(screen_rect.width() - 32.0)
+    };
+    let panel_h = if asset_workbench {
+        (screen_rect.height() * 0.86)
+            .clamp(640.0, 920.0)
+            .min(screen_rect.height() - 42.0)
+    } else {
+        (screen_rect.height() * 0.78)
+            .clamp(560.0, 720.0)
+            .min(screen_rect.height() - 42.0)
+    };
     let center = screen_rect.center();
     let target_pos = egui::pos2(
         (screen_rect.right() - panel_w - 24.0).max(screen_rect.left() + 16.0),
@@ -284,7 +350,6 @@ fn draw_editor(
     let slide_x = (1.0 - eased) * 32.0;
     let pos = egui::pos2(target_pos.x + slide_x, target_pos.y);
     let panel_rect = egui::Rect::from_min_size(pos, egui::vec2(panel_w, panel_h));
-    let ui_time = ctx.input(|i| i.time) as f32;
 
     // Keep the game readable behind the editor; the panel is an in-world
     // hologram, not a modal desktop window.
@@ -297,16 +362,13 @@ fn draw_editor(
 
     let mut frame = crate::ui_kit::toolbench_frame(settings.theme);
     frame.fill = settings.theme.panel_fill(0.58 + eased * 0.18);
+    let colors = settings.theme.semantic();
     frame.stroke = egui::Stroke::new(
-        1.2,
-        settings
-            .theme
-            .color
-            .primary()
-            .linear_multiply(0.55 + eased * 0.35),
+        KANSO_VISUALS.outline_width,
+        scale_color_alpha(colors.outline_strong, 0.55 + eased * 0.35),
     );
 
-    draw_editor_hologram_backplate(ctx, panel_rect, settings.theme, ui_time, eased);
+    draw_editor_hologram_backplate(ctx, panel_rect, settings.theme, eased);
 
     let response = egui::Window::new("voxel_native_editor")
         .title_bar(false)
@@ -328,47 +390,52 @@ fn draw_editor(
             ui.add_space(4.0);
             draw_tab_bar(ui, &mut state, theme);
             ui.add_space(10.0);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| match state.tab {
-                    EditorTab::World => {
-                        draw_world_tab(ui, &mut state, &mut settings, &governor, &mut player_q)
-                    }
-                    EditorTab::Graphics => draw_graphics_tab(ui, &mut settings, &fps_hist),
-                    EditorTab::Weather => draw_weather_tab(ui, &mut settings),
-                    EditorTab::Time => draw_time_tab(ui, &mut settings),
-                    EditorTab::Player => draw_player_tab(ui, &mut player_q),
-                    EditorTab::Textures => draw_textures_tab(ui, &mut library),
-                    EditorTab::Builder => draw_builder_tab(
-                        ui,
-                        &mut state,
-                        &mut builder,
-                        &clipboard,
-                        &history,
-                        &mut player_q,
-                    ),
-                    EditorTab::Animation => draw_animation_tab(ui, &mut studio),
-                    EditorTab::City => draw_city_tab(ui, &mut tools.city),
-                    EditorTab::Bots => {
-                        let selected_area = tools.selection.aabb();
-                        crate::bots::draw_bots_editor(
+            if state.tab == EditorTab::Assets {
+                crate::object_lab::draw_object_lab(ui, &mut tools.object_lab, theme);
+            } else {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match state.tab {
+                        EditorTab::World => {
+                            draw_world_tab(ui, &mut state, &mut settings, &governor, &mut player_q)
+                        }
+                        EditorTab::Graphics => draw_graphics_tab(ui, &mut settings, &fps_hist),
+                        EditorTab::Weather => draw_weather_tab(ui, &mut settings),
+                        EditorTab::Time => draw_time_tab(ui, &mut settings),
+                        EditorTab::Player => draw_player_tab(ui, &mut player_q),
+                        EditorTab::Textures => draw_textures_tab(ui, &mut library),
+                        EditorTab::Builder => draw_builder_tab(
                             ui,
-                            &mut tools.bots,
+                            &mut state,
+                            &mut builder,
+                            &clipboard,
+                            &history,
+                            &mut player_q,
+                        ),
+                        EditorTab::Animation => draw_animation_tab(ui, &mut studio),
+                        EditorTab::Assets => unreachable!("asset workbench bypasses outer scroll"),
+                        EditorTab::City => draw_city_tab(ui, &mut tools.city),
+                        EditorTab::Bots => {
+                            let selected_area = tools.selection.aabb();
+                            crate::bots::draw_bots_editor(
+                                ui,
+                                &mut tools.bots,
+                                &mut settings,
+                                selected_area,
+                            )
+                        }
+                        EditorTab::System => draw_system_tab(
+                            ui,
+                            &mut state,
                             &mut settings,
-                            selected_area,
-                        )
-                    }
-                    EditorTab::System => draw_system_tab(
-                        ui,
-                        &mut state,
-                        &mut settings,
-                        &diagnostics,
-                        &world,
-                        &streamer,
-                        &governor,
-                        &mut pause,
-                    ),
-                });
+                            &diagnostics,
+                            &world,
+                            &streamer,
+                            &governor,
+                            &mut pause,
+                        ),
+                    });
+            }
             ui.add_space(6.0);
             // Status bar (terminal-style) just above the action footer.
             let fps = diagnostics
@@ -452,37 +519,61 @@ fn handle_editor_keyboard(keys: &ButtonInput<KeyCode>, state: &mut EditorState) 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EditorBackplateSample {
+    alpha: f32,
+    sweep_phase: f32,
+}
+
+fn sample_editor_backplate(panel_progress: f32) -> EditorBackplateSample {
+    let progress = if panel_progress.is_finite() {
+        panel_progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    EditorBackplateSample {
+        alpha: progress,
+        sweep_phase: egui::lerp(0.28..=0.72, progress),
+    }
+}
+
+fn scale_color_alpha(color: egui::Color32, amount: f32) -> egui::Color32 {
+    let amount = if amount.is_finite() {
+        amount.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let [red, green, blue, alpha] = color.to_srgba_unmultiplied();
+    egui::Color32::from_rgba_unmultiplied(red, green, blue, (alpha as f32 * amount).round() as u8)
+}
+
 fn draw_editor_hologram_backplate(
     ctx: &egui::Context,
     rect: egui::Rect,
     theme: crate::theme::ThemeSettings,
-    time: f32,
-    alpha: f32,
+    panel_progress: f32,
 ) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Middle,
         egui::Id::new("editor_hologram_backplate"),
     ));
-    let primary = theme.color.primary();
-    let dim = theme.color.dim();
-    let a = alpha.clamp(0.0, 1.0);
-    let glow = egui::Color32::from_rgba_unmultiplied(
-        primary.r(),
-        primary.g(),
-        primary.b(),
-        (a * 130.0) as u8,
-    );
-    let faint = egui::Color32::from_rgba_unmultiplied(dim.r(), dim.g(), dim.b(), (a * 46.0) as u8);
+    let sample = sample_editor_backplate(panel_progress);
+    let colors = theme.semantic();
+    let glow = scale_color_alpha(colors.outline_active, sample.alpha * 0.62);
+    let faint = scale_color_alpha(colors.outline, sample.alpha * 0.18);
     let outer = rect.expand(12.0);
     painter.rect_stroke(
         outer,
-        egui::Rounding::same(10.0),
-        egui::Stroke::new(1.0, faint),
+        egui::Rounding::same(KANSO_VISUALS.corner_radius + 4.0),
+        egui::Stroke::new(KANSO_VISUALS.outline_width, faint),
     );
-    painter.rect_stroke(
+    paint_neon_outline(
+        &painter,
         rect.expand(4.0),
-        egui::Rounding::same(8.0),
-        egui::Stroke::new(1.4, glow),
+        KANSO_VISUALS.corner_radius + 2.0,
+        colors.focus_glow,
+        colors.outline_active,
+        sample.alpha * 0.72,
     );
 
     let corner = 46.0;
@@ -495,28 +586,23 @@ fn draw_editor_hologram_backplate(
         let p = egui::pos2(x, y);
         painter.line_segment(
             [p, p + egui::vec2(corner * sx, 0.0)],
-            egui::Stroke::new(2.0, glow),
+            egui::Stroke::new(KANSO_VISUALS.focus_width, glow),
         );
         painter.line_segment(
             [p, p + egui::vec2(0.0, corner * sy)],
-            egui::Stroke::new(2.0, glow),
+            egui::Stroke::new(KANSO_VISUALS.focus_width, glow),
         );
     }
 
-    let sweep_x = rect.left() + ((time * 0.18).fract()) * rect.width();
+    let sweep_x = rect.left() + sample.sweep_phase * rect.width();
     painter.line_segment(
         [
             egui::pos2(sweep_x, rect.top()),
             egui::pos2(sweep_x + 38.0, rect.bottom()),
         ],
         egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgba_unmultiplied(
-                primary.r(),
-                primary.g(),
-                primary.b(),
-                (a * 70.0) as u8,
-            ),
+            KANSO_VISUALS.outline_width,
+            scale_color_alpha(colors.accent, sample.alpha * 0.26),
         ),
     );
 
@@ -524,29 +610,57 @@ fn draw_editor_hologram_backplate(
     for i in 0..=rows {
         let k = i as f32 / rows as f32;
         let y = rect.top() + k * rect.height();
-        let pulse = ((time * 2.0 + i as f32 * 0.7).sin() * 0.5 + 0.5) * 28.0;
+        let row_alpha = if i % 3 == 0 { 0.14 } else { 0.08 };
         painter.line_segment(
             [
                 egui::pos2(rect.left() - 8.0, y),
                 egui::pos2(rect.right() + 8.0, y),
             ],
             egui::Stroke::new(
-                0.7,
-                egui::Color32::from_rgba_unmultiplied(
-                    primary.r(),
-                    primary.g(),
-                    primary.b(),
-                    (a * (18.0 + pulse)) as u8,
-                ),
+                KANSO_VISUALS.outline_width,
+                scale_color_alpha(colors.outline_hover, sample.alpha * row_alpha),
             ),
         );
     }
 
     let anchor = egui::pos2(rect.left() - 54.0, rect.center().y);
-    painter.circle_stroke(anchor, 22.0, egui::Stroke::new(1.0, glow));
+    let outer_diamond = [
+        anchor + egui::vec2(0.0, -22.0),
+        anchor + egui::vec2(22.0, 0.0),
+        anchor + egui::vec2(0.0, 22.0),
+        anchor + egui::vec2(-22.0, 0.0),
+    ];
+    let inner_diamond = [
+        anchor + egui::vec2(0.0, -9.0),
+        anchor + egui::vec2(9.0, 0.0),
+        anchor + egui::vec2(0.0, 9.0),
+        anchor + egui::vec2(-9.0, 0.0),
+    ];
+    for points in [outer_diamond, inner_diamond] {
+        for index in 0..points.len() {
+            painter.line_segment(
+                [points[index], points[(index + 1) % points.len()]],
+                egui::Stroke::new(KANSO_VISUALS.outline_width, glow),
+            );
+        }
+    }
+    painter.line_segment(
+        [
+            anchor + egui::vec2(-14.0, 0.0),
+            anchor + egui::vec2(14.0, 0.0),
+        ],
+        egui::Stroke::new(KANSO_VISUALS.outline_width, faint),
+    );
+    painter.line_segment(
+        [
+            anchor + egui::vec2(0.0, -14.0),
+            anchor + egui::vec2(0.0, 14.0),
+        ],
+        egui::Stroke::new(KANSO_VISUALS.outline_width, faint),
+    );
     painter.line_segment(
         [anchor, egui::pos2(rect.left(), rect.center().y)],
-        egui::Stroke::new(1.0, glow),
+        egui::Stroke::new(KANSO_VISUALS.outline_width, glow),
     );
 }
 
@@ -560,16 +674,13 @@ fn draw_header(ui: &mut egui::Ui, state: &mut EditorState, theme: crate::theme::
     ui.horizontal(|ui| {
         crate::ui_kit::status_chip(ui, state.tab.icon(), "TAB", state.tab.label(), theme);
         crate::ui_kit::status_chip(ui, Icon::Hud, "STYLE", style_label, theme);
-        crate::ui_kit::status_chip(ui, Icon::Help, "KEYS", "Alt+1-0 / PgUp PgDn", theme);
+        crate::ui_kit::status_chip(ui, Icon::Help, "TOOLS", "sidebar tabs / page step", theme);
     });
-    // Tiny inline close "x" so the panel still has a visible close.
+    // Keep the close action compact while sharing the editor-wide interaction
+    // motion and danger semantics.
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let btn = egui::Button::new(egui::RichText::new("[ X ]").color(ALERT).monospace())
-                .fill(egui::Color32::BLACK)
-                .stroke(egui::Stroke::new(1.0, ALERT))
-                .rounding(egui::Rounding::ZERO);
-            if ui.add(btn).clicked() {
+            if crate::ui_kit::danger_icon_square(ui, Icon::Close, theme, "Close editor").clicked() {
                 state.open = false;
             }
         });
@@ -1021,6 +1132,22 @@ fn draw_graphics_tab(ui: &mut egui::Ui, settings: &mut WorldSettings, fps_hist: 
     ui.horizontal_wrapped(|ui| {
         if crate::ui_kit::mode_card(
             ui,
+            Icon::Sun,
+            "Zen Garden",
+            "Sakura glass UI, blossom scenery and bright golden-hour sky.",
+            settings.scenery_quality == SceneryQuality::Lush
+                && settings.theme.color == ThemeColor::Sakura
+                && settings.graphics == GraphicsMode::High
+                && settings.time_mode == TimeMode::Fixed
+                && (settings.time_of_day - 17.8).abs() < 0.25,
+            settings.theme,
+        )
+        .clicked()
+        {
+            settings.apply_zen_garden_look();
+        }
+        if crate::ui_kit::mode_card(
+            ui,
             Icon::Eye,
             "Clear",
             "Readable distance and calm contrast.",
@@ -1089,6 +1216,24 @@ fn draw_graphics_tab(ui: &mut egui::Ui, settings: &mut WorldSettings, fps_hist: 
             }
         }
     });
+    ui.add_space(6.0);
+    section_heading(ui, "SCENERY");
+    ui.horizontal_wrapped(|ui| {
+        for quality in SceneryQuality::ALL {
+            let selected = settings.scenery_quality == quality;
+            if crate::ui_kit::tab_chip(ui, Icon::Detail, quality.label(), selected, settings.theme)
+                .on_hover_text(quality.detail())
+                .clicked()
+            {
+                settings.scenery_quality = quality;
+            }
+        }
+    });
+    ui.label(
+        egui::RichText::new("Regenerate refreshes trees and blossom density for the current seed.")
+            .size(11.0)
+            .color(egui::Color32::from_gray(160)),
+    );
     ui.add_space(6.0);
     section_heading(ui, "SICHTFELD");
     ui.add(egui::Slider::new(&mut settings.fov_deg, 50.0..=110.0).text("FOV (Grad)"));
@@ -1339,6 +1484,109 @@ fn draw_player_tab(ui: &mut egui::Ui, player_q: &mut Query<(&mut Transform, &mut
     ui.add(egui::Slider::new(&mut player.sensitivity, 0.0005..=0.01).text("Maus-Sensitivitaet"));
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamingUiPhase {
+    Idle,
+    Scanning {
+        cursor: usize,
+        total: usize,
+    },
+    Building {
+        terrain: usize,
+        meshes: usize,
+        dirty: usize,
+    },
+    Ready,
+}
+
+const STREAMING_STATUS_LABEL: &str = "WORLD STREAM";
+
+#[derive(Debug, Clone, PartialEq)]
+struct StreamingUiPresentation {
+    state: LoadingState,
+    value: String,
+}
+
+fn classify_streaming_ui_phase(
+    frontier_complete: bool,
+    load_cursor: usize,
+    load_total: usize,
+    pending_terrain: usize,
+    pending_meshes: usize,
+    dirty_chunks: usize,
+) -> StreamingUiPhase {
+    if frontier_complete && pending_terrain == 0 && pending_meshes == 0 && dirty_chunks == 0 {
+        StreamingUiPhase::Ready
+    } else if !frontier_complete && load_total > 0 && load_cursor < load_total {
+        StreamingUiPhase::Scanning {
+            cursor: load_cursor.min(load_total),
+            total: load_total,
+        }
+    } else if pending_terrain > 0 || pending_meshes > 0 || dirty_chunks > 0 {
+        StreamingUiPhase::Building {
+            terrain: pending_terrain,
+            meshes: pending_meshes,
+            dirty: dirty_chunks,
+        }
+    } else {
+        StreamingUiPhase::Idle
+    }
+}
+
+fn streaming_ui_presentation(
+    phase: StreamingUiPhase,
+    chunk_count: usize,
+    visible_mesh_groups: usize,
+) -> StreamingUiPresentation {
+    match phase {
+        StreamingUiPhase::Idle => StreamingUiPresentation {
+            state: LoadingState::Idle,
+            value: "Waiting for a world anchor".to_owned(),
+        },
+        StreamingUiPhase::Scanning { cursor, total } => StreamingUiPresentation {
+            state: LoadingState::Progress(cursor.min(total) as f32 / total.max(1) as f32),
+            value: format!("Scanning frontier {cursor}/{total} // nearby first"),
+        },
+        StreamingUiPhase::Building {
+            terrain,
+            meshes,
+            dirty,
+        } => StreamingUiPresentation {
+            state: LoadingState::Indeterminate,
+            value: format!("Building terrain {terrain} // meshes {meshes} // updates {dirty}"),
+        },
+        StreamingUiPhase::Ready => StreamingUiPresentation {
+            state: LoadingState::Complete,
+            value: format!("{chunk_count} chunks // {visible_mesh_groups} visible mesh groups"),
+        },
+    }
+}
+
+fn draw_streaming_activity(
+    ui: &mut egui::Ui,
+    world: &VoxelWorld,
+    streamer: &ChunkStreamer,
+    theme: ThemeSettings,
+) {
+    let phase = classify_streaming_ui_phase(
+        streamer.frontier_complete,
+        streamer.load_cursor,
+        streamer.load_offsets.len(),
+        streamer.pending_terrain.len(),
+        streamer.pending_meshes.len(),
+        streamer.dirty_queue.len() + world.edit_dirty_chunks.len(),
+    );
+    let presentation =
+        streaming_ui_presentation(phase, world.chunks.len(), streamer.entities.len());
+    crate::ui_kit::activity_status(
+        ui,
+        presentation.state,
+        STREAMING_STATUS_LABEL,
+        &presentation.value,
+        theme,
+    );
+}
+
 fn draw_system_tab(
     ui: &mut egui::Ui,
     state: &mut EditorState,
@@ -1370,7 +1618,7 @@ fn draw_system_tab(
             pause.paused = true;
         }
         ui.label(
-            egui::RichText::new("F6 togglen (ueberall)")
+            egui::RichText::new("Pause toggle available")
                 .size(11.0)
                 .color(egui::Color32::from_gray(160))
                 .monospace(),
@@ -1383,6 +1631,9 @@ fn draw_system_tab(
         .size(11.0)
         .color(AMBER),
     );
+    ui.add_space(6.0);
+
+    draw_streaming_activity(ui, world, streamer, settings.theme);
     ui.add_space(6.0);
 
     section_heading(ui, "HUD + READABILITY");
@@ -1444,17 +1695,24 @@ fn draw_system_tab(
                 settings.theme.density = density;
             }
         }
-        ui.label("Style:");
-        for (style, label) in [
-            (ThemeStyle::LiquidGlass, "Glass"),
-            (ThemeStyle::NeonToolbench, "Neon"),
-            (ThemeStyle::ClassicCrt, "CRT"),
-        ] {
-            let selected = settings.theme.style == style;
-            if crate::ui_kit::icon_action(ui, Icon::Layout, label, selected, settings.theme)
-                .clicked()
-            {
-                settings.theme.style = style;
+    });
+    ui.add_space(4.0);
+    let selected_theme_name = selected_theme_preset(settings.theme)
+        .map(|preset| preset.name)
+        .unwrap_or("Custom Mix");
+    ui.label(
+        egui::RichText::new(format!("Theme concept: {selected_theme_name}"))
+            .size(11.0)
+            .color(settings.theme.semantic().text_muted)
+            .monospace(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        for preset in THEME_PRESETS.iter() {
+            let selected =
+                settings.theme.style == preset.style && settings.theme.color == preset.color;
+            if draw_theme_preview_card(ui, preset, selected).clicked() {
+                settings.theme.style = preset.style;
+                settings.theme.color = preset.color;
             }
         }
     });
@@ -1566,14 +1824,12 @@ fn draw_system_tab(
     ui.add_space(6.0);
     section_heading(ui, "HINWEISE");
     ui.label(
-        egui::RichText::new(
-            "WASD bewegen  //  Space springen  //  W-Doppeltipp/Ctrl Sprint  //  F Fliegen  //  1-9 Hotbar",
-        )
-        .size(12.0)
-        .color(egui::Color32::from_gray(190)),
+        egui::RichText::new(editor_navigation_hint())
+            .size(12.0)
+            .color(egui::Color32::from_gray(190)),
     );
     ui.label(
-        egui::RichText::new("F3 Editor  //  F2 Screenshot  //  F5 Speichern  //  ESC zu")
+        egui::RichText::new(editor_action_hint())
             .size(12.0)
             .color(egui::Color32::from_gray(190)),
     );
@@ -1613,10 +1869,11 @@ fn draw_system_tab(
     });
 
     ui.add_space(8.0);
-    section_heading(ui, "THEME / CRT");
+    section_heading(ui, "THEME / ACCENT");
     ui.horizontal(|ui| {
-        ui.label("Phosphor:");
+        ui.label("Accent:");
         for (variant, label) in [
+            (ThemeColor::Sakura, "SAKURA"),
             (ThemeColor::Green, "GREEN"),
             (ThemeColor::Amber, "AMBER"),
             (ThemeColor::Blue, "BLUE"),
@@ -1663,11 +1920,192 @@ fn draw_footer(ui: &mut egui::Ui, state: &mut EditorState, settings: &mut WorldS
     });
 }
 
+fn editor_navigation_hint() -> &'static str {
+    "WASD bewegen  //  Space springen  //  Doppeltipp-W sprintet  //  F fliegt  //  Maus fuer Blick und Sketch-Orbit"
+}
+
+fn editor_action_hint() -> &'static str {
+    "Toolbox waehlt Werkzeuge  //  Pencil/Rect/Push arbeiten direkt im Spiel  //  Save button speichert  //  ESC schliesst"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_hints_are_mouse_first_without_function_keys() {
+        let hints = [editor_navigation_hint(), editor_action_hint()];
+
+        for hint in hints {
+            assert!(
+                !["F1", "F2", "F3", "F5", "F7", "F8", "Tab", "1-9", "1-0"]
+                    .iter()
+                    .any(|token| hint.contains(token)),
+                "editor hint still advertises old key workflow: {hint}"
+            );
+        }
+
+        assert!(editor_action_hint().contains("Toolbox"));
+        assert!(editor_action_hint().contains("Save"));
+    }
+
+    #[test]
+    fn ui_motion_follows_explicit_and_adaptive_low_spec_states() {
+        assert!(effective_low_spec_ui_motion(
+            RuntimeProfile::LowSpec,
+            false,
+            QualityState::Nominal
+        ));
+        assert!(effective_low_spec_ui_motion(
+            RuntimeProfile::Auto,
+            true,
+            QualityState::Critical
+        ));
+        assert!(effective_low_spec_ui_motion(
+            RuntimeProfile::Auto,
+            true,
+            QualityState::Throttled
+        ));
+        assert!(!effective_low_spec_ui_motion(
+            RuntimeProfile::Auto,
+            false,
+            QualityState::Critical
+        ));
+        assert!(!effective_low_spec_ui_motion(
+            RuntimeProfile::Balanced,
+            true,
+            QualityState::Critical
+        ));
+    }
+
+    #[test]
+    fn editor_backplate_motion_is_bounded_by_panel_progress() {
+        let hidden = sample_editor_backplate(0.0);
+        let halfway = sample_editor_backplate(0.5);
+        let visible = sample_editor_backplate(1.0);
+
+        assert_eq!(sample_editor_backplate(-4.0), hidden);
+        assert_eq!(sample_editor_backplate(f32::NAN), hidden);
+        assert_eq!(sample_editor_backplate(4.0), visible);
+        assert_eq!(hidden.alpha, 0.0);
+        assert_eq!(visible.alpha, 1.0);
+        assert!(hidden.sweep_phase < halfway.sweep_phase);
+        assert!(halfway.sweep_phase < visible.sweep_phase);
+        for sample in [hidden, halfway, visible] {
+            assert!((0.0..=1.0).contains(&sample.alpha));
+            assert!((0.0..=1.0).contains(&sample.sweep_phase));
+        }
+    }
+
+    #[test]
+    fn streaming_status_only_reports_ready_when_every_queue_is_drained() {
+        assert_eq!(
+            classify_streaming_ui_phase(true, 16, 16, 0, 0, 0),
+            StreamingUiPhase::Ready
+        );
+        assert_eq!(
+            classify_streaming_ui_phase(false, 4, 16, 0, 0, 0),
+            StreamingUiPhase::Scanning {
+                cursor: 4,
+                total: 16
+            }
+        );
+        assert_eq!(
+            classify_streaming_ui_phase(true, 16, 16, 2, 3, 4),
+            StreamingUiPhase::Building {
+                terrain: 2,
+                meshes: 3,
+                dirty: 4
+            }
+        );
+        assert_eq!(
+            classify_streaming_ui_phase(false, 0, 0, 0, 0, 0),
+            StreamingUiPhase::Idle
+        );
+    }
+
+    #[test]
+    fn streaming_phases_use_the_shared_loading_and_status_contract() {
+        let idle = streaming_ui_presentation(StreamingUiPhase::Idle, 0, 0);
+        let scanning = streaming_ui_presentation(
+            StreamingUiPhase::Scanning {
+                cursor: 4,
+                total: 16,
+            },
+            8,
+            3,
+        );
+        let building = streaming_ui_presentation(
+            StreamingUiPhase::Building {
+                terrain: 2,
+                meshes: 3,
+                dirty: 4,
+            },
+            8,
+            3,
+        );
+        let ready = streaming_ui_presentation(StreamingUiPhase::Ready, 8, 3);
+
+        assert_eq!(idle.state, LoadingState::Idle);
+        assert_eq!(scanning.state, LoadingState::Progress(0.25));
+        assert_eq!(building.state, LoadingState::Indeterminate);
+        assert_eq!(ready.state, LoadingState::Complete);
+        assert!(scanning.value.starts_with("Scanning frontier 4/16"));
+        assert!(building.value.starts_with("Building terrain 2"));
+        assert_eq!(ready.value, "8 chunks // 3 visible mesh groups");
+    }
+
+    #[test]
+    fn streaming_status_geometry_stays_stable_across_phases() {
+        egui::__run_test_ui(|ui| {
+            let theme = ThemeSettings::default();
+            let presentations = [
+                streaming_ui_presentation(StreamingUiPhase::Idle, 0, 0),
+                streaming_ui_presentation(
+                    StreamingUiPhase::Scanning {
+                        cursor: 4,
+                        total: 16,
+                    },
+                    8,
+                    3,
+                ),
+                streaming_ui_presentation(
+                    StreamingUiPhase::Building {
+                        terrain: 2,
+                        meshes: 3,
+                        dirty: 4,
+                    },
+                    8,
+                    3,
+                ),
+                streaming_ui_presentation(StreamingUiPhase::Ready, 8, 3),
+            ];
+            let sizes: Vec<_> = presentations
+                .iter()
+                .map(|presentation| {
+                    crate::ui_kit::activity_status(
+                        ui,
+                        presentation.state,
+                        STREAMING_STATUS_LABEL,
+                        &presentation.value,
+                        theme,
+                    )
+                    .rect
+                    .size()
+                })
+                .collect();
+
+            assert!(sizes.iter().all(|size| size.y == 40.0));
+            assert!(sizes.windows(2).all(|pair| pair[0] == pair[1]));
+        });
+    }
+}
+
 fn handle_regen(
     mut state: ResMut<EditorState>,
     mut world: ResMut<VoxelWorld>,
     mut streamer: ResMut<ChunkStreamer>,
-    settings: Res<WorldSettings>,
+    active: Option<Res<ActiveWorld>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
@@ -1676,7 +2114,16 @@ fn handle_regen(
     }
     state.regen_requested = false;
 
-    world.generator = crate::terrain::TerrainGenerator::new(settings.seed);
+    // Regeneration may rebuild the active world's chunks, but it must never
+    // reinterpret them through mutable presentation settings. The persisted
+    // generation identity is the sole authority, including its terrain-byte
+    // grammar. If no named world is active, retain the generator's existing
+    // identity instead of silently upgrading to the current grammar.
+    let identity = active
+        .as_deref()
+        .map(|active| active.meta.generation_identity())
+        .unwrap_or_else(|| world.generator.generation_identity());
+    world.generator = crate::terrain::TerrainGenerator::from_identity(identity);
     world.clear_chunks();
     world.column_top_cy.clear();
     world.edit_dirty_chunks.clear();
@@ -1699,7 +2146,10 @@ fn handle_regen(
             let _ = meshes.remove(&entry.handle);
         }
     }
-    info!("World regenerated with seed {}", settings.seed);
+    info!(
+        "World regenerated with seed {} and terrain grammar {:?}",
+        identity.seed, identity.terrain_grammar
+    );
 }
 
 fn handle_screenshot(
@@ -2364,7 +2814,9 @@ fn draw_animation_tab(ui: &mut egui::Ui, studio: &mut AnimationStudio) {
                                 ui.selectable_value(&mut k.interp, mode, mode.label());
                             }
                         });
-                    if ui.small_button("X").clicked() {
+                    if crate::ui_kit::danger_icon_square(ui, Icon::Delete, theme, "Delete keyframe")
+                        .clicked()
+                    {
                         remove = Some(i);
                     }
                 });

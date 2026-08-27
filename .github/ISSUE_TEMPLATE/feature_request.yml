@@ -1,0 +1,56 @@
+name: Feature request
+description: Propose a bounded engine, tooling, or evidence improvement.
+title: "[Feature]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Strong proposals name the authority boundary, fixed budget, evidence plan, failure mode, and rollback before implementation.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete user or engineering problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the smallest useful behavior and what remains out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Authority and fixed budget
+      description: Identify retained state and proposed work, memory, byte, entity, or population ceilings.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Verification and visual evidence plan
+      description: Name deterministic tests, matched routes, metrics, viewports, and failure thresholds as applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and rollback
+      description: What simpler approaches were considered, and how can the change be disabled or removed safely?
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I separated research inspiration from current implementation claims.
+          required: true
+        - label: I did not include private data, secrets, or unlicensed copied material.
+          required: true
+        - label: I agree to follow the repository Code of Conduct.
+          required: true

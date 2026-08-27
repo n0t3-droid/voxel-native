@@ -1,323 +1,161 @@
-# Professional Build Tooling Roadmap
+# Voxel Native Build and Modeling Roadmap
 
-This plan is for turning voxel-native's current build tools into a coherent, SketchUp-like direct-manipulation editor. It is intentionally phased so each pass makes the engine more usable before the next complex feature lands.
+Status: maintained product roadmap, August 2026. This document distinguishes
+compile-registered behavior from live integration and from visually accepted
+interaction. It does not claim SketchUp equivalence or release readiness.
 
-## Current Problem
+## Product direction
 
-The current toolset has useful pieces, but they do not feel like one professional system:
+Voxel Native is building a mouse-first modeling environment inside an editable
+voxel world. The target is a coherent loop:
 
-- Build/editor/toolbelt/weapons are separate state machines, so the player cannot always tell what mode is active.
-- Inputs fail silently when the palette is open, cursor is not locked, raycast misses, or the wrong tool is live.
-- Tool names are too short and mixed: `RECT`, `SCULPT`, `PLACE`, `CUT`, `FACE`, `ANIM` do not explain when to use them.
-- The bottom toolbelt and hotbar compete for space and can look like two unrelated systems.
-- There is no persistent selection workflow: draw/select/fill/move/rotate/scale/retexture should be one fluent loop.
-- Localization does not exist; UI text is hardcoded across source files.
-
-## Design Target
-
-Press `F3` and enter a clear Build Studio:
-
-- Weapons holster and stay disabled until Build Studio exits.
-- A visible mode strip says what is active and what the mouse will do.
-- Tools are named by job, not internal implementation.
-- Every blocked input explains itself in the status strip.
-- Direct tools work in the world: draw, select, fill, push/pull, move, rotate, scale, paint, duplicate.
-- Undo/redo is always visible and always works across build operations.
-- UI text comes from a localization layer, not hardcoded strings.
-
-## Sprint 1: Stop The Confusion
-
-Goal: make the current tools understandable and predictable before adding more power.
-
-Files:
-
-- `src/toolbelt.rs`
-- `src/hud.rs`
-- `src/menu.rs`
-- `src/weapons.rs`
-- `src/builder.rs`
-- `src/commands.rs`
-
-Changes:
-
-1. Add a Build Studio mode strip.
-   - Show active mode: `COMBAT`, `BUILD PICKER`, `BUILD LIVE`, `EDITOR`, `PAUSED`.
-   - Show current tool full name and one-line action: `Rectangle Fill - drag LMB on a face`.
-   - Show weapons state: `Weapons holstered` while building.
-
-2. Remove silent failures.
-   - If ESC/E is blocked by Build Studio, set status: `F3 closes Build Studio`.
-   - If LMB cannot build because palette is open, show: `Choose a tool or press Tab to hide palette`.
-   - If raycast misses, show: `No block face under crosshair`.
-   - If 1-9 is pressed while building, show: `Weapon hotkeys disabled in Build Studio`.
-
-3. Clean up F3/F7/Tab.
-   - `F3`: enter/exit Build Studio.
-   - `Tab`: show/hide tool picker while staying in Build Studio.
-   - `F7`: either remove from the active mental model or make it a secondary alias for hiding/showing the picker, never a separate build state.
-
-4. Rename and group tools.
-   - `Navigate` -> `Navigate / Inspect`
-   - `DrawRect` -> `Rectangle Fill`
-   - `Sculpt` -> `Push Pull Face`
-   - `BrushPlace` -> `Place Brush`
-   - `BrushCut` -> `Cut Brush`
-   - `CityRoad` -> `Road Tool`
-   - `CityDistrict` -> `District Zone`
-   - `CityBuilding` -> `Building Shell`
-   - `CityFacade` -> `Facade Stamp`
-   - `AnimationPick` -> `Animation Picker`
-
-5. Redesign the toolbelt layout.
-   - Group tools by category: Navigation, Shape, Edit, City, Animation.
-   - Keep hotbar visually separate from build tools.
-   - Add hover tooltips using existing `hint()` plus richer full names.
-   - Use color category accents only as secondary signals.
-
-Verification:
-
-- Build with `cargo build --release --color never`.
-- Start engine and press F3.
-- Confirm weapons disappear and 1-9 cannot switch weapons.
-- Confirm every blocked action updates the status strip.
-- Confirm tool picker names are clear without guessing.
-
-## Sprint 2: One Source Of Truth For Modes
-
-Goal: stop build/editor/combat state from drifting apart.
-
-Files:
-
-- New: `src/mode.rs`
-- `src/main.rs`
-- `src/toolbelt.rs`
-- `src/menu.rs`
-- `src/weapons.rs`
-- `src/editor.rs`
-- `src/animation.rs`
-- `src/city.rs`
-- `src/hud.rs`
-
-Add:
-
-```rust
-pub enum ActiveMode {
-    Combat,
-    BuildPicker { tool: ToolbeltTool },
-    BuildLive { tool: ToolbeltTool },
-    Editor { tab: EditorTab },
-    Paused,
-    CommandPalette,
-}
-
-pub struct ModeContext {
-    pub mode: ActiveMode,
-    pub last_mode: ActiveMode,
-    pub status: String,
-}
+```text
+point or select
+  -> preview the exact affected geometry
+  -> commit one bounded edit transaction
+  -> preserve semantic identity and materials
+  -> undo or redo the same transaction
+  -> verify the result in the native engine
 ```
 
-Rules:
+The editor must remain understandable while the world streams, the window
+resizes, and control moves between play, build, menus, and observation. A tool
+is not complete merely because its data type or command exists.
 
-- Weapons only run in `Combat`.
-- Build tools only run in `BuildLive`.
-- Tool UI runs in `BuildPicker` or `BuildLive` with picker visible.
-- Editor UI runs in `Editor`.
-- Menus run in `Paused`.
+## Status vocabulary
 
-Migration:
+| Label | Meaning |
+| --- | --- |
+| **Live** | Registered in the native application and reachable through the normal UI. |
+| **Partial** | A real implementation exists, but one or more interaction, durability, or visual-acceptance gates remain open. |
+| **Pure layer** | Compiled and tested as data or math, but not connected to the live authoring path. |
+| **Planned** | A forward requirement, not implemented capability. |
 
-1. Add `ModeContext` while keeping old states in sync.
-2. Make `weapons.rs` read `mode.allows_weapons()`.
-3. Make `menu.rs` use mode transitions instead of early returns.
-4. Make `toolbelt.rs` transition modes instead of owning live/palette truth.
-5. Make `city.rs` and `animation.rs` derive their active tool from mode, not from manual sync.
+## What exists today
 
-Verification:
+| Area | Status | Source boundary | Honest limitation |
+| --- | --- | --- | --- |
+| Mode and input authority | **Live** | [`src/mode.rs`](src/mode.rs), [`src/menu.rs`](src/menu.rs), [`src/toolbelt.rs`](src/toolbelt.rs) | Mode, cursor, menu, editor, and weapon policies share one authority, but every transition still needs native edge-case inspection. |
+| Modeling tool rail | **Live / Partial** | [`src/toolbelt.rs`](src/toolbelt.rs), [`src/builder.rs`](src/builder.rs), [`src/sculpt/`](src/sculpt/) | Core drawing and transform tools are exposed; their inference and selection behavior is not yet SketchUp-equivalent. |
+| Semantic document and picking | **Partial** | [`src/sketch_model.rs`](src/sketch_model.rs), [`src/selection.rs`](src/selection.rs) | Raw hits, semantic links, and inference candidates exist, but universal occlusion-aware picking and complete nested selection do not. |
+| Move, rotate, scale, and push/pull | **Partial** | [`src/sculpt/transform.rs`](src/sculpt/transform.rs), [`src/sculpt/pushpull.rs`](src/sculpt/pushpull.rs) | Bounded voxel commits and previews exist; grip-point parity, robust topology healing, arrays, and typed transforms remain incomplete. |
+| Edit history and persistence | **Partial** | [`src/builder.rs`](src/builder.rs), [`src/world.rs`](src/world.rs), [`src/settings.rs`](src/settings.rs) | Batched edits and save paths exist, but every semantic, voxel, material, and link-index mutation is not yet proven as one durable command across all tools. |
+| Material authoring | **Partial** | [`src/textures.rs`](src/textures.rs), [`src/blocks.rs`](src/blocks.rs) | Runtime material handling is bounded; complete cross-restart custom-source identity remains an explicit open contract. |
+| Localization | **Planned** | UI strings remain distributed across the application. | No public claim of a complete language layer is made. |
+| Responsive and visual evidence | **Contract active** | [`docs/RESPONSIVE_VISUAL_QA.md`](docs/RESPONSIVE_VISUAL_QA.md), [`src/qa.rs`](src/qa.rs) | A source-level or headless pass does not replace matched native screenshots and telemetry. |
 
-- Log every mode transition once.
-- Confirm there is no state where tool picker is visible and weapons fire.
-- Confirm city and animation tools activate only when selected.
+The detailed interaction gap analysis lives in
+[`docs/SKETCHUP_EQUIVALENCE_AUDIT.md`](docs/SKETCHUP_EQUIVALENCE_AUDIT.md).
+The whole-engine acceptance boundary lives in
+[`docs/ELITE_WORLD_SYSTEMS_STANDARD.md`](docs/ELITE_WORLD_SYSTEMS_STANDARD.md).
 
-## Sprint 3: Selection First, Then Transform
+## Milestone 1: interaction correctness
 
-Goal: make the core SketchUp loop real: select something, then manipulate it.
+Make pointing, inference, and mode transitions predictable before increasing
+tool count.
 
-Files:
+- Keep raw picking separate from inference ranking.
+- Prefer the visible mouse position for pointer tools and reject stale hidden
+  cursor coordinates.
+- Expose endpoint, midpoint, face, edge, axis, and reference-chain decisions
+  in the preview instead of silently snapping.
+- Make cancel, pause, menu, observer, and build transitions preserve one clear
+  cursor policy and one visible status.
+- Add adversarial tests for occlusion, large faces, chunk boundaries, narrow
+  viewports, and focus loss.
 
-- `src/sculpt/state.rs`
-- New: `src/sculpt/selection.rs`
-- New: `src/sculpt/gizmo.rs`
-- New: `src/sculpt/transform.rs`
-- `src/sculpt/draw.rs`
-- `src/sculpt/mod.rs`
-- `src/builder.rs`
-- `src/world.rs`
+Done means the same intended point produces the same preview and committed
+cell, with no fallback to a hidden crosshair or stale pointer location.
 
-Features:
+## Milestone 2: selection and direct manipulation
 
-1. Rectangle Select.
-   - Drag on a face to create a persistent selection, not just an immediate fill.
-   - `Enter` or a Fill button fills it.
-   - `Esc` clears active drag; second `Esc` exits Build Studio.
-   - Selection outline stays visible after release.
+Turn the existing semantic and transform foundations into a dependable
+select-first workflow.
 
-2. Fill Selected.
-   - Fill the selection with active block/material.
-   - Record one undo batch through `BuilderHistory::record_external()`.
+- Add crossing-window selection and explicit add/remove/toggle semantics.
+- Complete nested component and edit-context priority.
+- Give move, rotate, and scale stable grip points with inference-visible
+  previews and typed deltas.
+- Preserve block, material, semantic identity, and selection state through
+  transforms.
+- Add copy, array, make-unique, and duplicate workflows only after the base
+  transform transaction is proven atomic.
 
-3. Move Gizmo.
-   - Show red/green/blue axes at selection center.
-   - Drag an axis to move selected voxels by integer blocks.
-   - Preview while dragging; commit on release.
+Done means a selected object can be transformed across chunk boundaries,
+undone, redone, saved, and reloaded without identity drift or partial edits.
 
-4. Rotate Gizmo.
-   - Show X/Y/Z rings.
-   - Rotation snaps to 90 degrees.
-   - Commit through one undo batch.
+## Milestone 3: topology, history, and durability
 
-5. Scale Gizmo.
-   - Corner/axis handles scale selection by integer factors.
-   - Start with simple nearest-neighbor up/down scale.
+Unify authoring mutations under a single fail-closed transaction boundary.
 
-Data reuse:
+- Route voxel cells, semantic links, material identity, and document changes
+  through one bounded history record per user action.
+- Make push/pull and opening tools reject ambiguous or non-manifold outcomes
+  before mutation.
+- Define exact rollback behavior for interrupted saves and missing custom
+  material sources.
+- Test failed writes, stale epochs, extreme signed coordinates, undo-cap
+  pressure, and restart reconstruction.
 
-- Use existing `SculptSelection::Aabb` and `VoxelBlob` in `src/sculpt/state.rs`.
-- Use `VoxelWorld::edit_set_voxel_batched()` and `finish_edit_batch()`.
-- Use `BuilderHistory::record_external()`.
-- Use `dda_voxel()` and `ray_to_locked_plane()` patterns.
+Done means no supported tool can leave the voxel world and semantic document
+desynchronized, even after a rejected operation or failed persistence step.
 
-Verification:
+## Milestone 4: interface, accessibility, and localization
 
-- Select a 3x3 area, fill it, undo it.
-- Select a block group, move it on X/Y/Z, undo it.
-- Rotate a rectangular prism 90 degrees, undo/redo it.
-- Scale a selection and verify no crash on chunk boundaries.
+Polish the authoring surface without hiding capability behind undocumented
+shortcuts.
 
-## Sprint 4: Material Paint And Retexture
+- Keep tool names action-oriented and group related tools without duplicating
+  their purpose.
+- Provide visible keyboard alternatives, focus order, high-contrast states,
+  reduced motion, and supported viewport limits.
+- Move player-facing strings behind a versioned localization layer with a
+  loud missing-key fallback.
+- Validate 320 x 480 through ultrawide layouts at the documented DPI matrix.
 
-Goal: let users change appearance without destroying block structure.
+Done means the core authoring loop remains legible and reachable across the
+declared viewport, DPI, input, and language matrix.
 
-Files:
+## Milestone 5: evidence-backed acceptance
 
-- New: `src/sculpt/paint.rs`
-- `src/toolbelt.rs`
-- `src/textures.rs`
-- `src/world.rs`
-- `src/editor.rs`
+Promote interaction claims only from one identified build and reproducible
+native routes.
 
-Features:
+- Record the source revision, binary SHA-256, world identity, route, viewport,
+  DPI, tool state, and known limitations.
+- Pair screenshots with telemetry and inspect both; average FPS alone is not a
+  visual or responsiveness verdict.
+- Exercise Natural and Astral profiles, existing and fresh worlds, focus loss,
+  pause/resume, save/load, undo/redo, and pressure states.
+- Keep rejected frames and unresolved findings out of the public gallery until
+  the same-binary acceptance contract passes.
 
-1. Add `Material Paint` tool.
-2. Add compact material picker panel.
-3. Paint modes:
-   - Replace block and material.
-   - Material only.
-   - Erase to air.
-4. Brush size via mouse wheel or small stepper buttons.
-5. Retexture Selected button for any persistent selection.
+Done means each public capability statement points to source or to a bounded,
+reproducible evidence artifact and states what remains unproven.
 
-Implementation notes:
+## Verification baseline
 
-- Prefer `edit_set_cell_batched()` for material-aware edits.
-- Keep one undo batch per stroke.
-- Preserve material in copy/duplicate blobs.
+Use the repository gates before native visual inspection:
 
-Verification:
+```powershell
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features
+cargo test --workspace --quiet
+cargo check --target wasm32-unknown-unknown --bin voxel-native
+python -B tools/publication/validate_repository_presentation.py
+```
 
-- Paint a wall material without changing block type.
-- Retexture a selected rectangle.
-- Undo and redo material changes.
-- Save/load and confirm materials persist.
+Changes to interaction, layout, rendering, streaming, or persistence also need
+the relevant focused tests and the native route matrix. Generated QA worlds,
+screenshots, control files, and local settings are evidence inputs or local
+state; they are not source changes.
 
-## Sprint 5: Copy, Duplicate, History UI
+## Guardrails
 
-Goal: fast high-detail building needs repetition tools.
-
-Files:
-
-- New: `src/sculpt/clipboard.rs`
-- `src/sculpt/state.rs`
-- `src/hud.rs`
-- `src/builder.rs`
-
-Features:
-
-1. `Ctrl+C`: copy selection to `VoxelBlob` with materials and mask.
-2. `Ctrl+V`: paste preview in front of camera.
-3. `Ctrl+D`: duplicate selected voxels along last transform axis or camera-right.
-4. Visible Undo/Redo buttons in Build Studio.
-5. History label shows last action: `Moved Selection`, `Filled Rectangle`, `Painted Material`.
-
-Verification:
-
-- Copy/paste a detailed object with materials.
-- Duplicate it multiple times.
-- Undo each duplicate cleanly.
-
-## Sprint 6: Localization
-
-Goal: all UI text comes from language resources.
-
-Files:
-
-- New: `src/localization.rs`
-- `src/settings.rs`
-- `src/main.rs`
-- `src/menu.rs`
-- `src/editor.rs`
-- `src/hud.rs`
-- `src/toolbelt.rs`
-- `src/commands.rs`
-- `src/builder.rs`
-- `src/city.rs`
-- `src/animation.rs`
-
-Approach:
-
-- Start with `Language::{German, English}` and a central string table.
-- Store selected language in save/settings.
-- Add editor/system language picker.
-- Convert UI strings in waves: toolbelt and mode strip first, then menu/editor, then command deck and status text.
-- Keep fallback behavior: missing translation displays the key, making gaps obvious.
-
-Initial language keys:
-
-- `mode.combat`
-- `mode.build_picker`
-- `mode.build_live`
-- `tool.rectangle_fill.name`
-- `tool.rectangle_fill.hint`
-- `tool.push_pull_face.name`
-- `tool.push_pull_face.hint`
-- `status.weapons_holstered`
-- `status.no_target_face`
-- `status.press_f3_to_exit_build`
-
-Verification:
-
-- Switch language in editor/system tab.
-- Confirm toolbelt names, mode strip, and command deck update.
-- Restart game and confirm language persists.
-
-## Coding Principles
-
-- Do not add new build features until mode/status feedback is reliable.
-- Every live action must have: visible selected tool, preview, commit, cancel, undo, redo.
-- No silent early returns in player-facing tools; update status when a user action cannot run.
-- Use one edit batch per user action, not per frame.
-- Keep chunk/voxel storage unchanged unless a feature absolutely requires it.
-- Use existing world edit APIs and BuilderHistory.
-- Add localization incrementally; do not block core build fixes on translating every string at once.
-
-## First Implementation Slice
-
-The next code slice should be Sprint 1 only:
-
-1. Mode strip in HUD/toolbelt UI.
-2. Clear tool names and grouped toolbelt.
-3. F3/Tab/F7 cleanup.
-4. Status feedback for blocked ESC/E/1-9/LMB.
-5. Release build and run engine.
-
-This gives the user an immediately more professional tool experience before deeper transform-gizmo work begins.
+- Preserve signed integer world identity and Euclidean coordinate mapping.
+- Keep work, memory, queue, entity, and history limits explicit.
+- Reduce detail before dropping authority or silently shortening the horizon.
+- Do not mutate user saves to manufacture test evidence.
+- Keep experimental representations reversible and feature-gated.
+- Treat a beautiful screenshot, a passing unit test, and a clean benchmark as
+  different forms of evidence; no one form substitutes for the others.

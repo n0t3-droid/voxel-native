@@ -4,20 +4,23 @@
 //! shuttle hulls. They do not mutate terrain chunks while flying, which keeps
 //! chunk streaming and the mesher stable.
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy::window::PrimaryWindow;
+use bevy_egui::{egui, EguiContexts, EguiSet};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::blocks::BlockType;
+use crate::blocks::{BlockType, AIR};
 use crate::director::{SimulationDirector, UnifiedTelemetry};
 use crate::menu::{GameState, PendingWorldLoad};
 use crate::mode::{ActiveMode, ModeContext};
+use crate::neurocore::RuntimeProfile;
 use crate::player::Player;
 use crate::settings::{ActiveWorld, WorldSettings};
-use crate::world::VoxelWorld;
+use crate::world::{ChunkStreamer, VoxelWorld, WorldSet};
 
 pub struct ShipPlugin;
 
@@ -29,8 +32,22 @@ impl Plugin for ShipPlugin {
             .insert_resource(ShipBoardingState::default())
             .insert_resource(CockpitTransition::default())
             .insert_resource(ShipFxCache::default())
+            .insert_resource(ShipInputCapture::default())
+            .insert_resource(PendingDefaultScoutSpawn::default())
             .add_systems(OnEnter(GameState::MainMenu), cleanup_ship_runtime)
             .add_systems(OnEnter(GameState::InGame), spawn_saved_ships_once)
+            .add_systems(
+                PreUpdate,
+                capture_ship_input
+                    .after(EguiSet::BeginFrame)
+                    .run_if(in_state(GameState::InGame)),
+            )
+            .add_systems(
+                Update,
+                resolve_pending_default_scout_spawn
+                    .after(WorldSet::Mesh)
+                    .run_if(in_state(GameState::InGame)),
+            )
             .add_systems(
                 Update,
                 (
@@ -127,35 +144,114 @@ impl SavedShipInstance {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementPointerSource {
+    CreatorLibrary,
+    World,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShipPlacementPhase {
+    #[default]
+    Inactive,
+    Ready,
+    PointerHeld(PlacementPointerSource),
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct ShipPlacementState {
-    pub active: bool,
+    pub phase: ShipPlacementPhase,
     pub kind: ShipKind,
     pub yaw: f32,
     pub preview: Option<Entity>,
-    pub last_pos: Vec3,
+    pub target: Option<Vec3>,
+    pub return_mode: ActiveMode,
     pub status: String,
+    preview_kind: Option<ShipKind>,
+    retired_previews: Vec<Entity>,
 }
 
 impl Default for ShipPlacementState {
     fn default() -> Self {
         Self {
-            active: false,
+            phase: ShipPlacementPhase::Inactive,
             kind: ShipKind::ScoutShuttle,
             yaw: 0.0,
             preview: None,
-            last_pos: Vec3::ZERO,
+            target: None,
+            return_mode: ActiveMode::Combat,
             status: "Hangar ready.".into(),
+            preview_kind: None,
+            retired_previews: Vec::new(),
         }
     }
 }
 
 impl ShipPlacementState {
-    pub fn start(&mut self, kind: ShipKind) {
-        self.active = true;
+    pub fn start_ready(&mut self, kind: ShipKind, return_mode: ActiveMode) {
+        self.start_with_phase(kind, return_mode, ShipPlacementPhase::Ready);
+    }
+
+    pub fn start_drag(&mut self, kind: ShipKind, return_mode: ActiveMode) {
+        self.start_with_phase(
+            kind,
+            return_mode,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary),
+        );
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.phase != ShipPlacementPhase::Inactive
+    }
+
+    /// Compatibility entry point for the legacy inventory hangar.
+    fn start_with_phase(
+        &mut self,
+        kind: ShipKind,
+        return_mode: ActiveMode,
+        phase: ShipPlacementPhase,
+    ) {
+        if self.kind != kind {
+            self.retire_preview();
+        }
         self.kind = kind;
+        self.phase = phase;
         self.yaw = 0.0;
+        self.target = None;
+        self.return_mode = return_mode;
         self.status = format!("Placing {}.", kind.label());
+    }
+
+    fn retire_preview(&mut self) {
+        if let Some(entity) = self.preview.take() {
+            self.retired_previews.push(entity);
+        }
+        self.preview_kind = None;
+    }
+
+    fn sync_preview_kind(&mut self) {
+        if self.preview.is_some() && self.preview_kind != Some(self.kind) {
+            self.retire_preview();
+        }
+    }
+
+    fn handle_pointer_edges(&mut self, just_pressed: bool, just_released: bool) -> bool {
+        if just_pressed && self.phase == ShipPlacementPhase::Ready {
+            self.phase = ShipPlacementPhase::PointerHeld(PlacementPointerSource::World);
+        }
+
+        if just_released && matches!(self.phase, ShipPlacementPhase::PointerHeld(_)) {
+            self.phase = ShipPlacementPhase::Ready;
+            return true;
+        }
+
+        false
+    }
+
+    fn deactivate(&mut self) -> ActiveMode {
+        self.phase = ShipPlacementPhase::Inactive;
+        self.target = None;
+        self.return_mode
     }
 }
 
@@ -170,6 +266,11 @@ pub struct PilotState {
     pub shield_flash: f32,
     pub primary_cooldown: f32,
     pub secondary_cooldown: f32,
+    /// Short, timer-based reticle bloom after firing. Kept in the HUD so
+    /// weapon response remains visible without spawning extra scene FX.
+    pub weapon_flash: f32,
+    /// Hit-confirm timer driven by projectile impacts on enemy drones.
+    pub hit_confirm: f32,
     pub status: String,
     /// Seconds after cockpit link before enemy drones can spawn / hunt.
     pub entry_peace_timer: f32,
@@ -186,6 +287,8 @@ impl Default for PilotState {
             shield_flash: 0.0,
             primary_cooldown: 0.0,
             secondary_cooldown: 0.0,
+            weapon_flash: 0.0,
+            hit_confirm: 0.0,
             status: "No shuttle linked.".into(),
             entry_peace_timer: 0.0,
         }
@@ -222,11 +325,19 @@ impl ShipWeaponKind {
         }
     }
 
-    fn color(self) -> Color {
+    fn hud_color(self) -> egui::Color32 {
         match self {
-            ShipWeaponKind::IonRocket => Color::srgb(0.10, 0.95, 1.00),
-            ShipWeaponKind::PlasmaFlak => Color::srgb(1.00, 0.20, 0.86),
-            ShipWeaponKind::RailLance => Color::srgb(1.00, 0.65, 0.14),
+            ShipWeaponKind::IonRocket => egui::Color32::from_rgb(26, 242, 255),
+            ShipWeaponKind::PlasmaFlak => egui::Color32::from_rgb(255, 51, 219),
+            ShipWeaponKind::RailLance => egui::Color32::from_rgb(255, 166, 36),
+        }
+    }
+
+    fn fx_tone(self) -> ShipFxTone {
+        match self {
+            ShipWeaponKind::IonRocket => ShipFxTone::Ion,
+            ShipWeaponKind::PlasmaFlak => ShipFxTone::Plasma,
+            ShipWeaponKind::RailLance => ShipFxTone::Rail,
         }
     }
 
@@ -287,19 +398,139 @@ struct ShipMotion {
     /// the shuttle never snaps from frame to frame.
     yaw_rate: f32,
     pitch_rate: f32,
+    roll_rate: f32,
     /// Smoothed lateral velocity component (m/s) for inertial banking drift.
     lateral_speed: f32,
 }
 
-const SHIP_MOUSE_YAW_SENS: f32 = 0.00016;
-const SHIP_MOUSE_PITCH_SENS: f32 = 0.00048;
-const SHIP_KEY_YAW_RATE: f32 = 0.42;
-const SHIP_KEY_PITCH_RATE: f32 = 0.56;
-const SHIP_YAW_RATE_LIMIT: f32 = 0.95;
-const SHIP_PITCH_RATE_LIMIT: f32 = 0.80;
-const SHIP_TARGET_ROLL: f32 = 0.32;
-const SHIP_BANK_YAW_RATE: f32 = 0.14;
-const SHIP_RUDDER_YAW_RATE: f32 = 0.12;
+#[derive(Resource, Debug, Default, Clone, Copy)]
+struct ShipInputCapture {
+    pointer: bool,
+    keyboard: bool,
+    pointer_over_ui: bool,
+}
+
+#[derive(SystemParam)]
+struct ShipPlacementFrame<'w, 's> {
+    time: Res<'w, Time>,
+    mouse: Res<'w, ButtonInput<MouseButton>>,
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    input_capture: Res<'w, ShipInputCapture>,
+    wheel: EventReader<'w, 's, MouseWheel>,
+    world: Res<'w, VoxelWorld>,
+    settings: Res<'w, WorldSettings>,
+    windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    camera:
+        Query<'w, 's, (&'static Camera, &'static GlobalTransform), (With<Camera3d>, With<Player>)>,
+}
+
+#[derive(SystemParam)]
+struct ShipFlightFrame<'w> {
+    time: Res<'w, Time>,
+    input_capture: Res<'w, ShipInputCapture>,
+}
+
+impl ShipInputCapture {
+    fn any(self) -> bool {
+        self.pointer || self.keyboard
+    }
+}
+
+fn capture_ship_input(
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mode: Res<ModeContext>,
+    ui_focus: Option<Res<crate::toolbelt::SketchEditorUiFocus>>,
+    mut egui_contexts: Query<&mut bevy_egui::EguiContext, With<PrimaryWindow>>,
+    mut capture: ResMut<ShipInputCapture>,
+) {
+    let (egui_pointer, egui_keyboard, egui_pointer_over_ui) = egui_contexts
+        .get_single_mut()
+        .map(|mut context| {
+            let context = context.get_mut();
+            (
+                context.wants_pointer_input() || context.is_pointer_over_area(),
+                context.wants_keyboard_input(),
+                context.is_pointer_over_area(),
+            )
+        })
+        .unwrap_or((false, false, false));
+    let pointer_over_editor_ui = ui_focus
+        .as_deref()
+        .is_some_and(|focus| focus.pointer_over_editor_ui);
+    capture.pointer = egui_pointer || pointer_over_editor_ui;
+    capture.keyboard = egui_keyboard;
+    capture.pointer_over_ui = egui_pointer_over_ui || pointer_over_editor_ui;
+
+    // E is a continuous roll axis in the cockpit, while the global menu uses
+    // its pressed edge to open inventory. Egui has already seen the raw event.
+    if mode.is_ship_flight() {
+        keys.clear_just_pressed(KeyCode::KeyE);
+    }
+}
+
+fn ship_controls_allowed(capture: ShipInputCapture) -> bool {
+    !capture.any()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShipHandlingProfile {
+    look_response: f32,
+    roll_response: f32,
+    bank_scale: f32,
+    lateral_drift: f32,
+    pitch_level_response: f32,
+}
+
+fn ship_handling_profile(kind: ShipKind) -> ShipHandlingProfile {
+    match kind {
+        ShipKind::ScoutShuttle => ShipHandlingProfile {
+            look_response: 7.4,
+            roll_response: 3.0,
+            bank_scale: 1.05,
+            lateral_drift: 0.030,
+            pitch_level_response: 0.42,
+        },
+        ShipKind::StrikeFighter => ShipHandlingProfile {
+            look_response: 8.2,
+            roll_response: 3.5,
+            bank_scale: 1.20,
+            lateral_drift: 0.026,
+            pitch_level_response: 0.34,
+        },
+        ShipKind::HeavyDropship => ShipHandlingProfile {
+            look_response: 4.8,
+            roll_response: 1.8,
+            bank_scale: 0.78,
+            lateral_drift: 0.018,
+            pitch_level_response: 0.54,
+        },
+    }
+}
+
+const SHIP_MOUSE_DEADZONE_RAD_PER_S: f32 = 0.008;
+const SHIP_MOUSE_YAW_SENS_RAD_PER_PIXEL: f32 = 0.00016;
+const SHIP_MOUSE_PITCH_SENS_RAD_PER_PIXEL: f32 = 0.00048;
+const SHIP_KEY_YAW_RATE_RAD_PER_S: f32 = 0.30;
+const SHIP_KEY_PITCH_RATE_RAD_PER_S: f32 = 0.56;
+const SHIP_YAW_RATE_LIMIT_RAD_PER_S: f32 = 0.95;
+const SHIP_PITCH_RATE_LIMIT_RAD_PER_S: f32 = 0.80;
+const SHIP_ROLL_RATE_LIMIT_RAD_PER_S: f32 = 1.10;
+const SHIP_YAW_ACCEL_RAD_PER_S2: f32 = 3.8;
+const SHIP_PITCH_ACCEL_RAD_PER_S2: f32 = 3.2;
+const SHIP_ROLL_ACCEL_RAD_PER_S2: f32 = 3.6;
+const SHIP_ROLL_LEVEL_GAIN_PER_S: f32 = 2.8;
+const SHIP_ROLL_LEVEL_DEADZONE_RAD: f32 = 0.002;
+const SHIP_BANK_YAW_GAIN_PER_S: f32 = 0.10;
+const SHIP_RUDDER_YAW_RATE_RAD_PER_S: f32 = 0.06;
+
+fn apply_ship_mouse_deadzone(value: Vec2) -> Vec2 {
+    let magnitude = value.length();
+    if magnitude <= SHIP_MOUSE_DEADZONE_RAD_PER_S || magnitude <= f32::EPSILON {
+        Vec2::ZERO
+    } else {
+        value * ((magnitude - SHIP_MOUSE_DEADZONE_RAD_PER_S) / magnitude)
+    }
+}
 
 fn ship_target_angular_rates(
     mouse_dx: f32,
@@ -308,15 +539,151 @@ fn ship_target_angular_rates(
     pitch_input: f32,
     dt: f32,
 ) -> (f32, f32) {
-    let inv_dt = if dt > 1e-4 { 1.0 / dt } else { 60.0 };
-    let mouse_rate_scale = inv_dt.min(90.0);
-    let yaw = (-mouse_dx * SHIP_MOUSE_YAW_SENS) * mouse_rate_scale + turn_input * SHIP_KEY_YAW_RATE;
-    let pitch =
-        (-mouse_dy * SHIP_MOUSE_PITCH_SENS) * mouse_rate_scale + pitch_input * SHIP_KEY_PITCH_RATE;
+    let mouse_rates = if dt.is_finite() && dt > f32::EPSILON {
+        apply_ship_mouse_deadzone(Vec2::new(
+            -mouse_dx * SHIP_MOUSE_YAW_SENS_RAD_PER_PIXEL / dt,
+            -mouse_dy * SHIP_MOUSE_PITCH_SENS_RAD_PER_PIXEL / dt,
+        ))
+    } else {
+        Vec2::ZERO
+    };
+    let yaw = mouse_rates.x + turn_input * SHIP_KEY_YAW_RATE_RAD_PER_S;
+    let pitch = mouse_rates.y + pitch_input * SHIP_KEY_PITCH_RATE_RAD_PER_S;
     (
-        yaw.clamp(-SHIP_YAW_RATE_LIMIT, SHIP_YAW_RATE_LIMIT),
-        pitch.clamp(-SHIP_PITCH_RATE_LIMIT, SHIP_PITCH_RATE_LIMIT),
+        yaw.clamp(
+            -SHIP_YAW_RATE_LIMIT_RAD_PER_S,
+            SHIP_YAW_RATE_LIMIT_RAD_PER_S,
+        ),
+        pitch.clamp(
+            -SHIP_PITCH_RATE_LIMIT_RAD_PER_S,
+            SHIP_PITCH_RATE_LIMIT_RAD_PER_S,
+        ),
     )
+}
+
+fn ship_bank_and_rudder_yaw_rate(turn_input: f32, roll: f32) -> f32 {
+    roll * SHIP_BANK_YAW_GAIN_PER_S + turn_input * SHIP_RUDDER_YAW_RATE_RAD_PER_S
+}
+
+fn integrate_ship_angular_rate(
+    current_rad_per_s: f32,
+    target_rad_per_s: f32,
+    max_accel_rad_per_s2: f32,
+    dt_seconds: f32,
+) -> (f32, f32) {
+    if !dt_seconds.is_finite() || dt_seconds <= 0.0 {
+        return (current_rad_per_s, 0.0);
+    }
+    let acceleration = max_accel_rad_per_s2.max(0.0);
+    let difference = target_rad_per_s - current_rad_per_s;
+    if difference.abs() <= f32::EPSILON {
+        return (target_rad_per_s, target_rad_per_s * dt_seconds);
+    }
+    if acceleration <= f32::EPSILON {
+        return (current_rad_per_s, current_rad_per_s * dt_seconds);
+    }
+
+    let signed_acceleration = difference.signum() * acceleration;
+    let time_to_target = (difference.abs() / acceleration).min(dt_seconds);
+    let reached_rate = current_rad_per_s + signed_acceleration * time_to_target;
+    let accelerated_angle = current_rad_per_s * time_to_target
+        + 0.5 * signed_acceleration * time_to_target * time_to_target;
+    let remaining_time = dt_seconds - time_to_target;
+    let angle_delta = accelerated_angle + target_rad_per_s * remaining_time;
+    let next_rate = if remaining_time > 0.0 {
+        target_rad_per_s
+    } else {
+        reached_rate
+    };
+    (next_rate, angle_delta)
+}
+
+fn wrap_ship_angle(angle: f32) -> f32 {
+    (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+
+fn ship_roll_input(left: bool, right: bool) -> f32 {
+    match (left, right) {
+        (true, false) => 1.0,
+        (false, true) => -1.0,
+        _ => 0.0,
+    }
+}
+
+fn step_ship_attitude(
+    motion: &mut ShipMotion,
+    mouse_delta_pixels: Vec2,
+    turn_input: f32,
+    pitch_input: f32,
+    roll_input: f32,
+    dt_seconds: f32,
+    handling: ShipHandlingProfile,
+) {
+    if !dt_seconds.is_finite() || dt_seconds <= 0.0 {
+        return;
+    }
+
+    let (mouse_and_key_yaw, target_pitch_rate) = ship_target_angular_rates(
+        mouse_delta_pixels.x,
+        mouse_delta_pixels.y,
+        turn_input,
+        pitch_input,
+        dt_seconds,
+    );
+    let target_yaw_rate = (mouse_and_key_yaw
+        + ship_bank_and_rudder_yaw_rate(turn_input, motion.roll) * handling.bank_scale)
+        .clamp(
+            -SHIP_YAW_RATE_LIMIT_RAD_PER_S,
+            SHIP_YAW_RATE_LIMIT_RAD_PER_S,
+        );
+    let target_roll_rate = if roll_input.abs() > f32::EPSILON {
+        roll_input.clamp(-1.0, 1.0) * SHIP_ROLL_RATE_LIMIT_RAD_PER_S
+    } else if motion.roll.abs() > SHIP_ROLL_LEVEL_DEADZONE_RAD {
+        (-wrap_ship_angle(motion.roll) * SHIP_ROLL_LEVEL_GAIN_PER_S).clamp(
+            -SHIP_ROLL_RATE_LIMIT_RAD_PER_S,
+            SHIP_ROLL_RATE_LIMIT_RAD_PER_S,
+        )
+    } else {
+        0.0
+    };
+
+    let look_accel_scale = (handling.look_response / 7.4).clamp(0.5, 1.5);
+    let roll_accel_scale = (handling.roll_response / 3.0).clamp(0.5, 1.5);
+    let yaw_accel = SHIP_YAW_ACCEL_RAD_PER_S2 * look_accel_scale;
+    let pitch_accel = SHIP_PITCH_ACCEL_RAD_PER_S2 * look_accel_scale;
+    let roll_accel = SHIP_ROLL_ACCEL_RAD_PER_S2 * roll_accel_scale;
+    let (yaw_rate, yaw_delta) =
+        integrate_ship_angular_rate(motion.yaw_rate, target_yaw_rate, yaw_accel, dt_seconds);
+    let (pitch_rate, pitch_delta) = integrate_ship_angular_rate(
+        motion.pitch_rate,
+        target_pitch_rate,
+        pitch_accel,
+        dt_seconds,
+    );
+    let (roll_rate, roll_delta) =
+        integrate_ship_angular_rate(motion.roll_rate, target_roll_rate, roll_accel, dt_seconds);
+    motion.yaw_rate = yaw_rate;
+    motion.pitch_rate = pitch_rate;
+    motion.roll_rate = roll_rate;
+    motion.yaw = wrap_ship_angle(motion.yaw + yaw_delta);
+
+    let unclamped_pitch = motion.pitch + pitch_delta;
+    motion.pitch = unclamped_pitch.clamp(-0.85, 0.72);
+    if motion.pitch != unclamped_pitch && motion.pitch_rate.signum() == pitch_delta.signum() {
+        motion.pitch_rate = 0.0;
+    }
+    if target_pitch_rate.abs() <= f32::EPSILON {
+        motion.pitch *= (-dt_seconds * handling.pitch_level_response).exp();
+    }
+
+    motion.roll = wrap_ship_angle(motion.roll + roll_delta);
+    if roll_input.abs() <= f32::EPSILON
+        && motion.roll.abs() <= SHIP_ROLL_LEVEL_DEADZONE_RAD
+        && motion.roll_rate.abs() <= roll_accel * dt_seconds
+    {
+        motion.roll = 0.0;
+        motion.roll_rate = 0.0;
+    }
 }
 
 #[derive(Component)]
@@ -335,6 +702,7 @@ struct EnemyDrone {
 #[derive(Component)]
 struct ShipProjectile {
     owner: ProjectileOwner,
+    tone: ShipFxTone,
     velocity: Vec3,
     damage: f32,
     radius: f32,
@@ -345,6 +713,27 @@ struct ShipProjectile {
 enum ProjectileOwner {
     Player,
     Drone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ShipFxTone {
+    Pulse,
+    Ion,
+    Plasma,
+    Rail,
+    Hostile,
+}
+
+impl ShipFxTone {
+    fn color(self) -> Color {
+        match self {
+            Self::Pulse => Color::srgb(0.08, 0.96, 1.0),
+            Self::Ion => Color::srgb(0.10, 0.95, 1.00),
+            Self::Plasma => Color::srgb(1.00, 0.20, 0.86),
+            Self::Rail => Color::srgb(1.00, 0.65, 0.14),
+            Self::Hostile => Color::srgb(1.0, 0.08, 0.55),
+        }
+    }
 }
 
 #[derive(Component)]
@@ -429,6 +818,52 @@ struct RealShipPartSpec {
     rotation: Quat,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShipVisualDetail {
+    Core,
+    Full,
+}
+
+impl ShipVisualDetail {
+    fn for_profile(profile: RuntimeProfile) -> Self {
+        if profile == RuntimeProfile::LowSpec {
+            Self::Core
+        } else {
+            Self::Full
+        }
+    }
+
+    fn includes_decorative_parts(self) -> bool {
+        self == Self::Full
+    }
+
+    fn includes_cockpit_panel(self, index: usize, tone: CockpitPanelTone) -> bool {
+        if self == Self::Full {
+            return true;
+        }
+        match tone {
+            CockpitPanelTone::Shell
+            | CockpitPanelTone::Seat
+            | CockpitPanelTone::Frame
+            | CockpitPanelTone::Glass => true,
+            CockpitPanelTone::Cyan | CockpitPanelTone::Magenta | CockpitPanelTone::Amber => {
+                index % 2 == 0
+            }
+        }
+    }
+
+    fn includes_energy_trail(self, index: usize, tone: ShipTrailTone) -> bool {
+        self == Self::Full || tone == ShipTrailTone::Amber || index < 2
+    }
+
+    fn dynamic_light_budget(self) -> usize {
+        match self {
+            Self::Core => 0,
+            Self::Full => 2,
+        }
+    }
+}
+
 #[derive(Resource, Debug, Clone)]
 struct CockpitTransition {
     active: bool,
@@ -477,7 +912,8 @@ struct ShipFxCache {
     projectile: Option<Handle<Mesh>>,
     explosion: Option<Handle<Mesh>>,
     real_mats: std::collections::HashMap<(RealShipTone, bool), Handle<StandardMaterial>>,
-    projectile_mats: std::collections::HashMap<u8, Handle<StandardMaterial>>,
+    projectile_mats: std::collections::HashMap<ShipFxTone, Handle<StandardMaterial>>,
+    explosion_mats: std::collections::HashMap<ShipFxTone, Handle<StandardMaterial>>,
     cockpit_mats: std::collections::HashMap<u8, Handle<StandardMaterial>>,
     drone_mat: Option<Handle<StandardMaterial>>,
 }
@@ -1456,8 +1892,11 @@ fn push_box(out: &mut Vec<ShipVoxel>, min: IVec3, max: IVec3, block: BlockType) 
     }
 }
 
-fn realistic_ship_exterior_specs(kind: ShipKind) -> Vec<RealShipPartSpec> {
-    let mut parts = Vec::with_capacity(24);
+fn realistic_ship_exterior_specs(
+    kind: ShipKind,
+    detail: ShipVisualDetail,
+) -> Vec<RealShipPartSpec> {
+    let mut parts = Vec::with_capacity(36);
     push_real_part(
         &mut parts,
         RealShipMeshKind::SmoothEllipsoid,
@@ -1489,6 +1928,32 @@ fn realistic_ship_exterior_specs(kind: ShipKind) -> Vec<RealShipPartSpec> {
         Vec3::new(0.0, 1.42, -4.95),
         Vec3::new(1.45, 0.38, 1.82),
         Quat::from_rotation_x(-0.05),
+    );
+    for sx in [-1.0, 1.0] {
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::CarbonBlack,
+            Vec3::new(sx * 1.34, 1.38, -4.92),
+            Vec3::new(0.16, 0.18, 2.08),
+            Quat::from_rotation_y(-sx * 0.04),
+        );
+    }
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::AeroPlate,
+        RealShipTone::CarbonBlack,
+        Vec3::new(0.0, 1.78, -4.94),
+        Vec3::new(0.13, 0.12, 2.04),
+        Quat::from_rotation_x(-0.05),
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::AeroPlate,
+        RealShipTone::CarbonBlack,
+        Vec3::new(0.0, 1.50, -3.36),
+        Vec3::new(2.70, 0.16, 0.18),
+        Quat::IDENTITY,
     );
     for sx in [-1.0, 1.0] {
         push_real_part(
@@ -1557,6 +2022,43 @@ fn realistic_ship_exterior_specs(kind: ShipKind) -> Vec<RealShipPartSpec> {
         Quat::IDENTITY,
     );
 
+    if detail.includes_decorative_parts() {
+        for sx in [-1.0, 1.0] {
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::AeroPlate,
+                RealShipTone::CarbonBlack,
+                Vec3::new(sx * 2.42, 0.94, -0.55),
+                Vec3::new(0.34, 0.10, 4.15),
+                Quat::from_rotation_y(-sx * 0.08),
+            );
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::AeroPlate,
+                RealShipTone::CeramicWhite,
+                Vec3::new(sx * 4.45, 0.62, 1.20),
+                Vec3::new(2.65, 0.14, 0.64),
+                Quat::from_rotation_y(-sx * 0.12),
+            );
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::AeroPlate,
+                RealShipTone::AmberHeat,
+                Vec3::new(sx * 2.12, 0.18, 4.78),
+                Vec3::new(0.52, 0.08, 1.22),
+                Quat::IDENTITY,
+            );
+        }
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::CarbonBlack,
+            Vec3::new(0.0, 0.78, 5.56),
+            Vec3::new(3.72, 0.20, 0.68),
+            Quat::IDENTITY,
+        );
+    }
+
     match kind {
         ShipKind::ScoutShuttle => {
             push_real_part(
@@ -1612,8 +2114,12 @@ fn realistic_ship_exterior_specs(kind: ShipKind) -> Vec<RealShipPartSpec> {
     parts
 }
 
-fn realistic_cockpit_part_specs(kind: ShipKind, bp: &ShipBlueprint) -> Vec<RealShipPartSpec> {
-    let mut parts = Vec::with_capacity(14);
+fn realistic_cockpit_part_specs(
+    kind: ShipKind,
+    bp: &ShipBlueprint,
+    detail: ShipVisualDetail,
+) -> Vec<RealShipPartSpec> {
+    let mut parts = Vec::with_capacity(20);
     let scale = (bp.hull_radius / 8.0).clamp(0.86, 1.30);
     push_real_part(
         &mut parts,
@@ -1638,6 +2144,22 @@ fn realistic_cockpit_part_specs(kind: ShipKind, bp: &ShipBlueprint) -> Vec<RealS
         Vec3::new(0.0, -0.70, 1.05),
         Vec3::new(0.92, 0.92, 0.14),
         Quat::from_rotation_x(0.22),
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::AeroPlate,
+        RealShipTone::ConsoleBlack,
+        Vec3::new(0.0, -1.48, 0.02),
+        Vec3::new(3.02, 0.12, 2.82),
+        Quat::IDENTITY,
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::AeroPlate,
+        RealShipTone::CarbonBlack,
+        Vec3::new(0.0, -0.16, 1.52),
+        Vec3::new(2.72, 2.34, 0.14),
+        Quat::from_rotation_x(0.06),
     );
     for sx in [-1.0, 1.0] {
         push_real_part(
@@ -1681,6 +2203,34 @@ fn realistic_cockpit_part_specs(kind: ShipKind, bp: &ShipBlueprint) -> Vec<RealS
         Vec3::new(2.18, 0.035, 0.52),
         Quat::from_rotation_x(-0.42),
     );
+    if detail.includes_decorative_parts() {
+        for sx in [-1.0, 1.0] {
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::AeroPlate,
+                RealShipTone::CarbonBlack,
+                Vec3::new(sx * 1.54, 0.12, -0.18),
+                Vec3::new(0.14, 1.62, 2.30),
+                Quat::from_rotation_z(sx * 0.08),
+            );
+        }
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::CarbonBlack,
+            Vec3::new(0.0, 1.13, -0.58),
+            Vec3::new(3.02, 0.14, 0.18),
+            Quat::IDENTITY,
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            RealShipTone::AmberHeat,
+            Vec3::new(0.0, 1.03, -0.72),
+            Vec3::new(1.18, 0.04, 0.06),
+            Quat::IDENTITY,
+        );
+    }
     if matches!(kind, ShipKind::HeavyDropship) {
         for sx in [-1.0, 1.0] {
             push_real_part(
@@ -1724,6 +2274,7 @@ fn spawn_ship_entity(
     pos: Vec3,
     yaw: f32,
     preview: bool,
+    detail: ShipVisualDetail,
     shield_override: Option<f32>,
 ) -> Entity {
     let bp = blueprint(kind);
@@ -1757,6 +2308,7 @@ fn spawn_ship_entity(
                 speed: 0.0,
                 yaw_rate: 0.0,
                 pitch_rate: 0.0,
+                roll_rate: 0.0,
                 lateral_speed: 0.0,
             },
         ));
@@ -1767,34 +2319,38 @@ fn spawn_ship_entity(
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
     commands.entity(root).with_children(|p| {
-        spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview);
+        spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview, detail);
         if !preview {
-            spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp);
-            spawn_ship_energy_trails(p, materials, fx, &cube, kind);
-            p.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: Color::srgb(0.64, 0.92, 1.0),
-                    intensity: 130_000.0,
-                    range: 18.0,
-                    shadows_enabled: false,
+            spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp, detail);
+            spawn_ship_energy_trails(p, materials, fx, &cube, kind, detail);
+            if detail.dynamic_light_budget() >= 1 {
+                p.spawn(PointLightBundle {
+                    point_light: PointLight {
+                        color: Color::srgb(0.64, 0.92, 1.0),
+                        intensity: 130_000.0,
+                        range: 18.0,
+                        shadows_enabled: false,
+                        ..default()
+                    },
+                    transform: Transform::from_translation(
+                        bp.cockpit_offset + Vec3::new(0.0, 1.0, 0.6),
+                    ),
                     ..default()
-                },
-                transform: Transform::from_translation(
-                    bp.cockpit_offset + Vec3::new(0.0, 1.0, 0.6),
-                ),
-                ..default()
-            });
-            p.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: Color::srgb(0.25, 0.90, 1.0),
-                    intensity: 450_000.0,
-                    range: 22.0,
-                    shadows_enabled: false,
+                });
+            }
+            if detail.dynamic_light_budget() >= 2 {
+                p.spawn(PointLightBundle {
+                    point_light: PointLight {
+                        color: Color::srgb(0.25, 0.90, 1.0),
+                        intensity: 450_000.0,
+                        range: 22.0,
+                        shadows_enabled: false,
+                        ..default()
+                    },
+                    transform: Transform::from_translation(Vec3::new(0.0, 1.4, 6.8)),
                     ..default()
-                },
-                transform: Transform::from_translation(Vec3::new(0.0, 1.4, 6.8)),
-                ..default()
-            });
+                });
+            }
         }
     });
     root
@@ -1807,8 +2363,9 @@ fn spawn_realistic_ship_exterior(
     fx: &mut ShipFxCache,
     kind: ShipKind,
     preview: bool,
+    detail: ShipVisualDetail,
 ) {
-    for part in realistic_ship_exterior_specs(kind) {
+    for part in realistic_ship_exterior_specs(kind, detail) {
         spawn_real_ship_part(
             parent,
             meshes,
@@ -1828,8 +2385,9 @@ fn spawn_realistic_cockpit_parts(
     fx: &mut ShipFxCache,
     kind: ShipKind,
     bp: &ShipBlueprint,
+    detail: ShipVisualDetail,
 ) {
-    for part in realistic_cockpit_part_specs(kind, bp) {
+    for part in realistic_cockpit_part_specs(kind, bp, detail) {
         let mut part = part;
         part.offset += bp.cockpit_offset;
         spawn_real_ship_part(
@@ -1889,6 +2447,96 @@ fn real_ship_mesh(
     }
 }
 
+fn real_ship_surface_alpha(preview: bool, preview_alpha: f32) -> f32 {
+    if preview {
+        preview_alpha
+    } else {
+        1.0
+    }
+}
+
+fn real_ship_material_spec(tone: RealShipTone, preview: bool) -> StandardMaterial {
+    let alpha_mode = if preview {
+        AlphaMode::Blend
+    } else {
+        AlphaMode::Opaque
+    };
+    let (base_color, emissive, metallic, roughness, reflectance) = match tone {
+        RealShipTone::CeramicWhite => (
+            Color::srgba(0.72, 0.78, 0.82, real_ship_surface_alpha(preview, 0.38)),
+            LinearRgba::rgb(0.035, 0.045, 0.055),
+            0.45,
+            0.32,
+            0.55,
+        ),
+        RealShipTone::CarbonBlack => (
+            Color::srgba(0.015, 0.022, 0.028, real_ship_surface_alpha(preview, 0.38)),
+            LinearRgba::rgb(0.004, 0.018, 0.022),
+            0.58,
+            0.30,
+            0.52,
+        ),
+        RealShipTone::SmokedGlass => (
+            Color::srgba(0.004, 0.025, 0.034, real_ship_surface_alpha(preview, 0.42)),
+            LinearRgba::rgb(0.01, 0.12, 0.16),
+            0.30,
+            0.16,
+            0.78,
+        ),
+        RealShipTone::CyanEmission => (
+            Color::srgba(0.02, 0.86, 1.0, real_ship_surface_alpha(preview, 0.52)),
+            LinearRgba::rgb(0.22, 7.8, 9.4),
+            0.0,
+            0.14,
+            0.62,
+        ),
+        RealShipTone::AmberHeat => (
+            Color::srgba(1.0, 0.36, 0.06, real_ship_surface_alpha(preview, 0.34)),
+            LinearRgba::rgb(8.5, 2.2, 0.10),
+            0.0,
+            0.18,
+            0.52,
+        ),
+        RealShipTone::LuminiteGlass => (
+            Color::srgba(0.56, 1.0, 1.0, real_ship_surface_alpha(preview, 0.44)),
+            LinearRgba::rgb(1.6, 6.8, 7.2),
+            0.05,
+            0.12,
+            0.72,
+        ),
+        RealShipTone::MagentaSignal => (
+            Color::srgba(1.0, 0.12, 0.82, real_ship_surface_alpha(preview, 0.46)),
+            LinearRgba::rgb(6.4, 0.18, 4.8),
+            0.0,
+            0.14,
+            0.62,
+        ),
+        RealShipTone::SeatLeather => (
+            Color::srgba(0.018, 0.016, 0.014, real_ship_surface_alpha(preview, 0.38)),
+            LinearRgba::BLACK,
+            0.15,
+            0.42,
+            0.35,
+        ),
+        RealShipTone::ConsoleBlack => (
+            Color::srgba(0.006, 0.012, 0.018, real_ship_surface_alpha(preview, 0.38)),
+            LinearRgba::rgb(0.0, 0.05, 0.08),
+            0.48,
+            0.30,
+            0.55,
+        ),
+    };
+    StandardMaterial {
+        base_color,
+        emissive,
+        alpha_mode,
+        metallic,
+        perceptual_roughness: roughness,
+        reflectance,
+        ..default()
+    }
+}
+
 fn real_ship_material(
     fx: &mut ShipFxCache,
     materials: &mut Assets<StandardMaterial>,
@@ -1899,106 +2547,7 @@ fn real_ship_material(
     if let Some(mat) = fx.real_mats.get(&key) {
         return mat.clone();
     }
-    let preview_alpha = if preview { 0.38 } else { 1.0 };
-    let (base, emissive, alpha_mode, metallic, roughness, reflectance) = match tone {
-        RealShipTone::CeramicWhite => (
-            Color::srgba(0.88, 0.93, 0.96, preview_alpha),
-            LinearRgba::rgb(0.05, 0.06, 0.07),
-            if preview {
-                AlphaMode::Blend
-            } else {
-                AlphaMode::Opaque
-            },
-            0.72,
-            0.18,
-            0.76,
-        ),
-        RealShipTone::CarbonBlack => (
-            Color::srgba(0.006, 0.010, 0.014, preview_alpha),
-            LinearRgba::rgb(0.005, 0.025, 0.030),
-            if preview {
-                AlphaMode::Blend
-            } else {
-                AlphaMode::Opaque
-            },
-            0.86,
-            0.22,
-            0.58,
-        ),
-        RealShipTone::SmokedGlass => (
-            Color::srgba(0.0, 0.025, 0.035, if preview { 0.42 } else { 0.88 }),
-            LinearRgba::rgb(0.02, 0.22, 0.28),
-            AlphaMode::Blend,
-            0.10,
-            0.03,
-            0.95,
-        ),
-        RealShipTone::CyanEmission => (
-            Color::srgba(0.02, 0.86, 1.0, if preview { 0.52 } else { 0.74 }),
-            LinearRgba::rgb(0.22, 7.8, 9.4),
-            AlphaMode::Add,
-            0.0,
-            0.08,
-            0.72,
-        ),
-        RealShipTone::AmberHeat => (
-            Color::srgba(1.0, 0.36, 0.06, if preview { 0.34 } else { 0.52 }),
-            LinearRgba::rgb(8.5, 2.2, 0.10),
-            AlphaMode::Add,
-            0.0,
-            0.15,
-            0.58,
-        ),
-        RealShipTone::LuminiteGlass => (
-            Color::srgba(0.56, 1.0, 1.0, if preview { 0.44 } else { 0.66 }),
-            LinearRgba::rgb(1.6, 6.8, 7.2),
-            AlphaMode::Add,
-            0.05,
-            0.04,
-            0.9,
-        ),
-        RealShipTone::MagentaSignal => (
-            Color::srgba(1.0, 0.12, 0.82, if preview { 0.46 } else { 0.72 }),
-            LinearRgba::rgb(6.4, 0.18, 4.8),
-            AlphaMode::Add,
-            0.0,
-            0.09,
-            0.72,
-        ),
-        RealShipTone::SeatLeather => (
-            Color::srgba(0.018, 0.016, 0.014, preview_alpha),
-            LinearRgba::BLACK,
-            if preview {
-                AlphaMode::Blend
-            } else {
-                AlphaMode::Opaque
-            },
-            0.15,
-            0.42,
-            0.35,
-        ),
-        RealShipTone::ConsoleBlack => (
-            Color::srgba(0.006, 0.012, 0.018, preview_alpha),
-            LinearRgba::rgb(0.0, 0.08, 0.12),
-            if preview {
-                AlphaMode::Blend
-            } else {
-                AlphaMode::Opaque
-            },
-            0.55,
-            0.20,
-            0.62,
-        ),
-    };
-    let mat = materials.add(StandardMaterial {
-        base_color: base,
-        emissive,
-        alpha_mode,
-        metallic,
-        perceptual_roughness: roughness,
-        reflectance,
-        ..default()
-    });
+    let mat = materials.add(real_ship_material_spec(tone, preview));
     fx.real_mats.insert(key, mat.clone());
     mat
 }
@@ -2062,8 +2611,12 @@ fn spawn_ship_energy_trails(
     fx: &mut ShipFxCache,
     cube: &Handle<Mesh>,
     kind: ShipKind,
+    detail: ShipVisualDetail,
 ) {
-    for spec in ship_trail_specs(kind) {
+    for (index, spec) in ship_trail_specs(kind).into_iter().enumerate() {
+        if !detail.includes_energy_trail(index, spec.tone) {
+            continue;
+        }
         let material = ship_trail_material(fx, materials, spec.tone);
         parent.spawn((
             PbrBundle {
@@ -2148,9 +2701,13 @@ fn spawn_cockpit_holograms(
     cube: &Handle<Mesh>,
     kind: ShipKind,
     bp: &ShipBlueprint,
+    detail: ShipVisualDetail,
 ) {
-    spawn_realistic_cockpit_parts(parent, meshes, materials, fx, kind, bp);
-    for panel in cockpit_panel_specs(kind, bp) {
+    spawn_realistic_cockpit_parts(parent, meshes, materials, fx, kind, bp, detail);
+    for (index, panel) in cockpit_panel_specs(kind, bp).into_iter().enumerate() {
+        if !detail.includes_cockpit_panel(index, panel.tone) {
+            continue;
+        }
         let mat = cockpit_panel_material(fx, materials, panel.tone);
         spawn_panel(
             parent,
@@ -2504,11 +3061,445 @@ fn cockpit_material(
     mat
 }
 
+// Default-ship spawn plan, v1.
+//
+// Three bounded alternatives were evaluated:
+// 1. Keep the historical (+14,+18) offset and sample only its centre. This is
+//    cheap, but a 16+ block-wide Scout can still intersect a cliff or canopy.
+// 2. Trust only the heightfield-derived hover plan. This cannot see restored
+//    edits, authored structures, fluids, or still-streaming chunks.
+// 3. Selected: use the bounded heightfield plan only as a candidate, then keep
+//    a bounded pending request until the current exact streaming set resolves
+//    the complete orientation-independent hull/clearance envelope. Only that
+//    authoritative second gate may create the default ship.
+//
+// The selected plan is pure, deterministic and rollback-local to
+// `default_scout_spawn_plan`. It performs at most 8 * 2,809 = 22,472 terrain
+// queries once per world entry. Its result never directly spawns. An invalid
+// blueprint, arithmetic overflow, unresolved request-set slot, occupied voxel,
+// or fixed wait/query cap fails closed without mutating saves. A
+// steep-but-representable world may still propose its least-relief site, but
+// must pass exactly the same authoritative gate.
+const DEFAULT_SCOUT_CANDIDATE_OFFSETS: [IVec2; 8] = [
+    IVec2::new(14, 18),
+    IVec2::new(-14, 18),
+    IVec2::new(18, -14),
+    IVec2::new(-18, -14),
+    IVec2::new(28, 0),
+    IVec2::new(-28, 0),
+    IVec2::new(0, 28),
+    IVec2::new(0, -28),
+];
+const DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS: i32 = 18;
+// Terrain's current Lush tree grammar declares max_extent <= 7 blocks. The
+// extra block is a conservative seam/rounding halo around the rotated hull.
+const PROCEDURAL_VEGETATION_HORIZONTAL_CLEARANCE_BLOCKS: i32 = 8;
+// Current maximum is a 17-block Lush Jungle trunk + 5-block crown lift + a
+// 3-block terminal crown radius = 25 blocks above the surface. Thirty-two
+// deliberately leaves seven blocks of version headroom. This is a
+// procedural-vegetation bound, not
+// a false claim about arbitrary saved edits or authored structures.
+const PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS: i32 = 32;
+const DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS: i32 = 2;
+const DEFAULT_SCOUT_PREFERRED_RELIEF_BLOCKS: i32 = 4;
+const DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP: usize = 2_809;
+const DEFAULT_SCOUT_TOTAL_SURFACE_QUERY_CAP: usize =
+    DEFAULT_SCOUT_CANDIDATE_OFFSETS.len() * DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP;
+const DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS: i32 = 2;
+const DEFAULT_SCOUT_AUTHORITY_VERTICAL_SPAN_CAP: usize = 32;
+const DEFAULT_SCOUT_AUTHORITY_CHUNK_CHECK_CAP: usize = 64;
+const DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP: usize = 53_792;
+const DEFAULT_SCOUT_AUTHORITY_WAIT_FRAME_CAP: u16 = 900;
+// Bevy's world transform is f32. Inside this inclusive range every integer
+// coordinate is representable; the authored half-block root offset may round
+// by at most half a block, which remains inside the explicit two-block
+// authority clearance. Outside it, a rounded ECS transform could leave the
+// integer voxel volume that was actually checked, so default spawning fails
+// closed until the engine has a floating-origin or double-precision contract.
+const DEFAULT_SCOUT_RENDER_EXACT_INTEGER_LIMIT: i64 = 1_i64 << 24;
+const _: () = assert!(
+    (DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS as usize
+        + DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS as usize)
+        .saturating_mul(2)
+        .saturating_add(1)
+        .saturating_mul(
+            (DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS as usize
+                + DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS as usize)
+                .saturating_mul(2)
+                .saturating_add(1),
+        )
+        .saturating_mul(DEFAULT_SCOUT_AUTHORITY_VERTICAL_SPAN_CAP)
+        == DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScoutSpawnEnvelope {
+    footprint_radius_blocks: i32,
+    vegetation_scan_radius_blocks: i32,
+    min_voxel_y: i32,
+    max_voxel_y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DefaultScoutSpawnPlan {
+    center: IVec2,
+    root_y: i32,
+    candidate_index: usize,
+    footprint_radius_blocks: i32,
+    vegetation_scan_radius_blocks: i32,
+    footprint_min_surface: i32,
+    footprint_max_surface: i32,
+    vegetation_max_surface: i32,
+    terrain_relief_blocks: i32,
+    surface_queries: usize,
+    preferred_site: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingDefaultScoutSpawnRequest {
+    plan: DefaultScoutSpawnPlan,
+    yaw: f32,
+    visual_detail: ShipVisualDetail,
+    waited_frames: u16,
+}
+
+#[derive(Resource, Debug, Default)]
+struct PendingDefaultScoutSpawn {
+    request: Option<PendingDefaultScoutSpawnRequest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefaultScoutAuthorityResult {
+    Clear {
+        chunk_checks: usize,
+        voxel_queries: usize,
+    },
+    Pending,
+    Occupied(IVec3),
+    Invalid,
+}
+
+fn scout_spawn_envelope(bp: &ShipBlueprint) -> Option<ScoutSpawnEnvelope> {
+    let max_abs_x = bp
+        .voxels
+        .iter()
+        .map(|voxel| i64::from(voxel.pos.x).abs())
+        .max()?;
+    let max_abs_z = bp
+        .voxels
+        .iter()
+        .map(|voxel| i64::from(voxel.pos.z).abs())
+        .max()?;
+    let min_voxel_y = bp.voxels.iter().map(|voxel| voxel.pos.y).min()?;
+    let max_voxel_y = bp.voxels.iter().map(|voxel| voxel.pos.y).max()?;
+
+    // Voxel centres are integral; +1 in doubled coordinates includes each
+    // outer half-block. The circumscribed radius contains the full rectangular
+    // footprint under every yaw, avoiding float/trig decisions at world scale.
+    let twice_x = max_abs_x.checked_mul(2)?.checked_add(1)?;
+    let twice_z = max_abs_z.checked_mul(2)?.checked_add(1)?;
+    let required_diameter_squared = twice_x
+        .checked_mul(twice_x)?
+        .checked_add(twice_z.checked_mul(twice_z)?)?;
+    let footprint_radius_blocks =
+        (0..=DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS).find(|radius| {
+            let diameter = i64::from(*radius) * 2;
+            diameter * diameter >= required_diameter_squared
+        })?;
+    let vegetation_scan_radius_blocks =
+        footprint_radius_blocks.checked_add(PROCEDURAL_VEGETATION_HORIZONTAL_CLEARANCE_BLOCKS)?;
+    let side = usize::try_from(
+        vegetation_scan_radius_blocks
+            .checked_mul(2)?
+            .checked_add(1)?,
+    )
+    .ok()?;
+    if side.checked_mul(side)? > DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP {
+        return None;
+    }
+
+    Some(ScoutSpawnEnvelope {
+        footprint_radius_blocks,
+        vegetation_scan_radius_blocks,
+        min_voxel_y,
+        max_voxel_y,
+    })
+}
+
+fn bounded_scout_candidate_center(anchor: IVec2, offset: IVec2, scan_radius_blocks: i32) -> IVec2 {
+    let radius = i64::from(scan_radius_blocks.max(0));
+    let min_center = i64::from(i32::MIN) + radius;
+    let max_center = i64::from(i32::MAX) - radius;
+    let bounded = |anchor: i32, offset: i32| {
+        (i64::from(anchor) + i64::from(offset)).clamp(min_center, max_center) as i32
+    };
+    IVec2::new(bounded(anchor.x, offset.x), bounded(anchor.y, offset.y))
+}
+
+fn sample_scout_spawn_candidate(
+    center: IVec2,
+    candidate_index: usize,
+    envelope: ScoutSpawnEnvelope,
+    surface_height_at: &mut impl FnMut(i32, i32) -> i32,
+) -> Option<DefaultScoutSpawnPlan> {
+    let mut footprint_min_surface = i32::MAX;
+    let mut footprint_max_surface = i32::MIN;
+    let mut vegetation_max_surface = i32::MIN;
+    let mut surface_queries = 0usize;
+
+    for dz in -envelope.vegetation_scan_radius_blocks..=envelope.vegetation_scan_radius_blocks {
+        for dx in -envelope.vegetation_scan_radius_blocks..=envelope.vegetation_scan_radius_blocks {
+            if surface_queries >= DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP {
+                return None;
+            }
+            let wx = center.x.checked_add(dx)?;
+            let wz = center.y.checked_add(dz)?;
+            let surface = surface_height_at(wx, wz);
+            surface_queries = surface_queries.checked_add(1)?;
+            vegetation_max_surface = vegetation_max_surface.max(surface);
+            if dx.abs() <= envelope.footprint_radius_blocks
+                && dz.abs() <= envelope.footprint_radius_blocks
+            {
+                footprint_min_surface = footprint_min_surface.min(surface);
+                footprint_max_surface = footprint_max_surface.max(surface);
+            }
+        }
+    }
+
+    let terrain_relief_blocks = footprint_max_surface.checked_sub(footprint_min_surface)?;
+    let root_y = i64::from(vegetation_max_surface)
+        .checked_add(i64::from(PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS))?
+        .checked_add(i64::from(DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS))?
+        .checked_sub(i64::from(envelope.min_voxel_y))?;
+    let root_y = i32::try_from(root_y).ok()?;
+
+    Some(DefaultScoutSpawnPlan {
+        center,
+        root_y,
+        candidate_index,
+        footprint_radius_blocks: envelope.footprint_radius_blocks,
+        vegetation_scan_radius_blocks: envelope.vegetation_scan_radius_blocks,
+        footprint_min_surface,
+        footprint_max_surface,
+        vegetation_max_surface,
+        terrain_relief_blocks,
+        surface_queries,
+        preferred_site: terrain_relief_blocks <= DEFAULT_SCOUT_PREFERRED_RELIEF_BLOCKS,
+    })
+}
+
+fn scout_spawn_candidate_is_better(
+    candidate: DefaultScoutSpawnPlan,
+    current: DefaultScoutSpawnPlan,
+) -> bool {
+    (
+        candidate.terrain_relief_blocks,
+        candidate.vegetation_max_surface,
+        candidate.candidate_index,
+    ) < (
+        current.terrain_relief_blocks,
+        current.vegetation_max_surface,
+        current.candidate_index,
+    )
+}
+
+fn default_scout_spawn_plan(
+    anchor: IVec2,
+    bp: &ShipBlueprint,
+    mut surface_height_at: impl FnMut(i32, i32) -> i32,
+) -> Option<DefaultScoutSpawnPlan> {
+    let envelope = scout_spawn_envelope(bp)?;
+    let mut visited_centers = Vec::with_capacity(DEFAULT_SCOUT_CANDIDATE_OFFSETS.len());
+    let mut best_preferred = None;
+    let mut best_fallback = None;
+    let mut total_surface_queries = 0usize;
+
+    for (candidate_index, offset) in DEFAULT_SCOUT_CANDIDATE_OFFSETS.iter().copied().enumerate() {
+        let center =
+            bounded_scout_candidate_center(anchor, offset, envelope.vegetation_scan_radius_blocks);
+        if visited_centers.contains(&center) {
+            continue;
+        }
+        visited_centers.push(center);
+
+        let Some(candidate) =
+            sample_scout_spawn_candidate(center, candidate_index, envelope, &mut surface_height_at)
+        else {
+            continue;
+        };
+        total_surface_queries = total_surface_queries.checked_add(candidate.surface_queries)?;
+        if total_surface_queries > DEFAULT_SCOUT_TOTAL_SURFACE_QUERY_CAP {
+            return None;
+        }
+
+        let slot = if candidate.preferred_site {
+            &mut best_preferred
+        } else {
+            &mut best_fallback
+        };
+        if slot.is_none_or(|current| scout_spawn_candidate_is_better(candidate, current)) {
+            *slot = Some(candidate);
+        }
+    }
+
+    let mut selected = best_preferred.or(best_fallback)?;
+    selected.surface_queries = total_surface_queries;
+    Some(selected)
+}
+
+fn default_scout_authority_bounds(
+    plan: DefaultScoutSpawnPlan,
+    blueprint: &ShipBlueprint,
+) -> Option<(IVec3, IVec3)> {
+    let envelope = scout_spawn_envelope(blueprint)?;
+    let radius = envelope
+        .footprint_radius_blocks
+        .checked_add(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)?;
+    let min = IVec3::new(
+        plan.center.x.checked_sub(radius)?,
+        plan.root_y
+            .checked_add(envelope.min_voxel_y)?
+            .checked_sub(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)?,
+        plan.center.y.checked_sub(radius)?,
+    );
+    let max = IVec3::new(
+        plan.center.x.checked_add(radius)?,
+        plan.root_y
+            .checked_add(envelope.max_voxel_y)?
+            .checked_add(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)?,
+        plan.center.y.checked_add(radius)?,
+    );
+    let side = usize::try_from(max.x.checked_sub(min.x)?.checked_add(1)?).ok()?;
+    let depth = usize::try_from(max.z.checked_sub(min.z)?.checked_add(1)?).ok()?;
+    let height = usize::try_from(max.y.checked_sub(min.y)?.checked_add(1)?).ok()?;
+    if height > DEFAULT_SCOUT_AUTHORITY_VERTICAL_SPAN_CAP
+        || side.checked_mul(depth)?.checked_mul(height)? > DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP
+    {
+        return None;
+    }
+    Some((min, max))
+}
+
+fn default_scout_spawn_translation(
+    plan: DefaultScoutSpawnPlan,
+    blueprint: &ShipBlueprint,
+) -> Option<Vec3> {
+    let (min, max) = default_scout_authority_bounds(plan, blueprint)?;
+    if [min.x, min.y, min.z, max.x, max.y, max.z]
+        .into_iter()
+        .any(|coordinate| i64::from(coordinate).abs() > DEFAULT_SCOUT_RENDER_EXACT_INTEGER_LIMIT)
+    {
+        return None;
+    }
+
+    // This is the exact representation later passed to Bevy. Binding the
+    // safety decision to these same f32 operations prevents an extreme i32
+    // centre from rounding to a different, unchecked part of the world.
+    let translation = Vec3::new(
+        plan.center.x as f32 + 0.5,
+        plan.root_y as f32,
+        plan.center.y as f32 + 0.5,
+    );
+    if !translation.is_finite() {
+        return None;
+    }
+    let clearance = f64::from(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS);
+    let root_delta = [
+        (f64::from(translation.x) - f64::from(plan.center.x)).abs(),
+        (f64::from(translation.y) - f64::from(plan.root_y)).abs(),
+        (f64::from(translation.z) - f64::from(plan.center.y)).abs(),
+    ];
+    if root_delta.into_iter().any(|delta| delta > clearance) {
+        return None;
+    }
+    Some(translation)
+}
+
+fn default_scout_authority_check(
+    world: &VoxelWorld,
+    streamer: &ChunkStreamer,
+    plan: DefaultScoutSpawnPlan,
+    blueprint: &ShipBlueprint,
+) -> DefaultScoutAuthorityResult {
+    if default_scout_spawn_translation(plan, blueprint).is_none() {
+        return DefaultScoutAuthorityResult::Invalid;
+    }
+    let Some((min, max)) = default_scout_authority_bounds(plan, blueprint) else {
+        return DefaultScoutAuthorityResult::Invalid;
+    };
+    let chunk_size = crate::chunk::CHUNK_SIZE_I;
+    let min_chunk = IVec3::new(
+        min.x.div_euclid(chunk_size),
+        min.y.div_euclid(chunk_size),
+        min.z.div_euclid(chunk_size),
+    );
+    let max_chunk = IVec3::new(
+        max.x.div_euclid(chunk_size),
+        max.y.div_euclid(chunk_size),
+        max.z.div_euclid(chunk_size),
+    );
+    let mut chunk_checks = 0usize;
+    for cy in min_chunk.y..=max_chunk.y {
+        for cz in min_chunk.z..=max_chunk.z {
+            for cx in min_chunk.x..=max_chunk.x {
+                chunk_checks = chunk_checks.saturating_add(1);
+                if chunk_checks > DEFAULT_SCOUT_AUTHORITY_CHUNK_CHECK_CAP {
+                    return DefaultScoutAuthorityResult::Invalid;
+                }
+                let pos = crate::chunk::ChunkPos::new(cx, cy, cz);
+                if !streamer.requested_chunks.contains(&pos) {
+                    return DefaultScoutAuthorityResult::Pending;
+                }
+                if world.chunks.contains_key(&pos) {
+                    continue;
+                }
+                if world.edited_overrides.contains_key(&pos) {
+                    return DefaultScoutAuthorityResult::Pending;
+                }
+                let Some(probe_x) = cx.checked_mul(chunk_size) else {
+                    return DefaultScoutAuthorityResult::Invalid;
+                };
+                let Some(probe_y) = cy.checked_mul(chunk_size) else {
+                    return DefaultScoutAuthorityResult::Invalid;
+                };
+                let Some(probe_z) = cz.checked_mul(chunk_size) else {
+                    return DefaultScoutAuthorityResult::Invalid;
+                };
+                if world.voxel_at_if_resolved(probe_x, probe_y, probe_z) != Some(AIR) {
+                    return DefaultScoutAuthorityResult::Pending;
+                }
+            }
+        }
+    }
+
+    let mut voxel_queries = 0usize;
+    for y in min.y..=max.y {
+        for z in min.z..=max.z {
+            for x in min.x..=max.x {
+                voxel_queries = voxel_queries.saturating_add(1);
+                if voxel_queries > DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP {
+                    return DefaultScoutAuthorityResult::Invalid;
+                }
+                match world.voxel_at_if_resolved(x, y, z) {
+                    Some(voxel) if voxel == AIR => {}
+                    Some(_) => return DefaultScoutAuthorityResult::Occupied(IVec3::new(x, y, z)),
+                    None => return DefaultScoutAuthorityResult::Pending,
+                }
+            }
+        }
+    }
+    DefaultScoutAuthorityResult::Clear {
+        chunk_checks,
+        voxel_queries,
+    }
+}
+
 fn spawn_saved_ships_once(
     pending: Res<PendingWorldLoad>,
     active: Option<Res<ActiveWorld>>,
     settings: Res<WorldSettings>,
     mut inventory: ResMut<ShipInventory>,
+    mut pending_default: ResMut<PendingDefaultScoutSpawn>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -2519,6 +3510,7 @@ fn spawn_saved_ships_once(
     if !pending.0 {
         return;
     }
+    pending_default.request = None;
     for e in existing.iter() {
         if let Some(entity_commands) = commands.get_entity(e) {
             entity_commands.despawn_recursive();
@@ -2528,8 +3520,10 @@ fn spawn_saved_ships_once(
         return;
     };
     *inventory = active.meta.ship_inventory.clone();
-    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed);
-    let (player_anchor, player_yaw) = resolved_world_entry_anchor(&active, &settings, &generator);
+    let generator =
+        crate::terrain::TerrainGenerator::from_identity(active.meta.generation_identity());
+    let (player_anchor, player_yaw) = resolved_world_entry_anchor(&active, &generator);
+    let visual_detail = ShipVisualDetail::for_profile(settings.runtime_profile);
 
     for saved in &active.meta.ships {
         spawn_ship_entity(
@@ -2542,6 +3536,7 @@ fn spawn_saved_ships_once(
             Vec3::new(saved.pos[0], saved.pos[1], saved.pos[2]),
             saved.yaw,
             false,
+            visual_detail,
             Some(saved.shield),
         );
     }
@@ -2551,33 +3546,125 @@ fn spawn_saved_ships_once(
             < 260.0
     });
     if active.meta.ships.is_empty() || !has_nearby_ship {
-        let px = player_anchor.x.round() as i32 + 14;
-        let pz = player_anchor.z.round() as i32 + 18;
-        let py = generator.surface_height_at(px, pz) as f32 + 4.0;
-        spawn_ship_entity(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &mut fx,
-            ShipKind::ScoutShuttle,
-            Vec3::new(px as f32 + 0.5, py, pz as f32 + 0.5),
-            player_yaw + std::f32::consts::PI,
-            false,
-            None,
+        let anchor = IVec2::new(
+            crate::chunk::floor_to_i32_safe(player_anchor.x.round()),
+            crate::chunk::floor_to_i32_safe(player_anchor.z.round()),
         );
+        let scout = blueprint(ShipKind::ScoutShuttle);
+        if let Some(plan) =
+            default_scout_spawn_plan(anchor, &scout, |x, z| generator.surface_height_at(x, z))
+        {
+            pending_default.request = Some(PendingDefaultScoutSpawnRequest {
+                plan,
+                yaw: player_yaw + std::f32::consts::PI,
+                visual_detail,
+                waited_frames: 0,
+            });
+            info!(
+                "Default Scout candidate {} queued for bounded authoritative voxel clearance",
+                plan.candidate_index,
+            );
+        } else {
+            warn!("Default Scout spawn rejected: bounded terrain clearance could not be proven");
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_pending_default_scout_spawn(
+    world: Res<VoxelWorld>,
+    streamer: Res<ChunkStreamer>,
+    mut pending: ResMut<PendingDefaultScoutSpawn>,
+    existing: Query<&GlobalTransform, With<ShipInstance>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut fx: ResMut<ShipFxCache>,
+) {
+    let Some(mut request) = pending.request else {
+        return;
+    };
+    let scout = blueprint(ShipKind::ScoutShuttle);
+    let Some(spawn_translation) = default_scout_spawn_translation(request.plan, &scout) else {
+        warn!("Default Scout spawn rejected: checked voxel bounds cannot represent the ECS transform exactly enough");
+        pending.request = None;
+        return;
+    };
+    let candidate_xz = Vec2::new(spawn_translation.x, spawn_translation.z);
+    if existing.iter().any(|transform| {
+        let translation = transform.translation();
+        Vec2::new(translation.x, translation.z).distance_squared(candidate_xz) < 260.0 * 260.0
+    }) {
+        info!("Default Scout request cancelled because a nearby ship already exists");
+        pending.request = None;
+        return;
+    }
+
+    if request.waited_frames >= DEFAULT_SCOUT_AUTHORITY_WAIT_FRAME_CAP {
+        warn!(
+            "Default Scout spawn rejected after {} frames: authoritative clearance never resolved",
+            DEFAULT_SCOUT_AUTHORITY_WAIT_FRAME_CAP,
+        );
+        pending.request = None;
+        return;
+    }
+    if !streamer.frontier_complete || !streamer.pending_terrain.is_empty() {
+        request.waited_frames = request.waited_frames.saturating_add(1);
+        pending.request = Some(request);
+        return;
+    }
+
+    match default_scout_authority_check(&world, &streamer, request.plan, &scout) {
+        DefaultScoutAuthorityResult::Clear {
+            chunk_checks,
+            voxel_queries,
+        } => {
+            spawn_ship_entity(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut fx,
+                ShipKind::ScoutShuttle,
+                spawn_translation,
+                request.yaw,
+                false,
+                request.visual_detail,
+                None,
+            );
+            info!(
+                "Default Scout spawned after {} authoritative chunk checks and {} voxel queries",
+                chunk_checks, voxel_queries,
+            );
+            pending.request = None;
+        }
+        DefaultScoutAuthorityResult::Pending => {
+            request.waited_frames = request.waited_frames.saturating_add(1);
+            pending.request = Some(request);
+        }
+        DefaultScoutAuthorityResult::Occupied(position) => {
+            warn!(
+                "Default Scout spawn rejected: authoritative voxel at [{}, {}, {}] occupies its clearance envelope",
+                position.x, position.y, position.z,
+            );
+            pending.request = None;
+        }
+        DefaultScoutAuthorityResult::Invalid => {
+            warn!("Default Scout spawn rejected: authoritative envelope exceeded a fixed bound");
+            pending.request = None;
+        }
     }
 }
 
 fn resolved_world_entry_anchor(
     active: &ActiveWorld,
-    settings: &WorldSettings,
     generator: &crate::terrain::TerrainGenerator,
 ) -> (Vec3, f32) {
     let pos = active.meta.player_pos;
     let mut anchor = Vec3::new(pos[0], pos[1], pos[2]);
     let mut yaw = active.meta.player_yaw;
-    if settings.visual_preset == crate::settings::VisualPreset::NaturalWorld {
+    if active.meta.world_profile == crate::settings::WorldProfile::Natural {
         let bx = crate::chunk::floor_to_i32_safe(anchor.x);
         let bz = crate::chunk::floor_to_i32_safe(anchor.z);
         let surface = generator.surface_height_at(bx, bz);
@@ -2587,7 +3674,7 @@ fn resolved_world_entry_anchor(
                 yaw = 0.0;
             }
         }
-    } else if settings.visual_preset == crate::settings::VisualPreset::NeonShuttle {
+    } else if active.meta.world_profile == crate::settings::WorldProfile::AstralFrontier {
         let bx = crate::chunk::floor_to_i32_safe(anchor.x);
         let bz = crate::chunk::floor_to_i32_safe(anchor.z);
         if !generator.biome_at(bx, bz).is_neon_showcase() {
@@ -2602,6 +3689,7 @@ fn resolved_world_entry_anchor(
 
 fn cleanup_ship_runtime(
     mut commands: Commands,
+    mut pending_default: ResMut<PendingDefaultScoutSpawn>,
     mut pilot: ResMut<PilotState>,
     mut placement: ResMut<ShipPlacementState>,
     mut boarding: ResMut<ShipBoardingState>,
@@ -2623,17 +3711,13 @@ fn cleanup_ship_runtime(
     *pilot = PilotState::default();
     *placement = ShipPlacementState::default();
     *boarding = ShipBoardingState::default();
+    pending_default.request = None;
     transition.clear();
 }
 
 #[allow(clippy::too_many_arguments)]
 fn ship_placement_input(
-    time: Res<Time>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mut wheel: EventReader<MouseWheel>,
-    world: Res<VoxelWorld>,
-    camera_q: Query<&GlobalTransform, (With<Camera3d>, With<Player>)>,
+    mut frame: ShipPlacementFrame,
     mut placement: ResMut<ShipPlacementState>,
     mut mode: ResMut<ModeContext>,
     mut commands: Commands,
@@ -2643,101 +3727,203 @@ fn ship_placement_input(
     mut fx: ResMut<ShipFxCache>,
     mut preview_q: Query<&mut Transform, With<ShipPreview>>,
 ) {
-    if !placement.active && !matches!(mode.mode, ActiveMode::ShipPlacement { .. }) {
+    if !placement.is_active() {
+        let ActiveMode::ShipPlacement { kind } = mode.mode else {
+            return;
+        };
+        placement.start_ready(kind, mode.last_mode);
+    } else {
+        let placement_mode = ActiveMode::ShipPlacement {
+            kind: placement.kind,
+        };
+        if mode.mode == placement.return_mode {
+            mode.set(
+                placement_mode,
+                format!("Placing {}.", placement.kind.label()),
+            );
+        } else if matches!(mode.mode, ActiveMode::ShipPlacement { .. })
+            && mode.mode != placement_mode
+        {
+            mode.set(
+                placement_mode,
+                format!("Placing {}.", placement.kind.label()),
+            );
+        } else if mode.mode != placement_mode {
+            return;
+        }
+    }
+
+    placement.sync_preview_kind();
+    for entity in std::mem::take(&mut placement.retired_previews) {
+        despawn(&mut commands, entity);
+    }
+
+    let wheel_delta: f32 = frame.wheel.read().map(|ev| ev.y).sum();
+
+    // Cancellation must remain available even while egui owns pointer or
+    // keyboard focus. In particular, RMB over the Creator Library must not
+    // leave placement armed behind the overlay.
+    if frame.mouse.just_pressed(MouseButton::Right) || frame.keys.just_pressed(KeyCode::Escape) {
+        remove_placement_preview(&mut commands, &mut placement);
+        let return_mode = placement.deactivate();
+        placement.status = "Ship placement cancelled.".into();
+        mode.set(return_mode, "Ship placement cancelled.");
         return;
     }
-    placement.active = true;
 
-    let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
+    if !placement_controls_allowed(*frame.input_capture, placement.phase) {
+        if frame.input_capture.pointer_over_ui {
+            placement.target = None;
+            remove_placement_preview(&mut commands, &mut placement);
+        }
+        if placement.handle_pointer_edges(false, frame.mouse.just_released(MouseButton::Left)) {
+            placement.status = "Move the pointer back over the world to place the ship.".into();
+        }
+        return;
+    }
+
     if wheel_delta.abs() > 0.1 {
         placement.yaw += wheel_delta.signum() * 15.0_f32.to_radians();
     }
 
-    let Ok(cam) = camera_q.get_single() else {
-        return;
-    };
-    let origin = cam.translation();
-    let forward = cam.forward();
-    let dir = Vec3::new(forward.x, forward.y, forward.z).normalize_or_zero();
-    let pos = placement_target(&world, origin, dir).unwrap_or(origin + dir * 18.0);
-    placement.last_pos = pos;
+    placement.target = frame
+        .windows
+        .get_single()
+        .ok()
+        .zip(frame.camera.get_single().ok())
+        .and_then(|(window, (camera, camera_transform))| {
+            placement_pointer_ray(window, camera, camera_transform)
+        })
+        .and_then(|(origin, dir)| placement_target(&frame.world, origin, dir));
 
-    let preview = match placement.preview {
-        Some(e) if preview_q.get_mut(e).is_ok() => e,
-        _ => {
-            let e = spawn_ship_entity(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &mut fx,
-                placement.kind,
-                pos,
-                placement.yaw,
-                true,
-                None,
-            );
-            placement.preview = Some(e);
-            e
+    if let Some(pos) = placement.target {
+        let kind = placement.kind;
+        let preview = match placement.preview {
+            Some(entity)
+                if placement.preview_kind == Some(kind) && preview_q.get_mut(entity).is_ok() =>
+            {
+                entity
+            }
+            _ => {
+                remove_placement_preview(&mut commands, &mut placement);
+                let entity = spawn_ship_entity(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut images,
+                    &mut fx,
+                    kind,
+                    pos,
+                    placement.yaw,
+                    true,
+                    ShipVisualDetail::Core,
+                    None,
+                );
+                placement.preview = Some(entity);
+                placement.preview_kind = Some(kind);
+                entity
+            }
+        };
+        if let Ok(mut transform) = preview_q.get_mut(preview) {
+            let hover = (frame.time.elapsed_seconds_wrapped() * 4.0).sin() * 0.12;
+            transform.translation = pos + Vec3::Y * hover;
+            transform.rotation = Quat::from_rotation_y(placement.yaw);
         }
-    };
-    if let Ok(mut tf) = preview_q.get_mut(preview) {
-        let hover = (time.elapsed_seconds_wrapped() * 4.0).sin() * 0.12;
-        tf.translation = pos + Vec3::Y * hover;
-        tf.rotation = Quat::from_rotation_y(placement.yaw);
+    } else {
+        remove_placement_preview(&mut commands, &mut placement);
     }
 
-    if mouse.just_pressed(MouseButton::Right) || keys.just_pressed(KeyCode::Escape) {
-        if let Some(e) = placement.preview.take() {
-            if let Some(entity_commands) = commands.get_entity(e) {
-                entity_commands.despawn_recursive();
-            }
-        }
-        placement.active = false;
-        mode.set(ActiveMode::Combat, "Ship placement cancelled.");
+    let commit_requested = placement.handle_pointer_edges(
+        frame.mouse.just_pressed(MouseButton::Left),
+        frame.mouse.just_released(MouseButton::Left),
+    );
+    if !commit_requested {
         return;
     }
 
-    if mouse.just_pressed(MouseButton::Left) {
-        if let Some(e) = placement.preview.take() {
-            if let Some(entity_commands) = commands.get_entity(e) {
-                entity_commands.despawn_recursive();
-            }
-        }
-        let ship = spawn_ship_entity(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &mut fx,
-            placement.kind,
-            pos,
-            placement.yaw,
-            false,
-            None,
-        );
-        placement.active = false;
+    let Some(pos) = placement.target else {
+        placement.status = "Ships require a visible top-facing terrain surface.".into();
         mode.set(
-            ActiveMode::Combat,
-            format!(
-                "{} placed. Aim at cockpit and click to enter.",
-                placement.kind.label()
-            ),
+            ActiveMode::ShipPlacement {
+                kind: placement.kind,
+            },
+            placement.status.clone(),
         );
-        commands
-            .entity(ship)
-            .insert(Name::new(placement.kind.label()));
+        return;
+    };
+
+    remove_placement_preview(&mut commands, &mut placement);
+    let kind = placement.kind;
+    let ship = spawn_ship_entity(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &mut fx,
+        kind,
+        pos,
+        placement.yaw,
+        false,
+        ShipVisualDetail::for_profile(frame.settings.runtime_profile),
+        None,
+    );
+    let return_mode = placement.deactivate();
+    placement.status = format!("{} placed.", kind.label());
+    mode.set(
+        return_mode,
+        format!(
+            "{} placed. Aim at cockpit and click to enter.",
+            kind.label()
+        ),
+    );
+    commands.entity(ship).insert(Name::new(kind.label()));
+}
+
+fn placement_controls_allowed(capture: ShipInputCapture, phase: ShipPlacementPhase) -> bool {
+    !capture.any()
+        || (matches!(
+            phase,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary)
+        ) && !capture.pointer_over_ui)
+}
+
+fn placement_pointer_ray(
+    window: &Window,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+) -> Option<(Vec3, Vec3)> {
+    if !window.cursor.visible {
+        return None;
     }
+
+    let cursor = window.cursor_position()?;
+    let ray = camera.viewport_to_world(camera_transform, cursor)?;
+    Some((ray.origin, *ray.direction))
+}
+
+fn remove_placement_preview(commands: &mut Commands, placement: &mut ShipPlacementState) {
+    if let Some(entity) = placement.preview.take() {
+        despawn(commands, entity);
+    }
+    placement.preview_kind = None;
 }
 
 fn placement_target(world: &VoxelWorld, origin: Vec3, dir: Vec3) -> Option<Vec3> {
-    let (_, prev) = crate::sculpt::raycast::dda_voxel(world, origin, dir, 180.0)?;
+    let (hit, prev) = crate::sculpt::raycast::dda_voxel(world, origin, dir, 180.0)?;
+    top_face_placement_target(hit, prev)
+}
+
+fn top_face_placement_target(hit: IVec3, prev: IVec3) -> Option<Vec3> {
+    if prev - hit != IVec3::Y {
+        return None;
+    }
     Some(prev.as_vec3() + Vec3::new(0.5, 1.1, 0.5))
 }
 
 fn ship_interaction_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    input_capture: Res<ShipInputCapture>,
     mut pilot: ResMut<PilotState>,
     mut boarding: ResMut<ShipBoardingState>,
     mut transition: ResMut<CockpitTransition>,
@@ -2755,7 +3941,8 @@ fn ship_interaction_input(
         return;
     };
 
-    if pilot.active_ship.is_some() && !keys.just_pressed(KeyCode::KeyX) {
+    let controls_allowed = ship_controls_allowed(*input_capture);
+    if pilot.active_ship.is_some() && (!controls_allowed || !keys.just_pressed(KeyCode::KeyX)) {
         return;
     }
 
@@ -2839,7 +4026,8 @@ fn ship_interaction_input(
     boarding.kind = Some(kind);
     boarding.distance = d2.sqrt();
     boarding.lock = (1.0 - (lateral / lock_radius.max(0.01))).clamp(0.0, 1.0);
-    let board = mouse.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyH);
+    let board = controls_allowed
+        && (mouse.just_pressed(MouseButton::Left) || keys.just_pressed(KeyCode::KeyH));
     if !board {
         return;
     }
@@ -2923,7 +4111,9 @@ fn draw_ship_boarding_hud(
     let Some(kind) = boarding.kind else {
         return;
     };
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let screen = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -3019,7 +4209,7 @@ fn ship_wave_response(
 
 #[allow(clippy::too_many_arguments)]
 fn ship_flight_input(
-    time: Res<Time>,
+    frame: ShipFlightFrame,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut mouse_motion: EventReader<MouseMotion>,
@@ -3046,6 +4236,8 @@ fn ship_flight_input(
         return;
     }
     if transition.active {
+        mouse_motion.clear();
+        wheel.clear();
         return;
     }
     let Ok((mut ship_tf, mut ship, mut motion)) = ship_q.get_mut(active) else {
@@ -3055,8 +4247,10 @@ fn ship_flight_input(
     let Ok((mut player_tf, mut player)) = player_q.get_single_mut() else {
         return;
     };
-    let dt = time.delta_seconds().min(1.0 / 20.0);
+    let dt = frame.time.delta_seconds().min(1.0 / 20.0);
     pilot.shield_flash = (pilot.shield_flash - dt * 1.8).max(0.0);
+    pilot.weapon_flash = (pilot.weapon_flash - dt).max(0.0);
+    pilot.hit_confirm = (pilot.hit_confirm - dt).max(0.0);
 
     if pilot.shield <= 0.0 {
         let bp = blueprint(ship.kind);
@@ -3067,6 +4261,7 @@ fn ship_flight_input(
             &mut fx,
             ship_tf.translation,
             bp.hull_radius * 1.35,
+            ShipFxTone::Pulse,
         );
         player_tf.translation =
             ship_tf.translation + ship_tf.rotation * bp.exit_offset + Vec3::Y * 1.5;
@@ -3083,72 +4278,67 @@ fn ship_flight_input(
         return;
     }
 
-    // --- Smooth pitch/yaw from mouse look + keyboard flight trim -----------
-    // Convert raw mouse pixels into a target angular rate (rad/s), then
-    // blend in keyboard rudder/elevator input so cockpit flight stays usable
-    // without constantly reaching for the mouse.
-    let mut mouse_dx = 0.0_f32;
-    let mut mouse_dy = 0.0_f32;
-    for ev in mouse_motion.read() {
-        mouse_dx += ev.delta.x;
-        mouse_dy += ev.delta.y;
-    }
-    // Sensitivity stays deliberately low: mouse aims the nose, while A/D
-    // commits a smooth aircraft-style turn instead of snapping hard.
-    let key_turn_left = keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft);
-    let key_turn_right = keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight);
+    let controls_allowed = ship_controls_allowed(*frame.input_capture);
+    let raw_mouse_delta = mouse_motion
+        .read()
+        .fold(Vec2::ZERO, |sum, event| sum + event.delta);
+    let mouse_delta = if controls_allowed {
+        raw_mouse_delta
+    } else {
+        Vec2::ZERO
+    };
+    let wheel_delta: f32 = wheel.read().map(|event| event.y).sum();
+
+    // Mouse and keyboard command target angular rates. The attitude step
+    // applies bounded acceleration, so pressing or releasing an axis cannot
+    // introduce a one-frame rotation jump.
+    let key_turn_left =
+        controls_allowed && (keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft));
+    let key_turn_right =
+        controls_allowed && (keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight));
     let turn_input = match (key_turn_left, key_turn_right) {
         (true, false) => 1.0,
         (false, true) => -1.0,
         _ => 0.0,
     };
-    let key_pitch_up = keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ArrowUp);
-    let key_pitch_down = keys.pressed(KeyCode::ShiftLeft)
-        || keys.pressed(KeyCode::ShiftRight)
-        || keys.pressed(KeyCode::ArrowDown);
+    let key_pitch_up =
+        controls_allowed && (keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ArrowUp));
+    let key_pitch_down = controls_allowed
+        && (keys.pressed(KeyCode::ShiftLeft)
+            || keys.pressed(KeyCode::ShiftRight)
+            || keys.pressed(KeyCode::ArrowDown));
     let pitch_input = match (key_pitch_up, key_pitch_down) {
         (true, false) => 1.0,
         (false, true) => -1.0,
         _ => 0.0,
     };
-    let (target_yaw_rate, target_pitch_rate) =
-        ship_target_angular_rates(mouse_dx, mouse_dy, turn_input, pitch_input, dt);
-    let look_ease = 1.0 - (-dt * 6.5).exp();
-    motion.yaw_rate += (target_yaw_rate - motion.yaw_rate) * look_ease;
-    motion.pitch_rate += (target_pitch_rate - motion.pitch_rate) * look_ease;
-    // Clamp angular velocities for a heavier, more cinematic feel.
-    motion.yaw_rate = motion
-        .yaw_rate
-        .clamp(-SHIP_YAW_RATE_LIMIT, SHIP_YAW_RATE_LIMIT);
-    motion.pitch_rate = motion
-        .pitch_rate
-        .clamp(-SHIP_PITCH_RATE_LIMIT, SHIP_PITCH_RATE_LIMIT);
+    let roll_input = if controls_allowed {
+        ship_roll_input(keys.pressed(KeyCode::KeyQ), keys.pressed(KeyCode::KeyE))
+    } else {
+        0.0
+    };
+    let handling = ship_handling_profile(ship.kind);
+    step_ship_attitude(
+        &mut motion,
+        mouse_delta,
+        turn_input,
+        pitch_input,
+        roll_input,
+        dt,
+        handling,
+    );
 
-    let wheel_delta: f32 = wheel.read().map(|ev| ev.y).sum();
-    if wheel_delta.abs() > 0.1 {
+    if controls_allowed && wheel_delta.abs() > 0.1 {
         pilot.weapon = pilot.weapon.next(if wheel_delta > 0.0 { -1 } else { 1 });
     }
 
     let bp = blueprint(ship.kind);
 
-    // --- Roll-coordinated turn: A/D visibly banks the shuttle, but the
-    // keyboard rudder above is the primary authority. A is left, D is right.
-    let roll_input = turn_input;
-    let target_roll = roll_input * SHIP_TARGET_ROLL;
-    let roll_ease = 1.0 - (-dt * 2.4).exp();
-    motion.roll += (target_roll - motion.roll) * roll_ease;
-    // Bank-driven turn now follows the same sign as keyboard yaw, so holding
-    // A no longer slips/turns right while D no longer slips/turns left.
-    let bank_yaw_rate = motion.roll * SHIP_BANK_YAW_RATE;
-    let rudder = turn_input * SHIP_RUDDER_YAW_RATE;
-    motion.yaw += (motion.yaw_rate + bank_yaw_rate + rudder) * dt;
-    motion.pitch = (motion.pitch + motion.pitch_rate * dt).clamp(-0.85, 0.72);
-
     // --- Throttle with cruise inertia. ------------------------------------
     // W accelerates toward cruise, S brakes, and releasing both keeps most of
     // the current speed so long flights do not require holding W forever.
-    let accelerating = keys.pressed(KeyCode::KeyW);
-    let braking = keys.pressed(KeyCode::KeyS);
+    let accelerating = controls_allowed && keys.pressed(KeyCode::KeyW);
+    let braking = controls_allowed && keys.pressed(KeyCode::KeyS);
     let target_speed = if accelerating {
         bp.max_speed
     } else if braking {
@@ -3174,7 +4364,7 @@ fn ship_flight_input(
         ship.kind,
         motion.speed,
         bp.max_speed,
-        time.elapsed_seconds_wrapped(),
+        frame.time.elapsed_seconds_wrapped(),
     );
     ship_tf.rotation = Quat::from_rotation_y(motion.yaw)
         * Quat::from_rotation_x(motion.pitch)
@@ -3183,9 +4373,9 @@ fn ship_flight_input(
         * Quat::from_rotation_z(wave.roll);
     let forward = *ship_tf.forward();
     let right = *ship_tf.right();
-    // Keep only a whisper of bank drift; A/D should feel like turning the ship,
-    // not sliding sideways across the terrain.
-    let target_lateral = -motion.roll * motion.speed * 0.025;
+    // Keep only a whisper of bank drift; direct roll should rotate the ship,
+    // not slide it sideways across the terrain.
+    let target_lateral = -motion.roll * motion.speed * handling.lateral_drift;
     motion.lateral_speed += (target_lateral - motion.lateral_speed) * (1.0 - (-dt * 4.5).exp());
     let lift_speed = pitch_input * bp.max_speed * 0.34 + wave.vertical_velocity;
     ship_tf.translation +=
@@ -3212,7 +4402,7 @@ fn ship_flight_input(
     pilot.primary_cooldown = (pilot.primary_cooldown - dt).max(0.0);
     pilot.secondary_cooldown = (pilot.secondary_cooldown - dt).max(0.0);
 
-    if mouse.pressed(MouseButton::Left) && pilot.primary_cooldown <= 0.0 {
+    if controls_allowed && mouse.pressed(MouseButton::Left) && pilot.primary_cooldown <= 0.0 {
         fire_ship_pulse(
             &mut commands,
             &mut meshes,
@@ -3222,9 +4412,10 @@ fn ship_flight_input(
             &bp,
         );
         pilot.primary_cooldown = 0.12;
+        pilot.weapon_flash = 0.10;
         telemetry.ship_shots = telemetry.ship_shots.saturating_add(1);
     }
-    if mouse.pressed(MouseButton::Right) && pilot.secondary_cooldown <= 0.0 {
+    if controls_allowed && mouse.pressed(MouseButton::Right) && pilot.secondary_cooldown <= 0.0 {
         fire_ship_secondary(
             &mut commands,
             &mut meshes,
@@ -3235,6 +4426,7 @@ fn ship_flight_input(
             pilot.weapon,
         );
         pilot.secondary_cooldown = pilot.weapon.profile().cooldown;
+        pilot.weapon_flash = 0.18;
         telemetry.ship_shots = telemetry.ship_shots.saturating_add(1);
     }
 
@@ -3266,7 +4458,7 @@ fn fire_ship_pulse(
             origin,
             dir,
             ProjectileOwner::Player,
-            Color::srgb(0.08, 0.96, 1.0),
+            ShipFxTone::Pulse,
             WeaponProfile {
                 speed: 230.0,
                 damage: 16.0,
@@ -3298,7 +4490,7 @@ fn fire_ship_secondary(
         origin,
         dir,
         ProjectileOwner::Player,
-        weapon.color(),
+        weapon.fx_tone(),
         weapon.profile(),
     );
 }
@@ -3312,20 +4504,17 @@ fn spawn_ship_projectile(
     origin: Vec3,
     dir: Vec3,
     owner: ProjectileOwner,
-    color: Color,
+    tone: ShipFxTone,
     profile: WeaponProfile,
 ) {
     let mesh = fx
         .projectile
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
-    let mat_key = match owner {
-        ProjectileOwner::Player => 1,
-        ProjectileOwner::Drone => 2,
-    };
-    let mat = if let Some(mat) = fx.projectile_mats.get(&mat_key) {
+    let mat = if let Some(mat) = fx.projectile_mats.get(&tone) {
         mat.clone()
     } else {
+        let color = tone.color();
         let lin = color.to_linear();
         let mat = materials.add(StandardMaterial {
             base_color: color,
@@ -3333,7 +4522,7 @@ fn spawn_ship_projectile(
             alpha_mode: AlphaMode::Add,
             ..default()
         });
-        fx.projectile_mats.insert(mat_key, mat.clone());
+        fx.projectile_mats.insert(tone, mat.clone());
         mat
     };
     let ndir = dir.normalize_or_zero();
@@ -3349,6 +4538,7 @@ fn spawn_ship_projectile(
         },
         ShipProjectile {
             owner,
+            tone,
             velocity: ndir * profile.speed,
             damage: profile.damage,
             radius: profile.radius,
@@ -3424,6 +4614,7 @@ fn update_ship_projectiles(
                 &mut fx,
                 tf.translation,
                 p.radius,
+                p.tone,
             );
             despawn(&mut commands, entity);
             continue;
@@ -3441,8 +4632,16 @@ fn update_ship_projectiles(
                             &mut fx,
                             drone_tf.translation,
                             p.radius,
+                            p.tone,
                         );
-                        if drone.hp <= 0.0 {
+                        let destroyed = drone.hp <= 0.0;
+                        pilot.hit_confirm = if destroyed { 0.32 } else { 0.18 };
+                        pilot.status = if destroyed {
+                            "Target destroyed.".into()
+                        } else {
+                            "Hit confirmed.".into()
+                        };
+                        if destroyed {
                             despawn(&mut commands, drone_e);
                             telemetry.ship_kills = telemetry.ship_kills.saturating_add(1);
                         }
@@ -3474,6 +4673,7 @@ fn update_ship_projectiles(
                                 &mut fx,
                                 ship_tf.translation,
                                 2.5,
+                                ShipFxTone::Hostile,
                             );
                             despawn(&mut commands, entity);
                         }
@@ -3719,7 +4919,7 @@ fn update_enemy_drones(
                 tf.translation,
                 target_dir,
                 ProjectileOwner::Drone,
-                Color::srgb(1.0, 0.08, 0.55),
+                ShipFxTone::Hostile,
                 WeaponProfile {
                     speed: 135.0,
                     damage: 8.0,
@@ -3763,17 +4963,31 @@ fn spawn_ship_explosion(
     fx: &mut ShipFxCache,
     pos: Vec3,
     radius: f32,
+    tone: ShipFxTone,
 ) {
     let mesh = fx
         .explosion
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
-    let mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.1, 0.85, 1.0, 0.42),
-        emissive: LinearRgba::rgb(1.5, 4.0, 5.0),
-        alpha_mode: AlphaMode::Add,
-        ..default()
-    });
+    let mat = if let Some(mat) = fx.explosion_mats.get(&tone) {
+        mat.clone()
+    } else {
+        let color = tone.color();
+        let lin = color.to_linear();
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(lin.red, lin.green, lin.blue, 0.42),
+            emissive: LinearRgba::rgb(
+                lin.red * 5.0 + 0.4,
+                lin.green * 5.0 + 0.4,
+                lin.blue * 5.0 + 0.4,
+            ),
+            alpha_mode: AlphaMode::Add,
+            unlit: true,
+            ..default()
+        });
+        fx.explosion_mats.insert(tone, mat.clone());
+        mat
+    };
     commands.spawn((
         PbrBundle {
             mesh,
@@ -3817,7 +5031,9 @@ fn draw_ship_cockpit_hud(
     if pilot.active_ship.is_none() || !matches!(mode.mode, ActiveMode::ShipFlight { .. }) {
         return;
     }
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let screen = ctx.screen_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -3827,7 +5043,13 @@ fn draw_ship_cockpit_hud(
     let cyan = colors.info;
     let magenta = egui::Color32::from_rgb(255, 40, 220);
     let amber = colors.warning;
+    let weapon_color = pilot.weapon.hud_color();
     let glass = egui::Color32::from_rgba_unmultiplied(10, 36, 48, 108);
+    let target_budget = if settings.runtime_profile == RuntimeProfile::LowSpec {
+        4
+    } else {
+        8
+    };
     if pilot.shield_flash > 0.01 {
         painter.rect_filled(
             screen,
@@ -3970,23 +5192,46 @@ fn draw_ship_cockpit_hud(
     );
 
     let center = screen.center();
-    painter.circle_stroke(center, 22.0, egui::Stroke::new(1.5, cyan));
+    let shot_pulse = (pilot.weapon_flash / 0.18).clamp(0.0, 1.0);
+    let reticle_color = if pilot.hit_confirm > 0.0 {
+        egui::Color32::WHITE
+    } else {
+        weapon_color
+    };
+    painter.circle_stroke(
+        center,
+        22.0 + shot_pulse * 8.0,
+        egui::Stroke::new(1.5 + shot_pulse * 0.8, reticle_color),
+    );
     painter.line_segment(
         [
             center - egui::vec2(45.0, 0.0),
             center - egui::vec2(12.0, 0.0),
         ],
-        egui::Stroke::new(1.0, cyan),
+        egui::Stroke::new(1.0, reticle_color),
     );
     painter.line_segment(
         [
             center + egui::vec2(12.0, 0.0),
             center + egui::vec2(45.0, 0.0),
         ],
-        egui::Stroke::new(1.0, cyan),
+        egui::Stroke::new(1.0, reticle_color),
     );
+    if pilot.hit_confirm > 0.0 {
+        let hit_alpha = (pilot.hit_confirm / 0.32).clamp(0.0, 1.0);
+        let hit_color =
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, (90.0 + hit_alpha * 165.0) as u8);
+        for (a, b) in [
+            (egui::vec2(-13.0, -13.0), egui::vec2(-5.0, -5.0)),
+            (egui::vec2(13.0, -13.0), egui::vec2(5.0, -5.0)),
+            (egui::vec2(-13.0, 13.0), egui::vec2(-5.0, 5.0)),
+            (egui::vec2(13.0, 13.0), egui::vec2(5.0, 5.0)),
+        ] {
+            painter.line_segment([center + a, center + b], egui::Stroke::new(2.0, hit_color));
+        }
+    }
     if let Ok((camera, camera_tf)) = camera_q.get_single() {
-        for drone_tf in drones.iter().take(8) {
+        for drone_tf in drones.iter().take(target_budget) {
             if let Some(viewport) = camera.world_to_viewport(camera_tf, drone_tf.translation()) {
                 let target = egui::pos2(viewport.x, viewport.y);
                 if screen.contains(target) {
@@ -4014,8 +5259,24 @@ fn draw_ship_cockpit_hud(
         &painter,
         egui::pos2(screen.right() - 150.0, screen.bottom() - 115.0),
         pilot.weapon.label(),
-        magenta,
+        weapon_color,
         16.0,
+    );
+    let secondary_ready = 1.0
+        - (pilot.secondary_cooldown / pilot.weapon.profile().cooldown.max(0.01)).clamp(0.0, 1.0);
+    let ready_bar = egui::Rect::from_min_size(
+        egui::pos2(screen.right() - 150.0, screen.bottom() - 91.0),
+        egui::vec2(112.0, 4.0),
+    );
+    painter.rect_filled(
+        ready_bar,
+        egui::Rounding::same(2.0),
+        egui::Color32::from_gray(28),
+    );
+    painter.rect_filled(
+        ready_bar.with_max_x(ready_bar.left() + ready_bar.width() * secondary_ready),
+        egui::Rounding::same(2.0),
+        weapon_color,
     );
     draw_hud_text(
         &painter,
@@ -4024,12 +5285,18 @@ fn draw_ship_cockpit_hud(
         amber,
         18.0,
     );
-    if pilot.shield < 35.0 || pilot.shield_flash > 0.15 {
+    if pilot.shield < 35.0 || pilot.shield_flash > 0.15 || pilot.hit_confirm > 0.0 {
         draw_hud_text(
             &painter,
             egui::pos2(screen.center().x - 84.0, screen.bottom() - 122.0),
             &pilot.status,
-            if pilot.shield < 35.0 { amber } else { magenta },
+            if pilot.shield < 35.0 {
+                amber
+            } else if pilot.hit_confirm > 0.0 {
+                weapon_color
+            } else {
+                magenta
+            },
             14.0,
         );
     }
@@ -4042,7 +5309,7 @@ fn draw_ship_cockpit_hud(
         egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 235, 255, 90)),
     );
     draw_ship_silhouette(&painter, radar_center - egui::vec2(0.0, 4.0), cyan, amber);
-    for (i, _) in drones.iter().enumerate().take(8) {
+    for (i, _) in drones.iter().enumerate().take(target_budget) {
         let a = i as f32 * 1.93 + time.elapsed_seconds_wrapped() * 0.25;
         let r = 14.0 + (i % 3) as f32 * 9.0;
         painter.circle_filled(
@@ -4055,7 +5322,12 @@ fn draw_ship_cockpit_hud(
     let weather = settings.weather;
     let weather_alpha = (weather.rain_intensity.max(weather.snow_intensity) * 160.0) as u8;
     if weather_alpha > 5 {
-        for i in 0..36 {
+        let streak_budget = if settings.runtime_profile == RuntimeProfile::LowSpec {
+            12
+        } else {
+            36
+        };
+        for i in 0..streak_budget {
             let t =
                 time.elapsed_seconds_wrapped() * (0.25 + pilot.speed * 0.015) + i as f32 * 13.17;
             let x = screen.left() + (t.sin() * 0.5 + 0.5) * screen.width();
@@ -4326,6 +5598,129 @@ fn despawn(commands: &mut Commands, entity: Entity) {
 mod tests {
     use super::*;
 
+    fn test_ship_motion() -> ShipMotion {
+        ShipMotion {
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            speed: 0.0,
+            yaw_rate: 0.0,
+            pitch_rate: 0.0,
+            roll_rate: 0.0,
+            lateral_speed: 0.0,
+        }
+    }
+
+    #[test]
+    fn ship_placement_state_tracks_ready_and_creator_drag_phases() {
+        let return_mode = ActiveMode::BuildLive {
+            tool: crate::toolbelt::ToolbeltTool::DrawRect,
+        };
+        let mut placement = ShipPlacementState::default();
+        assert_eq!(placement.phase, ShipPlacementPhase::Inactive);
+        assert!(!placement.is_active());
+
+        placement.start_ready(ShipKind::StrikeFighter, return_mode);
+        assert_eq!(placement.phase, ShipPlacementPhase::Ready);
+        assert_eq!(placement.kind, ShipKind::StrikeFighter);
+        assert_eq!(placement.return_mode, return_mode);
+        assert!(placement.is_active());
+
+        placement.start_drag(ShipKind::HeavyDropship, return_mode);
+        assert_eq!(
+            placement.phase,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary)
+        );
+        assert_eq!(placement.kind, ShipKind::HeavyDropship);
+        assert_eq!(placement.return_mode, return_mode);
+    }
+
+    #[test]
+    fn ship_placement_world_click_and_drag_release_request_commit() {
+        let mut placement = ShipPlacementState::default();
+        placement.start_ready(ShipKind::ScoutShuttle, ActiveMode::Combat);
+
+        assert!(!placement.handle_pointer_edges(false, true));
+        assert_eq!(placement.phase, ShipPlacementPhase::Ready);
+        assert!(!placement.handle_pointer_edges(true, false));
+        assert_eq!(
+            placement.phase,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::World)
+        );
+        assert!(placement.handle_pointer_edges(false, true));
+        assert_eq!(placement.phase, ShipPlacementPhase::Ready);
+
+        placement.start_drag(ShipKind::ScoutShuttle, ActiveMode::Combat);
+        assert!(placement.handle_pointer_edges(false, true));
+        assert_eq!(placement.phase, ShipPlacementPhase::Ready);
+    }
+
+    #[test]
+    fn ship_placement_deactivation_restores_saved_mode() {
+        let return_mode = ActiveMode::BuildLive {
+            tool: crate::toolbelt::ToolbeltTool::Sculpt,
+        };
+        let mut placement = ShipPlacementState::default();
+        placement.start_ready(ShipKind::ScoutShuttle, return_mode);
+
+        assert_eq!(placement.deactivate(), return_mode);
+        assert_eq!(placement.phase, ShipPlacementPhase::Inactive);
+        assert!(!placement.is_active());
+    }
+
+    #[test]
+    fn changing_ship_kind_retires_the_old_preview() {
+        let old_preview = Entity::from_raw(42);
+        let mut placement = ShipPlacementState::default();
+        placement.preview = Some(old_preview);
+        placement.preview_kind = Some(ShipKind::ScoutShuttle);
+
+        placement.start_ready(ShipKind::StrikeFighter, ActiveMode::Combat);
+
+        assert_eq!(placement.preview, None);
+        assert_eq!(placement.preview_kind, None);
+        assert_eq!(placement.retired_previews, vec![old_preview]);
+    }
+
+    #[test]
+    fn placement_capture_allows_only_creator_originated_drag() {
+        let captured = ShipInputCapture {
+            pointer: true,
+            keyboard: false,
+            pointer_over_ui: false,
+        };
+        assert!(!placement_controls_allowed(
+            captured,
+            ShipPlacementPhase::Ready
+        ));
+        assert!(!placement_controls_allowed(
+            captured,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::World)
+        ));
+        assert!(placement_controls_allowed(
+            captured,
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary)
+        ));
+        assert!(!placement_controls_allowed(
+            ShipInputCapture {
+                pointer_over_ui: true,
+                ..captured
+            },
+            ShipPlacementPhase::PointerHeld(PlacementPointerSource::CreatorLibrary)
+        ));
+    }
+
+    #[test]
+    fn ship_placement_accepts_only_top_facing_terrain_hits() {
+        let hit = IVec3::new(4, 9, -2);
+        assert_eq!(
+            top_face_placement_target(hit, hit + IVec3::Y),
+            Some(Vec3::new(4.5, 11.1, -1.5))
+        );
+        assert_eq!(top_face_placement_target(hit, hit + IVec3::X), None);
+        assert_eq!(top_face_placement_target(hit, hit - IVec3::Y), None);
+    }
+
     #[test]
     fn blueprints_are_not_empty() {
         for kind in ShipKind::ALL {
@@ -4353,6 +5748,339 @@ mod tests {
             assert!(bp.cockpit_offset.length() < 18.0);
             assert!(bp.exit_offset.length() < 20.0);
         }
+    }
+
+    #[test]
+    fn default_scout_envelope_contains_the_complete_blueprint_under_any_yaw() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let envelope = scout_spawn_envelope(&bp).expect("Scout blueprint must have a bounded hull");
+        let doubled_radius = i64::from(envelope.footprint_radius_blocks) * 2;
+        let radius_squared = doubled_radius * doubled_radius;
+
+        for voxel in &bp.voxels {
+            // Test the far outer corner of every one-block cell. Rotation
+            // preserves this distance, so the same envelope is valid at every
+            // default-player yaw without trigonometric rounding.
+            let x = i64::from(voxel.pos.x).abs() * 2 + 1;
+            let z = i64::from(voxel.pos.z).abs() * 2 + 1;
+            assert!(
+                x * x + z * z <= radius_squared,
+                "Scout voxel {:?} escaped radius {}",
+                voxel.pos,
+                envelope.footprint_radius_blocks
+            );
+        }
+        assert!(envelope.footprint_radius_blocks <= DEFAULT_SCOUT_MAX_FOOTPRINT_RADIUS_BLOCKS);
+        assert_eq!(
+            envelope.vegetation_scan_radius_blocks,
+            envelope.footprint_radius_blocks + PROCEDURAL_VEGETATION_HORIZONTAL_CLEARANCE_BLOCKS
+        );
+        let side = (envelope.vegetation_scan_radius_blocks * 2 + 1) as usize;
+        assert!(side * side <= DEFAULT_SCOUT_SURFACE_QUERIES_PER_CANDIDATE_CAP);
+    }
+
+    #[test]
+    fn default_scout_authority_gate_requires_current_resolved_empty_voxels() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let plan = default_scout_spawn_plan(IVec2::ZERO, &bp, |_, _| 0).unwrap();
+        let (min, max) = default_scout_authority_bounds(plan, &bp).unwrap();
+        let chunk_size = crate::chunk::CHUNK_SIZE_I;
+        let min_chunk = IVec3::new(
+            min.x.div_euclid(chunk_size),
+            min.y.div_euclid(chunk_size),
+            min.z.div_euclid(chunk_size),
+        );
+        let max_chunk = IVec3::new(
+            max.x.div_euclid(chunk_size),
+            max.y.div_euclid(chunk_size),
+            max.z.div_euclid(chunk_size),
+        );
+        let mut world = VoxelWorld::new();
+        let mut streamer = ChunkStreamer::default();
+        let mut positions = Vec::new();
+        for cy in min_chunk.y..=max_chunk.y {
+            for cz in min_chunk.z..=max_chunk.z {
+                for cx in min_chunk.x..=max_chunk.x {
+                    let pos = crate::chunk::ChunkPos::new(cx, cy, cz);
+                    positions.push(pos);
+                    streamer.requested_chunks.insert(pos);
+                    world
+                        .column_top_cy
+                        .entry((cx, cz))
+                        .and_modify(|top| *top = (*top).min(min_chunk.y - 1))
+                        .or_insert(min_chunk.y - 1);
+                }
+            }
+        }
+
+        let clear = default_scout_authority_check(&world, &streamer, plan, &bp);
+        let DefaultScoutAuthorityResult::Clear {
+            chunk_checks,
+            voxel_queries,
+        } = clear
+        else {
+            panic!("expected a resolved-air clearance, got {clear:?}");
+        };
+        assert!(chunk_checks <= DEFAULT_SCOUT_AUTHORITY_CHUNK_CHECK_CAP);
+        assert!(voxel_queries <= DEFAULT_SCOUT_AUTHORITY_VOXEL_QUERY_CAP);
+
+        let first = positions[0];
+        streamer.requested_chunks.remove(&first);
+        assert_eq!(
+            default_scout_authority_check(&world, &streamer, plan, &bp),
+            DefaultScoutAuthorityResult::Pending
+        );
+        streamer.requested_chunks.insert(first);
+
+        world.edited_overrides.insert(
+            first,
+            crate::world::EditedChunkOverride {
+                voxels: vec![AIR; crate::chunk::CHUNK_VOLUME],
+                materials: Vec::new(),
+            },
+        );
+        assert_eq!(
+            default_scout_authority_check(&world, &streamer, plan, &bp),
+            DefaultScoutAuthorityResult::Pending
+        );
+        world.edited_overrides.remove(&first);
+
+        let (occupied_pos, lx, ly, lz) = crate::chunk::world_to_chunk(min.x, min.y, min.z);
+        let mut occupied = crate::chunk::Chunk::new(occupied_pos);
+        occupied.set(lx, ly, lz, crate::blocks::Voxel::from(BlockType::Water));
+        world.insert_chunk(occupied_pos, occupied);
+        assert_eq!(
+            default_scout_authority_check(&world, &streamer, plan, &bp),
+            DefaultScoutAuthorityResult::Occupied(min)
+        );
+    }
+
+    #[test]
+    fn default_scout_canopy_clearance_dominates_current_tree_height_contract() {
+        use crate::settings::SceneryQuality;
+        use crate::terrain::{Biome, TerrainGenerator};
+
+        let biomes = [
+            Biome::Ocean,
+            Biome::Beach,
+            Biome::Plains,
+            Biome::Forest,
+            Biome::Jungle,
+            Biome::Desert,
+            Biome::Savanna,
+            Biome::Tundra,
+            Biome::SnowyMountains,
+            Biome::Mountains,
+            Biome::Mesa,
+            Biome::Karst,
+            Biome::CrystalSpires,
+            Biome::VolcanicWaste,
+            Biome::GlacierShards,
+            Biome::AlienReef,
+        ];
+        let qualities = [
+            SceneryQuality::Off,
+            SceneryQuality::Lean,
+            SceneryQuality::Balanced,
+            SceneryQuality::Lush,
+        ];
+        let mut observed_max_trunk = 0;
+        for quality in qualities {
+            let generator = TerrainGenerator::new(0x5C07_5AFE).with_scenery_quality(quality);
+            for biome in biomes {
+                // 997 samples cover every integer variance band used by the
+                // public tree-height contract, including juvenile reductions.
+                for sample in 0..997 {
+                    let roll = (sample as f64 + 0.5) / 997.0;
+                    let (trunk_height, _) = generator.tree_height_for_biome(biome, roll);
+                    observed_max_trunk = observed_max_trunk.max(trunk_height);
+                    let current_max_crown_lift = 5;
+                    let current_max_terminal_cloud_radius = 3;
+                    assert!(
+                        trunk_height + current_max_crown_lift + current_max_terminal_cloud_radius
+                            <= PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS
+                    );
+                }
+            }
+        }
+        assert_eq!(observed_max_trunk, 17);
+
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let min_voxel_y = bp.voxels.iter().map(|voxel| voxel.pos.y).min().unwrap();
+        let plan = default_scout_spawn_plan(IVec2::ZERO, &bp, |_, _| 100).unwrap();
+        let ship_bottom_y = plan.root_y.checked_add(min_voxel_y).unwrap();
+        assert_eq!(
+            ship_bottom_y,
+            100 + PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS
+                + DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS
+        );
+    }
+
+    #[test]
+    fn default_scout_samples_canopy_roots_beyond_the_hull_footprint() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let envelope = scout_spawn_envelope(&bp).unwrap();
+        let canopy_root_x = envelope.footprint_radius_blocks + 7;
+        assert!(canopy_root_x <= envelope.vegetation_scan_radius_blocks);
+        let mut surface = |x: i32, z: i32| {
+            if x == canopy_root_x && z == 0 {
+                50
+            } else {
+                0
+            }
+        };
+
+        let plan = sample_scout_spawn_candidate(IVec2::ZERO, 0, envelope, &mut surface).unwrap();
+        assert_eq!(plan.footprint_max_surface, 0);
+        assert_eq!(plan.vegetation_max_surface, 50);
+        assert_eq!(
+            plan.root_y + envelope.min_voxel_y,
+            50 + PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS + DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS
+        );
+    }
+
+    #[test]
+    fn default_scout_rejects_the_historical_cliff_site_for_a_flat_candidate() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let plan = default_scout_spawn_plan(IVec2::ZERO, &bp, |x, _| if x >= 14 { 40 } else { 0 })
+            .unwrap();
+
+        assert_eq!(plan.candidate_index, 1);
+        assert_eq!(plan.center, IVec2::new(-14, 18));
+        assert_eq!(plan.terrain_relief_blocks, 0);
+        assert!(plan.preferred_site);
+    }
+
+    #[test]
+    fn default_scout_steep_world_uses_the_least_relief_hover_fallback() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let plan = default_scout_spawn_plan(IVec2::ZERO, &bp, |x, _| x.rem_euclid(10)).unwrap();
+        let envelope = scout_spawn_envelope(&bp).unwrap();
+
+        assert!(!plan.preferred_site);
+        assert!(plan.terrain_relief_blocks > DEFAULT_SCOUT_PREFERRED_RELIEF_BLOCKS);
+        assert_eq!(plan.candidate_index, 0);
+        assert!(
+            plan.root_y + envelope.min_voxel_y
+                >= plan.vegetation_max_surface
+                    + PROCEDURAL_VEGETATION_MAX_ABOVE_SURFACE_BLOCKS
+                    + DEFAULT_SCOUT_VERTICAL_GAP_BLOCKS
+        );
+    }
+
+    #[test]
+    fn default_scout_plan_is_deterministic_ordered_and_hard_capped() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let anchor = IVec2::new(-2_048, 4_096);
+        let mut first_queries = 0usize;
+        let first = default_scout_spawn_plan(anchor, &bp, |x, z| {
+            first_queries += 1;
+            x.rem_euclid(11) - z.rem_euclid(7)
+        })
+        .unwrap();
+        let mut replay_queries = 0usize;
+        let replay = default_scout_spawn_plan(anchor, &bp, |x, z| {
+            replay_queries += 1;
+            x.rem_euclid(11) - z.rem_euclid(7)
+        })
+        .unwrap();
+
+        assert_eq!(first, replay);
+        assert_eq!(first_queries, replay_queries);
+        assert_eq!(first.surface_queries, first_queries);
+        assert!(first_queries <= DEFAULT_SCOUT_TOTAL_SURFACE_QUERY_CAP);
+
+        let flat = default_scout_spawn_plan(anchor, &bp, |_, _| 12).unwrap();
+        assert_eq!(flat.candidate_index, 0);
+        assert_eq!(flat.center, anchor + DEFAULT_SCOUT_CANDIDATE_OFFSETS[0]);
+    }
+
+    #[test]
+    fn default_scout_integer_planning_is_total_but_render_gate_rejects_extreme_rounding() {
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        let negative_anchor = IVec2::new(-900_000, -700_000);
+        let negative = default_scout_spawn_plan(negative_anchor, &bp, |_, _| -64).unwrap();
+        assert_eq!(
+            negative.center,
+            negative_anchor + DEFAULT_SCOUT_CANDIDATE_OFFSETS[0]
+        );
+        let negative_translation =
+            default_scout_spawn_translation(negative, &bp).expect("bounded f32 transform");
+        let (negative_min, negative_max) = default_scout_authority_bounds(negative, &bp).unwrap();
+        let envelope = scout_spawn_envelope(&bp).unwrap();
+        let hull_radius = envelope.footprint_radius_blocks as f64;
+        assert!(f64::from(negative_translation.x) - hull_radius >= f64::from(negative_min.x));
+        assert!(f64::from(negative_translation.x) + hull_radius <= f64::from(negative_max.x));
+        assert!(f64::from(negative_translation.z) - hull_radius >= f64::from(negative_min.z));
+        assert!(f64::from(negative_translation.z) + hull_radius <= f64::from(negative_max.z));
+        assert!(
+            f64::from(negative_translation.y + envelope.min_voxel_y as f32)
+                >= f64::from(negative_min.y)
+        );
+        assert!(
+            f64::from(negative_translation.y + envelope.max_voxel_y as f32)
+                <= f64::from(negative_max.y)
+        );
+
+        let safe_edge_anchor =
+            IVec2::splat(i32::try_from(DEFAULT_SCOUT_RENDER_EXACT_INTEGER_LIMIT).unwrap() - 128);
+        let safe_edge = default_scout_spawn_plan(safe_edge_anchor, &bp, |_, _| -64).unwrap();
+        assert!(default_scout_spawn_translation(safe_edge, &bp).is_some());
+
+        for anchor in [
+            IVec2::new(i32::MIN, i32::MIN),
+            IVec2::new(i32::MAX, i32::MAX),
+            IVec2::new(i32::MIN, i32::MAX),
+            IVec2::new(i32::MAX, i32::MIN),
+        ] {
+            let plan = default_scout_spawn_plan(anchor, &bp, |_, _| -64).unwrap();
+            let radius = plan.vegetation_scan_radius_blocks;
+            assert!(plan.center.x >= i32::MIN + radius);
+            assert!(plan.center.x <= i32::MAX - radius);
+            assert!(plan.center.y >= i32::MIN + radius);
+            assert!(plan.center.y <= i32::MAX - radius);
+            assert!(plan.surface_queries <= DEFAULT_SCOUT_TOTAL_SURFACE_QUERY_CAP);
+            let unchecked_translation = Vec3::new(
+                plan.center.x as f32 + 0.5,
+                plan.root_y as f32,
+                plan.center.y as f32 + 0.5,
+            );
+            assert!(
+                (f64::from(unchecked_translation.x) - f64::from(plan.center.x)).abs()
+                    > f64::from(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)
+                    || (f64::from(unchecked_translation.z) - f64::from(plan.center.y)).abs()
+                        > f64::from(DEFAULT_SCOUT_AUTHORITY_CLEARANCE_BLOCKS)
+            );
+            assert!(default_scout_spawn_translation(plan, &bp).is_none());
+            assert_eq!(
+                default_scout_authority_check(
+                    &VoxelWorld::new(),
+                    &ChunkStreamer::default(),
+                    plan,
+                    &bp,
+                ),
+                DefaultScoutAuthorityResult::Invalid
+            );
+        }
+    }
+
+    #[test]
+    fn default_scout_plan_fails_closed_for_unbounded_or_unrepresentable_inputs() {
+        let mut empty = blueprint(ShipKind::ScoutShuttle);
+        empty.voxels.clear();
+        assert!(default_scout_spawn_plan(IVec2::ZERO, &empty, |_, _| 0).is_none());
+
+        let mut unbounded = blueprint(ShipKind::ScoutShuttle);
+        unbounded.voxels.push(ShipVoxel {
+            pos: IVec3::new(100, 0, 0),
+            block: BlockType::ShipHullAlloy,
+        });
+        assert!(default_scout_spawn_plan(IVec2::ZERO, &unbounded, |_, _| 0).is_none());
+
+        // No saturated Y coordinate is emitted when the required procedural
+        // canopy clearance cannot be represented exactly.
+        let bp = blueprint(ShipKind::ScoutShuttle);
+        assert!(default_scout_spawn_plan(IVec2::ZERO, &bp, |_, _| i32::MAX).is_none());
     }
 
     #[test]
@@ -4456,7 +6184,7 @@ mod tests {
     #[test]
     fn visible_ship_renderer_uses_smooth_realistic_meshes_not_voxel_blocks() {
         for kind in ShipKind::ALL {
-            let shell = realistic_ship_exterior_specs(kind);
+            let shell = realistic_ship_exterior_specs(kind, ShipVisualDetail::Full);
             assert!(
                 shell
                     .iter()
@@ -4492,7 +6220,7 @@ mod tests {
     fn visible_cockpit_renderer_has_real_seat_glass_and_controls() {
         for kind in ShipKind::ALL {
             let bp = blueprint(kind);
-            let real = realistic_cockpit_part_specs(kind, &bp);
+            let real = realistic_cockpit_part_specs(kind, &bp, ShipVisualDetail::Full);
             assert!(
                 real.iter()
                     .any(|part| part.tone == RealShipTone::SeatLeather),
@@ -4521,6 +6249,111 @@ mod tests {
     }
 
     #[test]
+    fn physical_ship_materials_are_opaque_while_previews_remain_translucent() {
+        let tones = [
+            RealShipTone::CeramicWhite,
+            RealShipTone::CarbonBlack,
+            RealShipTone::SmokedGlass,
+            RealShipTone::CyanEmission,
+            RealShipTone::AmberHeat,
+            RealShipTone::LuminiteGlass,
+            RealShipTone::MagentaSignal,
+            RealShipTone::SeatLeather,
+            RealShipTone::ConsoleBlack,
+        ];
+
+        for tone in tones {
+            let physical = real_ship_material_spec(tone, false);
+            let preview = real_ship_material_spec(tone, true);
+            assert!(
+                matches!(physical.alpha_mode, AlphaMode::Opaque),
+                "{tone:?} should be solid on a placed shuttle"
+            );
+            assert!(
+                matches!(preview.alpha_mode, AlphaMode::Blend),
+                "{tone:?} should remain translucent in placement preview"
+            );
+        }
+        assert_eq!(real_ship_surface_alpha(false, 0.2), 1.0);
+        assert_eq!(real_ship_surface_alpha(true, 0.42), 0.42);
+    }
+
+    #[test]
+    fn low_spec_keeps_structural_layers_with_a_bounded_detail_budget() {
+        assert_eq!(
+            ShipVisualDetail::for_profile(RuntimeProfile::LowSpec),
+            ShipVisualDetail::Core
+        );
+        assert_eq!(
+            ShipVisualDetail::for_profile(RuntimeProfile::Balanced),
+            ShipVisualDetail::Full
+        );
+        assert_eq!(ShipVisualDetail::Core.dynamic_light_budget(), 0);
+        assert_eq!(ShipVisualDetail::Full.dynamic_light_budget(), 2);
+
+        for kind in ShipKind::ALL {
+            let bp = blueprint(kind);
+            let core = realistic_ship_exterior_specs(kind, ShipVisualDetail::Core);
+            let full = realistic_ship_exterior_specs(kind, ShipVisualDetail::Full);
+            let canopy_frame_parts = core
+                .iter()
+                .filter(|part| {
+                    part.mesh == RealShipMeshKind::AeroPlate
+                        && part.tone == RealShipTone::CarbonBlack
+                        && part.offset.y > 1.2
+                        && part.offset.z < -3.0
+                })
+                .count();
+            assert!(
+                canopy_frame_parts >= 4,
+                "{kind:?} should keep its solid canopy frame on LowSpec"
+            );
+            assert_eq!(
+                full.len() - core.len(),
+                7,
+                "{kind:?} full exterior detail should stay tightly bounded"
+            );
+
+            let core_cockpit = realistic_cockpit_part_specs(kind, &bp, ShipVisualDetail::Core);
+            let full_cockpit = realistic_cockpit_part_specs(kind, &bp, ShipVisualDetail::Full);
+            assert!(core_cockpit.iter().any(|part| {
+                part.mesh == RealShipMeshKind::AeroPlate
+                    && part.tone == RealShipTone::ConsoleBlack
+                    && part.scale.x >= 3.0
+                    && part.scale.z >= 2.5
+            }));
+            assert_eq!(
+                full_cockpit.len() - core_cockpit.len(),
+                4,
+                "{kind:?} full cockpit detail should stay tightly bounded"
+            );
+
+            let panels = cockpit_panel_specs(kind, &bp);
+            let core_panels = panels
+                .iter()
+                .enumerate()
+                .filter(|(index, panel)| {
+                    ShipVisualDetail::Core.includes_cockpit_panel(*index, panel.tone)
+                })
+                .count();
+            let structural = panels
+                .iter()
+                .filter(|panel| {
+                    matches!(
+                        panel.tone,
+                        CockpitPanelTone::Shell
+                            | CockpitPanelTone::Seat
+                            | CockpitPanelTone::Frame
+                            | CockpitPanelTone::Glass
+                    )
+                })
+                .count();
+            assert!(core_panels >= structural + 4, "{kind:?}");
+            assert!(core_panels < panels.len(), "{kind:?}");
+        }
+    }
+
+    #[test]
     fn all_ship_kinds_spawn_cyan_and_amber_energy_wakes() {
         for kind in ShipKind::ALL {
             let specs = ship_trail_specs(kind);
@@ -4540,6 +6373,14 @@ mod tests {
                 specs.iter().any(|spec| spec.base_scale.z >= 4.0),
                 "{kind:?} trails should be long enough to read at flight speed"
             );
+            let core_count = specs
+                .iter()
+                .enumerate()
+                .filter(|(index, spec)| {
+                    ShipVisualDetail::Core.includes_energy_trail(*index, spec.tone)
+                })
+                .count();
+            assert!((2..=3).contains(&core_count), "{kind:?}");
         }
     }
 
@@ -4561,10 +6402,31 @@ mod tests {
     #[test]
     fn ship_keyboard_turning_is_deliberately_cinematic_not_twitchy() {
         let (yaw, pitch) = ship_target_angular_rates(0.0, 0.0, 1.0, 0.0, 1.0 / 60.0);
+        let sustained_yaw = yaw + ship_bank_and_rudder_yaw_rate(1.0, 0.0);
+        let reverse_yaw = ship_target_angular_rates(0.0, 0.0, -1.0, 0.0, 1.0 / 60.0).0
+            + ship_bank_and_rudder_yaw_rate(-1.0, 0.0);
 
         assert!(yaw > 0.0);
-        assert!(yaw <= 0.45, "A/D yaw should stay smooth, got {yaw}");
+        assert!(
+            sustained_yaw > 0.30 && sustained_yaw <= 0.40,
+            "combined A/D yaw should stay deliberate, got {sustained_yaw}"
+        );
+        assert!((sustained_yaw + reverse_yaw).abs() <= f32::EPSILON);
         assert_eq!(pitch, 0.0);
+
+        let dt = 0.05;
+        let mut motion = test_ship_motion();
+        step_ship_attitude(
+            &mut motion,
+            Vec2::ZERO,
+            1.0,
+            0.0,
+            0.0,
+            dt,
+            ship_handling_profile(ShipKind::ScoutShuttle),
+        );
+        assert!(motion.yaw_rate > 0.0);
+        assert!(motion.yaw_rate <= SHIP_YAW_ACCEL_RAD_PER_S2 * dt + 1e-6);
     }
 
     #[test]
@@ -4575,6 +6437,161 @@ mod tests {
             yaw.abs() < 0.28,
             "mouse left/right should only trim the shuttle nose, got {yaw}"
         );
+    }
+
+    #[test]
+    fn ship_q_and_e_are_direct_bounded_opposite_roll_controls() {
+        assert_eq!(ship_roll_input(true, false), 1.0);
+        assert_eq!(ship_roll_input(false, true), -1.0);
+        assert_eq!(ship_roll_input(true, true), 0.0);
+
+        let handling = ship_handling_profile(ShipKind::ScoutShuttle);
+        let mut q_roll = test_ship_motion();
+        let mut e_roll = test_ship_motion();
+        step_ship_attitude(
+            &mut q_roll,
+            Vec2::ZERO,
+            0.0,
+            0.0,
+            ship_roll_input(true, false),
+            0.1,
+            handling,
+        );
+        step_ship_attitude(
+            &mut e_roll,
+            Vec2::ZERO,
+            0.0,
+            0.0,
+            ship_roll_input(false, true),
+            0.1,
+            handling,
+        );
+
+        assert!(q_roll.roll_rate > 0.0 && q_roll.roll > 0.0);
+        assert!(e_roll.roll_rate < 0.0 && e_roll.roll < 0.0);
+        assert!((q_roll.roll_rate + e_roll.roll_rate).abs() < 1e-6);
+        assert!((q_roll.roll + e_roll.roll).abs() < 1e-6);
+        assert!(q_roll.roll_rate <= SHIP_ROLL_ACCEL_RAD_PER_S2 * 0.1 + 1e-6);
+    }
+
+    #[test]
+    fn ship_angular_response_has_a_hard_acceleration_bound() {
+        let (rate, angle) = integrate_ship_angular_rate(0.0, 10.0, 4.0, 0.25);
+        assert!((rate - 1.0).abs() < 1e-6);
+        assert!((angle - 0.125).abs() < 1e-6);
+
+        let dt = 0.05;
+        let mut motion = test_ship_motion();
+        step_ship_attitude(
+            &mut motion,
+            Vec2::new(10_000.0, -10_000.0),
+            1.0,
+            1.0,
+            1.0,
+            dt,
+            ship_handling_profile(ShipKind::ScoutShuttle),
+        );
+        assert!(motion.yaw_rate.abs() <= SHIP_YAW_ACCEL_RAD_PER_S2 * dt + 1e-6);
+        assert!(motion.pitch_rate.abs() <= SHIP_PITCH_ACCEL_RAD_PER_S2 * dt + 1e-6);
+        assert!(motion.roll_rate.abs() <= SHIP_ROLL_ACCEL_RAD_PER_S2 * dt + 1e-6);
+        assert!(motion.yaw_rate != 0.0 && motion.pitch_rate != 0.0 && motion.roll_rate != 0.0);
+    }
+
+    fn simulate_constant_ship_mouse(dt: f32, steps: usize) -> ShipMotion {
+        let mut motion = test_ship_motion();
+        let mouse_pixels_per_s = Vec2::new(900.0, -360.0);
+        let handling = ship_handling_profile(ShipKind::ScoutShuttle);
+        for _ in 0..steps {
+            step_ship_attitude(
+                &mut motion,
+                mouse_pixels_per_s * dt,
+                0.0,
+                0.0,
+                0.0,
+                dt,
+                handling,
+            );
+        }
+        motion
+    }
+
+    #[test]
+    fn ship_mouse_steering_is_frame_rate_independent() {
+        let slow = simulate_constant_ship_mouse(1.0 / 30.0, 30);
+        let fast = simulate_constant_ship_mouse(1.0 / 120.0, 120);
+        assert!((slow.yaw - fast.yaw).abs() < 2e-5);
+        assert!((slow.pitch - fast.pitch).abs() < 2e-5);
+        assert!((slow.yaw_rate - fast.yaw_rate).abs() < 2e-5);
+        assert!((slow.pitch_rate - fast.pitch_rate).abs() < 2e-5);
+    }
+
+    #[test]
+    fn ship_release_decays_rates_and_auto_levels_roll_without_snapping() {
+        let handling = ship_handling_profile(ShipKind::ScoutShuttle);
+        let mut motion = test_ship_motion();
+        motion.roll = 0.45;
+        motion.yaw_rate = 0.40;
+        motion.pitch_rate = -0.30;
+        motion.roll_rate = 0.55;
+        let initial_roll = motion.roll;
+        let initial_roll_rate = motion.roll_rate;
+        let dt = 1.0 / 120.0;
+
+        step_ship_attitude(&mut motion, Vec2::ZERO, 0.0, 0.0, 0.0, dt, handling);
+        assert_ne!(motion.roll, 0.0);
+        assert!((motion.roll - initial_roll).abs() < 0.01);
+        assert!(
+            (motion.roll_rate - initial_roll_rate).abs() <= SHIP_ROLL_ACCEL_RAD_PER_S2 * dt + 1e-6
+        );
+
+        for _ in 0..1_200 {
+            step_ship_attitude(&mut motion, Vec2::ZERO, 0.0, 0.0, 0.0, dt, handling);
+        }
+        assert!(motion.yaw_rate.abs() < 0.01);
+        assert!(motion.pitch_rate.abs() < 0.01);
+        assert!(motion.roll.abs() < 0.005);
+        assert!(motion.roll_rate.abs() < 0.01);
+    }
+
+    #[test]
+    fn ship_ui_capture_blocks_pointer_and_keyboard_control_channels() {
+        assert!(ship_controls_allowed(ShipInputCapture::default()));
+        assert!(!ship_controls_allowed(ShipInputCapture {
+            pointer: true,
+            keyboard: false,
+            ..default()
+        }));
+        assert!(!ship_controls_allowed(ShipInputCapture {
+            pointer: false,
+            keyboard: true,
+            ..default()
+        }));
+    }
+
+    #[test]
+    fn handling_profiles_keep_ship_classes_distinct_and_bounded() {
+        let scout = ship_handling_profile(ShipKind::ScoutShuttle);
+        let strike = ship_handling_profile(ShipKind::StrikeFighter);
+        let heavy = ship_handling_profile(ShipKind::HeavyDropship);
+
+        assert!(strike.look_response > scout.look_response);
+        assert!(scout.look_response > heavy.look_response);
+        assert!(strike.bank_scale > scout.bank_scale);
+        assert!(scout.bank_scale > heavy.bank_scale);
+        for profile in [scout, strike, heavy] {
+            assert!(profile.look_response.is_finite() && profile.look_response > 0.0);
+            assert!(profile.roll_response.is_finite() && profile.roll_response > 0.0);
+            assert!((0.0..=0.05).contains(&profile.lateral_drift));
+            assert!((0.0..=1.0).contains(&profile.pitch_level_response));
+        }
+    }
+
+    #[test]
+    fn ship_weapons_keep_distinct_fixed_fx_tones() {
+        assert_eq!(ShipWeaponKind::IonRocket.fx_tone(), ShipFxTone::Ion);
+        assert_eq!(ShipWeaponKind::PlasmaFlak.fx_tone(), ShipFxTone::Plasma);
+        assert_eq!(ShipWeaponKind::RailLance.fx_tone(), ShipFxTone::Rail);
+        assert_ne!(ShipFxTone::Pulse, ShipFxTone::Hostile);
     }
 
     #[test]

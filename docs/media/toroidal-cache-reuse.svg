@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 880" role="img" aria-labelledby="title desc">
+  <title id="title">Toroidal centre-sample window reuse for planetary terrain</title>
+  <desc id="desc">Three source-backed per-ring cases for the fixed 65 by 65 planetary terrain centre-height sample window. A one-cell axial shift samples 65 new values and reuses 4,160. A one-cell diagonal shift samples 129 new values and reuses 4,096. If either absolute axis shift is at least 65 cells, the shift is not grid-aligned, or the world or specification is incompatible, all 4,225 values are refilled inside the same fixed allocation. This is a CPU centre-source-sampling contract, not a GPU partial-update claim.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071217"/>
+      <stop offset="1" stop-color="#0d1d24"/>
+    </linearGradient>
+    <linearGradient id="reuseFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17363c"/>
+      <stop offset="1" stop-color="#10272f"/>
+    </linearGradient>
+    <linearGradient id="newFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#72f5d2"/>
+      <stop offset="1" stop-color="#4ba8ff"/>
+    </linearGradient>
+    <linearGradient id="fallbackFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#25434b"/>
+      <stop offset="1" stop-color="#18313a"/>
+    </linearGradient>
+    <pattern id="pageGrid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#8cb8c6" stroke-opacity="0.04"/>
+    </pattern>
+    <pattern id="sampleGrid" width="14" height="14" patternUnits="userSpaceOnUse">
+      <path d="M14 0H0V14" fill="none" stroke="#8fc1cb" stroke-opacity="0.16" stroke-width="1"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#61e8cb"/>
+    </marker>
+    <style>
+      .kicker{font-family:Helvetica;font-size:17px;font-weight:bold;letter-spacing:4px;fill:#73f4d4}
+      .heading{font-family:Helvetica;font-size:38px;font-weight:bold;fill:#f2fbff}
+      .subhead{font-family:Helvetica;font-size:20px;font-weight:normal;fill:#9dbdc9}
+      .panelTitle{font-family:Helvetica;font-size:22px;font-weight:bold;fill:#edf9fd}
+      .panelText{font-family:Helvetica;font-size:16px;font-weight:normal;fill:#a8c3cd}
+      .value{font-family:Helvetica;font-size:28px;font-weight:bold;fill:#f2fbff}
+      .mono{font-family:Courier;font-size:17px;font-weight:bold;fill:#cfe3e9}
+      .micro{font-family:Courier;font-size:14px;font-weight:bold;fill:#86a6b1}
+    </style>
+  </defs>
+
+  <rect width="1600" height="880" rx="24" fill="url(#bg)"/>
+  <rect width="1600" height="880" rx="24" fill="url(#pageGrid)"/>
+
+  <g font-family="Helvetica">
+    <text x="64" y="64" class="kicker">FIXED CPU CENTRE-SAMPLE WINDOW · EXACT PER-RING COUNTS</text>
+    <text x="64" y="116" class="heading">Travel rotates a 65 × 65 window—not its budget.</text>
+    <text x="64" y="153" class="subhead">Logical overlap is retained in place; only entering samples are replaced.</text>
+
+    <g transform="translate(1112 44)">
+      <rect width="424" height="94" rx="15" fill="#0c2026" stroke="#38616a"/>
+      <text x="22" y="34" fill="#79f4d7" font-size="14" font-weight="bold" letter-spacing="1.5">LIVE CENTRE-SAMPLING CONTRACT</text>
+      <text x="22" y="62" fill="#f0c77b" font-size="14" font-weight="bold">NOT A GPU PARTIAL-UPDATE CLAIM</text>
+      <text x="22" y="82" fill="#8caab5" font-size="13">mesh assembly and upload remain separate work</text>
+    </g>
+
+    <g transform="translate(64 210)">
+      <rect width="464" height="452" rx="20" fill="#09171c" stroke="#2a4b55"/>
+      <text x="26" y="42" class="panelTitle">01 · One-cell axial shift</text>
+      <text x="26" y="70" class="panelText">shift = (±1, 0) or (0, ±1)</text>
+
+      <g transform="translate(80 98)">
+        <rect width="280" height="280" rx="8" fill="url(#reuseFill)" stroke="#54808a" stroke-width="2"/>
+        <rect width="280" height="280" rx="8" fill="url(#sampleGrid)"/>
+        <rect x="268" width="12" height="280" fill="url(#newFill)"/>
+        <path d="M300 140H344" fill="none" stroke="#61e8cb" stroke-width="3" marker-end="url(#arrow)"/>
+        <text x="140" y="132" text-anchor="middle" fill="#b9d5de" font-size="16" font-weight="bold">overlap retained</text>
+        <text x="140" y="157" text-anchor="middle" fill="#7f9ea8" font-size="14">logical toroidal rotation</text>
+        <text x="291" y="95" fill="#7af2d6" font-size="13" font-weight="bold">entering</text>
+        <text x="291" y="114" fill="#7af2d6" font-size="13" font-weight="bold">strip</text>
+      </g>
+
+      <g transform="translate(26 404)">
+        <text class="value">65 new</text>
+        <text x="182" class="value" fill="#a9d7e4">4,160 reused</text>
+      </g>
+    </g>
+
+    <g transform="translate(568 210)">
+      <rect width="464" height="452" rx="20" fill="#09171c" stroke="#2a4b55"/>
+      <text x="26" y="42" class="panelTitle">02 · One-cell diagonal shift</text>
+      <text x="26" y="70" class="panelText">shift = (±1, ±1)</text>
+
+      <g transform="translate(80 98)">
+        <rect width="280" height="280" rx="8" fill="url(#reuseFill)" stroke="#54808a" stroke-width="2"/>
+        <rect width="280" height="280" rx="8" fill="url(#sampleGrid)"/>
+        <rect x="268" width="12" height="280" fill="url(#newFill)"/>
+        <rect y="268" width="280" height="12" fill="url(#newFill)"/>
+        <rect x="268" y="268" width="12" height="12" fill="#e5f7b1"/>
+        <path d="M300 58L338 20" fill="none" stroke="#61e8cb" stroke-width="3" marker-end="url(#arrow)"/>
+        <text x="134" y="132" text-anchor="middle" fill="#b9d5de" font-size="16" font-weight="bold">two entering strips</text>
+        <text x="134" y="157" text-anchor="middle" fill="#7f9ea8" font-size="14">shared corner counted once</text>
+      </g>
+
+      <g transform="translate(26 404)">
+        <text class="value">129 new</text>
+        <text x="198" class="value" fill="#a9d7e4">4,096 reused</text>
+      </g>
+    </g>
+
+    <g transform="translate(1072 210)">
+      <rect width="464" height="452" rx="20" fill="#09171c" stroke="#2a4b55"/>
+      <text x="26" y="42" class="panelTitle">03 · Bounded full fallback</text>
+      <text x="26" y="70" fill="#a8c3cd" font-size="14">either axis |shift| ≥ 65, or incompatible/non-grid</text>
+
+      <g transform="translate(80 98)">
+        <rect width="280" height="280" rx="8" fill="url(#fallbackFill)" stroke="#6a8f98" stroke-width="2"/>
+        <rect width="280" height="280" rx="8" fill="url(#sampleGrid)"/>
+        <rect x="20" y="102" width="240" height="76" rx="14" fill="#0c2026" stroke="#65d9c1"/>
+        <text x="140" y="133" text-anchor="middle" fill="#e8f8fc" font-size="20" font-weight="bold">same 65 × 65 allocation</text>
+        <text x="140" y="159" text-anchor="middle" fill="#86b9c3" font-size="15">no travel-history growth</text>
+        <path d="M140 78V36" fill="none" stroke="#61e8cb" stroke-width="3" marker-end="url(#arrow)"/>
+        <path d="M140 202V244" fill="none" stroke="#61e8cb" stroke-width="3" marker-end="url(#arrow)"/>
+      </g>
+
+      <g transform="translate(26 404)">
+        <text class="value">4,225 refill</text>
+        <text x="235" class="value" fill="#a9d7e4">0 reused</text>
+      </g>
+    </g>
+
+    <g transform="translate(64 704)">
+      <rect width="1472" height="116" rx="18" fill="#0a171c" stroke="#2a4852"/>
+      <text x="26" y="36" class="mono" fill="#79f4d7">N = 65² = 4,225</text>
+      <text x="246" y="36" class="mono">reused = (65 − |dx|)(65 − |dz|)</text>
+      <text x="720" y="36" class="mono">new = N − reused</text>
+      <text x="1036" y="36" class="micro">valid while |dx|, |dz| &lt; 65</text>
+      <path d="M26 56H1446" stroke="#294750"/>
+      <text x="26" y="85" fill="#a9c4cd" font-size="16">Entering strips are enlarged for legibility; the numbers are exact 65 × 65 centre-sample populations per ring.</text>
+      <text x="26" y="106" fill="#718f9a" font-size="14">Sources: src/planetary_streaming.rs · docs/PLANETARY_STREAMING_PHASE1.md · docs/CODEX_ENGINEERING_ATLAS.md</text>
+    </g>
+  </g>
+</svg>
