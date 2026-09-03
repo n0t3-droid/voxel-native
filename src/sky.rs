@@ -199,13 +199,21 @@ fn setup_sky(
             }),
             ..default()
         },
-        // Bloom — what makes the sun read as a true light source rather
-        // than a flat circle. `OLD_SCHOOL` gives a pronounced halo,
-        // perfect for a stylised voxel sky. Threshold is non-zero in
-        // that preset, so only the high-intensity emissives (sun + the
-        // brightest stars) bloom; the gradient sky stays clean.
+        // Bloom — sun disc only. Threshold is high enough that the
+        // horizon rim and nebula stay out of the bloom buffer; Additive
+        // OLD_SCHOOL at 0.6 was turning the whole lower sky milky.
         BloomSettings {
             composite_mode: BloomCompositeMode::Additive,
+            intensity: 0.08,
+            low_frequency_boost: 0.35,
+            prefilter_settings: bevy::core_pipeline::bloom::BloomPrefilterSettings {
+                // Horizon / nebula sit around 0.2–1.2; only the sun disc
+                // (emissive 60) and the hottest stars should bloom. The
+                // old 0.6 threshold let the additive horizon wall bloom
+                // into milky white and crush the rest of the sky.
+                threshold: 2.4,
+                threshold_softness: 0.35,
+            },
             ..BloomSettings::OLD_SCHOOL
         },
         sky_layer.clone(),
@@ -424,9 +432,11 @@ fn setup_sky(
         base_color: Color::WHITE,
         base_color_texture: Some(horizon_image.clone()),
         emissive_texture: Some(horizon_image),
-        emissive: LinearRgba::rgb(0.42, 0.28, 0.38),
+        // Blend (not Add): a coloured rim over ClearColor, not extra
+        // HDR energy that bloom turns into a milky white wall.
+        emissive: LinearRgba::rgb(0.18, 0.10, 0.08),
         unlit: true,
-        alpha_mode: AlphaMode::Add,
+        alpha_mode: AlphaMode::Blend,
         cull_mode: Some(bevy::render::render_resource::Face::Front),
         double_sided: true,
         ..default()
@@ -793,9 +803,9 @@ fn follow_and_animate_sky(
         // Additive + bloom made the old 3.0 dusk emissive bleach the
         // whole lower third of the frame.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
-            let noon = Vec3::new(0.18, 0.32, 0.48);
-            let dusk = Vec3::new(1.15, 0.48, 0.16);
-            let deep = Vec3::new(0.28, 0.10, 0.48);
+            let noon = Vec3::new(0.12, 0.22, 0.38);
+            let dusk = Vec3::new(0.55, 0.22, 0.08);
+            let deep = Vec3::new(0.16, 0.06, 0.28);
             let e = (noon * day + deep * night) * (1.0 - sunset * 0.45) + dusk * sunset;
             let e = e * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
@@ -1196,14 +1206,18 @@ fn build_horizon_gradient_image(height: u32) -> Image {
             // Smooth falloff to nothing well before the zenith.
             (1.0 - (elevation / 0.45).min(1.0)).powf(1.7)
         };
-        let byte = (intensity.clamp(0.0, 1.0) * 255.0) as u8;
+        let intensity = intensity.clamp(0.0, 1.0);
+        // Warm rim (dusk-leaning cream) in RGB; alpha carries the band
+        // so Blend composites over ClearColor instead of adding light.
+        let r = (1.00 * intensity * 255.0) as u8;
+        let g = (0.58 * intensity * 255.0) as u8;
+        let b = (0.28 * intensity * 255.0) as u8;
+        let a = (intensity * 0.62 * 255.0) as u8;
         for _ in 0..WIDTH {
-            data.push(byte);
-            data.push(byte);
-            data.push(byte);
-            // Alpha carries the same falloff so Additive empty sky
-            // (zenith / underground) contributes nothing.
-            data.push(byte);
+            data.push(r);
+            data.push(g);
+            data.push(b);
+            data.push(a);
         }
     }
 
@@ -1243,7 +1257,7 @@ mod tests {
         let horizon = H / 2;
 
         // Brightest at the horizon line.
-        assert!(gradient_row(&image, horizon) > 200);
+        assert!(gradient_row(&image, horizon) > 180);
         // Gone below the ground, so the band never lights the underside
         // of the world or fights the terrain fog.
         assert_eq!(gradient_row(&image, 0), 0);

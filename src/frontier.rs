@@ -49,6 +49,13 @@ pub const HERO_SKYWAY_X0: i32 = -36;
 pub const HERO_SKYWAY_X1: i32 = 188;
 pub const HERO_SKYWAY_Z: i32 = -48;
 
+/// Inclusive AABB of the spawn postcard. Terrain in this box is forced
+/// to banded mesa country so the first look is the key-art ground, not
+/// whatever plains the seed happened to put at the origin.
+pub fn in_hero_postcard(wx: i32, wz: i32) -> bool {
+    wx >= -48 && wx <= 220 && wz >= -180 && wz <= 28
+}
+
 /// Altitude band for sky islands.
 ///
 /// Airborne landmarks are only worth generating inside the vertical slab

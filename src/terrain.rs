@@ -601,6 +601,9 @@ impl TerrainGenerator {
         if height <= WATER_LEVEL - 2 {
             return Biome::Ocean;
         }
+        if crate::frontier::in_hero_postcard(wx as i32, wz as i32) && height > WATER_LEVEL + 2 {
+            return Biome::Mesa;
+        }
         // Region overrides (above water): alien & special regions
         // dominate even at weak strength so the player sees them
         // often. Classic canyons / karst need a bit more authority.
@@ -2922,6 +2925,13 @@ mod tests {
         assert!(spawn.y > WATER_LEVEL + 4);
         // Never drop the player into a lava or plasma channel.
         assert!(generator.frontier.rivers.column(spawn.x, spawn.z).is_none());
+        // Spawn postcard is forced mesa country so the opening shot is
+        // banded canyon, not a grassy field the seed happened to put
+        // under the crystal cluster.
+        assert_eq!(
+            generator.biome_at(crate::frontier::HERO_CRYSTAL_X, crate::frontier::HERO_CRYSTAL_Z),
+            Biome::Mesa
+        );
         // And never onto a wall they would immediately slide off.
         let surface = generator.surface_height_at(spawn.x, spawn.z);
         for (dx, dz) in [(-2, 0), (2, 0), (0, -2), (0, 2)] {

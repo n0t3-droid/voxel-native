@@ -320,6 +320,9 @@ struct AgentLiveStatus {
     in_game_frames: u32,
     last_screenshot: Option<String>,
     session_dir: String,
+    time_of_day: f32,
+    world_name: String,
+    visual_preset: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -590,6 +593,15 @@ fn agent_control_enter_game(
                 .unwrap_or(40)
                 .clamp(8, 64);
         }
+        info!(
+            "agent control: entering world '{}' seed={} hour={:.2} preset={:?} graphics={:?} rd={}",
+            meta.name,
+            seed,
+            meta.time_of_day,
+            settings.visual_preset,
+            settings.graphics,
+            settings.render_distance
+        );
         commands.insert_resource(ActiveWorld { meta });
         pending.0 = true;
     }
@@ -1047,6 +1059,8 @@ fn agent_control_status(
     streamer: Res<ChunkStreamer>,
     governor: Res<StreamingGovernor>,
     state: Res<AgentControlState>,
+    settings: Res<WorldSettings>,
+    active_world: Option<Res<ActiveWorld>>,
     mut runtime: ResMut<AgentControlRuntime>,
     active_weapon: Option<Res<ActiveWeapon>>,
     toolbelt: Option<Res<ToolbeltState>>,
@@ -1150,6 +1164,12 @@ fn agent_control_status(
             in_game_frames: runtime.in_game_frames,
             last_screenshot,
             session_dir: runtime_session_dir(&runtime),
+            time_of_day: settings.time_of_day,
+            world_name: active_world
+                .as_deref()
+                .map(|world| world.meta.name.clone())
+                .unwrap_or_default(),
+            visual_preset: format!("{:?}", settings.visual_preset),
         };
         if let Err(e) = std::fs::create_dir_all(&runtime.session_dir) {
             warn!(
