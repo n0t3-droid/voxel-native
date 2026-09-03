@@ -13,6 +13,7 @@ mod commands;
 mod daynight;
 mod director;
 mod editor;
+mod frontier;
 mod hud;
 mod icons;
 mod menu;
