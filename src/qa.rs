@@ -139,6 +139,21 @@ fn qa_enter_game(
         warn!("QA: could not create {}: {e}", qa.report_dir.display());
     }
 
+    // Screenshot runs are usually the point of the harness, and the
+    // adaptive streaming governor will happily throttle the horizon down
+    // to a couple of chunks on a slow or software renderer - which
+    // produces a picture of fog rather than a picture of the world.
+    // Pinning the distance trades frame rate for a representative frame.
+    if let Some(rd) = env_u32("VOXEL_NATIVE_QA_RENDER_DISTANCE") {
+        settings.render_distance = rd;
+        settings.neurocore_enabled = false;
+        settings.normalize_runtime_safety();
+        info!(
+            "QA: render distance pinned to {} chunks (adaptive streaming off)",
+            settings.render_distance
+        );
+    }
+
     let seed = env_u32("VOXEL_NATIVE_QA_SEED").unwrap_or(settings.seed);
     let world_name =
         std::env::var("VOXEL_NATIVE_QA_WORLD").unwrap_or_else(|_| "qa_autopilot".into());

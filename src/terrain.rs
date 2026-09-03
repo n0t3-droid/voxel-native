@@ -922,14 +922,16 @@ impl TerrainGenerator {
 
                 // --------- Energy river ---------
                 // `surface_height` already cut the channel; here we work
-                // out what pools in it. Only above the sea line, so
-                // channels never drain an ocean into a glowing trench.
-                let river = if surface > WATER_LEVEL + 4 {
-                    self.frontier.rivers.column(wx, wz)
-                } else {
-                    None
-                };
-                let river_fill_top = river.map(|r| surface + frontier::RIVER_FILL_DEPTH);
+                // out what pools in it. The gate has to be on the height
+                // BEFORE the cut, exactly as in `surface_height`, or a
+                // channel cut near the sea line would be left as a dry
+                // trench because the carve pushed it under the threshold.
+                let river = self
+                    .frontier
+                    .rivers
+                    .column(wx, wz)
+                    .filter(|r| surface + r.cut > WATER_LEVEL + 4);
+                let river_fill_top = river.map(|r| r.fluid_top(surface));
 
                 // --------- Skyway ---------
                 // Decks ride the smooth macro elevation, so a single
@@ -1373,9 +1375,9 @@ impl TerrainGenerator {
                         }
                     }
                     Biome::CrystalSpires => {
-                        if r < 0.025 {
+                        if r < 0.010 {
                             chunk.set(lx, above_ly as usize, lz, BlockType::Crystal.into());
-                        } else if r < 0.055 {
+                        } else if r < 0.040 {
                             chunk.set(lx, above_ly as usize, lz, BlockType::AlienMoss.into());
                         }
                     }
@@ -1447,16 +1449,21 @@ impl TerrainGenerator {
             // gets outpost clutter. Forest and jungle stay lowest: they
             // are the wilderness the outposts are cut out of, and the
             // canopy hides most of a prop anyway.
+            // These are per-candidate odds and there are 24 candidates a
+            // chunk, so the numbers are much smaller than they look: at
+            // 0.02 a chunk averages half a prop. Anything near 0.05 puts
+            // one outpost in every chunk, which at render distance is a
+            // field of glowing litter rather than a frontier.
             let density: f64 = match biome {
-                Biome::CrystalSpires => 0.18,
-                Biome::AlienReef => 0.16,
-                Biome::VolcanicWaste => 0.09,
-                Biome::GlacierShards => 0.08,
-                Biome::Mesa => 0.075,
-                Biome::Karst => 0.045,
-                Biome::Plains | Biome::Savanna | Biome::Desert | Biome::Tundra => 0.050,
-                Biome::Mountains | Biome::SnowyMountains => 0.035,
-                Biome::Forest | Biome::Jungle => 0.018,
+                Biome::CrystalSpires => 0.055,
+                Biome::AlienReef => 0.050,
+                Biome::VolcanicWaste => 0.030,
+                Biome::GlacierShards => 0.026,
+                Biome::Mesa => 0.022,
+                Biome::Karst => 0.014,
+                Biome::Plains | Biome::Savanna | Biome::Desert | Biome::Tundra => 0.014,
+                Biome::Mountains | Biome::SnowyMountains => 0.010,
+                Biome::Forest | Biome::Jungle => 0.006,
                 Biome::Ocean | Biome::Beach => 0.0,
             };
             if r_gate > density {
@@ -2048,10 +2055,13 @@ impl TerrainGenerator {
             let (surface, _cont) = self.surface_height(wx as f64, wz as f64);
             let biome = self.biome(wx as f64, wz as f64, surface, _cont);
 
+            // Sparse on purpose. At the old rate these read as glitter
+            // only because the ground around them was almost black; over
+            // a lit, saturated surface the same density looks like litter.
             let keep = match biome {
-                Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.18,
-                Biome::GlacierShards => r_gate < 0.045,
-                Biome::VolcanicWaste => r_gate < 0.030,
+                Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.075,
+                Biome::GlacierShards => r_gate < 0.030,
+                Biome::VolcanicWaste => r_gate < 0.022,
                 Biome::Forest | Biome::Jungle | Biome::Karst => false,
                 Biome::Mesa => false,
                 Biome::Desert | Biome::Savanna | Biome::Beach | Biome::Ocean => false,

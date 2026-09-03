@@ -374,7 +374,7 @@ pub struct CrystalCluster {
 
 impl CrystalCluster {
     pub fn for_cell(seed: u32, ix: i32, iz: i32) -> Option<Self> {
-        if cell_rand(seed, 0x0C_10_01, ix, iz) > 0.34 {
+        if cell_rand(seed, 0x0C_10_01, ix, iz) > 0.42 {
             return None;
         }
         let cx =
@@ -384,8 +384,8 @@ impl CrystalCluster {
         Some(Self {
             cx,
             cz,
-            shards: 3 + (cell_rand(seed, 0x0C_10_04, ix, iz) * 4.0) as u32,
-            scale: 9 + (cell_rand(seed, 0x0C_10_05, ix, iz) * 15.0) as i32,
+            shards: 3 + (cell_rand(seed, 0x0C_10_04, ix, iz) * 5.0) as u32,
+            scale: 10 + (cell_rand(seed, 0x0C_10_05, ix, iz) * 20.0) as i32,
         })
     }
 
@@ -776,8 +776,7 @@ pub fn skyway_lamp(wx: i32, wz: i32) -> bool {
 // Energy rivers -------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
-/// A glowing river carved into the terrain: lava in the volcanic
-/// provinces, cyan plasma everywhere else.
+/// A glowing river carved into the terrain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RiverColumn {
     /// Depth to cut below the natural surface, in blocks.
@@ -788,50 +787,84 @@ pub struct RiverColumn {
     pub fluid: BlockType,
 }
 
-/// The energy-river network. Same contour trick as the skyways, at a
-/// different frequency and phase so rivers and roads rarely coincide.
+impl RiverColumn {
+    /// Top of the standing fluid, given the carved bed height.
+    ///
+    /// The level is measured down from the *natural* surface rather than
+    /// up from the bed, so the fluid surface is flat right across the
+    /// channel. Filling a fixed depth above the bed instead would give a
+    /// parabolic river that climbs its own banks.
+    #[inline]
+    pub fn fluid_top(&self, bed: i32) -> i32 {
+        bed + self.cut - RIVER_BANK
+    }
+}
+
+/// The energy-river network.
+///
+/// Two independent contour fields, not one: the key art has an orange
+/// lava river and a blue plasma river threading the same canyon system,
+/// and a single field with a hot/cold mask can only ever give one colour
+/// per region.
 pub struct RiverNetwork {
-    flow: Perlin,
-    heat: Perlin,
+    lava: Perlin,
+    plasma: Perlin,
 }
 
 /// Half-width of an energy channel, in blocks.
-const RIVER_HALF_WIDTH: f64 = 5.5;
+const RIVER_HALF_WIDTH: f64 = 6.0;
 /// Deepest cut at the channel centreline.
-const RIVER_DEPTH: i32 = 7;
+const RIVER_DEPTH: i32 = 8;
+/// How far the fluid surface sits below the natural ground line. Small
+/// enough that the glow spills out over the banks and lights the canyon.
+const RIVER_BANK: i32 = 2;
 
 impl RiverNetwork {
     pub fn new(seed: u32) -> Self {
         Self {
-            flow: Perlin::new(seed.wrapping_add(43)),
-            heat: Perlin::new(seed.wrapping_add(44)),
+            lava: Perlin::new(seed.wrapping_add(43)),
+            plasma: Perlin::new(seed.wrapping_add(44)),
         }
     }
 
     #[inline]
-    fn flow_field(&self, wx: f64, wz: f64) -> f64 {
-        self.flow.get([wx * 0.0011 - 77.1, wz * 0.0011 + 44.9]) * 0.70
-            + self.flow.get([wx * 0.0027 + 8.3, wz * 0.0027 - 5.1]) * 0.30
+    fn field(source: &Perlin, wx: f64, wz: f64, phase: f64) -> f64 {
+        source.get([wx * 0.0011 + phase, wz * 0.0011 - phase]) * 0.70
+            + source.get([wx * 0.0027 - phase, wz * 0.0027 + phase]) * 0.30
     }
 
-    pub fn column(&self, wx: i32, wz: i32) -> Option<RiverColumn> {
+    fn channel(source: &Perlin, wx: i32, wz: i32, phase: f64) -> Option<f64> {
         let x = wx as f64;
         let z = wz as f64;
-        let a = self.flow_field(x, z);
+        let a = Self::field(source, x, z, phase);
         if a.abs() > 0.06 {
             return None;
         }
         let e = 3.0;
-        let gx = (self.flow_field(x + e, z) - self.flow_field(x - e, z)) / (2.0 * e);
-        let gz = (self.flow_field(x, z + e) - self.flow_field(x, z - e)) / (2.0 * e);
+        let gx = (Self::field(source, x + e, z, phase) - Self::field(source, x - e, z, phase))
+            / (2.0 * e);
+        let gz = (Self::field(source, x, z + e, phase) - Self::field(source, x, z - e, phase))
+            / (2.0 * e);
         let grad = (gx * gx + gz * gz).sqrt();
         if grad < 1e-9 {
             return None;
         }
         let dist = a.abs() / grad;
-        if dist > RIVER_HALF_WIDTH {
-            return None;
-        }
+        (dist <= RIVER_HALF_WIDTH).then_some(dist)
+    }
+
+    pub fn column(&self, wx: i32, wz: i32) -> Option<RiverColumn> {
+        // Where the two networks cross, the hotter one wins the bed.
+        let lava = Self::channel(&self.lava, wx, wz, 77.1);
+        let plasma = Self::channel(&self.plasma, wx, wz, -21.7);
+        let (dist, fluid) = match (lava, plasma) {
+            (Some(l), Some(p)) if l <= p => (l, BlockType::Lava),
+            (Some(_), Some(p)) => (p, BlockType::PlasmaFlow),
+            (Some(l), None) => (l, BlockType::Lava),
+            (None, Some(p)) => (p, BlockType::PlasmaFlow),
+            (None, None) => return None,
+        };
+
         // Parabolic channel profile: deepest in the middle, feathering to
         // nothing at the banks so the cut never leaves a vertical wall.
         let t = dist / RIVER_HALF_WIDTH;
@@ -839,17 +872,9 @@ impl RiverNetwork {
         if cut <= 0 {
             return None;
         }
-        let fluid = if self.heat.get([x * 0.00035, z * 0.00035]) > 0.05 {
-            BlockType::Lava
-        } else {
-            BlockType::PlasmaFlow
-        };
         Some(RiverColumn { cut, dist, fluid })
     }
 }
-
-/// Depth of fluid standing in a channel above its bed.
-pub const RIVER_FILL_DEPTH: i32 = 2;
 
 // ---------------------------------------------------------------------------
 
@@ -1088,22 +1113,62 @@ mod tests {
         let net = RiverNetwork::new(555);
         let mut deepest = 0;
         let mut fluids = std::collections::BTreeSet::new();
-        for wx in -6000..6000 {
-            if let Some(col) = net.column(wx, 128) {
-                assert!(col.cut > 0 && col.cut <= RIVER_DEPTH);
-                assert!(col.dist <= RIVER_HALF_WIDTH);
-                deepest = deepest.max(col.cut);
-                fluids.insert(col.fluid as u16);
+        for wz in (-6000..6000).step_by(97) {
+            for wx in (-6000..6000).step_by(3) {
+                if let Some(col) = net.column(wx, wz) {
+                    assert!(col.cut > 0 && col.cut <= RIVER_DEPTH);
+                    assert!(col.dist <= RIVER_HALF_WIDTH);
+                    deepest = deepest.max(col.cut);
+                    fluids.insert(col.fluid as u16);
+                }
             }
         }
         assert!(
             deepest >= 4,
             "rivers never cut deeper than {deepest} blocks"
         );
+        // Both networks must show up: the key art has an orange river and
+        // a blue one threading the same canyon country.
         assert!(
-            fluids.contains(&(BlockType::PlasmaFlow as u16))
-                || fluids.contains(&(BlockType::Lava as u16)),
-            "rivers carried no glowing fluid"
+            fluids.contains(&(BlockType::PlasmaFlow as u16)),
+            "no plasma river anywhere in a 12 km square"
+        );
+        assert!(
+            fluids.contains(&(BlockType::Lava as u16)),
+            "no lava river anywhere in a 12 km square"
+        );
+    }
+
+    #[test]
+    fn river_fluid_surface_is_flat_across_the_channel() {
+        // Filling a fixed depth above the bed would give a parabolic
+        // river climbing its own banks. The fluid top must instead be
+        // level, and must stay below the natural ground line.
+        let net = RiverNetwork::new(555);
+        let natural = 90;
+        let mut tops = std::collections::BTreeSet::new();
+        let mut found = 0;
+        for wx in -6000..6000 {
+            let Some(col) = net.column(wx, 128) else {
+                continue;
+            };
+            let bed = natural - col.cut;
+            let top = col.fluid_top(bed);
+            assert!(
+                top < natural,
+                "fluid at {top} overflows ground at {natural}"
+            );
+            if col.cut > RIVER_BANK {
+                assert!(top > bed, "channel centre at {bed} holds no fluid");
+                tops.insert(top);
+                found += 1;
+            }
+        }
+        assert!(found > 50, "only {found} deep river columns sampled");
+        assert_eq!(
+            tops.len(),
+            1,
+            "fluid surface is not level across the channel: {tops:?}"
         );
     }
 
