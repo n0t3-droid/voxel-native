@@ -145,12 +145,22 @@ avoids turning the low-end target into a brute-force simulation.
 
 ## Build And Run
 
+Requires **Rust 1.77+** (Bevy 0.14) via [rustup](https://rustup.rs). `blake3`
+is locked at **1.8.2** because 1.8.3+ needs edition2024 (Rust **1.85+**) and
+would fail `cargo build` on older toolchains at manifest parse time.
+
 ```powershell
+# Windows: one-command launch (release)
+.\run.ps1
+
+# QA autopilot (release + --qa)
+.\run.ps1 -Qa
+
+# or cargo directly
+cargo run --release
+
 # Debug build
 cargo run
-
-# Release build
-cargo run --release
 ```
 
 The first Bevy build can take a while. Later builds are faster because the dev
