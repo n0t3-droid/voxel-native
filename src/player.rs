@@ -7,6 +7,8 @@ use bevy::core_pipeline::bloom::{BloomCompositeMode, BloomSettings};
 use bevy::input::mouse::MouseMotion;
 use bevy::pbr::{FogFalloff, FogSettings};
 use bevy::prelude::*;
+use bevy::render::camera::Exposure;
+use bevy::render::view::{ColorGrading, ColorGradingSection};
 use bevy::window::PrimaryWindow;
 
 use crate::daynight::{day_factor, sun_direction, sunset_factor, WorldIntelRuntime};
@@ -67,6 +69,7 @@ impl Plugin for PlayerPlugin {
                     tick_suit_vitals.run_if(in_state(crate::menu::GameState::InGame)),
                     update_camera_fov,
                     update_bloom_by_graphics,
+                    update_cinematic_exposure,
                 )
                     .chain(),
             );
@@ -373,8 +376,8 @@ fn update_bloom_by_graphics(
         crate::settings::GraphicsMode::High => (0.14, 0.70, 0.32),
     };
     if cinematic && settings.graphics != crate::settings::GraphicsMode::Fast {
-        intensity += dusk * 0.04;
-        threshold -= dusk * 0.06;
+        intensity += dusk * 0.055;
+        threshold -= dusk * 0.07;
     }
     let target = (intensity * intel.profile.bloom_mul).clamp(0.0, 0.22);
     if let Ok(mut b) = q.get_single_mut() {
@@ -382,6 +385,97 @@ fn update_bloom_by_graphics(
         b.low_frequency_boost = lf_boost;
         b.prefilter_settings.threshold = threshold.clamp(0.62, 0.88);
         b.prefilter_settings.threshold_softness = if cinematic { 0.30 } else { 0.28 };
+    }
+}
+
+/// Pre-ACES look-pass for the world camera.
+///
+/// Pass-3 piled directional lux onto night and ACES still crushed the
+/// mesa to black. This lifts **shadows and midtones** (and drops EV100)
+/// so banding survives the tonemap, while highlight gain stays 1.0 so
+/// crystals and plasma remain the brightest thing. Fast keeps the
+/// Blender default — the grade is a uniform upload, but Fast play
+/// should not look like a graded cinematic.
+fn update_cinematic_exposure(
+    settings: Res<WorldSettings>,
+    mut q: Query<(&mut ColorGrading, &mut Exposure), With<Player>>,
+    mut last: Local<Option<(u8, bool, bool)>>,
+) {
+    let sun = sun_direction(settings.time_of_day);
+    let dusk = sunset_factor(sun);
+    let night_amt = (1.0 - day_factor(sun)).powf(1.55);
+    let band = if night_amt > 0.55 {
+        0u8
+    } else if dusk > 0.40 {
+        1
+    } else {
+        2
+    };
+    let cinematic = settings.runtime_profile == RuntimeProfile::Cinematic;
+    let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
+    let key = (band, cinematic, fast);
+    if *last == Some(key) {
+        return;
+    }
+    *last = Some(key);
+    let grade = look_pass_grade(night_amt, dusk, cinematic, fast);
+    if let Ok((mut grading, mut exposure)) = q.get_single_mut() {
+        exposure.ev100 = grade.ev100;
+        grading.global.exposure = grade.exposure;
+        grading.global.temperature = grade.temperature;
+        grading.shadows = ColorGradingSection {
+            saturation: 1.0 + night_amt * 0.06,
+            contrast: 1.0 - night_amt * 0.08,
+            gamma: 1.0 - night_amt * 0.10,
+            gain: grade.shadow_gain,
+            lift: grade.shadow_lift,
+        };
+        grading.midtones = ColorGradingSection {
+            saturation: grade.mid_sat,
+            contrast: 1.0,
+            gamma: 1.0,
+            gain: grade.mid_gain,
+            lift: 0.0,
+        };
+        // Highlights stay neutral so HDR crystals/rivers do not bloom
+        // into a white sheet when we open the shadows.
+        grading.highlights = ColorGradingSection::default();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LookPassGrade {
+    ev100: f32,
+    exposure: f32,
+    shadow_lift: f32,
+    shadow_gain: f32,
+    mid_gain: f32,
+    mid_sat: f32,
+    temperature: f32,
+}
+
+fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> LookPassGrade {
+    if fast {
+        return LookPassGrade {
+            ev100: Exposure::EV100_BLENDER,
+            exposure: 0.0,
+            shadow_lift: 0.0,
+            shadow_gain: 1.0,
+            mid_gain: 1.0,
+            mid_sat: 1.0,
+            temperature: 0.0,
+        };
+    }
+    let n = night_amt.clamp(0.0, 1.0);
+    let mul = if cinematic { 1.0 } else { 0.55 };
+    LookPassGrade {
+        ev100: Exposure::EV100_BLENDER - n * 1.90 * mul,
+        exposure: n * 0.32 * mul,
+        shadow_lift: n * 0.14 * mul,
+        shadow_gain: 1.0 + n * 0.58 * mul,
+        mid_gain: 1.0 + n * 0.24 * mul + dusk * 0.05,
+        mid_sat: 1.0 + n * 0.10 + dusk * 0.12,
+        temperature: dusk * 0.12 - n * 0.03,
     }
 }
 
@@ -1084,5 +1178,29 @@ mod tests {
         keys.press(KeyCode::F9);
 
         assert!(wants_neon_showcase_warp(&keys));
+    }
+
+    #[test]
+    fn night_grade_opens_shadows_without_touching_fast_or_noon() {
+        let night = look_pass_grade(0.92, 0.05, true, false);
+        let noon = look_pass_grade(0.0, 0.0, true, false);
+        let dusk = look_pass_grade(0.18, 0.70, true, false);
+        let fast = look_pass_grade(0.92, 0.0, true, true);
+        assert!(
+            night.ev100 < 8.2,
+            "night EV100 {} still sits at daylight",
+            night.ev100
+        );
+        assert!(
+            (noon.ev100 - Exposure::EV100_BLENDER).abs() < 0.05,
+            "noon moved off the Blender EV"
+        );
+        assert!(night.shadow_lift > 0.10);
+        assert!(noon.shadow_lift.abs() < 0.01);
+        assert!(night.shadow_gain > dusk.shadow_gain);
+        assert_eq!(fast.ev100, Exposure::EV100_BLENDER);
+        assert_eq!(fast.shadow_lift, 0.0);
+        // Dusk must not inherit a noon-flat mid gain.
+        assert!(dusk.mid_gain < 1.20);
     }
 }
