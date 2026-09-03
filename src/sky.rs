@@ -820,9 +820,10 @@ fn follow_and_animate_sky(
         // lower third; keep noon dim and let sunset_factor (now peaked
         // at hour 17) drive the warmth.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
-            let noon = Vec3::new(0.010, 0.028, 0.052);
-            let dusk = Vec3::new(1.35, 0.48, 0.08);
-            let deep = Vec3::new(0.10, 0.04, 0.20);
+            let noon = Vec3::new(0.008, 0.016, 0.028);
+            // Stay under ACES clip — 1.3 HDR orange tonemapped to a grey wall.
+            let dusk = Vec3::new(0.72, 0.30, 0.06);
+            let deep = Vec3::new(0.12, 0.05, 0.18);
             let e = noon * day * (1.0 - sunset) + deep * night + dusk * sunset;
             let e = e * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
@@ -1231,14 +1232,17 @@ fn build_horizon_gradient_image(height: u32) -> Image {
             (1.0 - (elevation / 0.28).min(1.0)).powf(1.85)
         };
         let intensity = intensity.clamp(0.0, 1.0);
-        // Greyscale carrier — live emissive supplies the colour so noon
-        // stays cool instead of inheriting a baked dusk-orange rim.
-        let byte = (intensity * 255.0) as u8;
-        let a = (intensity * 0.50 * 255.0) as u8;
+        // Warm carrier so ACES doesn't turn a grey * HDR-orange into a
+        // milky white wall. Noon live-emissive is ~0.01 so this tint
+        // stays invisible at hour 11.
+        let r = (intensity * 255.0) as u8;
+        let g = (intensity * 118.0) as u8;
+        let b = (intensity * 36.0) as u8;
+        let a = (intensity * 0.42 * 255.0) as u8;
         for _ in 0..WIDTH {
-            data.push(byte);
-            data.push(byte);
-            data.push(byte);
+            data.push(r);
+            data.push(g);
+            data.push(b);
             data.push(a);
         }
     }
