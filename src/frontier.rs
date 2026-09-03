@@ -404,6 +404,17 @@ impl CrystalCluster {
         }
     }
 
+    /// Second shard group further into the postcard look so crystals
+    /// stay a landmark once the camera has flown to ~x=90.
+    pub fn hero_b() -> Self {
+        Self {
+            cx: 142,
+            cz: -78,
+            shards: 5,
+            scale: 22,
+        }
+    }
+
     pub fn for_cell(seed: u32, ix: i32, iz: i32) -> Option<Self> {
         if cell_rand(seed, 0x0C_10_01, ix, iz) > 0.42 {
             return None;
@@ -694,13 +705,16 @@ pub struct SkywayColumn {
     /// True when this column sits on the pylon lattice, so a support
     /// should be dropped from the deck down to the ground.
     pub pylon: bool,
+    /// Half-width of this ribbon. Postcard rails are narrower than the
+    /// main carriageway so Fast-mode meshing stays a thin extra strip.
+    pub half: f64,
 }
 
 impl SkywayColumn {
     /// Block for one voxel of the deck cross-section, or `None` for a
     /// voxel that should simply be left empty.
     pub fn deck_block(&self, wy: i32, lamp: bool) -> Option<BlockType> {
-        let edge = self.dist > SKYWAY_HALF_WIDTH - 1.2;
+        let edge = self.dist > self.half - 1.2;
         if wy == self.deck_y {
             return Some(if self.dist < 0.75 {
                 BlockType::RoadMarking
@@ -763,6 +777,9 @@ impl SkywayNetwork {
         if let Some(spur) = hero_skyway_spur(wx, wz, macro_h) {
             return Some(spur);
         }
+        if let Some(rail) = hero_mesa_rail(wx, wz, macro_h) {
+            return Some(rail);
+        }
         let x = wx as f64;
         let z = wz as f64;
         let a = self.route_field(x, z);
@@ -798,6 +815,7 @@ impl SkywayNetwork {
             deck_y,
             dist,
             pylon,
+            half: SKYWAY_HALF_WIDTH,
         })
     }
 
@@ -959,6 +977,7 @@ fn hero_skyway_column(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
         deck_y,
         dist,
         pylon,
+        half: SKYWAY_HALF_WIDTH,
     })
 }
 
@@ -979,6 +998,30 @@ fn hero_skyway_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
         deck_y,
         dist,
         pylon,
+        half: SKYWAY_HALF_WIDTH,
+    })
+}
+
+/// Low mesa-edge rail: a narrower ribbon sitting closer to the cliff
+/// so the postcard reads as a colony with stacked transit, not one
+/// lonely skyway. Postcard AABB only.
+fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+    const RAIL_Z: i32 = -88;
+    const HALF: f64 = 2.4;
+    if wx < 16 || wx > 172 {
+        return None;
+    }
+    let dist = (wz - RAIL_Z).abs() as f64;
+    if dist > HALF {
+        return None;
+    }
+    let deck_y = (macro_h + 10.0).round() as i32;
+    let pylon = wx.rem_euclid(SKYWAY_PYLON_PITCH) < 2 && dist < HALF - 0.6;
+    Some(SkywayColumn {
+        deck_y,
+        dist,
+        pylon,
+        half: HALF,
     })
 }
 
@@ -999,7 +1042,7 @@ pub struct CliffHab {
 }
 
 impl CliffHab {
-    pub fn hero_cluster() -> [Self; 10] {
+    pub fn hero_cluster() -> [Self; 16] {
         [
             Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4 },
             Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5 },
@@ -1007,12 +1050,17 @@ impl CliffHab {
             Self { cx: 22, cz: -82, floors: 6, width: 4, depth: 4 },
             Self { cx: 108, cz: -66, floors: 8, width: 5, depth: 3 },
             Self { cx: 70, cz: -40, floors: 4, width: 7, depth: 5 },
-            // Look-cone extras: the postcard still ends ~ (87, -44)
-            // looking +X/-Z, so density has to live ahead of the camera.
             Self { cx: 128, cz: -92, floors: 7, width: 5, depth: 4 },
             Self { cx: 146, cz: -74, floors: 9, width: 4, depth: 5 },
             Self { cx: 96, cz: -108, floors: 6, width: 6, depth: 4 },
             Self { cx: 168, cz: -88, floors: 8, width: 5, depth: 4 },
+            // Terraced extras packed into the postcard look cone.
+            Self { cx: 118, cz: -58, floors: 5, width: 6, depth: 4 },
+            Self { cx: 138, cz: -108, floors: 8, width: 4, depth: 4 },
+            Self { cx: 158, cz: -64, floors: 6, width: 5, depth: 5 },
+            Self { cx: 112, cz: -84, floors: 10, width: 4, depth: 4 },
+            Self { cx: 78, cz: -96, floors: 5, width: 7, depth: 4 },
+            Self { cx: 48, cz: -98, floors: 7, width: 4, depth: 5 },
         ]
     }
 
@@ -1021,7 +1069,8 @@ impl CliffHab {
         let (ox, oy, oz) = origin;
         let hw = self.width / 2;
         let hd = self.depth / 2;
-        let reach = hw.max(hd) + 2;
+        let pad = 2;
+        let reach = hw.max(hd) + pad + 1;
         if (ox + CHUNK_SIZE_I <= self.cx - reach)
             || (ox > self.cx + reach)
             || (oz + CHUNK_SIZE_I <= self.cz - reach)
@@ -1047,7 +1096,7 @@ impl CliffHab {
                         if !edge && ly > 0 {
                             continue;
                         }
-                        let block = if ly == 1 && edge && !corner && (floor + dx + dz).rem_euclid(2) == 0
+                        let block = if ly == 1 && edge && !corner && (floor + dx + dz).rem_euclid(3) != 0
                         {
                             BlockType::HoloPanel
                         } else if ly == 2 && edge {
@@ -1076,6 +1125,36 @@ impl CliffHab {
                 if dx == 0 && dz == 0 {
                     place_over(chunk, origin, wx, roof + 1, wz, BlockType::HoloPanel);
                     place_over(chunk, origin, wx, roof + 2, wz, BlockType::PlatingWhite);
+                }
+            }
+        }
+        // One-floor plated terrace so towers read as stacked cliff
+        // buildings, not floating boxes on bare mesa.
+        let pad_w = hw + pad;
+        let pad_d = hd + pad;
+        for dz in -pad_d..=pad_d {
+            for dx in -pad_w..=pad_w {
+                if dx.abs() <= hw && dz.abs() <= hd {
+                    continue;
+                }
+                let wx = self.cx + dx;
+                let wz = self.cz + dz;
+                let outer = dx.abs() == pad_w || dz.abs() == pad_d;
+                place_over(chunk, origin, wx, base, wz, BlockType::PlatingTeal);
+                place_over(
+                    chunk,
+                    origin,
+                    wx,
+                    base + 1,
+                    wz,
+                    if outer {
+                        BlockType::PlatingWhite
+                    } else {
+                        BlockType::RoadDeck
+                    },
+                );
+                if outer && (dx + dz).rem_euclid(3) == 0 {
+                    place_over(chunk, origin, wx, base + 2, wz, BlockType::NeonAmber);
                 }
             }
         }
@@ -1123,6 +1202,7 @@ impl FrontierPlanner {
             cluster.stamp(self.seed, chunk, ground);
         }
         CrystalCluster::hero().stamp(self.seed, chunk, ground);
+        CrystalCluster::hero_b().stamp(self.seed, chunk, ground);
         for hab in CliffHab::hero_cluster() {
             hab.stamp(chunk, ground);
         }
@@ -1303,6 +1383,7 @@ mod tests {
             deck_y: 100,
             dist: 0.0,
             pylon: false,
+            half: SKYWAY_HALF_WIDTH,
         };
         assert_eq!(col.deck_block(100, false), Some(BlockType::RoadMarking));
         assert_eq!(col.deck_block(99, false), Some(BlockType::PlatingWhite));
@@ -1312,6 +1393,7 @@ mod tests {
             deck_y: 100,
             dist: SKYWAY_HALF_WIDTH - 0.1,
             pylon: false,
+            half: SKYWAY_HALF_WIDTH,
         };
         assert_eq!(edge.deck_block(101, false), Some(BlockType::PlatingWhite));
         assert_eq!(edge.deck_block(102, true), Some(BlockType::NeonAmber));
@@ -1440,10 +1522,14 @@ mod tests {
         );
         assert!(count_blocks(&chunk, BlockType::PlatingWhite) > 10);
         assert!(count_blocks(&chunk, BlockType::NeonAmber) > 0);
-        assert_eq!(CliffHab::hero_cluster().len(), 10);
+        assert_eq!(CliffHab::hero_cluster().len(), 16);
         for h in CliffHab::hero_cluster() {
             assert!(in_hero_postcard(h.cx, h.cz), "hab {},{} left the postcard", h.cx, h.cz);
         }
+        assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
+        let sky = SkywayNetwork::new(1);
+        let rail = sky.column(80, -88, 70.0).expect("mesa rail missing on postcard");
+        assert!(rail.half < SKYWAY_HALF_WIDTH, "mesa rail should be a thin ribbon");
     }
 
     #[test]
