@@ -295,10 +295,11 @@ fn update_sun(
 
     // Keep a shallow key so ground N·L never hits zero during dusk.
     // Once the sun is truly down this becomes a cool moonlight from
-    // the same azimuth, high enough to light walkable faces.
+    // the same azimuth, high enough to light walkable +Y faces so
+    // mesas stay readable instead of pure silhouette.
     let mut key_dir = sun_dir;
-    if key_dir.y < 0.10 {
-        key_dir.y = if sun_dir.y < -0.12 { 0.38 } else { 0.12 };
+    if key_dir.y < 0.12 {
+        key_dir.y = if sun_dir.y < -0.12 { 0.55 } else { 0.16 };
         key_dir = key_dir.normalize();
     }
 
@@ -308,9 +309,11 @@ fn update_sun(
         .looking_to(forward, Vec3::Y);
 
     if sun_dir.y < -0.12 {
-        // Night: cool moonlight, dim but enough to read terrain.
-        light.illuminance = 420.0 + (1.0 - day) * 160.0;
-        light.color = Color::srgb(0.62, 0.74, 1.0);
+        // Night: cool moonlight strong enough to read strata, still
+        // well below crystal/lava HDR so emissives stay the brightest
+        // thing in the frame (concept-art mood, not a second noon).
+        light.illuminance = 1_800.0 + (1.0 - day) * 500.0;
+        light.color = Color::srgb(0.70, 0.80, 1.0);
     } else {
         // Warm key. Sunset adds extra illuminance so low elevation
         // still rims the mesas instead of silhouetting them.
@@ -324,17 +327,19 @@ fn update_sun(
 
     // Ambient: warm fill through dusk so shadowed canyon floors stay
     // readable; a lifted cool floor at night so ground never crushes.
+    // Keep dusk ambient well below the key so long shadows survive.
     let day_color = Color::srgb(0.80, 0.88, 1.0).to_linear();
-    let night_color = Color::srgb(0.24, 0.28, 0.50).to_linear();
+    let night_color = Color::srgb(0.32, 0.36, 0.55).to_linear();
     let sunset_color = Color::srgb(1.0, 0.52, 0.26).to_linear();
     let golden_fill = Color::srgb(1.0, 0.74, 0.44).to_linear();
     let night_amt = (1.0 - day).powf(1.55);
     let amb_lin = day_color
         .mix(&night_color, night_amt)
-        .mix(&sunset_color, sunset * 0.50)
-        .mix(&golden_fill, sunset * 0.38);
+        .mix(&sunset_color, sunset * 0.42)
+        .mix(&golden_fill, sunset * 0.28);
     ambient.color = Color::LinearRgba(amb_lin);
-    ambient.brightness = (920.0 + day * 360.0 + sunset * 260.0) * intel.profile.ambient_mul;
+    ambient.brightness =
+        (1_720.0 + day * 120.0 + sunset * 340.0 + night_amt * 380.0) * intel.profile.ambient_mul;
 
     // Sky (clear colour). Only a hint of sunset goes into the flat
     // dome — `sky.rs` owns the warm rim through its horizon gradient.
@@ -381,17 +386,17 @@ fn update_sun(
         // terrain isn't dyed with the zenith. Inscatter is separate.
         // Alpha is the *maximum* mix amount — 1.0 fully replaces distant
         // geometry with the fog colour (the milky-horizon bug).
-        let mut fog_fill = sky.mix(&horizon, 0.40).mix(&golden_fill, sunset * 0.22);
-        fog_fill.alpha = (0.34 + sunset * 0.10 + (1.0 - day) * 0.08 - day.powf(1.8) * 0.14)
-            .clamp(0.16, 0.46);
+        let mut fog_fill = sky.mix(&horizon, 0.28).mix(&golden_fill, sunset * 0.16);
+        fog_fill.alpha = (0.22 + sunset * 0.10 + (1.0 - day) * 0.10 - day.powf(1.6) * 0.12)
+            .clamp(0.10, 0.38);
         fog_settings.color = Color::LinearRgba(fog_fill);
         fog_settings.falloff = FogFalloff::ExponentialSquared {
-            density: 0.00014
-                * (1.0 + sunset * 0.35 + (1.0 - day) * 0.12 - day.powf(1.7) * 0.48)
+            density: 0.00010
+                * (1.0 + sunset * 0.28 + (1.0 - day) * 0.10 - day.powf(1.6) * 0.55)
                 * intel.profile.fog_density_mul,
         };
         let mut sun_scatter = horizon;
-        sun_scatter.alpha = 0.28 + sunset * 0.22;
+        sun_scatter.alpha = 0.16 + sunset * 0.18;
         fog_settings.directional_light_color = Color::LinearRgba(sun_scatter);
         fog_settings.directional_light_exponent = 14.0;
     }
@@ -459,5 +464,18 @@ mod tests {
         assert!(night.y < -0.20, "hour 21.5 should be true night, y={:.3}", night.y);
         assert!(day_factor(night) < 0.12);
         assert!(sunset_factor(night) < 0.20);
+    }
+
+    #[test]
+    fn night_and_dusk_keep_a_walkable_fill_without_flattening_to_noon() {
+        // Moonlight key must hit +Y faces (y well above 0) while dusk
+        // still has a much stronger directional key than night.
+        let night = sun_direction(21.5);
+        let dusk = sun_direction(17.0);
+        let noon = sun_direction(11.0);
+        assert!(day_factor(dusk) > 0.45 && day_factor(dusk) < 0.90);
+        assert!(day_factor(noon) > day_factor(dusk) + 0.15);
+        assert!(night.y < 0.0);
+        assert!(sunset_factor(dusk) > sunset_factor(noon));
     }
 }
