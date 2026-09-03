@@ -51,6 +51,13 @@ pub const SKY_LAYER: usize = 1;
 /// normal play, close enough that floating-point precision is fine.
 const SKY_DISTANCE: f32 = 950.0;
 
+/// Fixed bearing of the great cratered moon: high and to the left.
+///
+/// The sun sweeps the x/y plane with a constant +z lean, so parking the
+/// moon on the -z side is what guarantees the two never come close
+/// enough for the sun's bloom to wash the moon out.
+const GREAT_MOON_DIR: Vec3 = Vec3::new(-0.52, 0.66, -0.54);
+
 pub struct SkyPlugin;
 
 impl Plugin for SkyPlugin {
@@ -65,7 +72,9 @@ impl Plugin for SkyPlugin {
             // world view by exactly one frame).
             .add_systems(
                 PostUpdate,
-                follow_and_animate_sky.before(bevy::transform::TransformSystem::TransformPropagate),
+                (follow_and_animate_sky, follow_static_sky_bodies)
+                    .chain()
+                    .before(bevy::transform::TransformSystem::TransformPropagate),
             );
     }
 }
@@ -83,6 +92,35 @@ struct MoonDisc;
 /// moon system (see reference image 1 with its crescent pair).
 #[derive(Component)]
 struct MoonDiscB;
+
+/// Big cratered grey moon parked high on a fixed bearing. Unlike the two
+/// orbiting moons this one never sets: in the key art it is the largest
+/// thing in the sky after the ringed giant, and a landmark that vanishes
+/// for half the day is not a landmark.
+#[derive(Component)]
+struct GreatMoon;
+
+/// A celestial body that keeps a fixed bearing from the player instead
+/// of orbiting. Carrying the bearing on the component lets one small
+/// system place all of them, rather than growing another arm on the
+/// mutually-exclusive `Without<..>` query chain below.
+#[derive(Component)]
+struct StaticSkyBody {
+    dir: Vec3,
+    distance: f32,
+}
+
+/// Broad band of light hugging the horizon.
+///
+/// `daynight.rs` drives a single flat `ClearColor` for the whole dome,
+/// which is what keeps the fog and the sky matched — but a flat sky is
+/// the one thing the key art never has. This dome adds a latitude
+/// gradient on top: warm at dusk, violet at night, cool at noon,
+/// fading to nothing well before the zenith. It blends additively, so
+/// it can only brighten the existing gradient and can never introduce a
+/// seam between the sky and the fogged horizon.
+#[derive(Component)]
+struct HorizonGlow;
 
 /// Distant ringed gas giant parked high in the sky for epic framing.
 /// Stays fixed on the celestial dome and rotates slowly for parallax.
@@ -109,6 +147,8 @@ struct SkyMaterials {
     sun: Handle<StandardMaterial>,
     moon: Handle<StandardMaterial>,
     moon_b: Handle<StandardMaterial>,
+    great_moon: Handle<StandardMaterial>,
+    horizon: Handle<StandardMaterial>,
     planet: Handle<StandardMaterial>,
     ring: Handle<StandardMaterial>,
     planet_b: Handle<StandardMaterial>,
@@ -336,6 +376,78 @@ fn setup_sky(
         Name::new("MoonDiscB"),
     ));
 
+    // ----- Great cratered moon ----------------------------------------
+    // Fixed bearing, upper-left. Big enough to dominate that quadrant of
+    // the sky without covering the play space at the horizon.
+    let great_moon_image = images.add(build_moon_image(nebula_res.min(512), settings.seed as u64));
+    let great_moon_mesh = meshes.add(
+        Sphere::new(58.0)
+            .mesh()
+            .ico(4)
+            .expect("subdivision 4 is within ico limits"),
+    );
+    let great_moon_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.86, 0.87, 0.92),
+        base_color_texture: Some(great_moon_image.clone()),
+        emissive_texture: Some(great_moon_image),
+        emissive: LinearRgba::rgb(3.4, 3.5, 4.0),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        PbrBundle {
+            mesh: great_moon_mesh,
+            material: great_moon_mat.clone(),
+            transform: Transform::from_translation(GREAT_MOON_DIR * SKY_DISTANCE * 0.92),
+            ..default()
+        },
+        NotShadowCaster,
+        sky_layer.clone(),
+        GreatMoon,
+        StaticSkyBody {
+            dir: GREAT_MOON_DIR.normalize(),
+            distance: SKY_DISTANCE * 0.92,
+        },
+        Name::new("GreatMoon"),
+    ));
+
+    // ----- Horizon glow band ------------------------------------------
+    // Drawn on a shell outside the nebula so transparency sorting puts
+    // it behind the clouds, which is where a scattering band belongs.
+    let horizon_image = images.add(build_horizon_gradient_image(128));
+    let horizon_mesh = meshes.add(
+        Sphere::new(SKY_DISTANCE * 3.4)
+            .mesh()
+            .ico(3)
+            .expect("subdivision 3 is within ico limits"),
+    );
+    let horizon_mat = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        base_color_texture: Some(horizon_image.clone()),
+        emissive_texture: Some(horizon_image),
+        emissive: LinearRgba::rgb(1.0, 0.7, 1.2),
+        unlit: true,
+        alpha_mode: AlphaMode::Add,
+        cull_mode: Some(bevy::render::render_resource::Face::Front),
+        double_sided: true,
+        ..default()
+    });
+    commands.spawn((
+        PbrBundle {
+            mesh: horizon_mesh,
+            material: horizon_mat.clone(),
+            ..default()
+        },
+        NotShadowCaster,
+        sky_layer.clone(),
+        HorizonGlow,
+        StaticSkyBody {
+            dir: Vec3::Y,
+            distance: 0.0,
+        },
+        Name::new("HorizonGlow"),
+    ));
+
     // ----- Ringed gas-giant planet ------------------------------------
     // Parked in a fixed sky direction; doesn't track the sun. Serves as
     // a dramatic backdrop feature like in reference image 2.
@@ -435,6 +547,8 @@ fn setup_sky(
         sun: sun_mat,
         moon: moon_mat,
         moon_b: moon_b_mat,
+        great_moon: great_moon_mat,
+        horizon: horizon_mat,
         planet: planet_mat,
         ring: ring_mat,
         planet_b: planet_b_mat,
@@ -663,11 +777,46 @@ fn follow_and_animate_sky(
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
+        // Great moon: sunlit grey by day, cool silver at night. Never
+        // fades out entirely - it is a permanent sky landmark.
+        if let Some(mat) = materials.get_mut(&sky_mats.great_moon) {
+            let lit = Vec3::new(4.4, 4.4, 4.6);
+            let dark = Vec3::new(2.2, 2.4, 3.4);
+            let e = dark.lerp(lit, day);
+            mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+        }
+
+        // Horizon band: cool cyan scatter at noon, a fierce orange rim
+        // at dusk and dawn, deep violet through the night. This is the
+        // vertical gradient the flat ClearColor cannot express.
+        if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
+            let noon = Vec3::new(0.55, 0.95, 1.35);
+            let dusk = Vec3::new(3.60, 1.35, 0.55);
+            let deep = Vec3::new(1.05, 0.35, 1.65);
+            let e = (noon * day + deep * night) * (1.0 - sunset * 0.55) + dusk * sunset;
+            let e = e * intel.profile.sky_saturation.max(0.7);
+            mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+        }
+
         // Stars: fade in linearly with night.
         if let Some(mat) = materials.get_mut(&sky_mats.stars) {
             let intensity = 14.0 * night * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(intensity, intensity, intensity * 1.15);
         }
+    }
+}
+
+/// Park every fixed-bearing sky body relative to the player camera.
+fn follow_static_sky_bodies(
+    main_cam: Query<&GlobalTransform, (With<Camera3d>, Without<SkyCamera>)>,
+    mut bodies: Query<(&mut Transform, &StaticSkyBody)>,
+) {
+    let Ok(main_tf) = main_cam.get_single() else {
+        return;
+    };
+    let origin = main_tf.translation();
+    for (mut tf, body) in bodies.iter_mut() {
+        tf.translation = origin + body.dir * body.distance;
     }
 }
 
@@ -856,6 +1005,188 @@ fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+/// Build the cratered surface of the great moon: broad maria picked out
+/// by low-frequency noise, overlaid with a ring-shaped crater field from
+/// sharpened ridge noise. Deterministic by seed.
+fn build_moon_image(size: u32, seed: u64) -> Image {
+    let maria = Perlin::new(seed as u32 ^ 0x4D_4F_4F_4E);
+    let craters = Perlin::new(seed as u32 ^ 0x43_52_41_54);
+    let dust = Perlin::new(seed as u32 ^ 0x44_55_53_54);
+
+    let w = size;
+    let h = size / 2;
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        let v = (y as f64 / h as f64) * std::f64::consts::PI - std::f64::consts::FRAC_PI_2;
+        let (sv, cv) = v.sin_cos();
+        for x in 0..w {
+            let u = (x as f64 / w as f64) * std::f64::consts::TAU;
+            let (su, cu) = u.sin_cos();
+            let px = cv * cu;
+            let py = sv;
+            let pz = cv * su;
+
+            // Dark basaltic plains.
+            let sea = maria.get([px * 1.5, py * 1.5, pz * 1.5]);
+            // `1 - |n|` raised to a high power leaves only the thin
+            // zero-crossing shells: a field of crater rims.
+            let rim = (1.0 - craters.get([px * 7.0, py * 7.0, pz * 7.0]).abs()).powf(14.0);
+            let rim2 = (1.0 - craters.get([px * 15.0, py * 15.0, pz * 15.0]).abs()).powf(20.0);
+            let grain = dust.get([px * 40.0, py * 40.0, pz * 40.0]) * 0.05;
+
+            let mut b = 0.78 + sea * 0.16 + grain;
+            b -= rim * 0.30;
+            b -= rim2 * 0.18;
+            let b = (b.clamp(0.35, 1.0) * 255.0) as u8;
+            // Very slightly warm in the highlands, cool in the maria.
+            let tint = ((sea.max(0.0) * 8.0) as u8).min(10);
+            data.push(b);
+            data.push(b.saturating_sub(tint / 2));
+            data.push(b.saturating_sub(tint));
+            data.push(255);
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
+}
+
+/// Build the horizon-glow gradient.
+///
+/// Deliberately a function of latitude only. Bevy's icosphere UVs are
+/// good enough for billowing nebula clouds but not accurate enough in
+/// longitude to aim a directional lobe, and a band only needs the
+/// vertical mapping to be monotonic. Peaks on the horizon line, dies out
+/// by roughly 40 degrees of elevation, and is black below the ground so
+/// it never brightens the underside of the world.
+fn build_horizon_gradient_image(height: u32) -> Image {
+    const WIDTH: u32 = 4;
+    let mut data = Vec::with_capacity((WIDTH * height * 4) as usize);
+    for y in 0..height {
+        // Latitude in [-PI/2, PI/2]; 0 is the horizon.
+        let lat = (y as f32 / height as f32) * std::f32::consts::PI - std::f32::consts::FRAC_PI_2;
+        let elevation = lat / std::f32::consts::FRAC_PI_2; // -1 below, +1 zenith
+        let intensity = if elevation < 0.0 {
+            // Fade out fast below the horizon line.
+            (1.0 + elevation * 5.0).max(0.0)
+        } else {
+            // Smooth falloff to nothing well before the zenith.
+            (1.0 - (elevation / 0.45).min(1.0)).powf(1.7)
+        };
+        let byte = (intensity.clamp(0.0, 1.0) * 255.0) as u8;
+        for _ in 0..WIDTH {
+            data.push(byte);
+            data.push(byte);
+            data.push(byte);
+            data.push(255);
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: WIDTH,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read the red channel of the single-column gradient at row `y`.
+    fn gradient_row(image: &Image, y: u32) -> u8 {
+        let width = image.texture_descriptor.size.width;
+        image.data[((y * width) * 4) as usize]
+    }
+
+    #[test]
+    fn horizon_glow_peaks_on_the_horizon_and_dies_before_the_zenith() {
+        const H: u32 = 128;
+        let image = build_horizon_gradient_image(H);
+        let horizon = H / 2;
+
+        // Brightest at the horizon line.
+        assert!(gradient_row(&image, horizon) > 200);
+        // Gone below the ground, so the band never lights the underside
+        // of the world or fights the terrain fog.
+        assert_eq!(gradient_row(&image, 0), 0);
+        // Gone at the zenith, so the deep indigo overhead stays deep.
+        assert_eq!(gradient_row(&image, H - 1), 0);
+        // Monotonic decay upward from the horizon.
+        let mut previous = gradient_row(&image, horizon);
+        for y in (horizon + 1)..H {
+            let current = gradient_row(&image, y);
+            assert!(
+                current <= previous,
+                "horizon band brightens again at row {y}: {previous} -> {current}"
+            );
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn great_moon_surface_has_dark_maria_and_bright_highlands() {
+        let image = build_moon_image(128, 4242);
+        let mut min = u8::MAX;
+        let mut max = u8::MIN;
+        for pixel in image.data.chunks_exact(4) {
+            min = min.min(pixel[0]);
+            max = max.max(pixel[0]);
+        }
+        assert!(
+            max - min > 60,
+            "moon surface only spans {} levels; it would read as a flat disc",
+            max - min
+        );
+    }
+
+    #[test]
+    fn great_moon_keeps_clear_of_the_suns_arc() {
+        // The sun sweeps the x/y plane at z = 0.3 (see daynight.rs). If
+        // the great moon sat on that arc it would pass behind the sun
+        // and get washed out by the bloom for part of every day.
+        let moon = GREAT_MOON_DIR.normalize();
+        let mut closest = f32::MAX;
+        for step in 0..360 {
+            let t = (step as f32 / 360.0) * std::f32::consts::TAU;
+            let sun = Vec3::new(t.cos(), t.sin(), 0.3).normalize();
+            closest = closest.min(moon.angle_between(sun));
+        }
+        assert!(
+            closest.to_degrees() > 25.0,
+            "great moon passes within {:.1} degrees of the sun",
+            closest.to_degrees()
+        );
+    }
 }
 
 /// Build a procedural nebula image — multi-octave 3D Perlin on a

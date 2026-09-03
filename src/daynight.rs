@@ -57,19 +57,27 @@ impl BiomeArtProfile {
                 weather_fx_mul: 1.18,
                 streaming_bonus: -6,
             },
+            // Banded canyon country is the frontier's default ground, so
+            // its profile is what most of the world looks like: clear
+            // enough for the long mesa vistas, saturated enough that the
+            // violet and ochre strata stay vivid at distance.
             Biome::Mesa | Biome::Desert => Self {
-                fog_density_mul: 0.95,
-                ambient_mul: 0.96,
-                sky_saturation: 1.04,
-                bloom_mul: 1.02,
+                fog_density_mul: 0.92,
+                ambient_mul: 1.02,
+                sky_saturation: 1.22,
+                bloom_mul: 1.18,
                 weather_fx_mul: 0.35,
                 streaming_bonus: -2,
             },
+            // Even the green transitional country between the provinces
+            // is on the same planet under the same nebula. A flat 1.0
+            // baseline here would make every ridge crossing look like a
+            // different game.
             _ => Self {
                 fog_density_mul: 1.0,
                 ambient_mul: 1.0,
-                sky_saturation: 1.0,
-                bloom_mul: 1.0,
+                sky_saturation: 1.14,
+                bloom_mul: 1.10,
                 weather_fx_mul: 1.0,
                 streaming_bonus: 0,
             },
