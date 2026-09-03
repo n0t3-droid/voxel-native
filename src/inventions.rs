@@ -25,14 +25,10 @@ use crate::world::{VoxelWorld, WorldEditBatch};
 
 /// One voxel = one metre so the 1.62 m eye height already used by the
 /// player controller stays an adult standing-eye anthropometric mean
-/// (Pheasant / ISO 7250-1 order of magnitude).
+/// (Pheasant / ISO 7250-1 order of magnitude). Hover-pad lift is a conveyor
+/// velocity (7 m/s), not Earth-g acceleration (g0 = 9.806 65 m/s², CGPM 1901),
+/// because this engine's player gravity is the Minecraft-like 34–52 m/s² curve.
 const VOXEL_METRE: f64 = 1.0;
-
-/// Standard gravity g0 = 9.806 65 m/s² (CGPM 1901). Hover-pad lift is a
-/// conveyor velocity (7 m/s), not an Earth-g acceleration, because this
-/// engine's player gravity is the Minecraft-like 34–52 m/s² curve.
-
-/// Portable industrial genset class (~5–20 kW). Crystal generator base.
 const GENERATOR_BASE_W: f64 = 12_000.0;
 /// Compact industrial laser while firing.
 const TURRET_FIRE_W: f64 = 3_000.0;
@@ -1281,33 +1277,29 @@ fn apply_player_machines(
                     }
                 }
             }
-            InventionKind::PortalGate => {
+            InventionKind::PortalGate
                 if workshop.portal_cooldown_s <= 0.0
                     && inv.energy_j >= PORTAL_TELEPORT_J
-                    && tf.translation.distance(center) < PORTAL_TRIGGER_M
-                {
-                    if let Some(dest_id) = inv.linked.first() {
-                        if let Some(dest) = placed.iter().find(|o| o.id == *dest_id) {
-                            if dest.powered {
-                                let dest_pos = dest.center()
-                                    + Vec3::Y * 0.6
-                                    + yaw_forward(dest.yaw_quarter) * 1.4;
-                                tf.translation = dest_pos;
-                                player.velocity = Vec3::ZERO;
-                                workshop.portal_cooldown_s = PORTAL_COOLDOWN_S;
-                                if let Some(src) =
-                                    workshop.placed.iter_mut().find(|o| o.id == inv.id)
-                                {
-                                    src.energy_j = (src.energy_j - PORTAL_TELEPORT_J).max(0.0);
-                                }
-                                workshop.status = format!("Portal hop {} → {}.", inv.id, dest.id);
-                                workshop.fx.push(FxBeam {
-                                    from: center,
-                                    to: dest.center(),
-                                    life: 0.45,
-                                    color: InventionKind::PortalGate.accent(),
-                                });
+                    && tf.translation.distance(center) < PORTAL_TRIGGER_M =>
+            {
+                if let Some(dest_id) = inv.linked.first() {
+                    if let Some(dest) = placed.iter().find(|o| o.id == *dest_id) {
+                        if dest.powered {
+                            let dest_pos =
+                                dest.center() + Vec3::Y * 0.6 + yaw_forward(dest.yaw_quarter) * 1.4;
+                            tf.translation = dest_pos;
+                            player.velocity = Vec3::ZERO;
+                            workshop.portal_cooldown_s = PORTAL_COOLDOWN_S;
+                            if let Some(src) = workshop.placed.iter_mut().find(|o| o.id == inv.id) {
+                                src.energy_j = (src.energy_j - PORTAL_TELEPORT_J).max(0.0);
                             }
+                            workshop.status = format!("Portal hop {} → {}.", inv.id, dest.id);
+                            workshop.fx.push(FxBeam {
+                                from: center,
+                                to: dest.center(),
+                                life: 0.45,
+                                color: InventionKind::PortalGate.accent(),
+                            });
                         }
                     }
                 }
