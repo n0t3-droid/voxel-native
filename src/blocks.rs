@@ -118,6 +118,18 @@ pub enum BlockType {
     MagnetiteOre = 34,
     /// Deep purple rare vein — reference "Iridium".
     IridiumVein = 35,
+    /// Magenta bloom crystal — the hero clusters that grow out of
+    /// canyon walls and sky-island keels. Translucent so the spikes
+    /// bleed light into each other.
+    CrystalMagenta = 36,
+    /// Verdant bloom crystal — the green third of the crystal triad.
+    CrystalVerdant = 37,
+    /// Electric-blue plasma coolant — flows in canyon channels the way
+    /// water pools in rivers. Non-solid, non-opaque, strongly emissive.
+    PlasmaFlow = 38,
+    /// Skyway deck plating — dark structural alloy for elevated roads,
+    /// monorail bridges and station decks.
+    SkywayDeck = 39,
 }
 
 /// Voxel ids for the three mineable neon resources (HUD + telemetry).
@@ -125,10 +137,21 @@ pub const VOXEL_LUMINITE: Voxel = BlockType::LuminiteCrystal as Voxel;
 pub const VOXEL_MAGNETITE: Voxel = BlockType::MagnetiteOre as Voxel;
 pub const VOXEL_IRIDIUM: Voxel = BlockType::IridiumVein as Voxel;
 
+/// Voxel ids the Aether Frontier overlay generates. Kept together so the
+/// frontier generator, HUD readouts and regression tests all agree on
+/// which blocks belong to the overlay.
+pub const VOXEL_CRYSTAL_MAGENTA: Voxel = BlockType::CrystalMagenta as Voxel;
+pub const VOXEL_CRYSTAL_VERDANT: Voxel = BlockType::CrystalVerdant as Voxel;
+pub const VOXEL_PLASMA_FLOW: Voxel = BlockType::PlasmaFlow as Voxel;
+pub const VOXEL_SKYWAY_DECK: Voxel = BlockType::SkywayDeck as Voxel;
+
 impl BlockType {
     #[inline]
     pub fn is_solid(self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water)
+        !matches!(
+            self,
+            BlockType::Air | BlockType::Water | BlockType::PlasmaFlow
+        )
     }
 
     #[inline]
@@ -141,6 +164,9 @@ impl BlockType {
                 | BlockType::JungleLeaves
                 | BlockType::Ice
                 | BlockType::CockpitGlass
+                | BlockType::CrystalMagenta
+                | BlockType::CrystalVerdant
+                | BlockType::PlasmaFlow
         )
     }
 
@@ -163,6 +189,9 @@ impl BlockType {
                 | BlockType::LuminiteCrystal
                 | BlockType::MagnetiteOre
                 | BlockType::IridiumVein
+                | BlockType::CrystalMagenta
+                | BlockType::CrystalVerdant
+                | BlockType::PlasmaFlow
         )
     }
 
@@ -220,6 +249,21 @@ impl BlockType {
             BlockType::LuminiteCrystal => Color::srgba(0.12, 0.82, 1.00, 0.68),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
+            // Crystal triad (sRGB IEC 61966-2-1, D65). The three hues are
+            // spaced ~120° apart in sRGB hue so magenta / cyan / green
+            // clusters stay separable at long range and under bloom.
+            // Magenta #E01FC6, verdant #2EE86B; the cyan third of the
+            // triad is the existing `Crystal` / `LuminiteCrystal` pair.
+            BlockType::CrystalMagenta => Color::srgba(0.878, 0.122, 0.776, 0.70),
+            BlockType::CrystalVerdant => Color::srgba(0.180, 0.910, 0.420, 0.70),
+            // Plasma coolant #1C8CFF — an electric blue well inside the
+            // sRGB gamut so it survives ACES tonemapping without clipping
+            // to white the way a pure-primary blue does.
+            BlockType::PlasmaFlow => Color::srgba(0.110, 0.549, 1.000, 0.84),
+            // Structural deck alloy #2A3140 — dark but never crushed to
+            // black, so skyway rails and guard edges stay readable when
+            // the deck is silhouetted against a bright nebula.
+            BlockType::SkywayDeck => Color::srgb(0.165, 0.192, 0.251),
         }
     }
 
@@ -260,6 +304,10 @@ impl BlockType {
             33 => BlockType::LuminiteCrystal,
             34 => BlockType::MagnetiteOre,
             35 => BlockType::IridiumVein,
+            36 => BlockType::CrystalMagenta,
+            37 => BlockType::CrystalVerdant,
+            38 => BlockType::PlasmaFlow,
+            39 => BlockType::SkywayDeck,
             _ => BlockType::Air,
         }
     }
@@ -272,7 +320,7 @@ impl From<BlockType> for Voxel {
     }
 }
 
-pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
+pub const BUILDABLE_BLOCKS: [BlockType; 39] = [
     BlockType::Stone,
     BlockType::Dirt,
     BlockType::Grass,
@@ -308,6 +356,10 @@ pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
     BlockType::LuminiteCrystal,
     BlockType::MagnetiteOre,
     BlockType::IridiumVein,
+    BlockType::CrystalMagenta,
+    BlockType::CrystalVerdant,
+    BlockType::PlasmaFlow,
+    BlockType::SkywayDeck,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,6 +438,16 @@ const GLASS: &[BlockPaletteEntry] = &[
         label: "Iridium",
         role: "violet rare-glass vein",
     },
+    BlockPaletteEntry {
+        block: BlockType::CrystalMagenta,
+        label: "Magenta Bloom",
+        role: "magenta crystal cluster",
+    },
+    BlockPaletteEntry {
+        block: BlockType::CrystalVerdant,
+        label: "Verdant Bloom",
+        role: "green crystal cluster",
+    },
 ];
 
 const GROUND: &[BlockPaletteEntry] = &[
@@ -451,6 +513,11 @@ const METAL: &[BlockPaletteEntry] = &[
         block: BlockType::EngineCore,
         label: "Engine Core",
         role: "hot machinery",
+    },
+    BlockPaletteEntry {
+        block: BlockType::SkywayDeck,
+        label: "Skyway Deck",
+        role: "elevated road plating",
     },
 ];
 
@@ -526,6 +593,11 @@ const WATER_ENERGY: &[BlockPaletteEntry] = &[
         block: BlockType::Lava,
         label: "Lava",
         role: "hot emissive liquid",
+    },
+    BlockPaletteEntry {
+        block: BlockType::PlasmaFlow,
+        label: "Plasma Flow",
+        role: "cold emissive energy river",
     },
 ];
 
@@ -611,10 +683,11 @@ pub fn block_label(block: BlockType) -> &'static str {
 }
 
 /// Fast voxel → solid? (without converting through the enum).
-/// AIR (0), Water (5) and Lava (22) are non-solid for collision.
+/// AIR (0), Water (5), Lava (22) and PlasmaFlow (38) are non-solid for
+/// collision — plasma channels are swimmable/hazard volumes, not walls.
 #[inline]
 pub fn voxel_is_solid(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 22)
+    !matches!(v, 0 | 5 | 22 | 38)
 }
 
 /// Fast voxel -> can weapons intentionally hit and destroy this block?
@@ -628,10 +701,15 @@ pub fn voxel_is_weapon_target(v: Voxel) -> bool {
 
 /// Fast voxel → opaque? (used for face-culling).
 /// Air (0), water (5), leaves (7), ice (9), jungle leaves (11),
-/// crystal (20), lava (22), cockpit (28), luminite/iridium glass are non-opaque.
+/// crystal (20), lava (22), cockpit (28), luminite/iridium glass,
+/// the magenta/verdant bloom crystals (36, 37) and plasma (38) are
+/// non-opaque.
 #[inline]
 pub fn voxel_is_opaque(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35)
+    !matches!(
+        v,
+        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 36 | 37 | 38
+    )
 }
 
 /// Fast voxel → is this block bioluminescent? Emissive blocks get
@@ -640,9 +718,13 @@ pub fn voxel_is_opaque(v: Voxel) -> bool {
 /// alien moss, glow-sand).
 #[inline]
 pub fn voxel_is_emissive(v: Voxel) -> bool {
-    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9.
+    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9,
+    // bloom crystals 36–37, plasma 38.
     // Ice gets a whisper of glow so glacier biomes shimmer at night.
-    matches!(v, 9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35)
+    matches!(
+        v,
+        9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38
+    )
 }
 
 #[inline]
@@ -732,6 +814,26 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[1] *= 0.9;
             c[2] *= 4.6;
         }
+        36 => {
+            // Magenta bloom crystal — hot pink core, no green leak.
+            c[0] *= 3.4;
+            c[1] *= 3.0;
+            c[2] *= 3.8;
+        }
+        37 => {
+            // Verdant bloom crystal — the calmest of the triad so green
+            // clusters read as accents next to magenta hero spikes.
+            c[0] *= 3.0;
+            c[1] *= 3.0;
+            c[2] *= 3.0;
+        }
+        38 => {
+            // Plasma flow — the green lift pushes the channel core toward
+            // white-hot cyan while the banks stay deep electric blue.
+            c[0] *= 2.2;
+            c[1] *= 5.0;
+            c[2] *= 3.6;
+        }
         _ => {}
     }
     c
@@ -771,6 +873,31 @@ mod tests {
         assert!(!voxel_is_opaque(BlockType::LuminiteCrystal.into()));
         assert!(voxel_is_opaque(BlockType::MagnetiteOre.into()));
         assert!(ore_units_for_mined_voxel(VOXEL_LUMINITE) > 0);
+    }
+
+    #[test]
+    fn aether_frontier_blocks_map_and_glow() {
+        assert_eq!(BlockType::from_voxel(36), BlockType::CrystalMagenta);
+        assert_eq!(BlockType::from_voxel(37), BlockType::CrystalVerdant);
+        assert_eq!(BlockType::from_voxel(38), BlockType::PlasmaFlow);
+        assert_eq!(BlockType::from_voxel(39), BlockType::SkywayDeck);
+        assert_eq!(VOXEL_CRYSTAL_MAGENTA, 36);
+        assert_eq!(VOXEL_CRYSTAL_VERDANT, 37);
+        assert_eq!(VOXEL_PLASMA_FLOW, 38);
+        assert_eq!(VOXEL_SKYWAY_DECK, 39);
+
+        assert!(!voxel_is_solid(VOXEL_PLASMA_FLOW));
+        assert!(!BlockType::PlasmaFlow.is_solid());
+        assert!(voxel_is_solid(VOXEL_SKYWAY_DECK));
+        assert!(voxel_is_emissive(VOXEL_CRYSTAL_MAGENTA));
+        assert!(voxel_is_emissive(VOXEL_CRYSTAL_VERDANT));
+        assert!(voxel_is_emissive(VOXEL_PLASMA_FLOW));
+        assert!(!voxel_is_emissive(VOXEL_SKYWAY_DECK));
+        assert!(!voxel_is_opaque(VOXEL_CRYSTAL_MAGENTA));
+        assert!(!voxel_is_opaque(VOXEL_CRYSTAL_VERDANT));
+        assert!(!voxel_is_opaque(VOXEL_PLASMA_FLOW));
+        assert!(voxel_is_opaque(VOXEL_SKYWAY_DECK));
+        assert!(voxel_is_weapon_target(VOXEL_PLASMA_FLOW));
     }
 
     #[test]
