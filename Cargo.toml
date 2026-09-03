@@ -32,6 +32,11 @@ futures-lite = "2"
 # keeps compile times sane — we only need PNG.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Transitive pin: bevy_asset 0.14 wants blake3 ^1.5. blake3 1.8.3+ uses
+# edition2024 (Rust 1.85+), which makes older cargo fail at *manifest parse*
+# (`feature edition2024 is required`). 1.8.2 is the newest 2021-edition release.
+blake3 = "=1.8.2"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # In-game editor / debug panels (F3).
 bevy_egui = "0.28"
