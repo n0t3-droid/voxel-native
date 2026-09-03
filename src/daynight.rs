@@ -333,7 +333,7 @@ fn update_sun(
         // Night key: high enough to paint +Y strata (banding), still
         // well below crystal/lava HDR. Cool-but-not-icy so red mesa
         // albedo doesn't go grey under moonlight.
-        light.illuminance = 3_600.0 + (1.0 - day) * 900.0;
+        light.illuminance = 4_200.0 + (1.0 - day) * 1_000.0;
         light.color = Color::srgb(0.82, 0.78, 0.92);
     } else {
         // Warm key. Sunset adds extra illuminance so low elevation
@@ -355,7 +355,7 @@ fn update_sun(
         *fill_tf = Transform::from_xyz(bounce.x * 280.0, bounce.y * 280.0, bounce.z * 280.0)
             .looking_to(fill_forward, Vec3::Y);
         let night_amt = (1.0 - day).powf(1.35);
-        fill_light.illuminance = 80.0 + sunset * 420.0 + night_amt * 1_450.0;
+        fill_light.illuminance = 120.0 + sunset * 480.0 + night_amt * 2_200.0;
         fill_light.color = if sun_dir.y < -0.12 {
             Color::srgb(0.58, 0.64, 0.90)
         } else {
@@ -378,7 +378,7 @@ fn update_sun(
         .mix(&golden_fill, sunset * 0.38);
     ambient.color = Color::LinearRgba(amb_lin);
     ambient.brightness =
-        (1_480.0 + day * 140.0 + sunset * 280.0 + night_amt * 520.0) * intel.profile.ambient_mul;
+        (1_560.0 + day * 140.0 + sunset * 280.0 + night_amt * 980.0) * intel.profile.ambient_mul;
 
     // Sky (clear colour). Dusk zenith goes violet; the golden rim is
     // owned by `sky.rs` so we do not dye the whole dome orange.
