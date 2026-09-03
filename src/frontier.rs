@@ -721,7 +721,9 @@ impl SkywayColumn {
             return Some(BlockType::PlatingWhite);
         }
         if wy == self.deck_y + 2 && edge && lamp {
-            return Some(BlockType::NeonCyan);
+            // Warm streetlamps — cyan was blowing the Cinematic bloom
+            // buffer and wiping the mesa around every skyway.
+            return Some(BlockType::NeonAmber);
         }
         None
     }
@@ -757,6 +759,9 @@ impl SkywayNetwork {
     pub fn column(&self, wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
         if let Some(hero) = hero_skyway_column(wx, wz, macro_h) {
             return Some(hero);
+        }
+        if let Some(spur) = hero_skyway_spur(wx, wz, macro_h) {
+            return Some(spur);
         }
         let x = wx as f64;
         let z = wz as f64;
@@ -957,6 +962,120 @@ fn hero_skyway_column(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     })
 }
 
+/// North–south spur so the postcard has a crossing instead of a single
+/// lonely east–west deck.
+fn hero_skyway_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+    const SPUR_X: i32 = 96;
+    if wz < -120 || wz > -18 {
+        return None;
+    }
+    let dist = (wx - SPUR_X).abs() as f64;
+    if dist > SKYWAY_HALF_WIDTH {
+        return None;
+    }
+    let deck_y = (macro_h + 24.0).round() as i32;
+    let pylon = wz.rem_euclid(SKYWAY_PYLON_PITCH) < 3 && dist < SKYWAY_HALF_WIDTH - 1.0;
+    Some(SkywayColumn {
+        deck_y,
+        dist,
+        pylon,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Cliff colony (spawn postcard) ---------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// A small stacked hab on the mesa: plated walls, holo windows, a neon
+/// roof rim. Bounded to the spawn AABB so Fast-mode streaming is unchanged
+/// outside the postcard.
+#[derive(Debug, Clone, Copy)]
+pub struct CliffHab {
+    pub cx: i32,
+    pub cz: i32,
+    pub floors: i32,
+    pub width: i32,
+    pub depth: i32,
+}
+
+impl CliffHab {
+    pub fn hero_cluster() -> [Self; 6] {
+        [
+            Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4 },
+            Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5 },
+            Self { cx: 84, cz: -54, floors: 6, width: 6, depth: 4 },
+            Self { cx: 22, cz: -82, floors: 6, width: 4, depth: 4 },
+            Self { cx: 108, cz: -66, floors: 8, width: 5, depth: 3 },
+            Self { cx: 70, cz: -40, floors: 4, width: 7, depth: 5 },
+        ]
+    }
+
+    pub fn stamp(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
+        let origin = chunk.pos.origin();
+        let (ox, oy, oz) = origin;
+        let hw = self.width / 2;
+        let hd = self.depth / 2;
+        let reach = hw.max(hd) + 2;
+        if (ox + CHUNK_SIZE_I <= self.cx - reach)
+            || (ox > self.cx + reach)
+            || (oz + CHUNK_SIZE_I <= self.cz - reach)
+            || (oz > self.cz + reach)
+        {
+            return;
+        }
+        let base = ground(self.cx, self.cz);
+        let top = base + self.floors * 3 + 2;
+        if oy > top || oy + CHUNK_SIZE_I <= base {
+            return;
+        }
+        for dz in -hd..=hd {
+            for dx in -hw..=hw {
+                let wx = self.cx + dx;
+                let wz = self.cz + dz;
+                let edge = dx.abs() == hw || dz.abs() == hd;
+                let corner = dx.abs() == hw && dz.abs() == hd;
+                for floor in 0..self.floors {
+                    let wy0 = base + floor * 3;
+                    for ly in 0..3 {
+                        let wy = wy0 + ly;
+                        if !edge && ly > 0 {
+                            continue;
+                        }
+                        let block = if ly == 1 && edge && !corner && (floor + dx + dz).rem_euclid(2) == 0
+                        {
+                            BlockType::HoloPanel
+                        } else if ly == 2 && edge {
+                            BlockType::PlatingTeal
+                        } else if corner {
+                            BlockType::PlatingWhite
+                        } else {
+                            BlockType::PlatingWhite
+                        };
+                        place_over(chunk, origin, wx, wy, wz, block);
+                    }
+                }
+                let roof = base + self.floors * 3;
+                place_over(
+                    chunk,
+                    origin,
+                    wx,
+                    roof,
+                    wz,
+                    if edge {
+                        BlockType::NeonAmber
+                    } else {
+                        BlockType::PlatingTeal
+                    },
+                );
+                if dx == 0 && dz == 0 {
+                    place_over(chunk, origin, wx, roof + 1, wz, BlockType::HoloPanel);
+                    place_over(chunk, origin, wx, roof + 2, wz, BlockType::PlatingWhite);
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 /// Convenience bundle so `terrain.rs` builds the noise fields once.
@@ -998,6 +1117,9 @@ impl FrontierPlanner {
             cluster.stamp(self.seed, chunk, ground);
         }
         CrystalCluster::hero().stamp(self.seed, chunk, ground);
+        for hab in CliffHab::hero_cluster() {
+            hab.stamp(chunk, ground);
+        }
         // Widest island root reaches ~1.6 radii below the core.
         if top_y >= SKY_ISLAND_MIN_Y - 48 && base_y <= SKY_ISLAND_MAX_Y + 12 {
             for island in SkyIsland::near(self.seed, wx, wz, macro_ground) {
@@ -1186,7 +1308,7 @@ mod tests {
             pylon: false,
         };
         assert_eq!(edge.deck_block(101, false), Some(BlockType::PlatingWhite));
-        assert_eq!(edge.deck_block(102, true), Some(BlockType::NeonCyan));
+        assert_eq!(edge.deck_block(102, true), Some(BlockType::NeonAmber));
         assert_eq!(edge.deck_block(102, false), None);
     }
 
@@ -1293,6 +1415,29 @@ mod tests {
         assert_eq!(hero.cx, HERO_CRYSTAL_X);
         assert_eq!(hero.cz, HERO_CRYSTAL_Z);
         assert!(hero.shards >= 5);
+    }
+
+    #[test]
+    fn cliff_colony_stamps_lit_windows_on_the_postcard() {
+        let hab = CliffHab {
+            cx: 8,
+            cz: 8,
+            floors: 4,
+            width: 5,
+            depth: 4,
+        };
+        let mut chunk = Chunk::new(ChunkPos::new(0, 4, 0));
+        hab.stamp(&mut chunk, |_, _| 64);
+        assert!(
+            count_blocks(&chunk, BlockType::HoloPanel) > 4,
+            "cliff hab has no holo windows"
+        );
+        assert!(count_blocks(&chunk, BlockType::PlatingWhite) > 10);
+        assert!(count_blocks(&chunk, BlockType::NeonAmber) > 0);
+        assert_eq!(CliffHab::hero_cluster().len(), 6);
+        for h in CliffHab::hero_cluster() {
+            assert!(in_hero_postcard(h.cx, h.cz), "hab {},{} left the postcard", h.cx, h.cz);
+        }
     }
 
     #[test]
