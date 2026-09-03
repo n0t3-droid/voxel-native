@@ -962,6 +962,12 @@ impl TerrainGenerator {
         chunk.dirty = true;
         // Decorate AFTER the main fill so trees see the final surface.
         self.decorate(chunk);
+        crate::frontier::decorate_chunk(
+            chunk,
+            self.seed,
+            |x, z| self.surface_height_at(x, z),
+            |x, z| self.biome_at(x, z),
+        );
         chunk.finalize_uniform_flags();
     }
 
