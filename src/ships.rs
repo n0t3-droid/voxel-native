@@ -2166,16 +2166,16 @@ fn update_hero_flyby(
         // flown to ~(90, 110, -44) by the time chunks finish streaming.
         // Keep the orbiter AHEAD of that frustum, large enough to read
         // as the painting's white/orange shuttle, with a bank and plume.
-        let x = fly.origin.x + 48.0 + u * 120.0;
-        let z = fly.origin.z - 58.0 - (u * std::f32::consts::PI).sin() * 22.0;
-        let y = fly.origin.y + 20.0 + (u * std::f32::consts::TAU).sin() * 6.0;
-        let vx: f32 = 120.0;
-        let vz: f32 = -std::f32::consts::PI * 22.0 * (u * std::f32::consts::PI).cos();
+        let x = fly.origin.x + 72.0 + u * 100.0;
+        let z = fly.origin.z - 78.0 - (u * std::f32::consts::PI).sin() * 18.0;
+        let y = fly.origin.y + 16.0 + (u * std::f32::consts::TAU).sin() * 5.0;
+        let vx: f32 = 100.0;
+        let vz: f32 = -std::f32::consts::PI * 18.0 * (u * std::f32::consts::PI).cos();
         let yaw = f32::atan2(vx, -vz);
-        let roll = (u * std::f32::consts::TAU).sin() * 0.55;
+        let roll = (u * std::f32::consts::TAU).sin() * 0.50;
         tf.translation = Vec3::new(x, y, z);
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(3.6);
+        tf.scale = Vec3::splat(2.85);
         motion.yaw = yaw;
         motion.pitch = -0.12;
         motion.roll = roll;
