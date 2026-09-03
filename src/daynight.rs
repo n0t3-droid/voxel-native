@@ -336,7 +336,7 @@ fn night_terrain_emissive_floor(
     let floor = if settings.graphics == GraphicsMode::Fast {
         0.0
     } else {
-        night_amt * 0.12
+        night_amt * 0.18
     };
     let e = LinearRgba::rgb(floor * 1.25, floor * 0.55, floor * 0.36);
     for block in [

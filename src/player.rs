@@ -420,10 +420,16 @@ fn update_cinematic_exposure(
         exposure.ev100 = grade.ev100;
         grading.global.exposure = grade.exposure;
         grading.global.temperature = grade.temperature;
-        // Never lift the shadow section: that turns the night sky grey.
-        // Mesa faces get their floor from stone emissive + local bounce;
-        // midtones pick up the remaining ACES recovery.
-        grading.shadows = ColorGradingSection::default();
+        // Lift stays 0 so space stays black. Gamma < 1 expands dim
+        // mesa values that ACES would otherwise crush, without a grey
+        // sky wall.
+        grading.shadows = ColorGradingSection {
+            saturation: 1.0,
+            contrast: 1.0,
+            gamma: grade.shadow_gamma,
+            gain: grade.shadow_gain,
+            lift: 0.0,
+        };
         grading.midtones = ColorGradingSection {
             saturation: grade.mid_sat,
             contrast: 1.0,
@@ -443,6 +449,7 @@ struct LookPassGrade {
     exposure: f32,
     shadow_lift: f32,
     shadow_gain: f32,
+    shadow_gamma: f32,
     mid_gain: f32,
     mid_sat: f32,
     temperature: f32,
@@ -455,6 +462,7 @@ fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> Lo
             exposure: 0.0,
             shadow_lift: 0.0,
             shadow_gain: 1.0,
+            shadow_gamma: 1.0,
             mid_gain: 1.0,
             mid_sat: 1.0,
             temperature: 0.0,
@@ -469,7 +477,8 @@ fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> Lo
         ev100: Exposure::EV100_BLENDER,
         exposure: dusk * 0.08 * mul,
         shadow_lift: 0.0,
-        shadow_gain: 1.0,
+        shadow_gain: 1.0 + n * 0.18 * mul,
+        shadow_gamma: 1.0 - n * 0.32 * mul,
         mid_gain: 1.0 + n * 0.16 * mul + dusk * 0.04,
         mid_sat: 1.0 + n * 0.08 + dusk * 0.10,
         temperature: dusk * 0.10,
@@ -1186,6 +1195,8 @@ mod tests {
         assert_eq!(night.ev100, Exposure::EV100_BLENDER);
         assert_eq!(noon.ev100, Exposure::EV100_BLENDER);
         assert_eq!(night.shadow_lift, 0.0);
+        assert!(night.shadow_gamma < 0.80);
+        assert_eq!(noon.shadow_gamma, 1.0);
         assert!(night.mid_gain > noon.mid_gain);
         assert!(dusk.mid_gain < 1.20);
         assert_eq!(fast.ev100, Exposure::EV100_BLENDER);
