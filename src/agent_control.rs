@@ -558,7 +558,13 @@ fn agent_control_enter_game(
     }
     if active.is_none() {
         let seed = env_u32("VOXEL_NATIVE_AGENT_SEED").unwrap_or(settings.seed);
-        let mut meta = WorldMeta::new("agent_control".into(), seed);
+        // Never reuse the leftover `agent_control` world: it has ~1000
+        // edited chunks and a NeonShuttle save overlay, which hid the
+        // frontier postcard behind floating green islands.
+        let world_name = env_string("VOXEL_NATIVE_AGENT_WORLD")
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "cinematic_look_pass".into());
+        let mut meta = WorldMeta::new(world_name, seed);
         meta.time_mode = TimeMode::Fixed;
         meta.time_of_day = env_f32("VOXEL_NATIVE_AGENT_HOUR")
             .unwrap_or(10.8)
@@ -566,9 +572,23 @@ fn agent_control_enter_game(
         settings.seed = seed;
         settings.time_mode = meta.time_mode;
         settings.time_of_day = meta.time_of_day;
+        // Ignore voxel-native-save.ron's NeonShuttle / Fog presets so
+        // agent stills actually show generated mesas + Clear weather.
+        settings.visual_preset = crate::settings::VisualPreset::NaturalWorld;
+        settings
+            .weather
+            .apply_preset(crate::settings::WeatherPreset::Clear);
         if env_flag("VOXEL_NATIVE_AGENT_CINEMATIC") {
-            settings.graphics = crate::settings::GraphicsMode::High;
-            settings.runtime_profile = crate::neurocore::RuntimeProfile::Cinematic;
+            settings.apply_world_mode_card(crate::settings::WorldModeCard::Cinematic);
+            settings.visual_preset = crate::settings::VisualPreset::NaturalWorld;
+            settings
+                .weather
+                .apply_preset(crate::settings::WeatherPreset::Clear);
+            // Software Vulkan fills a 56-chunk disc too slowly for a
+            // 20s still; 40 chunks still covers the spawn postcard.
+            settings.render_distance = env_u32("VOXEL_NATIVE_AGENT_RD")
+                .unwrap_or(40)
+                .clamp(8, 64);
         }
         commands.insert_resource(ActiveWorld { meta });
         pending.0 = true;
@@ -1346,4 +1366,11 @@ fn env_f32(name: &str) -> Option<f32> {
 
 fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok()?.trim().parse().ok()
+}
+
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
