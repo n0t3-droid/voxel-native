@@ -800,19 +800,17 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 2.15;
         }
         22 => {
-            // Lava — hot orange, strong enough to light nearby rock
-            // through bloom on High/Cinematic. Fast has bloom off so
-            // this is just a bright HDR block, which ACES keeps readable.
-            c[0] *= 3.2;
-            c[1] *= 1.55;
-            c[2] *= 0.55;
+            // Lava — hot orange, lights nearby rock without a white core.
+            c[0] *= 2.6;
+            c[1] *= 1.35;
+            c[2] *= 0.50;
         }
         20 => {
-            // Crystal — cyan-violet spires. Pushed so they bloom like
-            // the key-art shards without turning the biome into lightning.
-            c[0] *= 2.1;
-            c[1] *= 3.6;
-            c[2] *= 5.2;
+            // Crystal — cyan-violet spires. Bloom-tuned so they glow
+            // instead of wiping the surrounding mesa white.
+            c[0] *= 1.45;
+            c[1] *= 2.35;
+            c[2] *= 3.20;
         }
         23 => {
             // AlienMoss — bioluminescent magenta/violet. The multiplier
@@ -830,14 +828,14 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 1.7;
         }
         29 => {
-            c[0] *= 0.9;
-            c[1] *= 3.5;
-            c[2] *= 4.4;
+            c[0] *= 0.65;
+            c[1] *= 2.15;
+            c[2] *= 2.55;
         }
         30 => {
-            c[0] *= 3.7;
-            c[1] *= 0.8;
-            c[2] *= 3.5;
+            c[0] *= 2.6;
+            c[1] *= 0.7;
+            c[2] *= 2.4;
         }
         31 => {
             c[0] *= 3.8;
@@ -874,29 +872,29 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 4.6;
         }
         38 => {
-            // Plasma river — the brightest thing on the canyon floor, so
-            // it reads as a light source carving through dark rock.
-            c[0] *= 1.35;
-            c[1] *= 4.6;
-            c[2] *= 6.2;
+            // Plasma river — brightest thing on the canyon floor, but
+            // not a white sheet.
+            c[0] *= 1.15;
+            c[1] *= 3.15;
+            c[2] *= 4.10;
         }
         39 => {
             // Magenta crystal — hot pink hero shards.
-            c[0] *= 5.4;
-            c[1] *= 1.05;
-            c[2] *= 4.6;
+            c[0] *= 3.35;
+            c[1] *= 0.85;
+            c[2] *= 2.85;
         }
         40 => {
             // Emerald crystal.
-            c[0] *= 1.15;
-            c[1] *= 5.2;
-            c[2] *= 2.2;
+            c[0] *= 0.95;
+            c[1] *= 3.40;
+            c[2] *= 1.70;
         }
         41 => {
             // Holo pane / window — interior glow like the cliff-city art.
-            c[0] *= 2.2;
-            c[1] *= 3.4;
-            c[2] *= 4.2;
+            c[0] *= 1.55;
+            c[1] *= 2.15;
+            c[2] *= 2.65;
         }
         _ => {}
     }

@@ -357,16 +357,16 @@ fn update_bloom_by_graphics(
     let cinematic = settings.runtime_profile == RuntimeProfile::Cinematic;
     let (intensity, threshold, lf_boost): (f32, f32, f32) = match settings.graphics {
         crate::settings::GraphicsMode::Fast => (0.0, 0.85, 0.20),
-        crate::settings::GraphicsMode::Balanced => (0.12, 0.72, 0.38),
-        crate::settings::GraphicsMode::High if cinematic => (0.34, 0.50, 0.62),
-        crate::settings::GraphicsMode::High => (0.22, 0.58, 0.48),
+        crate::settings::GraphicsMode::Balanced => (0.10, 0.76, 0.28),
+        crate::settings::GraphicsMode::High if cinematic => (0.16, 0.74, 0.30),
+        crate::settings::GraphicsMode::High => (0.14, 0.70, 0.32),
     };
-    let target = (intensity * intel.profile.bloom_mul).clamp(0.0, 0.45);
+    let target = (intensity * intel.profile.bloom_mul).clamp(0.0, 0.22);
     if let Ok(mut b) = q.get_single_mut() {
         b.intensity = target;
         b.low_frequency_boost = lf_boost;
         b.prefilter_settings.threshold = threshold;
-        b.prefilter_settings.threshold_softness = if cinematic { 0.55 } else { 0.40 };
+        b.prefilter_settings.threshold_softness = if cinematic { 0.32 } else { 0.28 };
     }
 }
 
