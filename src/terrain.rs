@@ -1341,8 +1341,17 @@ impl TerrainGenerator {
                         }
                     }
                     Biome::Mesa => {
-                        if is_sand_ground && r < 0.003 {
-                            chunk.set(lx, above_ly as usize, lz, BlockType::RedStone.into());
+                        // Green mesa tables get scrub; the bare banded
+                        // ledges get crystal glitter instead, so a cliff
+                        // shoulder still catches the light.
+                        if is_grass_ground && r < 0.030 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::Leaves.into());
+                        } else if is_grass_ground && r < 0.042 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::MossStone.into());
+                        } else if r < 0.006 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::Crystal.into());
+                        } else if r < 0.009 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::AmberStone.into());
                         }
                     }
                     Biome::Karst => {
@@ -1434,13 +1443,21 @@ impl TerrainGenerator {
 
             // Density gate per biome. Alien biomes get lots of props;
             // forests/jungles get very few (preserve wilderness).
+            // The frontier is inhabited everywhere, so every land biome
+            // gets outpost clutter. Forest and jungle stay lowest: they
+            // are the wilderness the outposts are cut out of, and the
+            // canopy hides most of a prop anyway.
             let density: f64 = match biome {
                 Biome::CrystalSpires => 0.18,
                 Biome::AlienReef => 0.16,
                 Biome::VolcanicWaste => 0.09,
                 Biome::GlacierShards => 0.08,
-                Biome::Mesa | Biome::Karst => 0.025,
-                _ => 0.0,
+                Biome::Mesa => 0.075,
+                Biome::Karst => 0.045,
+                Biome::Plains | Biome::Savanna | Biome::Desert | Biome::Tundra => 0.050,
+                Biome::Mountains | Biome::SnowyMountains => 0.035,
+                Biome::Forest | Biome::Jungle => 0.018,
+                Biome::Ocean | Biome::Beach => 0.0,
             };
             if r_gate > density {
                 continue;
@@ -1800,6 +1817,113 @@ impl TerrainGenerator {
                     );
                 }
 
+                // --- MESA / MOUNTAIN / KARST / FOREST -----------------
+                // Banded canyon country is where the player spends most
+                // of their time, so it gets the richest outpost kit: lit
+                // signage, plated pads and plasma conduits in the same
+                // palette as the skyways that run overhead.
+                (
+                    Biome::Mesa
+                    | Biome::Karst
+                    | Biome::Mountains
+                    | Biome::SnowyMountains
+                    | Biome::Forest
+                    | Biome::Jungle,
+                    0 | 1 | 2,
+                ) => {
+                    // Holo billboard: a plated post carrying a lit pane,
+                    // the neon signage that dots the cliffs in the art.
+                    for dy in 0..3 {
+                        set_safe(
+                            chunk,
+                            lx,
+                            base_y + dy,
+                            lz,
+                            BlockType::PlatingWhite,
+                            origin_y,
+                        );
+                    }
+                    for dy in 3..6 {
+                        for dx in 0..3 {
+                            let nx = lx + dx;
+                            if nx >= CHUNK_SIZE {
+                                continue;
+                            }
+                            let block = if dy == 3 || dx == 2 {
+                                BlockType::NeonMagenta
+                            } else {
+                                BlockType::HoloPanel
+                            };
+                            set_safe(chunk, nx, base_y + dy, lz, block, origin_y);
+                        }
+                    }
+                }
+                (
+                    Biome::Mesa
+                    | Biome::Karst
+                    | Biome::Mountains
+                    | Biome::SnowyMountains
+                    | Biome::Forest
+                    | Biome::Jungle,
+                    3 | 4 | 5,
+                ) => {
+                    // Plated landing pad with a lit rim and a corner mast.
+                    for dx in -2..=2 {
+                        for dz in -2..=2 {
+                            let nx = lx as i32 + dx;
+                            let nz = lz as i32 + dz;
+                            if nx < 0 || nz < 0 {
+                                continue;
+                            }
+                            let edge = dx.abs() == 2 || dz.abs() == 2;
+                            let block = if edge && (dx + dz).rem_euclid(2) == 0 {
+                                BlockType::NeonCyan
+                            } else if edge {
+                                BlockType::PlatingTeal
+                            } else {
+                                BlockType::RoadDeck
+                            };
+                            set_safe(chunk, nx as usize, base_y, nz as usize, block, origin_y);
+                        }
+                    }
+                    for dy in 1..4 {
+                        set_safe(
+                            chunk,
+                            lx,
+                            base_y + dy,
+                            lz,
+                            BlockType::PlatingWhite,
+                            origin_y,
+                        );
+                    }
+                    set_safe(chunk, lx, base_y + 4, lz, BlockType::NeonAmber, origin_y);
+                }
+                (
+                    Biome::Mesa
+                    | Biome::Karst
+                    | Biome::Mountains
+                    | Biome::SnowyMountains
+                    | Biome::Forest
+                    | Biome::Jungle,
+                    6 | 7,
+                ) => {
+                    // Plasma conduit: a short run of glowing pipe on
+                    // plated saddles, tapping the energy rivers below.
+                    for dx in 0..4 {
+                        let nx = lx + dx;
+                        if nx >= CHUNK_SIZE {
+                            continue;
+                        }
+                        set_safe(chunk, nx, base_y, lz, BlockType::PlatingTeal, origin_y);
+                        let block = if dx % 3 == 0 {
+                            BlockType::PlatingWhite
+                        } else {
+                            BlockType::PlasmaFlow
+                        };
+                        set_safe(chunk, nx, base_y + 1, lz, block, origin_y);
+                    }
+                }
+
                 // --- PLAINS / SAVANNA / DESERT -------------------------
                 (Biome::Plains | Biome::Savanna | Biome::Tundra | Biome::Desert, 0 | 1) => {
                     // Cargo crate: 2x2x2 stone box (stackable shipping
@@ -1868,11 +1992,11 @@ impl TerrainGenerator {
                     set_safe(chunk, lx, base_y + 1, lz, BlockType::Lava, origin_y);
                 }
 
-                // --- MESA ---------------------------------------------
-                (Biome::Mesa, _) => {
-                    // Rust-red ruin post with a glow crown.
-                    set_safe(chunk, lx, base_y, lz, BlockType::RedStone, origin_y);
-                    set_safe(chunk, lx, base_y + 1, lz, BlockType::RedStone, origin_y);
+                // --- MESA / KARST / MOUNTAIN ruins --------------------
+                (Biome::Mesa | Biome::Karst | Biome::Mountains | Biome::SnowyMountains, _) => {
+                    // Weathered strata post with a glow crown.
+                    set_safe(chunk, lx, base_y, lz, BlockType::VioletStone, origin_y);
+                    set_safe(chunk, lx, base_y + 1, lz, BlockType::AmberStone, origin_y);
                     set_safe(chunk, lx, base_y + 2, lz, BlockType::MagnetiteOre, origin_y);
                 }
 
