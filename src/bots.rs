@@ -6255,6 +6255,7 @@ fn road_style_bot_theme(style: crate::city::RoadStyle) -> BotTheme {
         crate::city::RoadStyle::Cobble => BotTheme::WhiteAlloy,
         crate::city::RoadStyle::Dirt => BotTheme::GreenPark,
         crate::city::RoadStyle::Asphalt => BotTheme::AmberStreet,
+        crate::city::RoadStyle::Skyway => BotTheme::WhiteAlloy,
     }
 }
 

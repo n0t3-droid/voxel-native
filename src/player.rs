@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::daynight::WorldIntelRuntime;
+use crate::editor::EditorState;
 use crate::settings::{ActiveWorld, PlayerMiningSave, SuitVitalsSave, WorldSettings};
 use crate::weapons::DestructionStats;
 use crate::world::{ChunkAnchor, VoxelWorld};
@@ -62,6 +63,7 @@ impl Plugin for PlayerPlugin {
                     update_look.run_if(in_state(crate::menu::GameState::InGame)),
                     place_on_surface_once.run_if(in_state(crate::menu::GameState::InGame)),
                     neon_showcase_warp_input.run_if(in_state(crate::menu::GameState::InGame)),
+                    aether_frontier_input.run_if(in_state(crate::menu::GameState::InGame)),
                     update_movement.run_if(in_state(crate::menu::GameState::InGame)),
                     tick_suit_vitals.run_if(in_state(crate::menu::GameState::InGame)),
                     update_camera_fov,
@@ -1036,6 +1038,70 @@ fn wants_neon_showcase_warp(keys: &ButtonInput<KeyCode>) -> bool {
     shift && keys.just_pressed(KeyCode::F9)
 }
 
+fn aether_frontier_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut editor: ResMut<EditorState>,
+    mut world: ResMut<VoxelWorld>,
+    mut query: Query<(&mut Transform, &mut Player)>,
+) {
+    let warp = wants_sky_island_warp(&keys) || std::mem::take(&mut editor.pending_sky_island_warp);
+    let stamp =
+        wants_orbital_station_stamp(&keys) || std::mem::take(&mut editor.pending_orbital_stamp);
+    if !warp && !stamp {
+        return;
+    }
+    let Ok((mut transform, mut player)) = query.get_single_mut() else {
+        return;
+    };
+    let origin_x = crate::chunk::floor_to_i32_safe(transform.translation.x);
+    let origin_z = crate::chunk::floor_to_i32_safe(transform.translation.z);
+    if warp {
+        match crate::frontier::find_nearest_island(
+            world.generator.seed,
+            origin_x,
+            origin_z,
+            16_000,
+            |x, z| world.generator.surface_height_at(x, z),
+            |x, z| world.generator.biome_at(x, z),
+        ) {
+            Some(spec) => {
+                let y = spec.deck_y as f32 + 4.0;
+                transform.translation = Vec3::new(spec.cx as f32 + 0.5, y, spec.cz as f32 + 0.5);
+                player.velocity = Vec3::ZERO;
+                player.flying = true;
+                player.placed_on_surface = true;
+                info!(
+                    "Shift+F10 sky-island warp: deck {} at {}, {}, {}",
+                    spec.deck_y, spec.cx, spec.deck_y, spec.cz
+                );
+            }
+            None => {
+                warn!("Shift+F10 sky-island warp: no Aether island found nearby");
+            }
+        }
+    }
+    if stamp {
+        let oy = crate::chunk::floor_to_i32_safe(transform.translation.y);
+        let mut changed = 0usize;
+        crate::frontier::visit_orbital_station(origin_x, oy, origin_z, |x, y, z, block| {
+            if world.edit_set_voxel(x, y, z, block.into()) {
+                changed += 1;
+            }
+        });
+        info!("Shift+F11 orbital station stamp: {changed} voxels at {origin_x},{oy},{origin_z}");
+    }
+}
+
+fn wants_sky_island_warp(keys: &ButtonInput<KeyCode>) -> bool {
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    shift && keys.just_pressed(KeyCode::F10)
+}
+
+fn wants_orbital_station_stamp(keys: &ButtonInput<KeyCode>) -> bool {
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    shift && keys.just_pressed(KeyCode::F11)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1055,5 +1121,20 @@ mod tests {
         keys.press(KeyCode::F9);
 
         assert!(wants_neon_showcase_warp(&keys));
+    }
+
+    #[test]
+    fn shift_f10_warps_to_sky_islands_and_shift_f11_stamps_stations() {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+        keys.press(KeyCode::F10);
+        assert!(wants_sky_island_warp(&keys));
+        assert!(!wants_orbital_station_stamp(&keys));
+
+        let mut stamp = ButtonInput::<KeyCode>::default();
+        stamp.press(KeyCode::ShiftLeft);
+        stamp.press(KeyCode::F11);
+        assert!(wants_orbital_station_stamp(&stamp));
+        assert!(!wants_sky_island_warp(&stamp));
     }
 }

@@ -356,7 +356,7 @@ fn update_stats_text(
     buf.clear();
     let _ = write!(
         buf,
-        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nSKETCH LMB draw face  RMB cut  G push/pull  Tab tools  F1 deck  ESC pause",
+        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nAETHER  Shift+F10 island  Shift+F11 station  SKYWAY workflow\nOBJ  {}\nSKETCH LMB draw face  RMB cut  G push/pull  Tab tools  F1 deck  ESC pause",
         governor.profile.label(),
         governor.intent.label(),
         governor.quality.label(),

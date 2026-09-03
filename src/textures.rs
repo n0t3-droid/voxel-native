@@ -343,6 +343,10 @@ pub fn bake_all_block_swatches(size: u32) -> Vec<BlockSwatch> {
         (LuminiteCrystal, "luminite_crystal", BlockStyle::Ice),
         (MagnetiteOre, "magnetite_ore", BlockStyle::Rock),
         (IridiumVein, "iridium_vein", BlockStyle::Ice),
+        (CrystalMagenta, "crystal_magenta", BlockStyle::Ice),
+        (CrystalVerdant, "crystal_verdant", BlockStyle::Ice),
+        (PlasmaFlow, "plasma_flow", BlockStyle::Water),
+        (SkywayDeck, "skyway_deck", BlockStyle::Rock),
     ];
     list.iter()
         .map(|(b, n, style)| bake_block_swatch(*b, n, *style, size))
@@ -765,6 +769,9 @@ mod tests {
             BlockType::CockpitGlass,
             BlockType::LuminiteCrystal,
             BlockType::IridiumVein,
+            BlockType::CrystalMagenta,
+            BlockType::CrystalVerdant,
+            BlockType::PlasmaFlow,
         ] {
             assert_eq!(
                 terrain_alpha_mode_for_block(block),

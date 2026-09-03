@@ -68,6 +68,8 @@ pub enum RoadStyle {
     Cobble,
     Neon,
     Dirt,
+    /// Elevated skyway plating — monorail decks spanning islands/chasms.
+    Skyway,
 }
 
 impl RoadStyle {
@@ -77,6 +79,7 @@ impl RoadStyle {
             RoadStyle::Cobble => "Kopfstein",
             RoadStyle::Neon => "Neon",
             RoadStyle::Dirt => "Erde",
+            RoadStyle::Skyway => "Skyway",
         }
     }
     pub fn surface_block(self) -> BlockType {
@@ -85,12 +88,14 @@ impl RoadStyle {
             RoadStyle::Cobble => BlockType::MossStone,
             RoadStyle::Neon => BlockType::Limestone,
             RoadStyle::Dirt => BlockType::Dirt,
+            RoadStyle::Skyway => BlockType::SkywayDeck,
         }
     }
     pub fn stripe_block(self) -> Option<BlockType> {
         match self {
             RoadStyle::Asphalt => Some(BlockType::Snow),
             RoadStyle::Neon => Some(BlockType::Snow),
+            RoadStyle::Skyway => Some(BlockType::NeonCyan),
             _ => None,
         }
     }
@@ -101,14 +106,16 @@ impl RoadStyle {
             RoadStyle::Cobble => Color::srgb(0.55, 0.52, 0.48),
             RoadStyle::Neon => Color::srgb(0.25, 1.00, 0.92),
             RoadStyle::Dirt => Color::srgb(0.62, 0.45, 0.28),
+            RoadStyle::Skyway => Color::srgb(0.22, 0.55, 1.00),
         }
     }
-    pub fn all() -> [RoadStyle; 4] {
+    pub fn all() -> [RoadStyle; 5] {
         [
             RoadStyle::Asphalt,
             RoadStyle::Cobble,
             RoadStyle::Neon,
             RoadStyle::Dirt,
+            RoadStyle::Skyway,
         ]
     }
 }
@@ -2129,7 +2136,11 @@ fn stamp_road(world: &mut VoxelWorld, seg: &RoadSegment) -> usize {
 
     let surface: Voxel = seg.style.surface_block().into();
     let stripe: Option<Voxel> = seg.style.stripe_block().map(|b| b.into());
-    let support: Voxel = BlockType::Basalt.into();
+    let support: Voxel = if seg.style == RoadStyle::Skyway {
+        BlockType::ShipHullDark.into()
+    } else {
+        BlockType::Basalt.into()
+    };
     let last_index = cells.len().saturating_sub(1);
 
     let mut changed = 0usize;
@@ -2187,6 +2198,15 @@ fn road_lane_surface_voxel(seg: RoadSegment, w: i32, half: i32, surface: Voxel) 
         return surface;
     }
     let offset = w.abs();
+    if seg.style == RoadStyle::Skyway {
+        if offset == half {
+            return Voxel::from(BlockType::ShipHullAlloy);
+        }
+        if offset == half - 1 {
+            return Voxel::from(BlockType::NeonCyan);
+        }
+        return surface;
+    }
     if offset == half {
         Voxel::from(BlockType::ShipHullDark)
     } else if offset == half - 1 {
@@ -2206,14 +2226,27 @@ fn stamp_road_furniture_column(
     deck_y: i32,
     wz: i32,
 ) -> usize {
-    if half < 4 || seg.style == RoadStyle::Dirt || w.abs() != half || index % 36 != 0 {
+    if half < 4 || seg.style == RoadStyle::Dirt || w.abs() != half {
+        return 0;
+    }
+    let cadence = if seg.style == RoadStyle::Skyway {
+        12
+    } else {
+        36
+    };
+    if index % cadence != 0 {
         return 0;
     }
 
     let mut changed = 0usize;
-    for y_offset in 1..=4 {
-        let voxel = if y_offset == 4 {
-            Voxel::from(BlockType::GlowSand)
+    let lamp_top = if seg.style == RoadStyle::Skyway { 3 } else { 4 };
+    for y_offset in 1..=lamp_top {
+        let voxel = if y_offset == lamp_top {
+            if seg.style == RoadStyle::Skyway {
+                Voxel::from(BlockType::NeonCyan)
+            } else {
+                Voxel::from(BlockType::GlowSand)
+            }
         } else {
             Voxel::from(BlockType::ShipHullDark)
         };
@@ -2235,6 +2268,8 @@ fn clear_road_furniture_column(world: &mut VoxelWorld, wx: i32, deck_y: i32, wz:
                 | BlockType::NeonMagenta
                 | BlockType::NeonAmber
                 | BlockType::EngineCore
+                | BlockType::SkywayDeck
+                | BlockType::ShipHullAlloy
         ) && world.edit_set_voxel(wx, y, wz, AIR)
         {
             changed += 1;
@@ -4166,5 +4201,42 @@ mod tests {
         let parsed: CityRoadSave = ron::from_str(&text).unwrap();
 
         assert_eq!(parsed.into_roads(), vec![corner, roundabout]);
+    }
+
+    #[test]
+    fn skyway_style_stamps_deck_plating_rails_and_cyan_lamps() {
+        let mut world = VoxelWorld::new();
+        let road = RoadSegment::new(
+            IVec3::new(0, 72, 0),
+            IVec3::new(48, 72, 0),
+            9,
+            RoadStyle::Skyway,
+        );
+        let curb_y = world.surface_height_at(12, 4);
+        let rail_y = world.surface_height_at(12, 3);
+        let lane_y = world.surface_height_at(12, 2);
+        let lamp_y = world.surface_height_at(0, 4);
+
+        stamp_road(&mut world, &road);
+
+        assert_eq!(
+            world.voxel_at(12, curb_y, 4),
+            Voxel::from(BlockType::ShipHullAlloy)
+        );
+        assert_eq!(
+            world.voxel_at(12, rail_y, 3),
+            Voxel::from(BlockType::NeonCyan)
+        );
+        assert_eq!(
+            world.voxel_at(12, lane_y, 2),
+            Voxel::from(BlockType::SkywayDeck)
+        );
+        assert_eq!(
+            world.voxel_at(0, lamp_y + 3, 4),
+            Voxel::from(BlockType::NeonCyan),
+            "skyway lamps should sit closer to the deck than boulevard lamps"
+        );
+        assert_eq!(next_road_style(RoadStyle::Dirt, 1), RoadStyle::Skyway);
+        assert_eq!(next_road_style(RoadStyle::Skyway, 1), RoadStyle::Asphalt);
     }
 }

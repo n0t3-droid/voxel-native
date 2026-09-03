@@ -112,6 +112,10 @@ pub struct EditorState {
     /// SketchUp-style direct-manipulation system supersedes it.
     /// Toggle lives in the SYSTEM tab.
     pub show_classic_builder: bool,
+    /// Command Deck / hotkey: warp to the nearest Aether sky island.
+    pub pending_sky_island_warp: bool,
+    /// Command Deck / hotkey: stamp an orbital station at the player.
+    pub pending_orbital_stamp: bool,
 }
 
 /// Global simulation-pause flag. When `paused = true` the day/night

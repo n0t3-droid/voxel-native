@@ -13,6 +13,7 @@ mod commands;
 mod daynight;
 mod director;
 mod editor;
+mod frontier;
 mod hud;
 mod icons;
 mod menu;
@@ -212,6 +213,8 @@ fn print_controls() {
     info!("  Inventar     : Shuttle KI-Gefecht optional (Drohnen aus bis du es einschaltest)");
     info!("  ESC          : pause menu / close overlay");
     info!("  Shift+F3     : toggle debug overlay");
+    info!("  Shift+F10    : warp to nearest Aether sky island");
+    info!("  Shift+F11    : stamp an orbital landing pad at the player");
     info!("  F2           : screenshot");
     info!("  F5           : save world + settings");
     info!("  LMB          : capture mouse");

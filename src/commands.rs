@@ -11,7 +11,7 @@ use bevy_egui::{egui, EguiContexts};
 
 use crate::animation::AnimationStudio;
 use crate::builder::{BuildAction, BuilderState};
-use crate::city::{CityState, CityTool, SnapMode};
+use crate::city::{CityState, CityTool, RoadStyle, SnapMode};
 use crate::editor::{EditorState, EditorTab, SimPause};
 use crate::hud::DebugOverlay;
 use crate::icons::{paint_icon, Icon};
@@ -63,6 +63,9 @@ enum CommandAction {
     ToggleReduceMotion,
     ToggleAdvancedSettings,
     CycleCompanionDock,
+    SetSkywayRoad,
+    WarpSkyIsland,
+    StampOrbitalStation,
 }
 
 #[derive(Resource)]
@@ -582,6 +585,30 @@ const COMMANDS: &[CommandSpec] = &[
         icon: Icon::Loop,
         essential: false,
     },
+    CommandSpec {
+        label: "Skyway-Strasse",
+        detail: "Road-Tool auf Skyway-Deck umschalten: Plating, Cyan-Rails, Pylonen",
+        key: "Deck",
+        context: CommandContext::City,
+        icon: Icon::Road,
+        essential: false,
+    },
+    CommandSpec {
+        label: "Sky-Island anfliegen",
+        detail: "Zur naechsten prozeduralen Aether-Insel warpen",
+        key: "Shift+F10",
+        context: CommandContext::Gameplay,
+        icon: Icon::Teleport,
+        essential: true,
+    },
+    CommandSpec {
+        label: "Orbitalstation stempeln",
+        detail: "Landeplattform mit Mast, Schuessel und Docking-Arm am Spieler platzieren",
+        key: "Shift+F11",
+        context: CommandContext::Builder,
+        icon: Icon::Cube,
+        essential: false,
+    },
 ];
 
 fn toggle_command_palette(
@@ -965,6 +992,9 @@ fn command_action(command: &CommandSpec) -> Option<CommandAction> {
         "Toolbench HUD Settings" => Some(CommandAction::OpenEditor(EditorTab::System)),
         "Admin Modus" => Some(CommandAction::ToggleAdminMode),
         "Infinite Ammo" => Some(CommandAction::ToggleInfiniteAmmo),
+        "Skyway-Strasse" => Some(CommandAction::SetSkywayRoad),
+        "Sky-Island anfliegen" => Some(CommandAction::WarpSkyIsland),
+        "Orbitalstation stempeln" => Some(CommandAction::StampOrbitalStation),
         _ => None,
     }
 }
@@ -1213,6 +1243,50 @@ fn execute_command_action(
                     "Command Deck: infinite ammo = {}",
                     settings.cheats.infinite_ammo
                 );
+                None
+            }
+        }
+        CommandAction::SetSkywayRoad => {
+            if *state.get() == GameState::MainMenu {
+                Some("Skyway-Strassen brauchen eine geladene Welt.".into())
+            } else {
+                city.tool = CityTool::Road;
+                city.road_style = RoadStyle::Skyway;
+                city.pending_road_a = None;
+                city.status = "Live-Werkzeug: Skyway".into();
+                toolbelt.tool = ToolbeltTool::CityRoad;
+                mode.set(
+                    crate::mode::ActiveMode::BuildLive {
+                        tool: ToolbeltTool::CityRoad,
+                    },
+                    "Build Live: skyway decks. Draw elevated plating with cyan rails.".to_string(),
+                );
+                toolbelt.status = mode.status.clone();
+                editor.open = false;
+                *pause_screen = PauseScreen::Menu;
+                next_state.set(GameState::InGame);
+                None
+            }
+        }
+        CommandAction::WarpSkyIsland => {
+            if *state.get() == GameState::MainMenu {
+                Some("Sky-Island Warp braucht eine geladene Welt.".into())
+            } else {
+                editor.pending_sky_island_warp = true;
+                editor.open = false;
+                *pause_screen = PauseScreen::Menu;
+                next_state.set(GameState::InGame);
+                None
+            }
+        }
+        CommandAction::StampOrbitalStation => {
+            if *state.get() == GameState::MainMenu {
+                Some("Orbitalstation braucht eine geladene Welt.".into())
+            } else {
+                editor.pending_orbital_stamp = true;
+                editor.open = false;
+                *pause_screen = PauseScreen::Menu;
+                next_state.set(GameState::InGame);
                 None
             }
         }
