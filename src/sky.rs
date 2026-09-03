@@ -833,7 +833,7 @@ fn follow_and_animate_sky(
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
             let noon = Vec3::new(0.004, 0.010, 0.018);
             // Under ACES clip so 17:00 stays golden, not a grey wall.
-            let dusk = Vec3::new(0.95, 0.52, 0.10);
+            let dusk = Vec3::new(0.92, 0.50, 0.14);
             let deep = Vec3::new(0.020, 0.018, 0.055);
             let vis = horizon_band_visibility(sunset, night);
             let dusk_gate = sunset * (1.0 - night).powf(1.4);
@@ -1238,21 +1238,7 @@ fn build_horizon_gradient_image(height: u32) -> Image {
         // Latitude in [-PI/2, PI/2]; 0 is the horizon.
         let lat = (y as f32 / height as f32) * std::f32::consts::PI - std::f32::consts::FRAC_PI_2;
         let elevation = lat / std::f32::consts::FRAC_PI_2; // -1 below, +1 zenith
-        let intensity = if elevation < 0.0 {
-            // Fade out fast below the horizon line.
-            (1.0 + elevation * 5.0).max(0.0)
-        } else {
-            // Smooth falloff to nothing well before the zenith — a thin
-            // rim, not a milky wall climbing the sky.
-            (1.0 - (elevation / 0.28).min(1.0)).powf(1.85)
-        };
-        let intensity = intensity.clamp(0.0, 1.0);
-        // Warm carrier, gated by live emissive. Noon/night emissive is
-        // ~0.02 so this tint only reads when sunset_factor is high.
-        let r = (intensity * 255.0) as u8;
-        let g = (intensity * 118.0) as u8;
-        let b = (intensity * 36.0) as u8;
-        let a = (intensity * 0.42 * 255.0) as u8;
+        let [r, g, b, a] = horizon_scatter_rgba(elevation);
         for _ in 0..WIDTH {
             data.push(r);
             data.push(g);
@@ -1278,6 +1264,34 @@ fn build_horizon_gradient_image(height: u32) -> Image {
         ..ImageSamplerDescriptor::linear()
     });
     image
+}
+
+/// Soft scattering band: gold on the horizon, peach through the lower
+/// sky, dying into violet before the zenith. Wider and gentler than the
+/// pass-3 stripe so 17:00 reads as atmosphere, not a painted line.
+fn horizon_scatter_rgba(elevation: f32) -> [u8; 4] {
+    let intensity = if elevation < 0.0 {
+        (1.0 + elevation * 5.0).max(0.0)
+    } else {
+        (1.0 - (elevation / 0.58).min(1.0)).powf(1.18)
+    };
+    let intensity = intensity.clamp(0.0, 1.0);
+    let u = elevation.clamp(0.0, 1.0);
+    let (hr, hg, hb) = if elevation <= 0.0 {
+        (255.0, 168.0, 56.0)
+    } else if u < 0.20 {
+        let t = u / 0.20;
+        (255.0, 168.0 + 22.0 * t, 56.0 + 90.0 * t)
+    } else {
+        let t = ((u - 0.20) / 0.38).clamp(0.0, 1.0);
+        (255.0 - 100.0 * t, 190.0 - 110.0 * t, 146.0 + 10.0 * t)
+    };
+    [
+        (hr * intensity) as u8,
+        (hg * intensity) as u8,
+        (hb * intensity) as u8,
+        (intensity * 0.40 * 255.0) as u8,
+    ]
 }
 
 #[cfg(test)]
@@ -1336,6 +1350,28 @@ mod tests {
             );
             previous = current;
         }
+    }
+
+    #[test]
+    fn horizon_scatter_is_a_soft_gradient_not_a_stripe() {
+        let rim = horizon_scatter_rgba(0.0);
+        let peach = horizon_scatter_rgba(0.16);
+        let upper = horizon_scatter_rgba(0.34);
+        let zenith = horizon_scatter_rgba(0.95);
+        assert!(rim[0] > 180, "horizon gold too dim ({})", rim[0]);
+        assert!(
+            peach[0] > 80,
+            "peach elevation died ({}); the band is still a hard stripe",
+            peach[0]
+        );
+        assert!(
+            peach[1] as f32 / (peach[0].max(1) as f32) > 0.55,
+            "peach band is still orange-red G/R={:.2}",
+            peach[1] as f32 / peach[0].max(1) as f32
+        );
+        assert!(upper[0] > 18, "upper scatter vanished at 0.34 ({})", upper[0]);
+        assert_eq!(zenith[0], 0);
+        assert_eq!(zenith[3], 0);
     }
 
     #[test]

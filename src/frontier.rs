@@ -786,6 +786,9 @@ impl SkywayNetwork {
         if let Some(spur) = hero_terrace_spur(wx, wz, macro_h) {
             return Some(spur);
         }
+        if let Some(face) = hero_face_rail(wx, wz, macro_h) {
+            return Some(face);
+        }
         let x = wx as f64;
         let z = wz as f64;
         let a = self.route_field(x, z);
@@ -1073,6 +1076,28 @@ fn hero_terrace_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     })
 }
 
+/// Lower face rail stepping down the mesa wall so habs hanging on the
+/// cliff stay connected to the mesa-top colony.
+fn hero_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+    const RAIL_Z: i32 = -130;
+    const HALF: f64 = 2.0;
+    if wx < 48 || wx > 160 {
+        return None;
+    }
+    let dist = (wz - RAIL_Z).abs() as f64;
+    if dist > HALF {
+        return None;
+    }
+    let deck_y = (macro_h - 2.0).round() as i32;
+    let pylon = wx.rem_euclid(SKYWAY_PYLON_PITCH) < 2 && dist < HALF - 0.5;
+    Some(SkywayColumn {
+        deck_y,
+        dist,
+        pylon,
+        half: HALF,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Cliff colony (spawn postcard) ---------------------------------------------
 // ---------------------------------------------------------------------------
@@ -1087,36 +1112,44 @@ pub struct CliffHab {
     pub floors: i32,
     pub width: i32,
     pub depth: i32,
+    /// Blocks below local ground. 0 sits on the mesa; >0 hangs the hab
+    /// on the cliff face so the colony terraces down instead of floating
+    /// as a row of pillars on the cap.
+    pub drop: i32,
 }
 
 impl CliffHab {
-    pub fn hero_cluster() -> [Self; 22] {
+    pub fn hero_cluster() -> [Self; 28] {
         [
-            Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4 },
-            Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5 },
-            Self { cx: 84, cz: -54, floors: 6, width: 6, depth: 4 },
-            Self { cx: 22, cz: -82, floors: 6, width: 4, depth: 4 },
-            Self { cx: 108, cz: -66, floors: 8, width: 5, depth: 3 },
-            Self { cx: 70, cz: -40, floors: 4, width: 7, depth: 5 },
-            Self { cx: 128, cz: -92, floors: 7, width: 5, depth: 4 },
-            Self { cx: 146, cz: -74, floors: 9, width: 4, depth: 5 },
-            Self { cx: 96, cz: -108, floors: 6, width: 6, depth: 4 },
-            Self { cx: 168, cz: -88, floors: 8, width: 5, depth: 4 },
-            // Terraced extras packed into the postcard look cone.
-            Self { cx: 118, cz: -58, floors: 5, width: 6, depth: 4 },
-            Self { cx: 138, cz: -108, floors: 8, width: 4, depth: 4 },
-            Self { cx: 158, cz: -64, floors: 6, width: 5, depth: 5 },
-            Self { cx: 112, cz: -84, floors: 10, width: 4, depth: 4 },
-            Self { cx: 78, cz: -96, floors: 5, width: 7, depth: 4 },
-            Self { cx: 48, cz: -98, floors: 7, width: 4, depth: 5 },
-            // Stacked annexes + a wide plaza so the cluster reads as a
-            // cliff city rather than a handful of isolated towers.
-            Self { cx: 64, cz: -52, floors: 3, width: 8, depth: 6 },
-            Self { cx: 100, cz: -48, floors: 4, width: 5, depth: 4 },
-            Self { cx: 124, cz: -76, floors: 6, width: 5, depth: 3 },
-            Self { cx: 152, cz: -96, floors: 5, width: 6, depth: 4 },
-            Self { cx: 90, cz: -80, floors: 3, width: 9, depth: 5 },
-            Self { cx: 174, cz: -70, floors: 7, width: 4, depth: 4 },
+            Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4, drop: 0 },
+            Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5, drop: 0 },
+            Self { cx: 84, cz: -54, floors: 6, width: 6, depth: 4, drop: 0 },
+            Self { cx: 22, cz: -82, floors: 6, width: 4, depth: 4, drop: 0 },
+            Self { cx: 108, cz: -66, floors: 8, width: 5, depth: 3, drop: 0 },
+            Self { cx: 70, cz: -40, floors: 4, width: 7, depth: 5, drop: 0 },
+            Self { cx: 128, cz: -92, floors: 7, width: 5, depth: 4, drop: 0 },
+            Self { cx: 146, cz: -74, floors: 9, width: 4, depth: 5, drop: 0 },
+            Self { cx: 96, cz: -108, floors: 6, width: 6, depth: 4, drop: 0 },
+            Self { cx: 168, cz: -88, floors: 8, width: 5, depth: 4, drop: 0 },
+            Self { cx: 118, cz: -58, floors: 5, width: 6, depth: 4, drop: 0 },
+            Self { cx: 138, cz: -108, floors: 8, width: 4, depth: 4, drop: 0 },
+            Self { cx: 158, cz: -64, floors: 6, width: 5, depth: 5, drop: 0 },
+            Self { cx: 112, cz: -84, floors: 10, width: 4, depth: 4, drop: 0 },
+            Self { cx: 78, cz: -96, floors: 5, width: 7, depth: 4, drop: 0 },
+            Self { cx: 48, cz: -98, floors: 7, width: 4, depth: 5, drop: 0 },
+            Self { cx: 64, cz: -52, floors: 3, width: 8, depth: 6, drop: 0 },
+            Self { cx: 100, cz: -48, floors: 4, width: 5, depth: 4, drop: 0 },
+            Self { cx: 124, cz: -76, floors: 6, width: 5, depth: 3, drop: 0 },
+            Self { cx: 152, cz: -96, floors: 5, width: 6, depth: 4, drop: 0 },
+            Self { cx: 90, cz: -80, floors: 3, width: 9, depth: 5, drop: 0 },
+            Self { cx: 174, cz: -70, floors: 7, width: 4, depth: 4, drop: 0 },
+            // Terraced down the mesa face, in the postcard look cone.
+            Self { cx: 88, cz: -124, floors: 4, width: 6, depth: 4, drop: 10 },
+            Self { cx: 108, cz: -132, floors: 5, width: 5, depth: 4, drop: 16 },
+            Self { cx: 128, cz: -126, floors: 6, width: 5, depth: 4, drop: 12 },
+            Self { cx: 68, cz: -128, floors: 4, width: 5, depth: 5, drop: 14 },
+            Self { cx: 148, cz: -120, floors: 5, width: 6, depth: 4, drop: 8 },
+            Self { cx: 96, cz: -140, floors: 3, width: 8, depth: 5, drop: 20 },
         ]
     }
 
@@ -1134,7 +1167,7 @@ impl CliffHab {
         {
             return;
         }
-        let base = ground(self.cx, self.cz);
+        let base = ground(self.cx, self.cz) - self.drop;
         let top = base + self.floors * 3 + 2;
         if oy > top || oy + CHUNK_SIZE_I <= base {
             return;
@@ -1569,6 +1602,7 @@ mod tests {
             floors: 4,
             width: 5,
             depth: 4,
+            drop: 0,
         };
         let mut chunk = Chunk::new(ChunkPos::new(0, 4, 0));
         hab.stamp(&mut chunk, |_, _| 64);
@@ -1578,10 +1612,14 @@ mod tests {
         );
         assert!(count_blocks(&chunk, BlockType::PlatingWhite) > 10);
         assert!(count_blocks(&chunk, BlockType::NeonAmber) > 0);
-        assert_eq!(CliffHab::hero_cluster().len(), 22);
+        assert_eq!(CliffHab::hero_cluster().len(), 28);
         for h in CliffHab::hero_cluster() {
             assert!(in_hero_postcard(h.cx, h.cz), "hab {},{} left the postcard", h.cx, h.cz);
         }
+        assert!(
+            CliffHab::hero_cluster().iter().any(|h| h.drop >= 10),
+            "no habs terrace down the cliff face"
+        );
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
         let sky = SkywayNetwork::new(1);
         let rail = sky.column(80, -88, 70.0).expect("mesa rail missing on postcard");
@@ -1590,6 +1628,9 @@ mod tests {
         assert!(walk.half < SKYWAY_HALF_WIDTH);
         let terrace = sky.column(118, -76, 70.0).expect("terrace spur missing on postcard");
         assert!(terrace.half < SKYWAY_HALF_WIDTH);
+        let face = sky.column(80, -130, 70.0).expect("face rail missing on postcard");
+        assert!(face.half < SKYWAY_HALF_WIDTH);
+        assert!(face.deck_y < rail.deck_y, "face rail should sit below the mesa rail");
     }
 
     #[test]
