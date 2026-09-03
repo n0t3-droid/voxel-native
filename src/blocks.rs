@@ -118,6 +118,29 @@ pub enum BlockType {
     MagnetiteOre = 34,
     /// Deep purple rare vein — reference "Iridium".
     IridiumVein = 35,
+    /// Violet sedimentary band — the purple stripe that runs through
+    /// every frontier cliff face in the key art.
+    VioletStone = 36,
+    /// Warm ochre sedimentary band — the orange stripe between the
+    /// violet and the buff cap-rock.
+    AmberStone = 37,
+    /// Cyan energy current. Flows like lava but reads as coolant /
+    /// plasma: the glowing blue rivers threading the canyon floors.
+    PlasmaFlow = 38,
+    /// Magenta crystal shard — hero foreground crystal clusters.
+    CrystalMagenta = 39,
+    /// Emerald crystal shard — the green tips in mixed clusters.
+    CrystalGreen = 40,
+    /// Translucent cyan holo pane for station windows and signage.
+    HoloPanel = 41,
+    /// Bright station plating — skyway decks, platforms, pylons.
+    PlatingWhite = 42,
+    /// Teal accent plating for station hulls and deck undersides.
+    PlatingTeal = 43,
+    /// Dark skyway carriageway surface.
+    RoadDeck = 44,
+    /// Painted lane marking on a skyway deck.
+    RoadMarking = 45,
 }
 
 /// Voxel ids for the three mineable neon resources (HUD + telemetry).
@@ -128,7 +151,10 @@ pub const VOXEL_IRIDIUM: Voxel = BlockType::IridiumVein as Voxel;
 impl BlockType {
     #[inline]
     pub fn is_solid(self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water)
+        !matches!(
+            self,
+            BlockType::Air | BlockType::Water | BlockType::PlasmaFlow
+        )
     }
 
     #[inline]
@@ -141,6 +167,10 @@ impl BlockType {
                 | BlockType::JungleLeaves
                 | BlockType::Ice
                 | BlockType::CockpitGlass
+                | BlockType::PlasmaFlow
+                | BlockType::CrystalMagenta
+                | BlockType::CrystalGreen
+                | BlockType::HoloPanel
         )
     }
 
@@ -163,6 +193,10 @@ impl BlockType {
                 | BlockType::LuminiteCrystal
                 | BlockType::MagnetiteOre
                 | BlockType::IridiumVein
+                | BlockType::PlasmaFlow
+                | BlockType::CrystalMagenta
+                | BlockType::CrystalGreen
+                | BlockType::HoloPanel
         )
     }
 
@@ -220,6 +254,21 @@ impl BlockType {
             BlockType::LuminiteCrystal => Color::srgba(0.12, 0.82, 1.00, 0.68),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
+            // Violet sedimentary band — saturated enough to read as an
+            // alien mineral stripe from a kilometre out.
+            BlockType::VioletStone => Color::srgb(0.44, 0.24, 0.62),
+            // Ochre band that separates the violet from the buff cap.
+            BlockType::AmberStone => Color::srgb(0.86, 0.50, 0.19),
+            // Coolant-blue energy current in the canyon floors.
+            BlockType::PlasmaFlow => Color::srgba(0.14, 0.84, 1.00, 0.80),
+            BlockType::CrystalMagenta => Color::srgba(0.96, 0.20, 0.86, 0.70),
+            BlockType::CrystalGreen => Color::srgba(0.30, 1.00, 0.56, 0.70),
+            // Holo pane — mostly transparent, tinted cyan.
+            BlockType::HoloPanel => Color::srgba(0.32, 0.90, 1.00, 0.36),
+            BlockType::PlatingWhite => Color::srgb(0.80, 0.84, 0.90),
+            BlockType::PlatingTeal => Color::srgb(0.16, 0.50, 0.58),
+            BlockType::RoadDeck => Color::srgb(0.27, 0.28, 0.33),
+            BlockType::RoadMarking => Color::srgb(0.92, 0.93, 0.87),
         }
     }
 
@@ -260,6 +309,16 @@ impl BlockType {
             33 => BlockType::LuminiteCrystal,
             34 => BlockType::MagnetiteOre,
             35 => BlockType::IridiumVein,
+            36 => BlockType::VioletStone,
+            37 => BlockType::AmberStone,
+            38 => BlockType::PlasmaFlow,
+            39 => BlockType::CrystalMagenta,
+            40 => BlockType::CrystalGreen,
+            41 => BlockType::HoloPanel,
+            42 => BlockType::PlatingWhite,
+            43 => BlockType::PlatingTeal,
+            44 => BlockType::RoadDeck,
+            45 => BlockType::RoadMarking,
             _ => BlockType::Air,
         }
     }
@@ -272,7 +331,7 @@ impl From<BlockType> for Voxel {
     }
 }
 
-pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
+pub const BUILDABLE_BLOCKS: [BlockType; 45] = [
     BlockType::Stone,
     BlockType::Dirt,
     BlockType::Grass,
@@ -308,6 +367,16 @@ pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
     BlockType::LuminiteCrystal,
     BlockType::MagnetiteOre,
     BlockType::IridiumVein,
+    BlockType::VioletStone,
+    BlockType::AmberStone,
+    BlockType::PlasmaFlow,
+    BlockType::CrystalMagenta,
+    BlockType::CrystalGreen,
+    BlockType::HoloPanel,
+    BlockType::PlatingWhite,
+    BlockType::PlatingTeal,
+    BlockType::RoadDeck,
+    BlockType::RoadMarking,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +409,16 @@ const ASPHALT_CONCRETE: &[BlockPaletteEntry] = &[
         label: "Bedrock",
         role: "dark foundation",
     },
+    BlockPaletteEntry {
+        block: BlockType::RoadDeck,
+        label: "Skyway Deck",
+        role: "carriageway surface",
+    },
+    BlockPaletteEntry {
+        block: BlockType::RoadMarking,
+        label: "Lane Marking",
+        role: "painted road line",
+    },
 ];
 
 const BRICK_MASONRY: &[BlockPaletteEntry] = &[
@@ -357,6 +436,16 @@ const BRICK_MASONRY: &[BlockPaletteEntry] = &[
         block: BlockType::RedSand,
         label: "Red Sand",
         role: "terracotta dust",
+    },
+    BlockPaletteEntry {
+        block: BlockType::VioletStone,
+        label: "Violet Strata",
+        role: "purple mineral band",
+    },
+    BlockPaletteEntry {
+        block: BlockType::AmberStone,
+        label: "Amber Strata",
+        role: "ochre mineral band",
     },
 ];
 
@@ -385,6 +474,21 @@ const GLASS: &[BlockPaletteEntry] = &[
         block: BlockType::IridiumVein,
         label: "Iridium",
         role: "violet rare-glass vein",
+    },
+    BlockPaletteEntry {
+        block: BlockType::CrystalMagenta,
+        label: "Magenta Crystal",
+        role: "hot pink crystal facet",
+    },
+    BlockPaletteEntry {
+        block: BlockType::CrystalGreen,
+        label: "Emerald Crystal",
+        role: "green crystal facet",
+    },
+    BlockPaletteEntry {
+        block: BlockType::HoloPanel,
+        label: "Holo Pane",
+        role: "see-through hologram",
     },
 ];
 
@@ -451,6 +555,16 @@ const METAL: &[BlockPaletteEntry] = &[
         block: BlockType::EngineCore,
         label: "Engine Core",
         role: "hot machinery",
+    },
+    BlockPaletteEntry {
+        block: BlockType::PlatingWhite,
+        label: "Station Plating",
+        role: "bright hull panel",
+    },
+    BlockPaletteEntry {
+        block: BlockType::PlatingTeal,
+        label: "Teal Plating",
+        role: "accent hull panel",
     },
 ];
 
@@ -526,6 +640,11 @@ const WATER_ENERGY: &[BlockPaletteEntry] = &[
         block: BlockType::Lava,
         label: "Lava",
         role: "hot emissive liquid",
+    },
+    BlockPaletteEntry {
+        block: BlockType::PlasmaFlow,
+        label: "Plasma Flow",
+        role: "cyan energy current",
     },
 ];
 
@@ -611,10 +730,11 @@ pub fn block_label(block: BlockType) -> &'static str {
 }
 
 /// Fast voxel → solid? (without converting through the enum).
-/// AIR (0), Water (5) and Lava (22) are non-solid for collision.
+/// AIR (0), Water (5), Lava (22) and PlasmaFlow (38) are non-solid for
+/// collision — the energy rivers are a hazard you fall into, not a floor.
 #[inline]
 pub fn voxel_is_solid(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 22)
+    !matches!(v, 0 | 5 | 22 | 38)
 }
 
 /// Fast voxel -> can weapons intentionally hit and destroy this block?
@@ -628,10 +748,15 @@ pub fn voxel_is_weapon_target(v: Voxel) -> bool {
 
 /// Fast voxel → opaque? (used for face-culling).
 /// Air (0), water (5), leaves (7), ice (9), jungle leaves (11),
-/// crystal (20), lava (22), cockpit (28), luminite/iridium glass are non-opaque.
+/// crystal (20), lava (22), cockpit (28), luminite/iridium glass,
+/// plasma (38), coloured crystal (39/40) and holo panes (41) are
+/// non-opaque.
 #[inline]
 pub fn voxel_is_opaque(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35)
+    !matches!(
+        v,
+        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 38 | 39 | 40 | 41
+    )
 }
 
 /// Fast voxel → is this block bioluminescent? Emissive blocks get
@@ -640,9 +765,13 @@ pub fn voxel_is_opaque(v: Voxel) -> bool {
 /// alien moss, glow-sand).
 #[inline]
 pub fn voxel_is_emissive(v: Voxel) -> bool {
-    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9.
+    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9,
+    // plasma rivers=38, coloured crystal=39/40, holo panes=41.
     // Ice gets a whisper of glow so glacier biomes shimmer at night.
-    matches!(v, 9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35)
+    matches!(
+        v,
+        9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 38 | 39 | 40 | 41
+    )
 }
 
 #[inline]
@@ -731,6 +860,31 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[0] *= 2.8;
             c[1] *= 0.9;
             c[2] *= 4.6;
+        }
+        38 => {
+            // Plasma river — the brightest thing on the canyon floor, so
+            // it reads as a light source carving through dark rock.
+            c[0] *= 1.1;
+            c[1] *= 3.8;
+            c[2] *= 5.0;
+        }
+        39 => {
+            // Magenta crystal — hot pink hero shards.
+            c[0] *= 4.4;
+            c[1] *= 0.9;
+            c[2] *= 3.8;
+        }
+        40 => {
+            // Emerald crystal.
+            c[0] *= 1.0;
+            c[1] *= 4.2;
+            c[2] *= 1.9;
+        }
+        41 => {
+            // Holo pane — faint but unmistakably lit.
+            c[0] *= 1.6;
+            c[1] *= 2.6;
+            c[2] *= 3.0;
         }
         _ => {}
     }
