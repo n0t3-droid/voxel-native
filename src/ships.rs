@@ -39,6 +39,7 @@ impl Plugin for ShipPlugin {
                     draw_ship_boarding_hud,
                     update_cockpit_transition,
                     ship_flight_input,
+                    update_hero_flyby,
                     update_ship_energy_trails,
                     update_ship_projectiles,
                     spawn_enemy_drones,
@@ -289,6 +290,15 @@ struct ShipMotion {
     pitch_rate: f32,
     /// Smoothed lateral velocity component (m/s) for inertial banking drift.
     lateral_speed: f32,
+}
+
+/// Cinematic shuttle pass that loops across the spawn postcard. Not
+/// player-piloted unless they board it; engine plumes stay lit because
+/// `speed` is held in cruise.
+#[derive(Component, Debug, Clone)]
+struct HeroFlyby {
+    t: f32,
+    origin: Vec3,
 }
 
 const SHIP_MOUSE_YAW_SENS: f32 = 0.00016;
@@ -2113,6 +2123,34 @@ fn ship_trail_material(
     }
 }
 
+fn update_hero_flyby(
+    time: Res<Time>,
+    pilot: Res<PilotState>,
+    mut q: Query<(Entity, &mut Transform, &mut HeroFlyby, &mut ShipMotion), Without<Player>>,
+) {
+    let dt = time.delta_seconds();
+    for (entity, mut tf, mut fly, mut motion) in q.iter_mut() {
+        if pilot.active_ship == Some(entity) {
+            continue;
+        }
+        fly.t = (fly.t + dt * 0.045).rem_euclid(1.0);
+        let u = fly.t;
+        let x = fly.origin.x - 95.0 + u * 230.0;
+        let z = fly.origin.z - 64.0 + (u * std::f32::consts::PI).sin() * 32.0;
+        let y = fly.origin.y + 34.0 + (u * std::f32::consts::TAU).sin() * 11.0;
+        let vx: f32 = 230.0;
+        let vz: f32 = std::f32::consts::PI * 32.0 * (u * std::f32::consts::PI).cos();
+        let yaw = f32::atan2(vx, -vz);
+        let roll = (u * std::f32::consts::TAU).sin() * 0.22;
+        tf.translation = Vec3::new(x, y, z);
+        tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
+        motion.yaw = yaw;
+        motion.pitch = -0.06;
+        motion.roll = roll;
+        motion.speed = 88.0;
+    }
+}
+
 fn update_ship_energy_trails(
     time: Res<Time>,
     pilot: Res<PilotState>,
@@ -2551,9 +2589,9 @@ fn spawn_saved_ships_once(
             < 260.0
     });
     if active.meta.ships.is_empty() || !has_nearby_ship {
-        let px = player_anchor.x.round() as i32 + 14;
-        let pz = player_anchor.z.round() as i32 + 18;
-        let py = generator.surface_height_at(px, pz) as f32 + 4.0;
+        let px = player_anchor.x + 22.0;
+        let pz = player_anchor.z - 28.0;
+        let py = player_anchor.y + 16.0;
         spawn_ship_entity(
             &mut commands,
             &mut meshes,
@@ -2561,11 +2599,27 @@ fn spawn_saved_ships_once(
             &mut images,
             &mut fx,
             ShipKind::ScoutShuttle,
-            Vec3::new(px as f32 + 0.5, py, pz as f32 + 0.5),
-            player_yaw + std::f32::consts::PI,
+            Vec3::new(px, py, pz),
+            player_yaw + 0.35,
             false,
             None,
         );
+        let fly = spawn_ship_entity(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &mut fx,
+            ShipKind::ScoutShuttle,
+            player_anchor + Vec3::new(-80.0, 36.0, -55.0),
+            player_yaw,
+            false,
+            None,
+        );
+        commands.entity(fly).insert(HeroFlyby {
+            t: 0.12,
+            origin: player_anchor,
+        });
     }
 }
 
@@ -2918,7 +2972,11 @@ fn draw_ship_boarding_hud(
     boarding: Res<ShipBoardingState>,
     pilot: Res<PilotState>,
     mode: Res<ModeContext>,
+    photo: Option<Res<crate::hud::PhotoMode>>,
 ) {
+    if photo.map(|p| p.hidden).unwrap_or(false) {
+        return;
+    }
     if pilot.active_ship.is_some() || !matches!(mode.mode, ActiveMode::Combat) {
         return;
     }

@@ -2804,7 +2804,14 @@ impl TerrainGenerator {
                 // Landing on a mesa table or a reef shelf gives the
                 // player the postcard on their first frame instead of a
                 // featureless field, so nudge the search toward them.
-                let vista_bonus = if biome.is_showcase_terrain() || biome == Biome::Mesa {
+                // Extra pull toward the hero vista (crystal + river +
+                // skyway parked at ~(-Z, +X) of origin).
+                let hero_dx = (x - 48).abs();
+                let hero_dz = (z - (-28)).abs();
+                let near_postcard = hero_dx < 90 && hero_dz < 90;
+                let vista_bonus = if near_postcard {
+                    -480
+                } else if biome.is_showcase_terrain() || biome == Biome::Mesa {
                     -220
                 } else {
                     0

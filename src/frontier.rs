@@ -36,6 +36,19 @@ pub const STATION_CELL: i32 = 512;
 /// Crystal clusters are common: they are ground detail, not landmarks.
 pub const CRYSTAL_CELL: i32 = 96;
 
+/// Postcard composition parked in front of the default look direction
+/// (camera forward is −Z at yaw 0). Kept within ~200 blocks of origin
+/// so the first 10 seconds of a new world match the key art instead of
+/// an empty mesa.
+pub const HERO_CRYSTAL_X: i32 = 72;
+pub const HERO_CRYSTAL_Z: i32 = -96;
+pub const HERO_RIVER_X0: i32 = 36;
+pub const HERO_RIVER_X1: i32 = 200;
+pub const HERO_RIVER_Z: i32 = -72;
+pub const HERO_SKYWAY_X0: i32 = -36;
+pub const HERO_SKYWAY_X1: i32 = 188;
+pub const HERO_SKYWAY_Z: i32 = -48;
+
 /// Altitude band for sky islands.
 ///
 /// Airborne landmarks are only worth generating inside the vertical slab
@@ -373,6 +386,17 @@ pub struct CrystalCluster {
 }
 
 impl CrystalCluster {
+    /// Guaranteed shard group for the spawn postcard. Always generated,
+    /// independent of the lattice roll.
+    pub fn hero() -> Self {
+        Self {
+            cx: HERO_CRYSTAL_X,
+            cz: HERO_CRYSTAL_Z,
+            shards: 7,
+            scale: 28,
+        }
+    }
+
     pub fn for_cell(seed: u32, ix: i32, iz: i32) -> Option<Self> {
         if cell_rand(seed, 0x0C_10_01, ix, iz) > 0.42 {
             return None;
@@ -724,6 +748,9 @@ impl SkywayNetwork {
     /// elevation from the terrain generator (no ridges, no hills), which
     /// is what keeps a deck level while the ground under it heaves.
     pub fn column(&self, wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+        if let Some(hero) = hero_skyway_column(wx, wz, macro_h) {
+            return Some(hero);
+        }
         let x = wx as f64;
         let z = wz as f64;
         let a = self.route_field(x, z);
@@ -854,6 +881,9 @@ impl RiverNetwork {
     }
 
     pub fn column(&self, wx: i32, wz: i32) -> Option<RiverColumn> {
+        if let Some(hero) = hero_river_column(wx, wz) {
+            return Some(hero);
+        }
         // Where the two networks cross, the hotter one wins the bed.
         let lava = Self::channel(&self.lava, wx, wz, 77.1);
         let plasma = Self::channel(&self.plasma, wx, wz, -21.7);
@@ -874,6 +904,50 @@ impl RiverNetwork {
         }
         Some(RiverColumn { cut, dist, fluid })
     }
+}
+
+/// Forced energy-river spur for the spawn postcard. A sine-wobble
+/// channel of lava/plasma along z ≈ HERO_RIVER_Z, starting east of
+/// origin so `find_natural_spawn(0,0)` never lands in it.
+fn hero_river_column(wx: i32, wz: i32) -> Option<RiverColumn> {
+    if wx < HERO_RIVER_X0 || wx > HERO_RIVER_X1 {
+        return None;
+    }
+    let centre_z = HERO_RIVER_Z + ((wx as f64 - 80.0) * 0.10 + (wx as f64 * 0.07).sin() * 6.0) as i32;
+    let dist = (wz - centre_z).abs() as f64;
+    if dist > RIVER_HALF_WIDTH {
+        return None;
+    }
+    let t = dist / RIVER_HALF_WIDTH;
+    let cut = ((1.0 - t * t) * RIVER_DEPTH as f64).round() as i32;
+    if cut <= 0 {
+        return None;
+    }
+    let fluid = if wx.rem_euclid(42) < 18 {
+        BlockType::Lava
+    } else {
+        BlockType::PlasmaFlow
+    };
+    Some(RiverColumn { cut, dist, fluid })
+}
+
+/// Forced skyway span for the spawn postcard: a straight carriageway
+/// along z = HERO_SKYWAY_Z so the first look has winding infrastructure.
+fn hero_skyway_column(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+    if wx < HERO_SKYWAY_X0 || wx > HERO_SKYWAY_X1 {
+        return None;
+    }
+    let dist = (wz - HERO_SKYWAY_Z).abs() as f64;
+    if dist > SKYWAY_HALF_WIDTH {
+        return None;
+    }
+    let deck_y = (macro_h + 24.0).round() as i32;
+    let pylon = wx.rem_euclid(SKYWAY_PYLON_PITCH) < 3 && dist < SKYWAY_HALF_WIDTH - 1.0;
+    Some(SkywayColumn {
+        deck_y,
+        dist,
+        pylon,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -916,6 +990,7 @@ impl FrontierPlanner {
         for cluster in CrystalCluster::near(self.seed, wx, wz) {
             cluster.stamp(self.seed, chunk, ground);
         }
+        CrystalCluster::hero().stamp(self.seed, chunk, ground);
         // Widest island root reaches ~1.6 radii below the core.
         if top_y >= SKY_ISLAND_MIN_Y - 48 && base_y <= SKY_ISLAND_MAX_Y + 12 {
             for island in SkyIsland::near(self.seed, wx, wz, macro_ground) {
@@ -1187,6 +1262,30 @@ mod tests {
         assert!(count_blocks(&deck, BlockType::PlatingWhite) > 40);
         assert!(count_blocks(&deck, BlockType::PlatingTeal) > 8);
         assert!(count_blocks(&deck, BlockType::NeonCyan) > 0);
+    }
+
+    #[test]
+    fn hero_postcard_is_always_near_origin() {
+        let net = RiverNetwork::new(12345);
+        let sky = SkywayNetwork::new(12345);
+        let mut river = 0;
+        let mut way = 0;
+        for x in 40..180 {
+            for z in -120..-20 {
+                if net.column(x, z).is_some() {
+                    river += 1;
+                }
+                if sky.column(x, z, 80.0).is_some() {
+                    way += 1;
+                }
+            }
+        }
+        assert!(river > 40, "hero energy river missing near spawn ({river} columns)");
+        assert!(way > 40, "hero skyway missing near spawn ({way} columns)");
+        let hero = CrystalCluster::hero();
+        assert_eq!(hero.cx, HERO_CRYSTAL_X);
+        assert_eq!(hero.cz, HERO_CRYSTAL_Z);
+        assert!(hero.shards >= 5);
     }
 
     #[test]
