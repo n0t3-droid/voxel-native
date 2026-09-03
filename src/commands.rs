@@ -295,6 +295,14 @@ const COMMANDS: &[CommandSpec] = &[
         essential: false,
     },
     CommandSpec {
+        label: "Invention Workshop",
+        detail: "Working machines: generator, turret, portal, rail, hover pad",
+        key: "I / QUICK",
+        context: CommandContext::Builder,
+        icon: Icon::LightBulb,
+        essential: true,
+    },
+    CommandSpec {
         label: "Tool 0 Animation Pick",
         detail: "Voxel-Auswahl fuer Animation Studio direkt aktivieren",
         key: "0",
@@ -940,6 +948,7 @@ fn command_action(command: &CommandSpec) -> Option<CommandAction> {
         "Tool 7 District" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityDistrict)),
         "Tool 8 Building Shell" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityBuilding)),
         "Tool 9 Facade Stamp" => Some(CommandAction::SetBuildTool(ToolbeltTool::CityFacade)),
+        "Invention Workshop" => Some(CommandAction::SetBuildTool(ToolbeltTool::Invent)),
         "Tool 0 Animation Pick" => Some(CommandAction::SetBuildTool(ToolbeltTool::AnimationPick)),
         "Builder Aktion rueckgaengig" => Some(CommandAction::BuilderUndo),
         "Builder Aktion wiederholen" => Some(CommandAction::BuilderRedo),

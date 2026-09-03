@@ -15,6 +15,7 @@ mod director;
 mod editor;
 mod hud;
 mod icons;
+mod inventions;
 mod menu;
 mod mesher;
 mod mode;
@@ -133,6 +134,7 @@ fn main() {
         .add_plugins(neurocore::NeuroCorePlugin)
         .add_plugins(qa::QaPlugin)
         .add_plugins(toolbelt::ToolbeltPlugin)
+        .add_plugins(inventions::InventionPlugin)
         .add_plugins(commands::CommandDeckPlugin)
         .add_plugins(sculpt::SculptPlugin)
         .add_systems(Startup, print_controls)
@@ -207,6 +209,7 @@ fn print_controls() {
     info!("  F8           : arm or holster weapons explicitly");
     info!("  Tab          : show/hide Build Studio picker");
     info!("  Q / E        : cycle Build Studio tools while building");
+    info!("  Invent tool  : place working machines (generator, turret, portal, rail, hover pad)");
     info!("  F1 / Ctrl+P  : command deck / searchable controls");
     info!("  H            : enter nearby shuttle cockpit (or LMB)");
     info!("  Inventar     : Shuttle KI-Gefecht optional (Drohnen aus bis du es einschaltest)");

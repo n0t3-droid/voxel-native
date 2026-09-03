@@ -37,10 +37,12 @@ pub enum ToolbeltTool {
     CityBuilding,
     CityFacade,
     AnimationPick,
+    /// Place working voxel inventions: generators, turrets, portals, rails, pads.
+    Invent,
 }
 
 impl ToolbeltTool {
-    pub const ALL: [ToolbeltTool; 11] = [
+    pub const ALL: [ToolbeltTool; 12] = [
         ToolbeltTool::Navigate,
         ToolbeltTool::DrawRect,
         ToolbeltTool::Sculpt,
@@ -51,6 +53,7 @@ impl ToolbeltTool {
         ToolbeltTool::CityDistrict,
         ToolbeltTool::CityBuilding,
         ToolbeltTool::CityFacade,
+        ToolbeltTool::Invent,
         ToolbeltTool::AnimationPick,
     ];
 
@@ -66,6 +69,7 @@ impl ToolbeltTool {
             ToolbeltTool::CityDistrict => "Bot City Area",
             ToolbeltTool::CityBuilding => "Building Shell",
             ToolbeltTool::CityFacade => "Facade Stamp",
+            ToolbeltTool::Invent => "Invention Workshop",
             ToolbeltTool::AnimationPick => "Animation Picker",
         }
     }
@@ -82,6 +86,7 @@ impl ToolbeltTool {
             ToolbeltTool::CityDistrict => "AREA",
             ToolbeltTool::CityBuilding => "SHELL",
             ToolbeltTool::CityFacade => "STAMP",
+            ToolbeltTool::Invent => "INVENT",
             ToolbeltTool::AnimationPick => "ANIM",
         }
     }
@@ -98,6 +103,7 @@ impl ToolbeltTool {
             ToolbeltTool::CityDistrict => Icon::District,
             ToolbeltTool::CityBuilding => Icon::City,
             ToolbeltTool::CityFacade => Icon::Open,
+            ToolbeltTool::Invent => Icon::LightBulb,
             ToolbeltTool::AnimationPick => Icon::Animation,
         }
     }
@@ -114,6 +120,9 @@ impl ToolbeltTool {
             ToolbeltTool::CityDistrict => "LMB drag/release marks the exact bot city footprint. Bots stay parked until an area or explicit task is placed, then plan roads and buildings inside that space.",
             ToolbeltTool::CityBuilding => "LMB drag/release sets two corners for a solid building shell; use Room and Sketch cuts for interiors, doors, and windows.",
             ToolbeltTool::CityFacade => "LMB stamps the active facade onto the targeted wall.",
+            ToolbeltTool::Invent => {
+                "LMB places a working invention (generator, turret, portal, rail, hover pad). RMB removes. [ ] cycles, R rotates, wheel picks the machine."
+            }
             ToolbeltTool::AnimationPick => "LMB/RMB pick voxels for animation authoring.",
         }
     }
@@ -366,6 +375,40 @@ impl ToolbeltTool {
                 None,
                 None,
             ],
+            ToolbeltTool::Invent => [
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "",
+                    "Place",
+                    Icon::LightBulb,
+                    ActionTone::Tool,
+                    "Stamp the selected invention at the targeted face.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Right,
+                    "",
+                    "Remove",
+                    Icon::Delete,
+                    ActionTone::Danger,
+                    "Remove the invention under the crosshair and restore the voxels.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Wheel,
+                    "",
+                    "Kind",
+                    Icon::Wand,
+                    ActionTone::Info,
+                    "Cycle generator, turret, portal, rail, and hover pad.",
+                )),
+                Some(ToolActionHint::new(
+                    MouseGlyph::Left,
+                    "R",
+                    "Rotate",
+                    Icon::RotateY90,
+                    ActionTone::Warning,
+                    "Press R to rotate the blueprint 90 degrees.",
+                )),
+            ],
             ToolbeltTool::AnimationPick => [
                 Some(ToolActionHint::new(
                     MouseGlyph::Left,
@@ -399,6 +442,7 @@ impl ToolbeltTool {
             | ToolbeltTool::CityDistrict
             | ToolbeltTool::CityBuilding
             | ToolbeltTool::CityFacade => "CITY",
+            ToolbeltTool::Invent => "INVENT",
             ToolbeltTool::AnimationPick => "ANIM",
         }
     }
@@ -415,6 +459,7 @@ impl ToolbeltTool {
             | ToolbeltTool::CityDistrict
             | ToolbeltTool::CityBuilding
             | ToolbeltTool::CityFacade => egui::Color32::from_rgb(80, 235, 225),
+            ToolbeltTool::Invent => egui::Color32::from_rgb(40, 230, 255),
             ToolbeltTool::AnimationPick => egui::Color32::from_rgb(255, 105, 255),
         }
     }
@@ -460,6 +505,7 @@ impl ToolbeltTool {
             ToolbeltTool::CityDistrict => "7",
             ToolbeltTool::CityBuilding => "8",
             ToolbeltTool::CityFacade => "9",
+            ToolbeltTool::Invent => "I",
             ToolbeltTool::AnimationPick => "0",
             ToolbeltTool::Navigate => "-",
         }
@@ -529,6 +575,8 @@ impl ToolbeltState {
         self.tool = tool;
         self.active_workflow = if tool == ToolbeltTool::DrawRect {
             Some(BuildWorkflowPreset::Sketch)
+        } else if tool == ToolbeltTool::Invent {
+            Some(BuildWorkflowPreset::Inventions)
         } else {
             None
         };
@@ -925,6 +973,7 @@ enum BuildWorkflowPreset {
     CityShell,
     Skyline,
     Spacecraft,
+    Inventions,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -968,7 +1017,7 @@ impl ToolActionHint {
 }
 
 impl BuildWorkflowPreset {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Sketch,
         Self::Room,
         Self::PushPull,
@@ -979,8 +1028,9 @@ impl BuildWorkflowPreset {
         Self::CityShell,
         Self::Skyline,
         Self::Spacecraft,
+        Self::Inventions,
     ];
-    const QUICK: [Self; 7] = [
+    const QUICK: [Self; 8] = [
         Self::Sketch,
         Self::Room,
         Self::PushPull,
@@ -988,6 +1038,7 @@ impl BuildWorkflowPreset {
         Self::BotArea,
         Self::CityShell,
         Self::Skyline,
+        Self::Inventions,
     ];
 
     fn label(self) -> &'static str {
@@ -1002,6 +1053,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => "CITY",
             Self::Skyline => "TOWER",
             Self::Spacecraft => "SHIP",
+            Self::Inventions => "INVENT",
         }
     }
 
@@ -1017,6 +1069,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => Icon::City,
             Self::Skyline => Icon::Wand,
             Self::Spacecraft => Icon::Cube,
+            Self::Inventions => Icon::LightBulb,
         }
     }
 
@@ -1032,6 +1085,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => ToolbeltTool::CityBuilding,
             Self::Skyline => ToolbeltTool::SmartTower,
             Self::Spacecraft => ToolbeltTool::DrawRect,
+            Self::Inventions => ToolbeltTool::Invent,
         }
     }
 
@@ -1043,7 +1097,9 @@ impl BuildWorkflowPreset {
             Self::ModernHouse => Some(IVec3::new(8, 1, 1)),
             Self::Landscape => Some(IVec3::new(8, 1, 8)),
             Self::Spacecraft => Some(IVec3::new(6, 1, 1)),
-            Self::Roads | Self::BotArea | Self::CityShell | Self::Skyline => None,
+            Self::Roads | Self::BotArea | Self::CityShell | Self::Skyline | Self::Inventions => {
+                None
+            }
         }
     }
 
@@ -1059,6 +1115,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => Some(BlockType::Limestone),
             Self::Skyline => Some(BlockType::CockpitGlass),
             Self::Spacecraft => Some(BlockType::ShipHullAlloy),
+            Self::Inventions => Some(BlockType::EngineCore),
         }
     }
 
@@ -1074,6 +1131,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => "City workflow: LMB drag/release a building shell footprint; roads and frontage stay component-aware.".into(),
             Self::Skyline => "Tower workflow: two clicks create a varied skyscraper shell with floors, crown, and undo.".into(),
             Self::Spacecraft => "Spacecraft workflow: alloy material and long hull brush for shuttles, fins, and cockpit follow-up.".into(),
+            Self::Inventions => "Invention workshop: LMB places a working machine, RMB removes it, [ ] cycles generator/turret/portal/rail/hover, R rotates.".into(),
         }
     }
 
@@ -1101,6 +1159,9 @@ impl BuildWorkflowPreset {
             Self::Spacecraft => {
                 "Alloy material and hull brush for shuttle bodies and sci-fi details."
             }
+            Self::Inventions => {
+                "One click switches to Invention Workshop: place generators, turrets, portals, rails, and hover pads that actually run."
+            }
         }
     }
 
@@ -1116,6 +1177,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => egui::Color32::from_rgb(130, 255, 125),
             Self::Skyline => egui::Color32::from_rgb(255, 184, 70),
             Self::Spacecraft => egui::Color32::from_rgb(150, 205, 230),
+            Self::Inventions => egui::Color32::from_rgb(40, 230, 255),
         }
     }
 }
@@ -2022,6 +2084,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invention_workshop_action_cards_explain_place_remove_cycle() {
+        let actions: Vec<ToolActionHint> = ToolbeltTool::Invent
+            .action_hints(false)
+            .into_iter()
+            .flatten()
+            .collect();
+
+        assert!(actions.iter().any(|a| a.label == "Place"));
+        assert!(actions
+            .iter()
+            .any(|a| a.label == "Remove" && a.tone == ActionTone::Danger));
+        assert!(actions
+            .iter()
+            .any(|a| a.glyph == MouseGlyph::Wheel && a.label == "Kind"));
+        assert!(ToolbeltTool::Invent.hint().contains("working invention"));
+        assert_eq!(ToolbeltTool::Invent.category(), "INVENT");
+    }
+
+    #[test]
     fn default_toolbelt_enters_sketch_draw_first() {
         let toolbelt = ToolbeltState::default();
 
@@ -2247,6 +2328,10 @@ mod tests {
             BuildWorkflowPreset::Skyline.tool(),
             ToolbeltTool::SmartTower
         );
+        assert_eq!(BuildWorkflowPreset::Inventions.tool(), ToolbeltTool::Invent);
+        assert!(BuildWorkflowPreset::Inventions
+            .status()
+            .contains("working machine"));
     }
 
     #[test]
@@ -2261,6 +2346,7 @@ mod tests {
                 BuildWorkflowPreset::BotArea,
                 BuildWorkflowPreset::CityShell,
                 BuildWorkflowPreset::Skyline,
+                BuildWorkflowPreset::Inventions,
             ]
         );
     }

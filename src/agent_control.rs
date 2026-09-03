@@ -1234,6 +1234,9 @@ fn parse_toolbelt_tool(name: &str) -> Option<ToolbeltTool> {
         "ZONE" | "DISTRICT" | "CITYDISTRICT" => Some(ToolbeltTool::CityDistrict),
         "SHELL" | "BUILDING" | "CITYBUILDING" => Some(ToolbeltTool::CityBuilding),
         "STAMP" | "FACADE" | "CITYFACADE" => Some(ToolbeltTool::CityFacade),
+        "INVENT" | "INVENTION" | "INVENTIONS" | "WORKSHOP" | "GENERATOR" | "TURRET" | "PORTAL" => {
+            Some(ToolbeltTool::Invent)
+        }
         "ANIM" | "ANIMATION" | "ANIMATIONPICK" => Some(ToolbeltTool::AnimationPick),
         _ => None,
     }
