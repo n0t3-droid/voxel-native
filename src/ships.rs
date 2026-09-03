@@ -2157,25 +2157,29 @@ fn update_hero_flyby(
         if pilot.active_ship == Some(entity) {
             continue;
         }
-        fly.t = (fly.t + dt * 0.055).rem_euclid(1.0);
+        // Slow enough that a 40s streaming wait still finds the ship in
+        // the postcard look (yaw -0.62 → +X/-Z), not already behind the
+        // camera. First ~10s from spawn also catch it.
+        fly.t = (fly.t + dt * 0.028).rem_euclid(1.0);
         let u = fly.t;
-        // Close banking pass across the spawn postcard. Starts already
-        // in frame (t≈0.22 at spawn) so the first 10 seconds see the
-        // white/orange shuttle instead of an empty sky.
-        let x = fly.origin.x - 22.0 + u * 96.0;
-        let z = fly.origin.z - 38.0 - (u * std::f32::consts::PI).sin() * 16.0;
-        let y = fly.origin.y + 12.0 + (u * std::f32::consts::TAU).sin() * 5.0;
-        let vx: f32 = 96.0;
-        let vz: f32 = -std::f32::consts::PI * 16.0 * (u * std::f32::consts::PI).cos();
+        // Postcard camera looks +X/-Z (yaw -0.62) and has typically
+        // flown to ~(90, 110, -44) by the time chunks finish streaming.
+        // Keep the orbiter AHEAD of that frustum, large enough to read
+        // as the painting's white/orange shuttle, with a bank and plume.
+        let x = fly.origin.x + 48.0 + u * 120.0;
+        let z = fly.origin.z - 58.0 - (u * std::f32::consts::PI).sin() * 22.0;
+        let y = fly.origin.y + 20.0 + (u * std::f32::consts::TAU).sin() * 6.0;
+        let vx: f32 = 120.0;
+        let vz: f32 = -std::f32::consts::PI * 22.0 * (u * std::f32::consts::PI).cos();
         let yaw = f32::atan2(vx, -vz);
-        let roll = (u * std::f32::consts::TAU).sin() * 0.48;
+        let roll = (u * std::f32::consts::TAU).sin() * 0.55;
         tf.translation = Vec3::new(x, y, z);
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(2.35);
+        tf.scale = Vec3::splat(3.6);
         motion.yaw = yaw;
-        motion.pitch = -0.10;
+        motion.pitch = -0.12;
         motion.roll = roll;
-        motion.speed = 96.0;
+        motion.speed = 110.0;
     }
 }
 
@@ -2645,7 +2649,7 @@ fn spawn_saved_ships_once(
             None,
         );
         commands.entity(fly).insert(HeroFlyby {
-            t: 0.22,
+            t: 0.18,
             origin: player_anchor,
         });
     }
