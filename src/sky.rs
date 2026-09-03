@@ -62,6 +62,14 @@ fn star_night_factor(day: f32) -> f32 {
     (1.0 - day).powf(4.0)
 }
 
+/// How much of the warm horizon carrier is allowed to show.
+///
+/// Noon and true night must sit near zero so the orange texture cannot
+/// paint a 24h red stripe; hour 17 is the golden band.
+fn horizon_band_visibility(sunset: f32, night: f32) -> f32 {
+    (sunset.max(0.0).powf(1.35) * (1.0 - night) * 0.95).clamp(0.0, 1.0)
+}
+
 /// Fixed bearing of the great cratered moon: high and to the left.
 ///
 /// The sun sweeps the x/y plane with a constant +z lean, so parking the
@@ -441,12 +449,15 @@ fn setup_sky(
             .expect("subdivision 3 is within ico limits"),
     );
     let horizon_mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
+        // Start invisible; `follow_and_animate_sky` raises this only
+        // while sunset_factor is high so the orange carrier cannot
+        // paint a 24h red stripe at noon or night.
+        base_color: Color::srgba(0.0, 0.0, 0.0, 0.0),
         base_color_texture: Some(horizon_image.clone()),
         emissive_texture: Some(horizon_image),
         // Blend (not Add): a coloured rim over ClearColor, not extra
         // HDR energy that bloom turns into a milky white wall.
-        emissive: LinearRgba::rgb(0.18, 0.10, 0.08),
+        emissive: LinearRgba::BLACK,
         unlit: true,
         alpha_mode: AlphaMode::Blend,
         cull_mode: Some(bevy::render::render_resource::Face::Front),
@@ -815,17 +826,21 @@ fn follow_and_animate_sky(
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
-        // Horizon band: a thin golden rim at 17:00, a cool whisper at
-        // noon. Additive + bloom made a fat dusk emissive bleach the
-        // lower third; keep noon dim and let sunset_factor (now peaked
-        // at hour 17) drive the warmth.
+        // Horizon band: a thin golden rim at 17:00, invisible at noon
+        // and night. Unlit + WHITE base_color used to draw the orange
+        // carrier 24h a day; vis and the dusk emissive both die with
+        // `night` so hour 21.5 cannot keep a red stripe.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
             let noon = Vec3::new(0.004, 0.010, 0.018);
             // Under ACES clip so 17:00 stays golden, not a grey wall.
             let dusk = Vec3::new(0.85, 0.34, 0.07);
             let deep = Vec3::new(0.020, 0.018, 0.055);
-            let e = noon * day * (1.0 - sunset) + deep * night + dusk * sunset;
+            let vis = horizon_band_visibility(sunset, night);
+            let dusk_gate = sunset * (1.0 - night).powf(1.4);
+            let e = noon * day * (1.0 - sunset) * 0.15 + deep * night * vis.max(0.02) * 0.25
+                + dusk * dusk_gate;
             let e = e * intel.profile.sky_saturation.max(0.7);
+            mat.base_color = Color::srgba(vis, vis * 0.50, vis * 0.18, vis);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
@@ -1273,6 +1288,29 @@ mod tests {
     fn gradient_row(image: &Image, y: u32) -> u8 {
         let width = image.texture_descriptor.size.width;
         image.data[((y * width) * 4) as usize]
+    }
+
+    #[test]
+    fn horizon_carrier_is_golden_at_17_and_gone_at_noon_and_night() {
+        let noon = sun_direction(11.0);
+        let dusk = sun_direction(17.0);
+        let night_dir = sun_direction(21.5);
+        let noon_vis = horizon_band_visibility(sunset_factor(noon), (1.0 - day_factor(noon)).powf(2.0));
+        let dusk_vis = horizon_band_visibility(sunset_factor(dusk), (1.0 - day_factor(dusk)).powf(2.0));
+        let night_vis =
+            horizon_band_visibility(sunset_factor(night_dir), (1.0 - day_factor(night_dir)).powf(2.0));
+        assert!(
+            noon_vis < 0.08,
+            "hour 11 horizon carrier still reads ({noon_vis:.3})"
+        );
+        assert!(
+            dusk_vis > 0.40,
+            "hour 17 horizon carrier is too shy ({dusk_vis:.3})"
+        );
+        assert!(
+            night_vis < 0.08,
+            "hour 21.5 still inherits a warm rim ({night_vis:.3})"
+        );
     }
 
     #[test]
