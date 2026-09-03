@@ -415,21 +415,15 @@ fn update_sun(
     // without a density wall on walkable ground. Night fog is a lifted
     // fill, never a black cut-out.
     if let Ok(mut fog_settings) = fog.get_single_mut() {
-        let horizon_day = Color::srgb(0.62, 0.76, 0.94).to_linear();
-        let horizon_dusk = Color::srgb(1.0, 0.50, 0.24).to_linear();
-        let horizon_night = Color::srgb(0.16, 0.14, 0.30).to_linear();
+        let horizon_day = Color::srgb(0.58, 0.72, 0.90).to_linear();
+        let horizon_dusk = Color::srgb(1.0, 0.42, 0.12).to_linear();
+        let horizon_night = Color::srgb(0.14, 0.10, 0.24).to_linear();
         let horizon = horizon_night
-            .mix(&horizon_day, day)
-            .mix(&horizon_dusk, sunset * 0.85);
-        // Fog colour is a *brighter* cousin of the sky so nearby
-        // terrain isn't dyed with the zenith. Inscatter is separate.
-        // Alpha is the *maximum* mix amount — 1.0 fully replaces distant
-        // geometry with the fog colour (the milky-horizon bug).
-        let mut fog_fill = sky.mix(&horizon, 0.22).mix(&golden_fill, sunset * 0.28);
-        // Midday alpha stays low (no milky wall). Dusk gets a warm veil
-        // without replacing distant mesas.
-        fog_fill.alpha = (0.14 + sunset * 0.12 + (1.0 - day) * 0.08 - day.powf(1.8) * 0.06)
-            .clamp(0.08, 0.30);
+            .mix(&horizon_day, day * (1.0 - sunset))
+            .mix(&horizon_dusk, sunset);
+        let mut fog_fill = sky.mix(&horizon, 0.18).mix(&golden_fill, sunset * 0.40);
+        fog_fill.alpha = (0.12 + sunset * 0.10 + (1.0 - day) * 0.06 - day.powf(1.8) * 0.04)
+            .clamp(0.07, 0.26);
         fog_settings.color = Color::LinearRgba(fog_fill);
         fog_settings.falloff = FogFalloff::ExponentialSquared {
             density: 0.00009
