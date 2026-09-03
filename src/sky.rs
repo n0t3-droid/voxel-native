@@ -38,7 +38,7 @@ use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::daynight::WorldIntelRuntime;
+use crate::daynight::{day_factor, sunset_factor, sun_direction, WorldIntelRuntime};
 use crate::settings::WorldSettings;
 
 /// Render layer used exclusively by the sky pass. The world camera stays
@@ -451,27 +451,32 @@ fn setup_sky(
     // ----- Ringed gas-giant planet ------------------------------------
     // Parked in a fixed sky direction; doesn't track the sun. Serves as
     // a dramatic backdrop feature like in reference image 2.
+    let planet_res = nebula_res.min(512);
+    let planet_image = images.add(build_planet_image(planet_res, settings.seed as u64));
     let planet_mesh = meshes.add(
-        Sphere::new(78.0)
+        Sphere::new(88.0)
             .mesh()
             .ico(4)
             .expect("subdivision 4 is within ico limits"),
     );
     let planet_mat = materials.add(StandardMaterial {
-        // Vibrant magenta–amber gas giant (matches the purple/teal ringed
-        // giant in the reference art). Very high emissive so it glows
-        // like a light source in its own right, not just reflects the sun.
-        base_color: Color::srgb(0.95, 0.55, 1.0),
-        emissive: LinearRgba::rgb(6.0, 2.2, 8.5),
+        // Banded gas giant: cream / tan / lavender, shaded rather than
+        // a magenta emissive gizmo. The texture already carries a
+        // terminator + limb darkening.
+        base_color: Color::srgb(0.92, 0.86, 0.78),
+        base_color_texture: Some(planet_image.clone()),
+        emissive_texture: Some(planet_image),
+        emissive: LinearRgba::rgb(1.35, 1.10, 0.92),
         unlit: true,
         ..default()
     });
-    // Ring: wide rainbow annulus with strong saturation and per-band
-    // colour variation (painted via vertex colours in build_ring_mesh).
-    let ring_mesh = meshes.add(build_ring_mesh(160.0, 270.0, 160));
+    // Dusty Saturn-like rings with a Cassini-style gap. Vertex colours
+    // carry the band albedo; keep emissive modest so they read as ice
+    // and dust, not a rainbow debug disc.
+    let ring_mesh = meshes.add(build_ring_mesh(132.0, 232.0, 192));
     let ring_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.9, 0.8, 1.0),
-        emissive: LinearRgba::rgb(5.5, 4.5, 6.5),
+        base_color: Color::srgba(0.92, 0.84, 0.70, 1.0),
+        emissive: LinearRgba::rgb(1.15, 0.95, 0.72),
         unlit: true,
         cull_mode: None,
         alpha_mode: AlphaMode::Blend,
@@ -673,10 +678,9 @@ fn follow_and_animate_sky(
     sky_tf.translation = trans;
     sky_tf.rotation = rot;
 
-    // Same celestial-angle math as daynight.rs::update_sun. Keep these
-    // formulas in sync; they share the same `time_of_day` resource.
-    let t = (settings.time_of_day / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-    let sun_dir = Vec3::new(t.cos(), t.sin(), 0.3).normalize();
+    // Same cinematic solar geometry as daynight.rs::update_sun.
+    let sun_dir = sun_direction(settings.time_of_day);
+    let t = (settings.time_of_day / 24.0) * std::f32::consts::TAU;
 
     if let Ok(mut sun_tf) = sun_q.get_single_mut() {
         sun_tf.translation = trans + sun_dir * SKY_DISTANCE;
@@ -715,9 +719,9 @@ fn follow_and_animate_sky(
     }
 
     // ----- Animate emissives by day factor -----------------------------
-    let day = sun_dir.y.max(0.0); // 1 at noon, 0 at horizon, 0 at night
-    let night = (1.0 - day).powf(2.0); // sharper fade-in for stars
-    let sunset = (1.0 - sun_dir.y.abs()).powf(3.0); // peak at horizon
+    let day = day_factor(sun_dir);
+    let night = (1.0 - day).powf(2.0);
+    let sunset = sunset_factor(sun_dir);
 
     if let Some(sky_mats) = sky_mats {
         // Sun: warm white at noon → fiery red-orange at sunset.
@@ -742,40 +746,36 @@ fn follow_and_animate_sky(
             mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
         }
 
-        // Ringed planet & rings — brightly emissive at all times so the
-        // magenta disc and rainbow rings stay breathtaking at noon too,
-        // just like in the reference art. Slight extra glow at
-        // night/sunset for the cinematic payoff.
-        let planet_scale = 1.8 + 0.8 * night + sunset * 0.5;
+        // Ringed planet & rings — a shaded gas giant, not a neon gizmo.
+        // Slight extra glow at night/sunset so bands stay readable
+        // against the dark sky without blowing out at noon.
+        let planet_scale = 0.72 + 0.38 * night + sunset * 0.18;
         if let Some(mat) = materials.get_mut(&sky_mats.planet) {
-            let base = Vec3::new(8.0, 3.0, 11.0);
+            let base = Vec3::new(1.55, 1.22, 0.98);
             let s = base * planet_scale;
             mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
         }
         if let Some(mat) = materials.get_mut(&sky_mats.ring) {
-            let base = Vec3::new(7.0, 6.0, 8.5);
+            let base = Vec3::new(1.35, 1.12, 0.82);
             let s = base * planet_scale;
             mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
         }
         if let Some(mat) = materials.get_mut(&sky_mats.planet_b) {
-            let base = Vec3::new(3.5, 7.5, 10.0);
+            let base = Vec3::new(0.85, 1.35, 1.70);
             let s = base * planet_scale;
             mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
         }
 
-        // Nebula — vivid magenta/cyan/orange at all times (additive
-        // blend paints clouds on top of the sky gradient). Day values
-        // are pushed HARD so the cosmic backdrop reads clearly even
-        // against the bright blue noon sky, just like in the reference
-        // art where planets and nebulae are visible in broad daylight.
+        // Nebula — cyan vs magenta filaments over a deep-violet zenith.
+        // Day values stay structured (not a pale wash); dusk keeps the
+        // horizon warm without flattening the whole dome to red.
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
-            let base_day = Vec3::new(9.0, 5.0, 13.0); // rich purple/magenta at noon
-            let base_night = Vec3::new(8.0, 5.5, 10.0); // full nebula glow at night
-                                                        // Restrained at dusk on purpose. A hot warm add on top of an
-                                                        // already-orange sunset sky flattened the whole dome into one
-                                                        // red wash and buried the cloud structure with it.
-            let base_sunset = Vec3::new(5.0, 2.4, 2.2);
-            let e = (base_day * day + base_night * night + base_sunset * sunset * 0.9)
+            let base_day = Vec3::new(2.6, 1.35, 4.4);
+            let base_night = Vec3::new(5.4, 3.2, 7.6);
+            let base_sunset = Vec3::new(3.2, 1.4, 1.6);
+            let e = (base_day * (0.35 + 0.65 * day)
+                + base_night * night
+                + base_sunset * sunset * 0.55)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
@@ -942,60 +942,85 @@ fn build_star_mesh(count: usize, seed: u64, radius: f32) -> Mesh {
 /// Build a flat annulus (ring) mesh for the gas-giant. Two-sided via
 /// material `cull_mode = None`. `inner`/`outer` are world radii, `segs`
 /// is the number of radial slices.
+///
+/// Colours follow dusty ice-and-dust rings (Saturn A/B/C, cream / tan /
+/// grey) with a Cassini-style gap. Radial bands, not a hue sweep — the
+/// old HSV rainbow read as a debug gizmo.
 fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(segs * 2);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(segs * 2);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(segs * 2);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(segs * 2);
-    let mut indices: Vec<u32> = Vec::with_capacity(segs * 6);
+    // Concentric bands so we can punch a real gap rather than dim a
+    // rainbow. Saturn's Cassini Division sits at ~1.95–2.03 Rs
+    // (NASA Saturn fact sheet); with inner≈1.52 Rs and outer≈2.6 Rs
+    // that maps to roughly the middle of this span.
+    const BANDS: usize = 16;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity((BANDS + 1) * segs);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity((BANDS + 1) * segs);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity((BANDS + 1) * segs);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity((BANDS + 1) * segs);
+    let mut indices: Vec<u32> = Vec::with_capacity(BANDS * segs * 6);
 
-    for i in 0..segs {
+    // Dusty cream / tan / grey albedos. Not saturated primaries.
+    // Approximate Cassini ISS natural-colour rings (ice + dust).
+    let band_albedo = |t: f32| -> [f32; 4] {
+        // Cassini Division: 0.48..0.58 of the span.
+        if t > 0.48 && t < 0.58 {
+            return [0.04, 0.035, 0.03, 0.0];
+        }
+        // C-like inner: dim grey-brown.
+        if t < 0.16 {
+            let k = t / 0.16;
+            return [
+                0.42 + 0.10 * k,
+                0.36 + 0.10 * k,
+                0.30 + 0.08 * k,
+                0.28 + 0.22 * k,
+            ];
+        }
+        // B ring: brightest cream/tan.
+        if t < 0.48 {
+            let k = (t - 0.16) / 0.32;
+            let pulse = (k * 11.0).sin().abs() * 0.07;
+            return [
+                0.78 + pulse,
+                0.68 + pulse * 0.7,
+                0.52 + pulse * 0.4,
+                0.82 - k * 0.08,
+            ];
+        }
+        // A ring: dustier, slightly greyer, with Encke-like dips.
+        let k = ((t - 0.58) / 0.42).clamp(0.0, 1.0);
+        let dip = if (k - 0.55).abs() < 0.04 { 0.35 } else { 1.0 };
+        [
+            (0.70 - k * 0.12) * dip,
+            (0.62 - k * 0.10) * dip,
+            (0.50 - k * 0.08) * dip,
+            (0.70 - k * 0.28) * dip,
+        ]
+    };
+
+    for i in 0..=segs {
         let a = (i as f32 / segs as f32) * std::f32::consts::TAU;
         let (sa, ca) = a.sin_cos();
-        positions.push([ca * inner, 0.0, sa * inner]);
-        positions.push([ca * outer, 0.0, sa * outer]);
-        normals.push([0.0, 1.0, 0.0]);
-        normals.push([0.0, 1.0, 0.0]);
-        let u = i as f32 / segs as f32;
-        uvs.push([u, 0.0]);
-        uvs.push([u, 1.0]);
-        // Rainbow ring: hue sweeps across the annulus radius so the
-        // disc reads as a prismatic Saturn-meets-nebula band. Density
-        // bands modulate alpha to give the classic Cassini-gap feel.
-        // Colour = HSV-ish rotation through magenta → teal → amber.
-        let hue = (u * 3.0).fract();
-        let (r, g, b) = if hue < 0.333 {
-            let k = hue / 0.333;
-            (1.0, 0.45 + 0.5 * k, 0.95 - 0.7 * k)
-        } else if hue < 0.666 {
-            let k = (hue - 0.333) / 0.333;
-            (1.0 - 0.7 * k, 0.95 - 0.2 * k, 0.25 + 0.65 * k)
-        } else {
-            let k = (hue - 0.666) / 0.334;
-            (0.3 + 0.7 * k, 0.75 - 0.25 * k, 0.9 - 0.6 * k)
-        };
-        // Alternating density bands (bright/dim/dark gap).
-        let band = ((i / 4) % 4) as f32;
-        let density = match band as i32 {
-            0 => 1.0,
-            1 => 0.85,
-            2 => 0.45,
-            _ => 0.75,
-        };
-        colors.push([r * density, g * density, b * density, 0.95 * density]);
-        colors.push([
-            r * density * 0.85,
-            g * density * 0.85,
-            b * density * 0.85,
-            0.55 * density,
-        ]);
+        for b in 0..=BANDS {
+            let t = b as f32 / BANDS as f32;
+            let r = inner + (outer - inner) * t;
+            positions.push([ca * r, 0.0, sa * r]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([i as f32 / segs as f32, t]);
+            colors.push(band_albedo(t));
+        }
     }
+    let stride = (BANDS + 1) as u32;
     for i in 0..segs {
-        let a = (i * 2) as u32;
-        let b = (i * 2 + 1) as u32;
-        let c = (((i + 1) % segs) * 2) as u32;
-        let d = (((i + 1) % segs) * 2 + 1) as u32;
-        indices.extend_from_slice(&[a, b, d, a, d, c]);
+        let a = (i as u32) * stride;
+        let c = a + stride;
+        for b in 0..BANDS as u32 {
+            // Skip the Cassini gap entirely so there's a real hole.
+            let t = (b as f32 + 0.5) / BANDS as f32;
+            if t > 0.48 && t < 0.58 {
+                continue;
+            }
+            indices.extend_from_slice(&[a + b, a + b + 1, c + b + 1, a + b, c + b + 1, c + b]);
+        }
     }
 
     let mut mesh = Mesh::new(
@@ -1048,6 +1073,84 @@ fn build_moon_image(size: u32, seed: u64) -> Image {
             data.push(b);
             data.push(b.saturating_sub(tint / 2));
             data.push(b.saturating_sub(tint));
+            data.push(255);
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
+}
+
+/// Equirectangular banded gas-giant body. Cream / tan / lavender belts
+/// with a baked terminator and cosine limb darkening so the unlit sky
+/// pass still reads as a shaded sphere, not a flat magenta disc.
+fn build_planet_image(size: u32, seed: u64) -> Image {
+    let belts = Perlin::new(seed as u32 ^ 0x47_41_53_31);
+    let swirl = Perlin::new(seed as u32 ^ 0x53_57_52_4C);
+    let storm = Perlin::new(seed as u32 ^ 0x53_54_4F_52);
+
+    let w = size;
+    let h = size / 2;
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    // Subsolar point facing the typical viewer-right sun in the key art.
+    let light = Vec3::new(0.72, 0.18, 0.48).normalize();
+    for y in 0..h {
+        let v = (y as f64 / h as f64) * std::f64::consts::PI - std::f64::consts::FRAC_PI_2;
+        let (sv, cv) = v.sin_cos();
+        let lat = (v / std::f64::consts::FRAC_PI_2) as f32;
+        for x in 0..w {
+            let u = (x as f64 / w as f64) * std::f64::consts::TAU;
+            let (su, cu) = u.sin_cos();
+            let px = cv * cu;
+            let py = sv;
+            let pz = cv * su;
+            let n = Vec3::new(px as f32, py as f32, pz as f32);
+
+            let warp = swirl.get([px * 2.2, py * 6.0, pz * 2.2]) * 0.08;
+            let band_n = belts.get([0.0, py * 7.5 + warp, 0.0]);
+            let band = (lat * 6.5 + warp as f32).sin() * 0.5 + 0.5 + band_n as f32 * 0.18;
+            let band = band.clamp(0.0, 1.0);
+            let cream = Vec3::new(0.90, 0.78, 0.58);
+            let tan = Vec3::new(0.72, 0.52, 0.34);
+            let lavender = Vec3::new(0.62, 0.50, 0.70);
+            let col = if band < 0.45 {
+                cream.lerp(tan, band / 0.45)
+            } else if band < 0.75 {
+                tan.lerp(lavender, (band - 0.45) / 0.30)
+            } else {
+                lavender.lerp(cream, (band - 0.75) / 0.25)
+            };
+            let oval = storm.get([px * 4.0, py * 4.0 - 1.4, pz * 4.0]);
+            let col = if py < -0.15 && oval > 0.55 {
+                col.lerp(Vec3::new(0.95, 0.82, 0.70), ((oval - 0.55) / 0.45) as f32)
+            } else {
+                col
+            };
+
+            let ndl = n.dot(light).max(0.0);
+            let limb = 0.28 + 0.72 * ndl.powf(0.72);
+            let night = 0.16 + 0.20 * (1.0 - ndl);
+            let shade = if ndl > 0.0 { limb } else { night };
+            let col = col * shade;
+
+            data.push((col.x.clamp(0.0, 1.0) * 255.0) as u8);
+            data.push((col.y.clamp(0.0, 1.0) * 255.0) as u8);
+            data.push((col.z.clamp(0.0, 1.0) * 255.0) as u8);
             data.push(255);
         }
     }
@@ -1174,14 +1277,14 @@ mod tests {
 
     #[test]
     fn great_moon_keeps_clear_of_the_suns_arc() {
-        // The sun sweeps the x/y plane at z = 0.3 (see daynight.rs). If
-        // the great moon sat on that arc it would pass behind the sun
-        // and get washed out by the bloom for part of every day.
+        // The cinematic sun still sweeps a +z-leaning arc. If the great
+        // moon sat on that arc it would pass behind the sun and get
+        // washed out by the bloom for part of every day.
         let moon = GREAT_MOON_DIR.normalize();
         let mut closest = f32::MAX;
-        for step in 0..360 {
-            let t = (step as f32 / 360.0) * std::f32::consts::TAU;
-            let sun = Vec3::new(t.cos(), t.sin(), 0.3).normalize();
+        for step in 0..48 {
+            let hour = step as f32 * 0.5;
+            let sun = sun_direction(hour);
             closest = closest.min(moon.angle_between(sun));
         }
         assert!(
@@ -1190,33 +1293,86 @@ mod tests {
             closest.to_degrees()
         );
     }
+
+    #[test]
+    fn ring_mesh_is_dusty_with_a_cassini_gap() {
+        let mesh = build_ring_mesh(132.0, 232.0, 48);
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x4(cols)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("ring mesh is missing vertex colours");
+        };
+        let mut gap = 0usize;
+        let mut dusty = 0usize;
+        let mut rainbow = 0usize;
+        for c in cols {
+            let [r, g, b, a] = *c;
+            if a < 0.05 {
+                gap += 1;
+                continue;
+            }
+            let max = r.max(g).max(b);
+            let min = r.min(g).min(b);
+            if max > 0.85 && min < 0.25 {
+                rainbow += 1;
+            }
+            if r > 0.30 && g > 0.25 && b > 0.18 && (r - b).abs() < 0.45 {
+                dusty += 1;
+            }
+        }
+        assert!(gap > 10, "Cassini gap never punched (only {gap} empty verts)");
+        assert!(
+            dusty > rainbow * 3,
+            "rings still look like a rainbow gizmo (dusty={dusty} rainbow={rainbow})"
+        );
+    }
+
+    #[test]
+    fn gas_giant_has_banded_body_and_a_dark_limb() {
+        let image = build_planet_image(128, 4242);
+        let mut min = u8::MAX;
+        let mut max = u8::MIN;
+        for pixel in image.data.chunks_exact(4) {
+            let y = pixel[0] / 3 + pixel[1] / 2 + pixel[2] / 6;
+            min = min.min(y);
+            max = max.max(y);
+        }
+        assert!(
+            max - min > 50,
+            "planet body only spans {} levels; it would read as a flat disc",
+            max - min
+        );
+    }
 }
 
-/// Build a procedural nebula image — multi-octave 3D Perlin on a
-/// spherical projection, three colour channels sampled at different
-/// frequencies. Produces billowing magenta / cyan / orange clouds
-/// reminiscent of Hubble field backdrops. Deterministic by seed.
+/// Build a procedural nebula image — swirled multi-octave Perlin on a
+/// spherical projection. Magenta and cyan are kept in opposition (not
+/// mixed into mud), the zenith stays deep violet, and the horizon
+/// picks up a warm burn so dusk doesn't flatten the dome.
 fn build_nebula_image(size: u32, seed: u64) -> Image {
-    let n_r = Perlin::new(seed as u32 ^ 0x7777_7777);
-    let n_g = Perlin::new(seed as u32 ^ 0x3333_3333);
-    let n_b = Perlin::new(seed as u32 ^ 0xBBBB_BBBB);
+    let n_fil = Perlin::new(seed as u32 ^ 0x7777_7777);
+    let n_pick = Perlin::new(seed as u32 ^ 0x3333_3333);
     let n_mask = Perlin::new(seed as u32 ^ 0x1234_5678);
-    // Equirectangular mapping: x → longitude [0, 2π), y → latitude [-π/2, π/2].
+    let n_swirl = Perlin::new(seed as u32 ^ 0x51_57_52_4C);
     let w = size;
     let h = size / 2;
     let mut data = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         let v = (y as f64 / h as f64) * std::f64::consts::PI - std::f64::consts::FRAC_PI_2;
         let (sv, cv) = v.sin_cos();
+        let zenith = sv.max(0.0); // 1 at +Y
+        let horizon = 1.0 - sv.abs();
         for x in 0..w {
             let u = (x as f64 / w as f64) * std::f64::consts::TAU;
-            let (su, cu) = u.sin_cos();
-            // Unit-sphere sample direction.
+            // Swirl: rotate longitude by a latitude-dependent twist so
+            // the clouds read as a volume, not a painted sheet.
+            let twist = 0.85 * (v * 2.2).sin() + n_swirl.get([v * 1.3, 0.2]) * 0.55;
+            let u_s = u + twist;
+            let (su, cu) = u_s.sin_cos();
             let px = cv * cu;
             let py = sv;
             let pz = cv * su;
 
-            // FBM helper inlined for speed.
             let fbm = |n: &Perlin, f: f64, oct: u32| -> f64 {
                 let mut sum = 0.0;
                 let mut amp = 1.0;
@@ -1230,31 +1386,27 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
                 }
                 sum / norm.max(1e-6)
             };
-            let r = fbm(&n_r, 1.3, 5);
-            let g = fbm(&n_g, 1.7, 5);
-            let b = fbm(&n_b, 1.1, 5);
-            let mask = fbm(&n_mask, 0.6, 3);
-            // Soft mask so large regions of the sphere are near-black,
-            // and only a few filaments glow strongly — exactly like
-            // real nebulae.
-            let amp = (mask + 0.2).max(0.0).powf(1.6);
-            let rr = ((r * 0.5 + 0.5) * amp).clamp(0.0, 1.0);
-            let gg = ((g * 0.5 + 0.5) * amp * 0.85).clamp(0.0, 1.0);
-            let bb = ((b * 0.5 + 0.5) * amp * 1.05).clamp(0.0, 1.0);
+            let filament = (fbm(&n_fil, 1.4, 5) * 0.5 + 0.5).powf(1.35);
+            let picker = fbm(&n_pick, 0.7, 3);
+            let mask = (fbm(&n_mask, 0.55, 3) + 0.25).max(0.0).powf(1.7);
+            let amp = (filament * mask).clamp(0.0, 1.0);
 
-            // Colour palette skewed toward magenta / cyan / warm orange
-            // highlights. Mix the raw channels with fixed biases so the
-            // image looks painterly, not random.
-            let mag = (rr * 1.15 + bb * 0.35).min(1.0);
-            let cyn = (gg * 0.9 + bb * 1.1).min(1.0);
-            let wrm = (rr * 1.05 + gg * 0.7).min(1.0);
-            let r_out = (mag * 0.9 + wrm * 0.6).min(1.0);
-            let g_out = (cyn * 0.6 + wrm * 0.55).min(1.0);
-            let b_out = (mag * 0.5 + cyn * 1.0).min(1.0);
+            // Magenta vs cyan: pick a side, don't average them into purple mud.
+            let magenta = Vec3::new(1.00, 0.18, 0.82);
+            let cyan = Vec3::new(0.12, 0.85, 1.00);
+            let mix = ((picker + 0.15) * 1.6).clamp(0.0, 1.0) as f32;
+            let mut col = cyan.lerp(magenta, mix) * amp as f32;
 
-            data.push((r_out * 255.0) as u8);
-            data.push((g_out * 255.0) as u8);
-            data.push((b_out * 255.0) as u8);
+            // Deep-violet zenith fill so the dome never goes empty-black
+            // or pale-fog, plus a warm horizon burn for golden hour.
+            let violet = Vec3::new(0.16, 0.04, 0.38) * (0.25 + 0.75 * zenith as f32);
+            let warm = Vec3::new(0.95, 0.38, 0.12) * (horizon as f32).powf(1.8) * 0.55;
+            col = col + violet * (0.55 + 0.45 * (1.0 - amp as f32)) + warm;
+            col = col.min(Vec3::splat(1.0));
+
+            data.push((col.x * 255.0) as u8);
+            data.push((col.y * 255.0) as u8);
+            data.push((col.z * 255.0) as u8);
             data.push(255);
         }
     }
