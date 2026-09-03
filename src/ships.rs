@@ -2581,8 +2581,10 @@ fn resolved_world_entry_anchor(
         let bx = crate::chunk::floor_to_i32_safe(anchor.x);
         let bz = crate::chunk::floor_to_i32_safe(anchor.z);
         let surface = generator.surface_height_at(bx, bz);
-        if generator.biome_at(bx, bz).is_showcase_terrain() || anchor.y > surface as f32 + 90.0 {
-            if let Some(spawn) = generator.find_natural_spawn(0, 0, 4096) {
+        // Ships park where the player left them; only a genuinely
+        // stranded anchor (adrift far above any terrain) gets moved.
+        if anchor.y > surface as f32 + 160.0 || anchor.y < 1.0 {
+            if let Some(spawn) = generator.find_natural_spawn(bx, bz, 4096) {
                 anchor = Vec3::new(spawn.x as f32 + 0.5, spawn.y as f32, spawn.z as f32 + 0.5);
                 yaw = 0.0;
             }

@@ -57,19 +57,27 @@ impl BiomeArtProfile {
                 weather_fx_mul: 1.18,
                 streaming_bonus: -6,
             },
+            // Banded canyon country is the frontier's default ground, so
+            // its profile is what most of the world looks like: clear
+            // enough for the long mesa vistas, saturated enough that the
+            // violet and ochre strata stay vivid at distance.
             Biome::Mesa | Biome::Desert => Self {
-                fog_density_mul: 0.95,
-                ambient_mul: 0.96,
-                sky_saturation: 1.04,
-                bloom_mul: 1.02,
+                fog_density_mul: 0.92,
+                ambient_mul: 1.02,
+                sky_saturation: 1.22,
+                bloom_mul: 1.18,
                 weather_fx_mul: 0.35,
                 streaming_bonus: -2,
             },
+            // Even the green transitional country between the provinces
+            // is on the same planet under the same nebula. A flat 1.0
+            // baseline here would make every ridge crossing look like a
+            // different game.
             _ => Self {
                 fog_density_mul: 1.0,
                 ambient_mul: 1.0,
-                sky_saturation: 1.0,
-                bloom_mul: 1.0,
+                sky_saturation: 1.14,
+                bloom_mul: 1.10,
                 weather_fx_mul: 1.0,
                 streaming_bonus: 0,
             },
@@ -257,7 +265,10 @@ fn update_sun(
 
     // Day factor 0..1 where 1 = high noon, 0 = deep night.
     let day = sun_dir.y.max(0.0);
-    light.illuminance = 2_200.0 + day * 14_000.0;
+    // The falloff is deliberately shallow near the horizon. A linear ramp
+    // collapses golden hour into a couple of in-game minutes, and golden
+    // hour is exactly the light the frontier is meant to be seen in.
+    light.illuminance = 3_400.0 + day.powf(0.7) * 12_000.0;
     // Warm sun, cool moon — the cinematic directional tint that
     // gives grass its golden rim at dusk and a silvery wash at night.
     let warmth = ((sun_dir.y - 0.05).clamp(-0.3, 0.4) / 0.4).clamp(-1.0, 1.0);
@@ -273,15 +284,23 @@ fn update_sun(
     let base = if day > 0.0 { day_color } else { night_color };
     let amb_lin = base.mix(&sunset_color, sunset * 0.40);
     ambient.color = Color::LinearRgba(amb_lin);
-    // Much brighter ambient floor so night is still visible (was 100.0).
-    ambient.brightness = (380.0 + day * 550.0) * intel.profile.ambient_mul;
+    // The frontier glows in the dark, so the floor matters more than the
+    // ceiling: with the sun down, ambient is the *only* thing separating
+    // a banded cliff from a black cut-out. The old 380 floor left dusk
+    // and night as pure silhouette, with the lit surfaces of skyways and
+    // platforms blowing out against nothing.
+    ambient.brightness = (640.0 + day * 420.0) * intel.profile.ambient_mul;
 
     // Sky (clear colour) interpolates similarly — richer gradient from
     // deep indigo night → fiery horizon → deep cyan midday.
     let sky_day = Color::srgb(0.48, 0.74, 0.98).to_linear();
     let sky_night = Color::srgb(0.012, 0.022, 0.08).to_linear();
     let sky = sky_night.mix(&sky_day, day);
-    let sky = sky.mix(&sunset_color, sunset * 0.32);
+    // Only a hint of sunset goes into the flat dome colour. `sky.rs` owns
+    // the warm rim through its horizon gradient, and doubling up here is
+    // what turned the whole sky into one uniform red wash at dusk instead
+    // of the deep violet zenith over a burning horizon in the key art.
+    let sky = sky.mix(&sunset_color, sunset * 0.15);
     let sat: f32 = intel.profile.sky_saturation;
     let sky = sky.mix(
         &Color::srgb(0.5, 0.5, 0.5).to_linear(),

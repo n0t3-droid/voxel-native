@@ -152,16 +152,17 @@ fn load_player_from_world(
     let bx = crate::chunk::floor_to_i32_safe(translation.x);
     let bz = crate::chunk::floor_to_i32_safe(translation.z);
     let surface = generator.surface_height_at(bx, bz);
-    if settings.visual_preset == crate::settings::VisualPreset::NaturalWorld
-        && (generator.biome_at(bx, bz).is_showcase_terrain()
-            || translation.y > surface as f32 + 90.0)
-    {
-        if let Some(spawn) = generator.find_natural_spawn(0, 0, 4096) {
+    // Only rescue a saved position that is genuinely unusable. Every
+    // biome is part of the frontier now, so "you are standing somewhere
+    // exotic" is no longer a reason to move the player - being stranded
+    // in the void far above the terrain still is.
+    if translation.y > surface as f32 + 160.0 || translation.y < 1.0 {
+        if let Some(spawn) = generator.find_natural_spawn(bx, bz, 4096) {
             translation = Vec3::new(spawn.x as f32 + 0.5, spawn.y as f32, spawn.z as f32 + 0.5);
             yaw = 0.0;
             pitch = -0.12;
             info!(
-                "Natural world entry: {:?} at {}, {}, {}",
+                "Recovered stranded world entry to {:?} at {}, {}, {}",
                 spawn.biome, spawn.x, spawn.y, spawn.z
             );
         }

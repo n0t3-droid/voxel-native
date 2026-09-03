@@ -381,7 +381,11 @@ impl Default for WorldSettings {
             seed: 12345,
             ship_skirmish_ai: false,
             render_distance: 50,
-            vertical_chunks: 8,
+            // 10 × 16 = 160 blocks of streamed height. The frontier hangs
+            // sky islands and docking platforms between y=86 and y=152;
+            // at the old 8 chunks (128 blocks) the streamer simply never
+            // loaded the slab they live in.
+            vertical_chunks: 10,
             chunks_per_frame: 10,
             meshes_per_frame: 10,
             mesh_applies_per_frame: default_mesh_applies_per_frame(),
@@ -494,7 +498,7 @@ impl WorldSettings {
                 self.neurocore_enabled = true;
                 self.runtime_profile = RuntimeProfile::Balanced;
                 self.render_distance = 40;
-                self.vertical_chunks = 8;
+                self.vertical_chunks = 10;
                 self.chunks_per_frame = 10;
                 self.meshes_per_frame = 10;
                 self.mesh_applies_per_frame = 8;
@@ -507,7 +511,9 @@ impl WorldSettings {
                 self.neurocore_enabled = true;
                 self.runtime_profile = RuntimeProfile::LowSpec;
                 self.render_distance = 24;
-                self.vertical_chunks = 6;
+                // Still the low-spec preset, but one slab taller so the
+                // lowest sky islands are inside the streamed volume.
+                self.vertical_chunks = 7;
                 self.chunks_per_frame = 18;
                 self.meshes_per_frame = 16;
                 self.mesh_applies_per_frame = 8;
@@ -1123,7 +1129,7 @@ mod tests {
         assert_eq!(settings.graphics, GraphicsMode::Fast);
         assert_eq!(settings.runtime_profile, RuntimeProfile::LowSpec);
         assert!(settings.render_distance <= 24);
-        assert_eq!(settings.vertical_chunks, 6);
+        assert_eq!(settings.vertical_chunks, 7);
 
         settings.apply_world_mode_card(WorldModeCard::Cinematic);
         assert_eq!(settings.graphics, GraphicsMode::High);
