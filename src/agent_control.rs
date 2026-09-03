@@ -85,6 +85,7 @@ pub struct AgentControlState {
     pub handoff: bool,
     pub screenshot: bool,
     pub exit: bool,
+    pub hide_hud: bool,
     pub status: String,
 }
 
@@ -113,6 +114,7 @@ impl Default for AgentControlState {
             handoff: false,
             screenshot: false,
             exit: false,
+            hide_hud: false,
             status: "agent control off".into(),
         }
     }
@@ -237,6 +239,7 @@ struct AgentControlCommand {
     handoff: bool,
     screenshot: bool,
     exit: bool,
+    hide_hud: bool,
 }
 
 impl Default for AgentControlCommand {
@@ -263,6 +266,7 @@ impl Default for AgentControlCommand {
             handoff: false,
             screenshot: false,
             exit: false,
+            hide_hud: false,
         }
     }
 }
@@ -453,6 +457,7 @@ fn apply_command(state: &mut AgentControlState, command: AgentControlCommand) {
     }
     state.screenshot = command.screenshot;
     state.exit = command.exit;
+    state.hide_hud = command.hide_hud;
     state.status = if state.enabled {
         "agent live".into()
     } else {
@@ -561,6 +566,10 @@ fn agent_control_enter_game(
         settings.seed = seed;
         settings.time_mode = meta.time_mode;
         settings.time_of_day = meta.time_of_day;
+        if env_flag("VOXEL_NATIVE_AGENT_CINEMATIC") {
+            settings.graphics = crate::settings::GraphicsMode::High;
+            settings.runtime_profile = crate::neurocore::RuntimeProfile::Cinematic;
+        }
         commands.insert_resource(ActiveWorld { meta });
         pending.0 = true;
     }
@@ -763,7 +772,11 @@ fn agent_control_toggle_panel(
     mut contexts: EguiContexts,
     mut state: ResMut<AgentControlState>,
     runtime: Res<AgentControlRuntime>,
+    photo: Option<Res<crate::hud::PhotoMode>>,
 ) {
+    if photo.map(|p| p.hidden).unwrap_or(false) || state.hide_hud {
+        return;
+    }
     let anchor = if state.enabled {
         egui::Align2::RIGHT_BOTTOM
     } else {
@@ -850,7 +863,11 @@ fn agent_control_overlay(
     active_weapon: Option<Res<ActiveWeapon>>,
     toolbelt: Option<Res<ToolbeltState>>,
     player: Query<(&Transform, &Player)>,
+    photo: Option<Res<crate::hud::PhotoMode>>,
 ) {
+    if photo.map(|p| p.hidden).unwrap_or(false) || state.hide_hud {
+        return;
+    }
     let Ok((transform, player)) = player.get_single() else {
         return;
     };
@@ -1193,6 +1210,7 @@ fn write_agent_control_file(runtime: &AgentControlRuntime, state: &AgentControlS
             handoff: state.handoff,
             screenshot: false,
             exit: false,
+            hide_hud: state.hide_hud,
         };
         if let Ok(text) = ron::ser::to_string_pretty(&command, ron::ser::PrettyConfig::default()) {
             let _ = std::fs::write(&runtime.control_path, text);
