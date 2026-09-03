@@ -1577,6 +1577,24 @@ fn realistic_ship_exterior_specs(kind: ShipKind) -> Vec<RealShipPartSpec> {
                 Vec3::new(1.35, 0.10, 3.4),
                 Quat::IDENTITY,
             );
+            // NASA-shuttle heat tiles: orange belly + leading edges so
+            // the hero pass reads as the painting's white/orange orbiter.
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::AeroPlate,
+                RealShipTone::AmberHeat,
+                Vec3::new(0.0, -0.55, 0.40),
+                Vec3::new(1.55, 0.08, 5.8),
+                Quat::IDENTITY,
+            );
+            push_real_part(
+                &mut parts,
+                RealShipMeshKind::AeroPlate,
+                RealShipTone::AmberHeat,
+                Vec3::new(0.0, 0.18, -6.8),
+                Vec3::new(0.85, 0.10, 1.6),
+                Quat::IDENTITY,
+            );
         }
         ShipKind::StrikeFighter => {
             for sx in [-1.0, 1.0] {
@@ -2038,9 +2056,15 @@ fn ship_trail_specs(kind: ShipKind) -> Vec<ShipTrailSpec> {
         ShipKind::ScoutShuttle => {
             specs.push(ShipTrailSpec {
                 base_translation: Vec3::new(0.0, -0.20, 12.0),
-                base_scale: Vec3::new(0.24, 0.16, 5.2),
+                base_scale: Vec3::new(0.36, 0.22, 7.4),
                 phase: 2.8,
                 tone: ShipTrailTone::Cyan,
+            });
+            specs.push(ShipTrailSpec {
+                base_translation: Vec3::new(0.0, 0.10, 10.4),
+                base_scale: Vec3::new(0.55, 0.28, 4.6),
+                phase: 1.4,
+                tone: ShipTrailTone::Amber,
             });
         }
         ShipKind::StrikeFighter => {
@@ -2133,21 +2157,25 @@ fn update_hero_flyby(
         if pilot.active_ship == Some(entity) {
             continue;
         }
-        fly.t = (fly.t + dt * 0.045).rem_euclid(1.0);
+        fly.t = (fly.t + dt * 0.055).rem_euclid(1.0);
         let u = fly.t;
-        let x = fly.origin.x - 95.0 + u * 230.0;
-        let z = fly.origin.z - 64.0 + (u * std::f32::consts::PI).sin() * 32.0;
-        let y = fly.origin.y + 34.0 + (u * std::f32::consts::TAU).sin() * 11.0;
-        let vx: f32 = 230.0;
-        let vz: f32 = std::f32::consts::PI * 32.0 * (u * std::f32::consts::PI).cos();
+        // Close banking pass across the spawn postcard. Starts already
+        // in frame (t≈0.22 at spawn) so the first 10 seconds see the
+        // white/orange shuttle instead of an empty sky.
+        let x = fly.origin.x - 22.0 + u * 96.0;
+        let z = fly.origin.z - 38.0 - (u * std::f32::consts::PI).sin() * 16.0;
+        let y = fly.origin.y + 12.0 + (u * std::f32::consts::TAU).sin() * 5.0;
+        let vx: f32 = 96.0;
+        let vz: f32 = -std::f32::consts::PI * 16.0 * (u * std::f32::consts::PI).cos();
         let yaw = f32::atan2(vx, -vz);
-        let roll = (u * std::f32::consts::TAU).sin() * 0.22;
+        let roll = (u * std::f32::consts::TAU).sin() * 0.48;
         tf.translation = Vec3::new(x, y, z);
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
+        tf.scale = Vec3::splat(2.35);
         motion.yaw = yaw;
-        motion.pitch = -0.06;
+        motion.pitch = -0.10;
         motion.roll = roll;
-        motion.speed = 88.0;
+        motion.speed = 96.0;
     }
 }
 
@@ -2611,13 +2639,13 @@ fn spawn_saved_ships_once(
             &mut images,
             &mut fx,
             ShipKind::ScoutShuttle,
-            player_anchor + Vec3::new(-80.0, 36.0, -55.0),
+            player_anchor + Vec3::new(-8.0, 14.0, -36.0),
             player_yaw,
             false,
             None,
         );
         commands.entity(fly).insert(HeroFlyby {
-            t: 0.12,
+            t: 0.22,
             origin: player_anchor,
         });
     }
