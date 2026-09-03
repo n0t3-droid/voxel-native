@@ -1933,17 +1933,17 @@ fn real_ship_material(
             // Warm off-white ceramic, not chrome. Midday stills blew this
             // into a white blob because metallic 0.72 + sRGB 0.96 sat
             // above the Cinematic bloom threshold. Linear peak stays
-            // under ~0.45 so ACES + bloom leave the hull readable.
-            Color::srgba(0.48, 0.42, 0.34, preview_alpha),
-            LinearRgba::rgb(0.008, 0.006, 0.005),
+            // under ~0.38 so ACES + ~16k lux leave the hull readable.
+            Color::srgba(0.42, 0.37, 0.30, preview_alpha),
+            LinearRgba::rgb(0.006, 0.005, 0.004),
             if preview {
                 AlphaMode::Blend
             } else {
                 AlphaMode::Opaque
             },
-            0.08,
-            0.58,
-            0.28,
+            0.06,
+            0.64,
+            0.16,
         ),
         RealShipTone::CarbonBlack => (
             Color::srgba(0.006, 0.010, 0.014, preview_alpha),
@@ -4621,10 +4621,10 @@ mod tests {
         // Matches RealShipTone::CeramicWhite base colour. Linear peak
         // must sit under Bevy OLD_SCHOOL's ~0.6-0.74 prefilter so midday
         // sun does not turn the orbiter into a white blob.
-        let lin = Color::srgb(0.48, 0.42, 0.34).to_linear();
+        let lin = Color::srgb(0.42, 0.37, 0.30).to_linear();
         let peak = lin.red.max(lin.green).max(lin.blue);
         assert!(
-            peak < 0.50,
+            peak < 0.40,
             "ceramic peak {peak:.3} will bloom into a white hull blob"
         );
     }

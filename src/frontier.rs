@@ -780,6 +780,12 @@ impl SkywayNetwork {
         if let Some(rail) = hero_mesa_rail(wx, wz, macro_h) {
             return Some(rail);
         }
+        if let Some(walk) = hero_cliff_walk(wx, wz, macro_h) {
+            return Some(walk);
+        }
+        if let Some(spur) = hero_terrace_spur(wx, wz, macro_h) {
+            return Some(spur);
+        }
         let x = wx as f64;
         let z = wz as f64;
         let a = self.route_field(x, z);
@@ -1025,6 +1031,48 @@ fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     })
 }
 
+/// Lower cliff walk hugging the mesa rim, still postcard-AABB only.
+fn hero_cliff_walk(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+    const RAIL_Z: i32 = -112;
+    const HALF: f64 = 2.0;
+    if wx < 32 || wx > 156 {
+        return None;
+    }
+    let dist = (wz - RAIL_Z).abs() as f64;
+    if dist > HALF {
+        return None;
+    }
+    let deck_y = (macro_h + 7.0).round() as i32;
+    let pylon = wx.rem_euclid(SKYWAY_PYLON_PITCH) < 2 && dist < HALF - 0.5;
+    Some(SkywayColumn {
+        deck_y,
+        dist,
+        pylon,
+        half: HALF,
+    })
+}
+
+/// Short N–S terrace deck that ties the stacked habs together.
+fn hero_terrace_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+    const SPUR_X: i32 = 118;
+    const HALF: f64 = 2.0;
+    if wz < -100 || wz > -48 {
+        return None;
+    }
+    let dist = (wx - SPUR_X).abs() as f64;
+    if dist > HALF {
+        return None;
+    }
+    let deck_y = (macro_h + 14.0).round() as i32;
+    let pylon = wz.rem_euclid(SKYWAY_PYLON_PITCH) < 2 && dist < HALF - 0.5;
+    Some(SkywayColumn {
+        deck_y,
+        dist,
+        pylon,
+        half: HALF,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Cliff colony (spawn postcard) ---------------------------------------------
 // ---------------------------------------------------------------------------
@@ -1042,7 +1090,7 @@ pub struct CliffHab {
 }
 
 impl CliffHab {
-    pub fn hero_cluster() -> [Self; 16] {
+    pub fn hero_cluster() -> [Self; 22] {
         [
             Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4 },
             Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5 },
@@ -1061,6 +1109,14 @@ impl CliffHab {
             Self { cx: 112, cz: -84, floors: 10, width: 4, depth: 4 },
             Self { cx: 78, cz: -96, floors: 5, width: 7, depth: 4 },
             Self { cx: 48, cz: -98, floors: 7, width: 4, depth: 5 },
+            // Stacked annexes + a wide plaza so the cluster reads as a
+            // cliff city rather than a handful of isolated towers.
+            Self { cx: 64, cz: -52, floors: 3, width: 8, depth: 6 },
+            Self { cx: 100, cz: -48, floors: 4, width: 5, depth: 4 },
+            Self { cx: 124, cz: -76, floors: 6, width: 5, depth: 3 },
+            Self { cx: 152, cz: -96, floors: 5, width: 6, depth: 4 },
+            Self { cx: 90, cz: -80, floors: 3, width: 9, depth: 5 },
+            Self { cx: 174, cz: -70, floors: 7, width: 4, depth: 4 },
         ]
     }
 
@@ -1096,7 +1152,7 @@ impl CliffHab {
                         if !edge && ly > 0 {
                             continue;
                         }
-                        let block = if ly == 1 && edge && !corner && (floor + dx + dz).rem_euclid(3) != 0
+                        let block = if ly == 1 && edge && !corner && (floor + dx + dz).rem_euclid(4) != 0
                         {
                             BlockType::HoloPanel
                         } else if ly == 2 && edge {
@@ -1522,7 +1578,7 @@ mod tests {
         );
         assert!(count_blocks(&chunk, BlockType::PlatingWhite) > 10);
         assert!(count_blocks(&chunk, BlockType::NeonAmber) > 0);
-        assert_eq!(CliffHab::hero_cluster().len(), 16);
+        assert_eq!(CliffHab::hero_cluster().len(), 22);
         for h in CliffHab::hero_cluster() {
             assert!(in_hero_postcard(h.cx, h.cz), "hab {},{} left the postcard", h.cx, h.cz);
         }
@@ -1530,6 +1586,10 @@ mod tests {
         let sky = SkywayNetwork::new(1);
         let rail = sky.column(80, -88, 70.0).expect("mesa rail missing on postcard");
         assert!(rail.half < SKYWAY_HALF_WIDTH, "mesa rail should be a thin ribbon");
+        let walk = sky.column(80, -112, 70.0).expect("cliff walk missing on postcard");
+        assert!(walk.half < SKYWAY_HALF_WIDTH);
+        let terrace = sky.column(118, -76, 70.0).expect("terrace spur missing on postcard");
+        assert!(terrace.half < SKYWAY_HALF_WIDTH);
     }
 
     #[test]
