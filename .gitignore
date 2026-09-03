@@ -2,6 +2,10 @@
 /web/pkg
 /qa_runs
 /agent_runs
+# Worlds the QA autopilot creates on each run. `saves/` is otherwise
+# tracked, so without this every screenshot run leaves 50 bot files
+# staged behind it.
+/saves/qa_*
 /agent_control.ron
 /screenshot_*.png
 /engine-tour-live-*.mp4
