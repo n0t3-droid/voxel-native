@@ -379,15 +379,21 @@ fn update_sun(
             .mix(&horizon_dusk, sunset * 0.85);
         // Fog colour is a *brighter* cousin of the sky so nearby
         // terrain isn't dyed with the zenith. Inscatter is separate.
-        let fog_fill = sky.mix(&horizon, 0.40).mix(&golden_fill, sunset * 0.22);
+        // Alpha is the *maximum* mix amount — 1.0 fully replaces distant
+        // geometry with the fog colour (the milky-horizon bug).
+        let mut fog_fill = sky.mix(&horizon, 0.40).mix(&golden_fill, sunset * 0.22);
+        fog_fill.alpha = (0.34 + sunset * 0.10 + (1.0 - day) * 0.08 - day.powf(1.8) * 0.14)
+            .clamp(0.16, 0.46);
         fog_settings.color = Color::LinearRgba(fog_fill);
         fog_settings.falloff = FogFalloff::ExponentialSquared {
-            density: 0.00020
-                * (1.0 + sunset * 0.50 + (1.0 - day) * 0.18 - day.powf(1.7) * 0.42)
+            density: 0.00014
+                * (1.0 + sunset * 0.35 + (1.0 - day) * 0.12 - day.powf(1.7) * 0.48)
                 * intel.profile.fog_density_mul,
         };
-        fog_settings.directional_light_color = Color::LinearRgba(horizon);
-        fog_settings.directional_light_exponent = 11.0;
+        let mut sun_scatter = horizon;
+        sun_scatter.alpha = 0.28 + sunset * 0.22;
+        fog_settings.directional_light_color = Color::LinearRgba(sun_scatter);
+        fog_settings.directional_light_exponent = 14.0;
     }
 }
 

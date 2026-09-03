@@ -262,15 +262,15 @@ fn spawn_player(mut commands: Commands) {
             ..default()
         },
         FogSettings {
-            color: Color::srgba(0.42, 0.58, 0.78, 1.0),
+            color: Color::srgba(0.42, 0.58, 0.78, 0.28),
             // Starting density is a placeholder: `update_sun()` in
             // daynight.rs owns the live ExponentialSquared aerial
             // perspective (thin at noon, warm inscatter at dusk, a
             // lifted fill at night). Keep this conservative so the
             // first frames before that system runs aren't milky.
-            falloff: FogFalloff::ExponentialSquared { density: 0.00022 },
-            directional_light_color: Color::srgb(0.72, 0.62, 0.48),
-            directional_light_exponent: 11.0,
+            falloff: FogFalloff::ExponentialSquared { density: 0.00014 },
+            directional_light_color: Color::srgba(0.72, 0.62, 0.48, 0.30),
+            directional_light_exponent: 14.0,
             ..default()
         },
         // Bloom on the world camera. Combined with HDR-boosted vertex

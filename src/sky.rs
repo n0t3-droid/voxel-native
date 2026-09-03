@@ -325,10 +325,9 @@ fn setup_sky(
         base_color: Color::srgba(1.0, 1.0, 1.0, 1.0),
         base_color_texture: Some(nebula_image.clone()),
         emissive_texture: Some(nebula_image),
-        // Strong emissive — with AlphaMode::Add the final on-screen
-        // colour is sky_clear + nebula_texture*emissive, so we want
-        // a punchy value. Day/night loop animates this per-frame.
-        emissive: LinearRgba::rgb(2.0, 1.6, 2.6),
+        // Modest start — follow_and_animate_sky owns the live value.
+        // Too high here and the first frames bleach the sky to pink fog.
+        emissive: LinearRgba::rgb(0.85, 0.55, 1.15),
         unlit: true,
         alpha_mode: AlphaMode::Add,
         // Render from inside the sphere — show back faces.
@@ -425,7 +424,7 @@ fn setup_sky(
         base_color: Color::WHITE,
         base_color_texture: Some(horizon_image.clone()),
         emissive_texture: Some(horizon_image),
-        emissive: LinearRgba::rgb(1.0, 0.7, 1.2),
+        emissive: LinearRgba::rgb(0.42, 0.28, 0.38),
         unlit: true,
         alpha_mode: AlphaMode::Add,
         cull_mode: Some(bevy::render::render_resource::Face::Front),
@@ -454,7 +453,7 @@ fn setup_sky(
     let planet_res = nebula_res.min(512);
     let planet_image = images.add(build_planet_image(planet_res, settings.seed as u64));
     let planet_mesh = meshes.add(
-        Sphere::new(88.0)
+        Sphere::new(128.0)
             .mesh()
             .ico(4)
             .expect("subdivision 4 is within ico limits"),
@@ -473,7 +472,7 @@ fn setup_sky(
     // Dusty Saturn-like rings with a Cassini-style gap. Vertex colours
     // carry the band albedo; keep emissive modest so they read as ice
     // and dust, not a rainbow debug disc.
-    let ring_mesh = meshes.add(build_ring_mesh(132.0, 232.0, 192));
+    let ring_mesh = meshes.add(build_ring_mesh(190.0, 340.0, 192));
     let ring_mat = materials.add(StandardMaterial {
         base_color: Color::srgba(0.92, 0.84, 0.70, 1.0),
         emissive: LinearRgba::rgb(1.15, 0.95, 0.72),
@@ -767,15 +766,16 @@ fn follow_and_animate_sky(
         }
 
         // Nebula — cyan vs magenta filaments over a deep-violet zenith.
-        // Day values stay structured (not a pale wash); dusk keeps the
-        // horizon warm without flattening the whole dome to red.
+        // Keep day values structured (not a pale wash). Additive blend
+        // plus a high emissive is what bleached noon into milky fog, so
+        // the live multipliers stay well below the old 2–7 range.
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
-            let base_day = Vec3::new(2.6, 1.35, 4.4);
-            let base_night = Vec3::new(5.4, 3.2, 7.6);
-            let base_sunset = Vec3::new(3.2, 1.4, 1.6);
-            let e = (base_day * (0.35 + 0.65 * day)
+            let base_day = Vec3::new(0.55, 0.28, 0.95);
+            let base_night = Vec3::new(1.85, 1.05, 2.55);
+            let base_sunset = Vec3::new(0.95, 0.38, 0.42);
+            let e = (base_day * (0.22 + 0.38 * day)
                 + base_night * night
-                + base_sunset * sunset * 0.55)
+                + base_sunset * sunset * 0.40)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
@@ -789,14 +789,14 @@ fn follow_and_animate_sky(
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
-        // Horizon band: cool cyan scatter at noon, a fierce orange rim
-        // at dusk and dawn, deep violet through the night. This is the
-        // vertical gradient the flat ClearColor cannot express.
+        // Horizon band: a thin warm rim at dusk, not a white wall.
+        // Additive + bloom made the old 3.0 dusk emissive bleach the
+        // whole lower third of the frame.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
-            let noon = Vec3::new(0.55, 0.95, 1.35);
-            let dusk = Vec3::new(3.00, 1.25, 0.50);
-            let deep = Vec3::new(1.05, 0.35, 1.65);
-            let e = (noon * day + deep * night) * (1.0 - sunset * 0.55) + dusk * sunset;
+            let noon = Vec3::new(0.18, 0.32, 0.48);
+            let dusk = Vec3::new(1.15, 0.48, 0.16);
+            let deep = Vec3::new(0.28, 0.10, 0.48);
+            let e = (noon * day + deep * night) * (1.0 - sunset * 0.45) + dusk * sunset;
             let e = e * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
@@ -1201,7 +1201,9 @@ fn build_horizon_gradient_image(height: u32) -> Image {
             data.push(byte);
             data.push(byte);
             data.push(byte);
-            data.push(255);
+            // Alpha carries the same falloff so Additive empty sky
+            // (zenith / underground) contributes nothing.
+            data.push(byte);
         }
     }
 
@@ -1399,15 +1401,18 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
 
             // Deep-violet zenith fill so the dome never goes empty-black
             // or pale-fog, plus a warm horizon burn for golden hour.
-            let violet = Vec3::new(0.16, 0.04, 0.38) * (0.25 + 0.75 * zenith as f32);
-            let warm = Vec3::new(0.95, 0.38, 0.12) * (horizon as f32).powf(1.8) * 0.55;
-            col = col + violet * (0.55 + 0.45 * (1.0 - amp as f32)) + warm;
+            let violet = Vec3::new(0.16, 0.04, 0.38) * (0.18 + 0.55 * zenith as f32);
+            let warm = Vec3::new(0.95, 0.38, 0.12) * (horizon as f32).powf(2.2) * 0.32;
+            col = col + violet * (0.35 + 0.25 * (1.0 - amp as f32)) + warm;
             col = col.min(Vec3::splat(1.0));
+            // Put density in alpha so Additive empty sky does not wash
+            // the ClearColor to milky pink. Filaments stay punchy.
+            let alpha = (amp * 0.90 + 0.06 * zenith + 0.10 * horizon.powf(1.6)).clamp(0.0, 1.0);
 
             data.push((col.x * 255.0) as u8);
             data.push((col.y * 255.0) as u8);
             data.push((col.z * 255.0) as u8);
-            data.push(255);
+            data.push((alpha * 255.0) as u8);
         }
     }
 
