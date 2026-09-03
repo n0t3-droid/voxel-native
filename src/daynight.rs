@@ -280,8 +280,10 @@ fn update_sun(
     // deep indigo night → fiery horizon → deep cyan midday.
     let sky_day = Color::srgb(0.48, 0.74, 0.98).to_linear();
     let sky_night = Color::srgb(0.012, 0.022, 0.08).to_linear();
+    let sky_nebula = Color::srgb(0.42, 0.10, 0.58).to_linear();
     let sky = sky_night.mix(&sky_day, day);
     let sky = sky.mix(&sunset_color, sunset * 0.32);
+    let sky = sky.mix(&sky_nebula, sunset * 0.22 + (1.0 - day) * 0.10);
     let sat: f32 = intel.profile.sky_saturation;
     let sky = sky.mix(
         &Color::srgb(0.5, 0.5, 0.5).to_linear(),
