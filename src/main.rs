@@ -11,6 +11,7 @@ mod chunk;
 mod city;
 mod commands;
 mod daynight;
+mod defense;
 mod director;
 mod editor;
 mod hud;
@@ -22,6 +23,7 @@ mod neurocore;
 mod platform;
 mod player;
 mod qa;
+mod rails;
 mod sculpt;
 mod selection;
 mod settings;
@@ -129,6 +131,8 @@ fn main() {
         ))
         .add_plugins(bots::BotsPlugin)
         .add_plugins(ships::ShipPlugin)
+        .add_plugins(rails::RailsPlugin)
+        .add_plugins(defense::DefensePlugin)
         .add_plugins(mode::ModePlugin)
         .add_plugins(neurocore::NeuroCorePlugin)
         .add_plugins(qa::QaPlugin)

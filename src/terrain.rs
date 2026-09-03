@@ -81,6 +81,34 @@ pub struct NaturalSpawnPoint {
     pub biome: Biome,
 }
 
+/// Bounded floating plateau used by the sky-island pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkyIslandSpec {
+    pub center_x: i32,
+    pub center_z: i32,
+    pub deck_y: i32,
+    pub radius: i32,
+}
+
+/// Axis-aligned monorail corridor stamped into showcase terrain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonorailAxis {
+    AlongX,
+    AlongZ,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonorailSite {
+    pub axis: MonorailAxis,
+    pub line_coord: i32,
+}
+
+/// Deterministic defense-turret pad on raised showcase terrain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefenseTurretSite {
+    pub base_y: i32,
+}
+
 /// Macro-region province. Returned by `region()` for any world (x,z).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -893,7 +921,11 @@ impl TerrainGenerator {
                     // pool molten basalt instead of seawater).
                     if wy > surface {
                         if in_volcanic && wy <= volcanic_lava_level {
-                            chunk.set(lx, ly, lz, BlockType::Lava.into());
+                            if let Some(block) =
+                                self.volcanic_channel_block(wx, wz, wy, surface, volcanic_lava_level)
+                            {
+                                chunk.set(lx, ly, lz, block.into());
+                            }
                         } else if wy <= WATER_LEVEL {
                             chunk.set(lx, ly, lz, BlockType::Water.into());
                         }
@@ -941,7 +973,7 @@ impl TerrainGenerator {
                     }
 
                     let depth = surface - wy;
-                    let block = if depth == 0 {
+                    let mut block = if depth == 0 {
                         top
                     } else if depth <= 3 {
                         sub
@@ -954,6 +986,13 @@ impl TerrainGenerator {
                     } else {
                         core
                     };
+                    if depth == 0 {
+                        if let Some(channel_top) =
+                            self.volcanic_channel_surface_block(wx, wz, surface)
+                        {
+                            block = channel_top;
+                        }
+                    }
                     chunk.set(lx, ly, lz, block.into());
                 }
             }
@@ -1098,6 +1137,9 @@ impl TerrainGenerator {
         // ruined pillar clusters, and boulder piles in rocky biomes.
         // Deterministic per-seed, chunk-local, no cross-chunk writes.
         self.decorate_structures(chunk);
+        self.decorate_sky_islands(chunk);
+        self.decorate_monorail(chunk);
+        self.decorate_defense_turrets(chunk);
 
         // ----------------------- Futuristic Cities ------------------
         // Rare skyscraper districts that flatten local terrain and
@@ -1906,6 +1948,17 @@ impl TerrainGenerator {
             self.try_place_crater_basin(chunk, anchor_x, anchor_z, surface, origin_y, biome);
             return;
         }
+        if roll >= 0.016
+            && roll < 0.022
+            && matches!(
+                biome,
+                Biome::Mountains | Biome::SnowyMountains | Biome::CrystalSpires
+            )
+            && surface > WATER_LEVEL + 28
+        {
+            self.try_place_docking_spire(chunk, anchor_x, anchor_z, surface, origin_y, biome);
+            return;
+        }
 
         // Arch: 1 chance in ~40 chunks, only in rocky biomes.
         if roll < 0.025
@@ -2189,6 +2242,442 @@ impl TerrainGenerator {
                 }
             }
         }
+    }
+
+    /// Lateral offset from the nearest volcanic canyon channel centre.
+    /// `None` when the column is outside a carved river corridor.
+    pub fn volcanic_channel_offset(&self, wx: i32, wz: i32) -> Option<i32> {
+        let biome = self.biome_at(wx, wz);
+        if matches!(biome, Biome::VolcanicWaste) {
+            let (region, rs) = self.region(wx as f64, wz as f64);
+            if matches!(region, Region::VolcanicWaste) && rs >= 0.20 {
+                return self.volcanic_channel_offset_inner(wx, wz);
+            }
+        }
+        if matches!(biome, Biome::Mesa) {
+            let (region, rs) = self.region(wx as f64, wz as f64);
+            if matches!(region, Region::Canyon) && rs >= 0.25 {
+                let (surface, _) = self.surface_height(wx as f64, wz as f64);
+                let (hn, _) = self.surface_height(wx as f64, (wz - 4) as f64);
+                let (hs, _) = self.surface_height(wx as f64, (wz + 4) as f64);
+                let drop = (surface - hn).max(surface - hs);
+                if drop >= 6 {
+                    return self.volcanic_channel_offset_inner(wx, wz);
+                }
+            }
+        }
+        None
+    }
+
+    fn volcanic_channel_offset_inner(&self, wx: i32, wz: i32) -> Option<i32> {
+        let river = self.ridged_fbm(&self.hills_a, wx as f64 * 0.003, wz as f64 * 0.003, 3);
+        if river < 0.68 {
+            return None;
+        }
+        let flow = self.fbm2(&self.hills_b, wx as f64 * 0.0008, wz as f64 * 0.0008, 2, 2.0, 0.5)
+            * std::f64::consts::PI;
+        let perp_x = flow.cos();
+        let perp_z = flow.sin();
+        let along = wx as f64 * perp_x + wz as f64 * perp_z;
+        let lateral = along - along.round();
+        let dist = (lateral * 8.0).round() as i32;
+        if dist.abs() > 2 {
+            return None;
+        }
+        Some(dist)
+    }
+
+    fn volcanic_channel_surface_block(&self, wx: i32, wz: i32, surface: i32) -> Option<BlockType> {
+        let offset = self.volcanic_channel_offset(wx, wz)?;
+        let biome = self.biome_at(wx, wz);
+        if matches!(biome, Biome::VolcanicWaste) {
+            let (_, cont) = self.surface_height(wx as f64, wz as f64);
+            let plateau = 72.0 + cont * 8.0;
+            if surface as f64 > plateau - 4.0 {
+                return None;
+            }
+        }
+        match offset {
+            0 => Some(BlockType::Lava),
+            1 => Some(BlockType::NeonCyan),
+            -1 => Some(BlockType::NeonMagenta),
+            _ => Some(BlockType::Basalt),
+        }
+    }
+
+    fn volcanic_channel_block(
+        &self,
+        wx: i32,
+        wz: i32,
+        wy: i32,
+        surface: i32,
+        lava_level: i32,
+    ) -> Option<BlockType> {
+        let offset = self.volcanic_channel_offset(wx, wz)?;
+        if wy > lava_level {
+            return None;
+        }
+        if wy <= surface {
+            return None;
+        }
+        match offset {
+            0 => Some(BlockType::Lava),
+            1 | -1 if wy == surface + 1 => Some(if offset == 1 {
+                BlockType::NeonCyan
+            } else {
+                BlockType::NeonMagenta
+            }),
+            _ => None,
+        }
+    }
+
+    /// Returns the sky-island deck covering this column, if any.
+    pub fn sky_island_at(&self, wx: i32, wz: i32) -> Option<SkyIslandSpec> {
+        let biome = self.biome_at(wx, wz);
+        let surface = self.surface_height_at(wx, wz);
+        if surface < WATER_LEVEL + 12 {
+            return None;
+        }
+        if !matches!(
+            biome,
+            Biome::CrystalSpires
+                | Biome::AlienReef
+                | Biome::Mountains
+                | Biome::SnowyMountains
+                | Biome::Karst
+                | Biome::Mesa
+                | Biome::Plains
+                | Biome::Forest
+        ) {
+            return None;
+        }
+        const CELL: i32 = 128;
+        let gx = wx.div_euclid(CELL);
+        let gz = wz.div_euclid(CELL);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let cell_gx = gx + dx;
+                let cell_gz = gz + dz;
+                let roll = column_rand(self.seed ^ 0x5A_B1_15E, cell_gx, cell_gz);
+                if roll > 0.58 {
+                    continue;
+                }
+                let cx = cell_gx * CELL
+                    + CELL / 2
+                    + ((column_rand(self.seed ^ 0x5A_B1_16E, cell_gx, cell_gz) * 40.0) as i32 - 20);
+                let cz = cell_gz * CELL
+                    + CELL / 2
+                    + ((column_rand(self.seed ^ 0x5A_B1_17E, cell_gx, cell_gz) * 40.0) as i32 - 20);
+                let radius = 6
+                    + (column_rand(self.seed ^ 0x5A_B1_18E, cell_gx, cell_gz) * 7.0) as i32;
+                let deck_y = (surface + 28)
+                    .max(90)
+                    + (column_rand(self.seed ^ 0x5A_B1_19E, cell_gx, cell_gz) * 12.0) as i32;
+                let dist = (wx - cx).abs().max((wz - cz).abs());
+                if dist <= radius {
+                    return Some(SkyIslandSpec {
+                        center_x: cx,
+                        center_z: cz,
+                        deck_y,
+                        radius,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Mid-altitude band between island decks should stay open for flight.
+    pub fn sky_island_corridor_open_at(&self, wx: i32, wy: i32, wz: i32) -> bool {
+        if wy < 78 || wy > 122 {
+            return true;
+        }
+        let Some(spec) = self.sky_island_at(wx, wz) else {
+            return true;
+        };
+        wy < spec.deck_y - 5 || wy > spec.deck_y + 4
+    }
+
+    fn decorate_sky_islands(&self, chunk: &mut Chunk) {
+        let origin_y = chunk.pos.y * CHUNK_SIZE_I;
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                let wx = chunk.pos.x * CHUNK_SIZE_I + lx as i32;
+                let wz = chunk.pos.z * CHUNK_SIZE_I + lz as i32;
+                let Some(spec) = self.sky_island_at(wx, wz) else {
+                    continue;
+                };
+                let dist = (wx - spec.center_x)
+                    .abs()
+                    .max((wz - spec.center_z).abs());
+                let edge = dist >= spec.radius.saturating_sub(1);
+                for ly in 0..CHUNK_SIZE {
+                    let wy = origin_y + ly as i32;
+                    let rel = wy - spec.deck_y;
+                    let block = if rel == 0 {
+                        Some(BlockType::BoneRock)
+                    } else if rel == 1 {
+                        Some(if edge {
+                            BlockType::GlowSand
+                        } else {
+                            BlockType::Crystal
+                        })
+                    } else if rel == 2 && !edge {
+                        Some(BlockType::LuminiteCrystal)
+                    } else if rel >= -4 && rel < 0 && dist <= spec.radius - 2 {
+                        Some(BlockType::Stone)
+                    } else {
+                        None
+                    };
+                    if let Some(block) = block {
+                        set_safe(chunk, lx, wy, lz, block, origin_y);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sparse monorail grid on showcase terrain and mountain spires.
+    pub fn monorail_at(&self, wx: i32, wz: i32) -> Option<MonorailSite> {
+        let biome = self.biome_at(wx, wz);
+        if !biome.is_showcase_terrain()
+            && !matches!(biome, Biome::Mountains | Biome::SnowyMountains)
+        {
+            return None;
+        }
+        const SPACING: i32 = 48;
+        let gx = wx.div_euclid(SPACING);
+        let gz = wz.div_euclid(SPACING);
+        let roll = column_rand(self.seed ^ 0xA11CE_B41, gx, gz);
+        if roll > 0.72 {
+            return None;
+        }
+        let local_x = wx.rem_euclid(SPACING);
+        let local_z = wz.rem_euclid(SPACING);
+        let along_x = local_z <= 2 || local_z >= SPACING - 3;
+        let along_z = local_x <= 2 || local_x >= SPACING - 3;
+        if along_x && !along_z {
+            return Some(MonorailSite {
+                axis: MonorailAxis::AlongX,
+                line_coord: wz - local_z + if local_z <= 2 { 1 } else { SPACING - 2 },
+            });
+        }
+        if along_z && !along_x {
+            return Some(MonorailSite {
+                axis: MonorailAxis::AlongZ,
+                line_coord: wx - local_x + if local_x <= 2 { 1 } else { SPACING - 2 },
+            });
+        }
+        None
+    }
+
+    fn decorate_monorail(&self, chunk: &mut Chunk) {
+        let origin_y = chunk.pos.y * CHUNK_SIZE_I;
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                let wx = chunk.pos.x * CHUNK_SIZE_I + lx as i32;
+                let wz = chunk.pos.z * CHUNK_SIZE_I + lz as i32;
+                let Some(site) = self.monorail_at(wx, wz) else {
+                    continue;
+                };
+                let (surface, _) = self.surface_height(wx as f64, wz as f64);
+                let deck = surface + 1;
+                if deck < origin_y || deck + 3 >= origin_y + CHUNK_SIZE_I {
+                    continue;
+                }
+                let offset = match site.axis {
+                    MonorailAxis::AlongX => (wx - site.line_coord).abs(),
+                    MonorailAxis::AlongZ => (wz - site.line_coord).abs(),
+                };
+                if offset == 0 {
+                    set_safe(chunk, lx, deck, lz, BlockType::NeonCyan, origin_y);
+                    set_safe(chunk, lx, deck + 1, lz, BlockType::ShipHullAlloy, origin_y);
+                } else if offset == 1 {
+                    set_safe(chunk, lx, deck, lz, BlockType::ShipHullAlloy, origin_y);
+                    set_safe(chunk, lx, deck + 1, lz, BlockType::NeonAmber, origin_y);
+                }
+                let gap = self.monorail_gap_below(wx, wz, surface, site);
+                if gap >= 5 {
+                    for drop in 1..=gap.min(12) {
+                        set_safe(
+                            chunk,
+                            lx,
+                            deck - drop,
+                            lz,
+                            BlockType::ShipHullDark,
+                            origin_y,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn monorail_gap_below(&self, wx: i32, wz: i32, surface: i32, site: MonorailSite) -> i32 {
+        let samples = match site.axis {
+            MonorailAxis::AlongX => [(-2, 0), (2, 0), (0, -2), (0, 2)],
+            MonorailAxis::AlongZ => [(-2, 0), (2, 0), (0, -2), (0, 2)],
+        };
+        let mut min_surface = surface;
+        for (dx, dz) in samples {
+            let (s, _) = self.surface_height((wx + dx) as f64, (wz + dz) as f64);
+            min_surface = min_surface.min(s);
+        }
+        (surface - min_surface).max(0)
+    }
+
+    fn decorate_defense_turrets(&self, chunk: &mut Chunk) {
+        let origin_y = chunk.pos.y * CHUNK_SIZE_I;
+        for lz in 0..CHUNK_SIZE {
+            for lx in 0..CHUNK_SIZE {
+                let wx = chunk.pos.x * CHUNK_SIZE_I + lx as i32;
+                let wz = chunk.pos.z * CHUNK_SIZE_I + lz as i32;
+                let Some(site) = self.defense_turret_site(wx, wz) else {
+                    continue;
+                };
+                if site.base_y < origin_y || site.base_y + 6 >= origin_y + CHUNK_SIZE_I {
+                    continue;
+                }
+                self.try_place_defense_turret(chunk, lx, lz, site.base_y, origin_y);
+            }
+        }
+    }
+
+    /// Rare raised defense-turret pads on showcase ridges.
+    pub fn defense_turret_site(&self, wx: i32, wz: i32) -> Option<DefenseTurretSite> {
+        const SPACING: i32 = 96;
+        let gx = wx.div_euclid(SPACING);
+        let gz = wz.div_euclid(SPACING);
+        let roll = column_rand(self.seed ^ 0x7_0_B37, gx, gz);
+        if roll > 0.35 {
+            return None;
+        }
+        let local_x = wx.rem_euclid(SPACING);
+        let local_z = wz.rem_euclid(SPACING);
+        let near_center = (local_x - SPACING / 2).abs() <= 2 && (local_z - SPACING / 2).abs() <= 2;
+        if !near_center {
+            return None;
+        }
+        let biome = self.biome_at(wx, wz);
+        if !biome.is_showcase_terrain()
+            && !matches!(
+                biome,
+                Biome::Mountains
+                    | Biome::SnowyMountains
+                    | Biome::Mesa
+                    | Biome::Karst
+                    | Biome::Plains
+                    | Biome::Forest
+            )
+        {
+            return None;
+        }
+        let surface = self.surface_height_at(wx, wz);
+        if surface <= WATER_LEVEL + 12 {
+            return None;
+        }
+        Some(DefenseTurretSite { base_y: surface + 1 })
+    }
+
+    fn try_place_docking_spire(
+        &self,
+        chunk: &mut Chunk,
+        ax: i32,
+        az: i32,
+        surface: i32,
+        origin_y: i32,
+        biome: Biome,
+    ) {
+        let h = 18 + ((column_rand(self.seed ^ 0xD0C_5A1E, ax, az) * 10.0) as i32);
+        let crown = match biome {
+            Biome::CrystalSpires => BlockType::LuminiteCrystal,
+            _ => BlockType::Crystal,
+        };
+        for dy in 0..=h {
+            let y = surface + dy;
+            if y < origin_y || y >= origin_y + CHUNK_SIZE_I {
+                continue;
+            }
+            let ly = (y - origin_y) as usize;
+            let taper = (h - dy) / 6;
+            for dz in -2 - taper..=2 + taper {
+                for dx in -2 - taper..=2 + taper {
+                    let nx = ax + dx;
+                    let nz = az + dz;
+                    if nx < 0 || nx >= CHUNK_SIZE_I || nz < 0 || nz >= CHUNK_SIZE_I {
+                        continue;
+                    }
+                    let edge = dx.abs() == 2 + taper || dz.abs() == 2 + taper;
+                    let block = if dy == h {
+                        crown
+                    } else if edge {
+                        BlockType::ShipHullAlloy
+                    } else if dy % 5 == 0 {
+                        BlockType::NeonCyan
+                    } else {
+                        BlockType::ShipHullDark
+                    };
+                    chunk.set(nx as usize, ly, nz as usize, block.into());
+                }
+            }
+        }
+        let arm_y = surface + h - 4;
+        if arm_y >= origin_y && arm_y < origin_y + CHUNK_SIZE_I {
+            let ly = (arm_y - origin_y) as usize;
+            for arm in [-5i32, 5] {
+                for step in 0..4 {
+                    let nx = ax + arm.signum() * (step + 1);
+                    let nz = az;
+                    if nx < 0 || nx >= CHUNK_SIZE_I {
+                        continue;
+                    }
+                    chunk.set(nx as usize, ly, nz as usize, BlockType::ShipHullAlloy.into());
+                    if step == 3 {
+                        chunk.set(
+                            nx as usize,
+                            ly,
+                            nz as usize,
+                            BlockType::NeonMagenta.into(),
+                        );
+                    }
+                }
+                let nx = ax + arm;
+                let nz = az;
+                if nx >= 0 && nx < CHUNK_SIZE_I {
+                    chunk.set(nx as usize, ly, nz as usize, BlockType::CockpitGlass.into());
+                }
+            }
+        }
+    }
+
+    fn try_place_defense_turret(
+        &self,
+        chunk: &mut Chunk,
+        lx: usize,
+        lz: usize,
+        base_y: i32,
+        origin_y: i32,
+    ) {
+        for dy in 0..5 {
+            let y = base_y + dy;
+            if y < origin_y || y >= origin_y + CHUNK_SIZE_I {
+                continue;
+            }
+            let block = match dy {
+                0..=2 => BlockType::ShipHullDark,
+                3 => BlockType::ShipHullAlloy,
+                _ => BlockType::NeonAmber,
+            };
+            set_safe(chunk, lx, y, lz, block, origin_y);
+        }
+        set_safe(
+            chunk,
+            lx,
+            base_y + 5,
+            lz,
+            BlockType::EngineCore,
+            origin_y,
+        );
     }
 
     /// Hill-sculpting palace pass. Rather than placing buildings on
@@ -2636,6 +3125,120 @@ mod tests {
             highest <= 220,
             "default terrain should stay playable for normal streaming budgets; highest sample was {highest}"
         );
+    }
+
+    fn find_feature_probe_column(generator: &TerrainGenerator) -> (i32, i32) {
+        for z in (-12_000..=12_000).step_by(128) {
+            for x in (-12_000..=12_000).step_by(128) {
+                if generator.monorail_at(x, z).is_some()
+                    || generator.sky_island_at(x, z).is_some()
+                    || generator.defense_turret_site(x, z).is_some()
+                {
+                    return (x, z);
+                }
+            }
+        }
+        panic!("feature probe column required for regression tests");
+    }
+
+    #[test]
+    fn sky_islands_preserve_mid_altitude_flight_corridors() {
+        let generator = (0..512u32)
+            .map(TerrainGenerator::new)
+            .find(|gen| {
+                (-4..=4).any(|cell| {
+                    gen.sky_island_at(cell * 128 + 64, cell * 128 + 64)
+                        .is_some()
+                })
+            })
+            .expect("at least one seed should spawn sky islands");
+        let mut island = None;
+        for cell in -8..=8 {
+            let x = cell * 128 + 64;
+            let z = cell * 128 + 64;
+            if let Some(spec) = generator.sky_island_at(x, z) {
+                island = Some(spec);
+                break;
+            }
+        }
+        let spec = island.expect("sky islands should exist on dramatic terrain");
+        let corridor_y = spec.deck_y - 3;
+        assert!(
+            generator.sky_island_corridor_open_at(
+                spec.center_x + spec.radius + 8,
+                corridor_y,
+                spec.center_z
+            ),
+            "flight corridor between islands should stay open"
+        );
+    }
+
+    #[test]
+    fn volcanic_canyon_channels_stamp_lava_with_neon_edges() {
+        let generator = TerrainGenerator::new(77_707);
+        let mut found = false;
+        for z in (-12_000..=12_000).step_by(32) {
+            for x in (-12_000..=12_000).step_by(32) {
+                let Some(offset) = generator.volcanic_channel_offset(x, z) else {
+                    continue;
+                };
+                if offset == 0 {
+                    let surface = generator.surface_height_at(x, z);
+                    let mut chunk = Chunk::new(ChunkPos::new(
+                        x.div_euclid(CHUNK_SIZE_I),
+                        surface.div_euclid(CHUNK_SIZE_I),
+                        z.div_euclid(CHUNK_SIZE_I),
+                    ));
+                    generator.generate(&mut chunk);
+                    let lx = x.rem_euclid(CHUNK_SIZE_I) as usize;
+                    let lz = z.rem_euclid(CHUNK_SIZE_I) as usize;
+                    let ly = (surface - chunk.pos.y * CHUNK_SIZE_I) as usize;
+                    let lava: Voxel = BlockType::Lava.into();
+                    assert_eq!(chunk.get(lx, ly, lz), lava);
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        assert!(found, "mesa/volcanic canyons should carve lava channels");
+    }
+
+    #[test]
+    fn monorail_sites_are_sparse_and_deterministic() {
+        let a = TerrainGenerator::new(9001);
+        let b = TerrainGenerator::new(9001);
+        let (x, z) = find_feature_probe_column(&a);
+        let site = a
+            .monorail_at(x, z)
+            .expect("probe column should expose monorail routing");
+        assert_eq!(site, b.monorail_at(x, z).unwrap());
+        let nearby = (0..12)
+            .filter(|i| a.monorail_at(x + i * 3, z).is_some())
+            .count();
+        assert!(
+            nearby <= 4,
+            "monorail corridors should stay sparse, found {nearby} samples"
+        );
+    }
+
+    #[test]
+    fn defense_turret_sites_anchor_on_dramatic_terrain() {
+        let generator = TerrainGenerator::new(1337);
+        let mut sites = 0usize;
+        for z in (-12_000..=12_000).step_by(96) {
+            for x in (-12_000..=12_000).step_by(96) {
+                let probe_x = x + 48;
+                let probe_z = z + 48;
+                if let Some(site) = generator.defense_turret_site(probe_x, probe_z) {
+                    assert!(site.base_y > WATER_LEVEL + 8);
+                    sites += 1;
+                }
+            }
+        }
+        assert!(sites > 0, "dramatic terrain should expose defense turret pads");
     }
 }
 

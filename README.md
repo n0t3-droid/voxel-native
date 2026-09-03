@@ -71,6 +71,11 @@ The latest engine work turns bot construction into a road-first city planner:
   still catching up, keeping low-end PCs responsive.
 - terrain installs are frame-capped so a wave of completed async chunks does
   not all fold back into the world during the same flight frame.
+- concept-art inventions now ship in default terrain: bounded floating sky
+  islands with preserved flight corridors, mesa/volcanic lava rivers edged by
+  cyan/magenta neon channels, sparse monorail ribbons with bridge pylons and
+  nearby moving carts, rare orbital docking spires on mountain peaks, and
+  defense turret pads that fire red laser beams at hostile drones.
 
 ## GitHub Snapshot
 
@@ -105,6 +110,9 @@ Verified update for this snapshot:
   translucent wall;
 - local engine captures remain ignored rather than becoming GitHub gallery
   clutter.
+- floating sky islands, lava/neon canyon channels, monorail tracks with carts,
+  docking-spire landmarks, and drone-targeting defense turrets extend the
+  showcase terrain toward the reference concept art.
 
 ## City Planner Math
 
