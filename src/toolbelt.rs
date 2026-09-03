@@ -11,7 +11,7 @@ use bevy_egui::{egui, EguiContexts};
 use crate::animation::AnimationStudio;
 use crate::blocks::{block_label, block_palette_catalog, BlockPaletteEntry, BlockType};
 use crate::builder::{BuilderHistory, BuilderState};
-use crate::city::{CityState, CityTool};
+use crate::city::{CityState, CityTool, RoadStyle};
 use crate::icons::{paint_icon, Icon};
 use crate::menu::GameState;
 use crate::mode::{ActiveMode, ModeContext};
@@ -668,6 +668,7 @@ fn draw_toolbelt(
     mut builder: ResMut<BuilderState>,
     mut history: ResMut<BuilderHistory>,
     mut world: ResMut<VoxelWorld>,
+    mut city: ResMut<CityState>,
     mut wheel: EventReader<MouseWheel>,
 ) {
     if !mode.is_build() {
@@ -741,6 +742,9 @@ fn draw_toolbelt(
         if let Some(block) = preset.block() {
             builder.block = block;
             builder.status = format!("Material: {}", block_label(block));
+        }
+        if preset == BuildWorkflowPreset::Skyway {
+            city.road_style = RoadStyle::Skyway;
         }
         mode.set(ActiveMode::BuildLive { tool }, preset.status());
         toolbelt.status = mode.status.clone();
@@ -925,6 +929,7 @@ enum BuildWorkflowPreset {
     CityShell,
     Skyline,
     Spacecraft,
+    Skyway,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -968,23 +973,25 @@ impl ToolActionHint {
 }
 
 impl BuildWorkflowPreset {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Sketch,
         Self::Room,
         Self::PushPull,
         Self::ModernHouse,
         Self::Roads,
+        Self::Skyway,
         Self::BotArea,
         Self::Landscape,
         Self::CityShell,
         Self::Skyline,
         Self::Spacecraft,
     ];
-    const QUICK: [Self; 7] = [
+    const QUICK: [Self; 8] = [
         Self::Sketch,
         Self::Room,
         Self::PushPull,
         Self::Roads,
+        Self::Skyway,
         Self::BotArea,
         Self::CityShell,
         Self::Skyline,
@@ -1002,6 +1009,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => "CITY",
             Self::Skyline => "TOWER",
             Self::Spacecraft => "SHIP",
+            Self::Skyway => "SKYWAY",
         }
     }
 
@@ -1017,6 +1025,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => Icon::City,
             Self::Skyline => Icon::Wand,
             Self::Spacecraft => Icon::Cube,
+            Self::Skyway => Icon::Road,
         }
     }
 
@@ -1032,6 +1041,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => ToolbeltTool::CityBuilding,
             Self::Skyline => ToolbeltTool::SmartTower,
             Self::Spacecraft => ToolbeltTool::DrawRect,
+            Self::Skyway => ToolbeltTool::CityRoad,
         }
     }
 
@@ -1043,7 +1053,7 @@ impl BuildWorkflowPreset {
             Self::ModernHouse => Some(IVec3::new(8, 1, 1)),
             Self::Landscape => Some(IVec3::new(8, 1, 8)),
             Self::Spacecraft => Some(IVec3::new(6, 1, 1)),
-            Self::Roads | Self::BotArea | Self::CityShell | Self::Skyline => None,
+            Self::Roads | Self::Skyway | Self::BotArea | Self::CityShell | Self::Skyline => None,
         }
     }
 
@@ -1059,6 +1069,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => Some(BlockType::Limestone),
             Self::Skyline => Some(BlockType::CockpitGlass),
             Self::Spacecraft => Some(BlockType::ShipHullAlloy),
+            Self::Skyway => Some(BlockType::SkywayDeck),
         }
     }
 
@@ -1074,6 +1085,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => "City workflow: LMB drag/release a building shell footprint; roads and frontage stay component-aware.".into(),
             Self::Skyline => "Tower workflow: two clicks create a varied skyscraper shell with floors, crown, and undo.".into(),
             Self::Spacecraft => "Spacecraft workflow: alloy material and long hull brush for shuttles, fins, and cockpit follow-up.".into(),
+            Self::Skyway => "Skyway workflow: draw elevated monorail decks with skyway plating, cyan rails, and support pylons.".into(),
         }
     }
 
@@ -1101,6 +1113,9 @@ impl BuildWorkflowPreset {
             Self::Spacecraft => {
                 "Alloy material and hull brush for shuttle bodies and sci-fi details."
             }
+            Self::Skyway => {
+                "One click switches to skyway decks: elevated plating, cyan rails, pylons."
+            }
         }
     }
 
@@ -1116,6 +1131,7 @@ impl BuildWorkflowPreset {
             Self::CityShell => egui::Color32::from_rgb(130, 255, 125),
             Self::Skyline => egui::Color32::from_rgb(255, 184, 70),
             Self::Spacecraft => egui::Color32::from_rgb(150, 205, 230),
+            Self::Skyway => egui::Color32::from_rgb(70, 150, 255),
         }
     }
 }
@@ -2258,6 +2274,7 @@ mod tests {
                 BuildWorkflowPreset::Room,
                 BuildWorkflowPreset::PushPull,
                 BuildWorkflowPreset::Roads,
+                BuildWorkflowPreset::Skyway,
                 BuildWorkflowPreset::BotArea,
                 BuildWorkflowPreset::CityShell,
                 BuildWorkflowPreset::Skyline,
@@ -2291,5 +2308,10 @@ mod tests {
             BuildWorkflowPreset::Spacecraft.block(),
             Some(crate::blocks::BlockType::ShipHullAlloy)
         );
+        assert_eq!(
+            BuildWorkflowPreset::Skyway.block(),
+            Some(crate::blocks::BlockType::SkywayDeck)
+        );
+        assert_eq!(BuildWorkflowPreset::Skyway.tool(), ToolbeltTool::CityRoad);
     }
 }
