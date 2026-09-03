@@ -274,10 +274,10 @@ impl BlockType {
             // Structural surfaces stay below the bloom threshold. Pure
             // white plating turned every skyway into a glare streak that
             // outshone the neon it was supposed to frame.
-            BlockType::PlatingWhite => Color::srgb(0.62, 0.66, 0.74),
-            BlockType::PlatingTeal => Color::srgb(0.22, 0.56, 0.62),
-            BlockType::RoadDeck => Color::srgb(0.34, 0.35, 0.41),
-            BlockType::RoadMarking => Color::srgb(0.76, 0.78, 0.72),
+            BlockType::PlatingWhite => Color::srgb(0.52, 0.56, 0.64),
+            BlockType::PlatingTeal => Color::srgb(0.22, 0.54, 0.60),
+            BlockType::RoadDeck => Color::srgb(0.28, 0.29, 0.34),
+            BlockType::RoadMarking => Color::srgb(0.62, 0.64, 0.58),
         }
     }
 
@@ -988,7 +988,7 @@ mod tests {
             let lin = block.color().to_linear();
             let peak = lin.red.max(lin.green).max(lin.blue);
             assert!(
-                peak < 0.62,
+                peak < 0.40,
                 "{block:?} peaks at linear {peak:.3} and will bloom into a glare streak"
             );
         }

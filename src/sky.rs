@@ -771,7 +771,10 @@ fn follow_and_animate_sky(
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
             let base_day = Vec3::new(9.0, 5.0, 13.0); // rich purple/magenta at noon
             let base_night = Vec3::new(8.0, 5.5, 10.0); // full nebula glow at night
-            let base_sunset = Vec3::new(12.0, 5.0, 4.5); // warm dusk glow
+                                                        // Restrained at dusk on purpose. A hot warm add on top of an
+                                                        // already-orange sunset sky flattened the whole dome into one
+                                                        // red wash and buried the cloud structure with it.
+            let base_sunset = Vec3::new(5.0, 2.4, 2.2);
             let e = (base_day * day + base_night * night + base_sunset * sunset * 0.9)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
@@ -791,7 +794,7 @@ fn follow_and_animate_sky(
         // vertical gradient the flat ClearColor cannot express.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
             let noon = Vec3::new(0.55, 0.95, 1.35);
-            let dusk = Vec3::new(3.60, 1.35, 0.55);
+            let dusk = Vec3::new(3.00, 1.25, 0.50);
             let deep = Vec3::new(1.05, 0.35, 1.65);
             let e = (noon * day + deep * night) * (1.0 - sunset * 0.55) + dusk * sunset;
             let e = e * intel.profile.sky_saturation.max(0.7);
