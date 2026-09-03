@@ -1232,14 +1232,16 @@ fn build_horizon_gradient_image(height: u32) -> Image {
             (1.0 - (elevation / 0.28).min(1.0)).powf(1.85)
         };
         let intensity = intensity.clamp(0.0, 1.0);
-        // Greyscale carrier — live emissive supplies the colour. A baked
-        // orange band stayed red at hour 21.5 and pink at hour 11.
-        let byte = (intensity * 255.0) as u8;
+        // Warm carrier, gated by live emissive. Noon/night emissive is
+        // ~0.02 so this tint only reads when sunset_factor is high.
+        let r = (intensity * 255.0) as u8;
+        let g = (intensity * 118.0) as u8;
+        let b = (intensity * 36.0) as u8;
         let a = (intensity * 0.42 * 255.0) as u8;
         for _ in 0..WIDTH {
-            data.push(byte);
-            data.push(byte);
-            data.push(byte);
+            data.push(r);
+            data.push(g);
+            data.push(b);
             data.push(a);
         }
     }
