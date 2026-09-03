@@ -323,8 +323,8 @@ fn ship_target_angular_rates(
 struct ShipPreview;
 
 #[derive(Component)]
-struct EnemyDrone {
-    hp: f32,
+pub(crate) struct EnemyDrone {
+    pub(crate) hp: f32,
     fire_cooldown: f32,
     orbit: f32,
     /// Smoothed translational velocity (m/s) — used to add inertia so drones
