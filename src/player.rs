@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::daynight::WorldIntelRuntime;
+use crate::neurocore::RuntimeProfile;
 use crate::settings::{ActiveWorld, PlayerMiningSave, SuitVitalsSave, WorldSettings};
 use crate::weapons::DestructionStats;
 use crate::world::{ChunkAnchor, VoxelWorld};
@@ -167,6 +168,14 @@ fn load_player_from_world(
             );
         }
     }
+    // Aim the first look at the hero postcard (crystal cluster + energy
+    // river + skyway) so the opening seconds match the key art.
+    if translation.x.abs() < 280.0 && translation.z.abs() < 280.0 {
+        let dx = crate::frontier::HERO_CRYSTAL_X as f32 + 0.5 - translation.x;
+        let dz = crate::frontier::HERO_CRYSTAL_Z as f32 + 0.5 - translation.z;
+        yaw = dx.atan2(-dz);
+        pitch = -0.14;
+    }
     tf.translation = translation;
     player.yaw = yaw;
     player.pitch = pitch;
@@ -253,17 +262,15 @@ fn spawn_player(mut commands: Commands) {
             ..default()
         },
         FogSettings {
-            color: Color::srgba(0.53, 0.80, 0.98, 1.0),
-            // Cinematic aerial-perspective fog: long visibility
-            // (1800 blocks) lets huge mountains and distant mesas
-            // dominate the horizon. The inscatter colour is a warm
-            // sunlit haze that picks up golden hour beautifully
-            // through `update_sun()` in daynight.rs.
-            falloff: FogFalloff::from_visibility_colors(
-                1800.0,
-                Color::srgb(0.80, 0.88, 1.0),
-                Color::srgb(0.58, 0.72, 0.95),
-            ),
+            color: Color::srgba(0.42, 0.58, 0.78, 1.0),
+            // Starting density is a placeholder: `update_sun()` in
+            // daynight.rs owns the live ExponentialSquared aerial
+            // perspective (thin at noon, warm inscatter at dusk, a
+            // lifted fill at night). Keep this conservative so the
+            // first frames before that system runs aren't milky.
+            falloff: FogFalloff::ExponentialSquared { density: 0.00022 },
+            directional_light_color: Color::srgb(0.72, 0.62, 0.48),
+            directional_light_exponent: 11.0,
             ..default()
         },
         // Bloom on the world camera. Combined with HDR-boosted vertex
@@ -333,27 +340,33 @@ fn update_camera_fov(
     }
 }
 
-/// React to GraphicsMode changes by scaling bloom intensity. In Fast
-/// mode bloom is ~free (iGPU still runs ~0.8 ms at 720p) but the
-/// tonemap pass dominates; set bloom to 0 so the compositor can skip
-/// the whole sub-pipeline. Balanced = subtle, High = full.
+/// React to GraphicsMode / runtime-profile changes by scaling bloom.
+/// Fast skips the pass entirely. Balanced stays conservative. High
+/// plus the Cinematic runtime profile is the lush key-art look.
 fn update_bloom_by_graphics(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
     mut q: Query<&mut BloomSettings, With<Player>>,
-    mut last: Local<Option<crate::settings::GraphicsMode>>,
+    mut last: Local<Option<(crate::settings::GraphicsMode, RuntimeProfile)>>,
 ) {
-    if *last == Some(settings.graphics) && !intel.is_changed() {
+    let key = (settings.graphics, settings.runtime_profile);
+    if *last == Some(key) && !intel.is_changed() {
         return;
     }
-    *last = Some(settings.graphics);
-    let target: f32 = match settings.graphics {
-        crate::settings::GraphicsMode::Fast => 0.0,
-        crate::settings::GraphicsMode::Balanced => 0.10,
-        crate::settings::GraphicsMode::High => 0.18,
-    } * intel.profile.bloom_mul;
+    *last = Some(key);
+    let cinematic = settings.runtime_profile == RuntimeProfile::Cinematic;
+    let (intensity, threshold, lf_boost): (f32, f32, f32) = match settings.graphics {
+        crate::settings::GraphicsMode::Fast => (0.0, 0.85, 0.20),
+        crate::settings::GraphicsMode::Balanced => (0.12, 0.72, 0.38),
+        crate::settings::GraphicsMode::High if cinematic => (0.34, 0.50, 0.62),
+        crate::settings::GraphicsMode::High => (0.22, 0.58, 0.48),
+    };
+    let target = (intensity * intel.profile.bloom_mul).clamp(0.0, 0.45);
     if let Ok(mut b) = q.get_single_mut() {
-        b.intensity = target.clamp(0.0, 0.35);
+        b.intensity = target;
+        b.low_frequency_boost = lf_boost;
+        b.prefilter_settings.threshold = threshold;
+        b.prefilter_settings.threshold_softness = if cinematic { 0.55 } else { 0.40 };
     }
 }
 

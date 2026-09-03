@@ -800,19 +800,19 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 2.15;
         }
         22 => {
-            // Lava — hot orange, dialled back so VolcanicWaste fields
-            // don't drown the screen in bloom. Still glows, just
-            // doesn't blind the player.
-            c[0] *= 2.0;
-            c[1] *= 1.15;
+            // Lava — hot orange, strong enough to light nearby rock
+            // through bloom on High/Cinematic. Fast has bloom off so
+            // this is just a bright HDR block, which ACES keeps readable.
+            c[0] *= 3.2;
+            c[1] *= 1.55;
             c[2] *= 0.55;
         }
         20 => {
-            // Crystal — cyan-violet spires. Subtler than lava so the
-            // biome still reads as sky-coloured rock, not lightning.
-            c[0] *= 1.7;
-            c[1] *= 3.0;
-            c[2] *= 4.2;
+            // Crystal — cyan-violet spires. Pushed so they bloom like
+            // the key-art shards without turning the biome into lightning.
+            c[0] *= 2.1;
+            c[1] *= 3.6;
+            c[2] *= 5.2;
         }
         23 => {
             // AlienMoss — bioluminescent magenta/violet. The multiplier
@@ -857,9 +857,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         }
         33 => {
             // Luminite — brilliant aquamarine (concept cavern key light).
-            c[0] *= 1.2;
-            c[1] *= 3.6;
-            c[2] *= 4.8;
+            c[0] *= 1.45;
+            c[1] *= 4.4;
+            c[2] *= 5.8;
         }
         34 => {
             // Magnetite — hot ember orange, reads as ore against cyan crystal.
@@ -876,27 +876,27 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         38 => {
             // Plasma river — the brightest thing on the canyon floor, so
             // it reads as a light source carving through dark rock.
-            c[0] *= 1.1;
-            c[1] *= 3.8;
-            c[2] *= 5.0;
+            c[0] *= 1.35;
+            c[1] *= 4.6;
+            c[2] *= 6.2;
         }
         39 => {
             // Magenta crystal — hot pink hero shards.
-            c[0] *= 4.4;
-            c[1] *= 0.9;
-            c[2] *= 3.8;
+            c[0] *= 5.4;
+            c[1] *= 1.05;
+            c[2] *= 4.6;
         }
         40 => {
             // Emerald crystal.
-            c[0] *= 1.0;
-            c[1] *= 4.2;
-            c[2] *= 1.9;
+            c[0] *= 1.15;
+            c[1] *= 5.2;
+            c[2] *= 2.2;
         }
         41 => {
-            // Holo pane — faint but unmistakably lit.
-            c[0] *= 1.6;
-            c[1] *= 2.6;
-            c[2] *= 3.0;
+            // Holo pane / window — interior glow like the cliff-city art.
+            c[0] *= 2.2;
+            c[1] *= 3.4;
+            c[2] *= 4.2;
         }
         _ => {}
     }
