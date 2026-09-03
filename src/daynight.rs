@@ -125,6 +125,7 @@ impl Plugin for DayNightPlugin {
                 (
                     advance_time,
                     update_world_intel_runtime,
+                    sync_postcard_bounce_lights,
                     update_sun,
                     update_shadow_quality,
                 )
@@ -225,6 +226,73 @@ fn spawn_sun(mut commands: Commands, settings: Res<WorldSettings>) {
     });
 }
 
+/// Unshadowed point fill parked on the spawn postcard. Lights nearby
+/// mesa faces from crystals / plasma / hab windows so night banding
+/// reads without a second noon key. Fast GraphicsMode never spawns
+/// these — the directional FillLight is the cheap path.
+#[derive(Component)]
+struct PostcardBounceLight {
+    base_intensity: f32,
+}
+
+/// (x, y, z, r, g, b, lumens, range)
+const POSTCARD_BOUNCE: [(f32, f32, f32, f32, f32, f32, f32, f32); 6] = [
+    // Hero cyan crystal — local rock fill, not a skyway glare.
+    (72.0, 86.0, -96.0, 0.32, 0.82, 1.0, 260_000.0, 32.0),
+    // Magenta cluster further into the look cone.
+    (142.0, 84.0, -78.0, 0.95, 0.28, 0.82, 220_000.0, 28.0),
+    // Energy river, two samples along the hero cut.
+    (90.0, 58.0, -72.0, 0.18, 0.78, 1.0, 210_000.0, 26.0),
+    (150.0, 58.0, -72.0, 0.18, 0.78, 1.0, 190_000.0, 26.0),
+    // Warm hab-window bounce so terraced plating isn't a silhouette.
+    (118.0, 90.0, -66.0, 1.0, 0.62, 0.32, 140_000.0, 22.0),
+    (84.0, 88.0, -54.0, 1.0, 0.62, 0.32, 120_000.0, 20.0),
+];
+
+fn night_bounce_dir(key_dir: Vec3, night: bool) -> Vec3 {
+    if night {
+        // Side skimming so vertical mesa faces get N·L. High-Y fill
+        // only lit +Y tops and left the postcard cliffs crushed.
+        Vec3::new(-key_dir.x * 0.95, 0.32, -key_dir.z * 1.15).normalize()
+    } else {
+        Vec3::new(-key_dir.x * 0.35, 0.82, -key_dir.z * 0.55).normalize()
+    }
+}
+
+fn sync_postcard_bounce_lights(
+    mut commands: Commands,
+    settings: Res<WorldSettings>,
+    existing: Query<Entity, With<PostcardBounceLight>>,
+) {
+    if settings.graphics == GraphicsMode::Fast {
+        for entity in &existing {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    if !existing.is_empty() {
+        return;
+    }
+    for &(x, y, z, r, g, b, lumens, range) in &POSTCARD_BOUNCE {
+        commands.spawn((
+            PointLightBundle {
+                point_light: PointLight {
+                    color: Color::srgb(r, g, b),
+                    intensity: 0.0,
+                    range,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                transform: Transform::from_xyz(x, y, z),
+                ..default()
+            },
+            PostcardBounceLight {
+                base_intensity: lumens,
+            },
+        ));
+    }
+}
+
 /// Reactively apply graphics-mode changes (from the F3 editor) to the
 /// sun's cascades, shadow toggle and shadow-map size without requiring
 /// a restart. Zero-cost when the mode hasn't changed.
@@ -304,6 +372,7 @@ fn update_sun(
     mut ambient: ResMut<AmbientLight>,
     mut sun: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
     mut fill: Query<(&mut Transform, &mut DirectionalLight), (With<FillLight>, Without<Sun>)>,
+    mut bounce_lights: Query<(&PostcardBounceLight, &mut PointLight)>,
     mut fog: Query<&mut FogSettings>,
 ) {
     let Ok((mut transform, mut light)) = sun.get_single_mut() else {
@@ -320,7 +389,9 @@ fn update_sun(
     // mesas stay readable instead of pure silhouette.
     let mut key_dir = sun_dir;
     if key_dir.y < 0.12 {
-        key_dir.y = if sun_dir.y < -0.12 { 0.55 } else { 0.16 };
+        // Night key: skim vertical cliff faces (y ~ 0.36) rather than
+        // a high moon that only paints +Y tops.
+        key_dir.y = if sun_dir.y < -0.12 { 0.36 } else { 0.16 };
         key_dir = key_dir.normalize();
     }
 
@@ -348,19 +419,27 @@ fn update_sun(
 
     // Opposite-azimuth bounce. No shadows, so Fast pays one extra
     // unshadowed directional. Night is the whole point; noon stays
-    // near zero so the look does not flatten.
+    // near zero so the look does not flatten. Night bounce comes in
+    // from the side so mesa strata (vertical faces) actually read.
     if let Ok((mut fill_tf, mut fill_light)) = fill.get_single_mut() {
-        let bounce = Vec3::new(-key_dir.x * 0.35, 0.82, -key_dir.z * 0.55).normalize();
+        let night_side = sun_dir.y < -0.12;
+        let bounce = night_bounce_dir(key_dir, night_side);
         let fill_forward = -bounce;
         *fill_tf = Transform::from_xyz(bounce.x * 280.0, bounce.y * 280.0, bounce.z * 280.0)
             .looking_to(fill_forward, Vec3::Y);
         let night_amt = (1.0 - day).powf(1.35);
-        fill_light.illuminance = 120.0 + sunset * 480.0 + night_amt * 2_200.0;
+        fill_light.illuminance = 120.0 + sunset * 480.0 + night_amt * 2_600.0;
         fill_light.color = if sun_dir.y < -0.12 {
-            Color::srgb(0.58, 0.64, 0.90)
+            Color::srgb(0.62, 0.66, 0.92)
         } else {
             Color::srgb(1.0, 0.70, 0.38)
         };
+    }
+
+    let night_amt = (1.0 - day).powf(1.35);
+    let dusk_glow = sunset * 0.18;
+    for (spec, mut point) in &mut bounce_lights {
+        point.intensity = spec.base_intensity * (night_amt + dusk_glow);
     }
 
     // Ambient: warm fill through dusk so shadowed canyon floors stay
@@ -378,7 +457,7 @@ fn update_sun(
         .mix(&golden_fill, sunset * 0.38);
     ambient.color = Color::LinearRgba(amb_lin);
     ambient.brightness =
-        (1_560.0 + day * 140.0 + sunset * 280.0 + night_amt * 980.0) * intel.profile.ambient_mul;
+        (1_560.0 + day * 140.0 + sunset * 280.0 + night_amt * 1_260.0) * intel.profile.ambient_mul;
 
     // Sky (clear colour). Dusk zenith goes violet; the golden rim is
     // owned by `sky.rs` so we do not dye the whole dome orange.
@@ -520,5 +599,43 @@ mod tests {
         assert!(day_factor(noon) > day_factor(dusk) + 0.15);
         assert!(night.y < 0.0);
         assert!(sunset_factor(dusk) > sunset_factor(noon));
+    }
+
+    #[test]
+    fn night_bounce_skims_vertical_faces_instead_of_only_tops() {
+        let key = sun_direction(21.5);
+        let mut key_dir = key;
+        key_dir.y = 0.36;
+        let key_dir = key_dir.normalize();
+        let night = night_bounce_dir(key_dir, true);
+        let day = night_bounce_dir(key_dir, false);
+        assert!(
+            night.y < 0.50,
+            "night bounce still comes from overhead (y={:.3})",
+            night.y
+        );
+        assert!(
+            day.y > 0.65,
+            "day bounce should stay a high fill, y={:.3}",
+            day.y
+        );
+        let cliff = Vec3::new(0.0, 0.0, -1.0);
+        assert!(
+            night.dot(cliff).abs() > day.dot(cliff).abs(),
+            "night bounce should hit Z-facing mesa walls harder than the day fill"
+        );
+    }
+
+    #[test]
+    fn postcard_bounce_stays_off_fast_and_local() {
+        assert_eq!(POSTCARD_BOUNCE.len(), 6);
+        for &(x, _y, z, _r, _g, _b, lumens, range) in &POSTCARD_BOUNCE {
+            assert!(
+                crate::frontier::in_hero_postcard(x as i32, z as i32),
+                "bounce light at {x},{z} left the postcard AABB"
+            );
+            assert!(range <= 36.0, "bounce range {range} would light the whole mesa");
+            assert!(lumens <= 300_000.0, "bounce lumens {lumens} would flatten night");
+        }
     }
 }
