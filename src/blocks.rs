@@ -838,9 +838,11 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 2.4;
         }
         31 => {
-            c[0] *= 3.8;
-            c[1] *= 2.2;
-            c[2] *= 0.7;
+            // Skyway lamps — warm, below crystal/plasma so energy reads
+            // as the brightest thing instead of a glare streak.
+            c[0] *= 2.35;
+            c[1] *= 1.25;
+            c[2] *= 0.35;
         }
         32 => {
             c[0] *= 1.4;
@@ -891,10 +893,10 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 1.70;
         }
         41 => {
-            // Holo pane / window — interior glow like the cliff-city art.
-            c[0] *= 1.55;
-            c[1] *= 2.15;
-            c[2] *= 2.65;
+            // Warm window glow — cliff-city interiors, not cyan glare.
+            c[0] *= 1.85;
+            c[1] *= 1.55;
+            c[2] *= 1.15;
         }
         _ => {}
     }

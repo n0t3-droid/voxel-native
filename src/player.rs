@@ -9,7 +9,7 @@ use bevy::pbr::{FogFalloff, FogSettings};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use crate::daynight::WorldIntelRuntime;
+use crate::daynight::{day_factor, sun_direction, sunset_factor, WorldIntelRuntime};
 use crate::neurocore::RuntimeProfile;
 use crate::settings::{ActiveWorld, PlayerMiningSave, SuitVitalsSave, WorldSettings};
 use crate::weapons::DestructionStats;
@@ -340,33 +340,48 @@ fn update_camera_fov(
     }
 }
 
-/// React to GraphicsMode / runtime-profile changes by scaling bloom.
-/// Fast skips the pass entirely. Balanced stays conservative. High
-/// plus the Cinematic runtime profile is the lush key-art look.
+/// React to GraphicsMode / runtime-profile / time-of-day band changes
+/// by scaling bloom. Fast skips the pass entirely. Dusk gets a slightly
+/// lusher halo so crystals glow; noon stays conservative so the hull
+/// and horizon don't milk.
 fn update_bloom_by_graphics(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
     mut q: Query<&mut BloomSettings, With<Player>>,
-    mut last: Local<Option<(crate::settings::GraphicsMode, RuntimeProfile)>>,
+    mut last: Local<Option<(crate::settings::GraphicsMode, RuntimeProfile, u8)>>,
 ) {
-    let key = (settings.graphics, settings.runtime_profile);
+    let sun = sun_direction(settings.time_of_day);
+    let dusk = sunset_factor(sun);
+    let night = 1.0 - day_factor(sun);
+    let band = if night > 0.55 {
+        0u8
+    } else if dusk > 0.40 {
+        1
+    } else {
+        2
+    };
+    let key = (settings.graphics, settings.runtime_profile, band);
     if *last == Some(key) && !intel.is_changed() {
         return;
     }
     *last = Some(key);
     let cinematic = settings.runtime_profile == RuntimeProfile::Cinematic;
-    let (intensity, threshold, lf_boost): (f32, f32, f32) = match settings.graphics {
+    let (mut intensity, mut threshold, lf_boost): (f32, f32, f32) = match settings.graphics {
         crate::settings::GraphicsMode::Fast => (0.0, 0.85, 0.20),
         crate::settings::GraphicsMode::Balanced => (0.10, 0.76, 0.28),
-        crate::settings::GraphicsMode::High if cinematic => (0.16, 0.74, 0.30),
+        crate::settings::GraphicsMode::High if cinematic => (0.15, 0.78, 0.28),
         crate::settings::GraphicsMode::High => (0.14, 0.70, 0.32),
     };
+    if cinematic && settings.graphics != crate::settings::GraphicsMode::Fast {
+        intensity += dusk * 0.04;
+        threshold -= dusk * 0.06;
+    }
     let target = (intensity * intel.profile.bloom_mul).clamp(0.0, 0.22);
     if let Ok(mut b) = q.get_single_mut() {
         b.intensity = target;
         b.low_frequency_boost = lf_boost;
-        b.prefilter_settings.threshold = threshold;
-        b.prefilter_settings.threshold_softness = if cinematic { 0.32 } else { 0.28 };
+        b.prefilter_settings.threshold = threshold.clamp(0.62, 0.88);
+        b.prefilter_settings.threshold_softness = if cinematic { 0.30 } else { 0.28 };
     }
 }
 
