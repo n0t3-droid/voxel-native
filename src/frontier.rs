@@ -999,7 +999,7 @@ pub struct CliffHab {
 }
 
 impl CliffHab {
-    pub fn hero_cluster() -> [Self; 6] {
+    pub fn hero_cluster() -> [Self; 10] {
         [
             Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4 },
             Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5 },
@@ -1007,6 +1007,12 @@ impl CliffHab {
             Self { cx: 22, cz: -82, floors: 6, width: 4, depth: 4 },
             Self { cx: 108, cz: -66, floors: 8, width: 5, depth: 3 },
             Self { cx: 70, cz: -40, floors: 4, width: 7, depth: 5 },
+            // Look-cone extras: the postcard still ends ~ (87, -44)
+            // looking +X/-Z, so density has to live ahead of the camera.
+            Self { cx: 128, cz: -92, floors: 7, width: 5, depth: 4 },
+            Self { cx: 146, cz: -74, floors: 9, width: 4, depth: 5 },
+            Self { cx: 96, cz: -108, floors: 6, width: 6, depth: 4 },
+            Self { cx: 168, cz: -88, floors: 8, width: 5, depth: 4 },
         ]
     }
 
@@ -1434,7 +1440,7 @@ mod tests {
         );
         assert!(count_blocks(&chunk, BlockType::PlatingWhite) > 10);
         assert!(count_blocks(&chunk, BlockType::NeonAmber) > 0);
-        assert_eq!(CliffHab::hero_cluster().len(), 6);
+        assert_eq!(CliffHab::hero_cluster().len(), 10);
         for h in CliffHab::hero_cluster() {
             assert!(in_hero_postcard(h.cx, h.cz), "hab {},{} left the postcard", h.cx, h.cz);
         }
