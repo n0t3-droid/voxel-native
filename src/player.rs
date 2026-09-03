@@ -390,12 +390,9 @@ fn update_bloom_by_graphics(
 
 /// Pre-ACES look-pass for the world camera.
 ///
-/// Pass-3 piled directional lux onto night and ACES still crushed the
-/// mesa to black. This lifts **shadows and midtones** (and drops EV100)
-/// so banding survives the tonemap, while highlight gain stays 1.0 so
-/// crystals and plasma remain the brightest thing. Fast keeps the
-/// Blender default — the grade is a uniform upload, but Fast play
-/// should not look like a graded cinematic.
+/// Global EV / shadow-lift washed the night sky grey. Night recovery is
+/// midtone gain (terrain, not space) plus a stone emissive floor. Fast
+/// keeps the Blender default. Highlight gain stays 1.0 so crystals win.
 fn update_cinematic_exposure(
     settings: Res<WorldSettings>,
     mut q: Query<(&mut ColorGrading, &mut Exposure), With<Player>>,
@@ -423,13 +420,10 @@ fn update_cinematic_exposure(
         exposure.ev100 = grade.ev100;
         grading.global.exposure = grade.exposure;
         grading.global.temperature = grade.temperature;
-        grading.shadows = ColorGradingSection {
-            saturation: 1.0 + night_amt * 0.06,
-            contrast: 1.0 - night_amt * 0.08,
-            gamma: 1.0 - night_amt * 0.10,
-            gain: grade.shadow_gain,
-            lift: grade.shadow_lift,
-        };
+        // Never lift the shadow section: that turns the night sky grey.
+        // Mesa faces get their floor from stone emissive + local bounce;
+        // midtones pick up the remaining ACES recovery.
+        grading.shadows = ColorGradingSection::default();
         grading.midtones = ColorGradingSection {
             saturation: grade.mid_sat,
             contrast: 1.0,
@@ -469,13 +463,16 @@ fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> Lo
     let n = night_amt.clamp(0.0, 1.0);
     let mul = if cinematic { 1.0 } else { 0.55 };
     LookPassGrade {
-        ev100: Exposure::EV100_BLENDER - n * 1.90 * mul,
-        exposure: n * 0.32 * mul,
-        shadow_lift: n * 0.14 * mul,
-        shadow_gain: 1.0 + n * 0.58 * mul,
-        mid_gain: 1.0 + n * 0.24 * mul + dusk * 0.05,
-        mid_sat: 1.0 + n * 0.10 + dusk * 0.12,
-        temperature: dusk * 0.12 - n * 0.03,
+        // Leave EV100 at Blender. Dropping it (or lifting shadows) turns
+        // the night sky into a grey wall. Mesa faces are recovered via
+        // stone emissive + midtone gain, not a global black-point lift.
+        ev100: Exposure::EV100_BLENDER,
+        exposure: dusk * 0.08 * mul,
+        shadow_lift: 0.0,
+        shadow_gain: 1.0,
+        mid_gain: 1.0 + n * 0.16 * mul + dusk * 0.04,
+        mid_sat: 1.0 + n * 0.08 + dusk * 0.10,
+        temperature: dusk * 0.10,
     }
 }
 
@@ -1181,26 +1178,18 @@ mod tests {
     }
 
     #[test]
-    fn night_grade_opens_shadows_without_touching_fast_or_noon() {
+    fn night_grade_opens_midtones_without_lifting_the_sky_or_fast() {
         let night = look_pass_grade(0.92, 0.05, true, false);
         let noon = look_pass_grade(0.0, 0.0, true, false);
         let dusk = look_pass_grade(0.18, 0.70, true, false);
         let fast = look_pass_grade(0.92, 0.0, true, true);
-        assert!(
-            night.ev100 < 8.2,
-            "night EV100 {} still sits at daylight",
-            night.ev100
-        );
-        assert!(
-            (noon.ev100 - Exposure::EV100_BLENDER).abs() < 0.05,
-            "noon moved off the Blender EV"
-        );
-        assert!(night.shadow_lift > 0.10);
-        assert!(noon.shadow_lift.abs() < 0.01);
-        assert!(night.shadow_gain > dusk.shadow_gain);
+        assert_eq!(night.ev100, Exposure::EV100_BLENDER);
+        assert_eq!(noon.ev100, Exposure::EV100_BLENDER);
+        assert_eq!(night.shadow_lift, 0.0);
+        assert!(night.mid_gain > noon.mid_gain);
+        assert!(dusk.mid_gain < 1.20);
         assert_eq!(fast.ev100, Exposure::EV100_BLENDER);
         assert_eq!(fast.shadow_lift, 0.0);
-        // Dusk must not inherit a noon-flat mid gain.
-        assert!(dusk.mid_gain < 1.20);
+        assert_eq!(fast.mid_gain, 1.0);
     }
 }
