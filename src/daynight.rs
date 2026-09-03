@@ -312,8 +312,11 @@ fn update_sun(
         // Night: cool moonlight strong enough to read strata, still
         // well below crystal/lava HDR so emissives stay the brightest
         // thing in the frame (concept-art mood, not a second noon).
-        light.illuminance = 1_800.0 + (1.0 - day) * 500.0;
-        light.color = Color::srgb(0.70, 0.80, 1.0);
+        // Pass-2 stills at 21.5 crushed ~80% of walkable faces below
+        // lum 25 with 1800 lux; ACES needs more key to keep red mesa
+        // albedo readable without flattening to dusk-noon.
+        light.illuminance = 2_800.0 + (1.0 - day) * 700.0;
+        light.color = Color::srgb(0.74, 0.82, 1.0);
     } else {
         // Warm key. Sunset adds extra illuminance so low elevation
         // still rims the mesas instead of silhouetting them.
@@ -339,7 +342,7 @@ fn update_sun(
         .mix(&golden_fill, sunset * 0.28);
     ambient.color = Color::LinearRgba(amb_lin);
     ambient.brightness =
-        (1_720.0 + day * 120.0 + sunset * 340.0 + night_amt * 380.0) * intel.profile.ambient_mul;
+        (1_720.0 + day * 120.0 + sunset * 340.0 + night_amt * 780.0) * intel.profile.ambient_mul;
 
     // Sky (clear colour). Only a hint of sunset goes into the flat
     // dome — `sky.rs` owns the warm rim through its horizon gradient.
