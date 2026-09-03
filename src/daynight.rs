@@ -6,9 +6,11 @@
 use bevy::pbr::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, FogFalloff};
 use bevy::prelude::*;
 
+use crate::blocks::BlockType;
 use crate::player::Player;
 use crate::settings::{GraphicsMode, TimeMode, WorldSettings};
 use crate::terrain::Biome;
+use crate::textures::MaterialLibrary;
 use crate::world::VoxelWorld;
 
 #[derive(Debug, Clone, Copy)]
@@ -126,6 +128,8 @@ impl Plugin for DayNightPlugin {
                     advance_time,
                     update_world_intel_runtime,
                     sync_postcard_bounce_lights,
+                    snap_postcard_bounce_to_ground,
+                    night_terrain_emissive_floor,
                     update_sun,
                     update_shadow_quality,
                 )
@@ -227,26 +231,28 @@ fn spawn_sun(mut commands: Commands, settings: Res<WorldSettings>) {
 }
 
 /// Unshadowed point fill parked on the spawn postcard. Lights nearby
-/// mesa faces from crystals / plasma / hab windows so night banding
-/// reads without a second noon key. Fast GraphicsMode never spawns
-/// these — the directional FillLight is the cheap path.
+/// mesa faces from crystals / plasma so night banding reads without a
+/// second noon key. Fast GraphicsMode never spawns these.
 #[derive(Component)]
 struct PostcardBounceLight {
     base_intensity: f32,
+    wx: i32,
+    wz: i32,
+    y_offset: f32,
 }
 
-/// (x, y, z, r, g, b, lumens, range)
-const POSTCARD_BOUNCE: [(f32, f32, f32, f32, f32, f32, f32, f32); 6] = [
-    // Hero cyan crystal — local rock fill, not a skyway glare.
-    (72.0, 86.0, -96.0, 0.32, 0.82, 1.0, 380_000.0, 34.0),
-    // Magenta cluster further into the look cone.
-    (142.0, 84.0, -78.0, 0.95, 0.28, 0.82, 320_000.0, 30.0),
-    // Energy river, two samples along the hero cut.
-    (90.0, 58.0, -72.0, 0.18, 0.78, 1.0, 300_000.0, 28.0),
-    (150.0, 58.0, -72.0, 0.18, 0.78, 1.0, 280_000.0, 28.0),
-    // Warm hab-window bounce so terraced plating isn't a silhouette.
-    (118.0, 90.0, -66.0, 1.0, 0.62, 0.32, 220_000.0, 24.0),
-    (84.0, 88.0, -54.0, 1.0, 0.62, 0.32, 200_000.0, 22.0),
+/// wx, wz, y_offset above surface, r, g, b, lumens, range.
+const POSTCARD_BOUNCE: [(i32, i32, f32, f32, f32, f32, f32, f32); 10] = [
+    (72, -96, 8.0, 0.32, 0.82, 1.0, 420_000.0, 36.0),
+    (80, -90, 5.0, 0.28, 0.78, 1.0, 260_000.0, 22.0),
+    (142, -78, 8.0, 0.95, 0.28, 0.82, 360_000.0, 32.0),
+    (90, -72, 3.0, 0.18, 0.78, 1.0, 340_000.0, 28.0),
+    (90, -66, 4.0, 0.18, 0.78, 1.0, 220_000.0, 20.0),
+    (90, -78, 4.0, 1.0, 0.42, 0.12, 260_000.0, 22.0),
+    (120, -72, 3.0, 0.18, 0.78, 1.0, 280_000.0, 24.0),
+    (150, -72, 3.0, 0.18, 0.78, 1.0, 300_000.0, 28.0),
+    (108, -132, 6.0, 1.0, 0.62, 0.32, 180_000.0, 20.0),
+    (96, -140, 5.0, 1.0, 0.55, 0.22, 170_000.0, 20.0),
 ];
 
 fn night_bounce_dir(key_dir: Vec3, night: bool) -> Vec3 {
@@ -273,7 +279,7 @@ fn sync_postcard_bounce_lights(
     if !existing.is_empty() {
         return;
     }
-    for &(x, y, z, r, g, b, lumens, range) in &POSTCARD_BOUNCE {
+    for &(wx, wz, y_offset, r, g, b, lumens, range) in &POSTCARD_BOUNCE {
         commands.spawn((
             PointLightBundle {
                 point_light: PointLight {
@@ -283,13 +289,78 @@ fn sync_postcard_bounce_lights(
                     shadows_enabled: false,
                     ..default()
                 },
-                transform: Transform::from_xyz(x, y, z),
+                transform: Transform::from_xyz(wx as f32 + 0.5, 80.0 + y_offset, wz as f32 + 0.5),
                 ..default()
             },
             PostcardBounceLight {
                 base_intensity: lumens,
+                wx,
+                wz,
+                y_offset,
             },
         ));
+    }
+}
+
+fn snap_postcard_bounce_to_ground(
+    world: Option<Res<VoxelWorld>>,
+    mut q: Query<(&PostcardBounceLight, &mut Transform)>,
+) {
+    let Some(world) = world else {
+        return;
+    };
+    for (spec, mut tf) in &mut q {
+        let h = world.surface_height_at(spec.wx, spec.wz) as f32;
+        tf.translation.x = spec.wx as f32 + 0.5;
+        tf.translation.z = spec.wz as f32 + 0.5;
+        tf.translation.y = h + spec.y_offset;
+    }
+}
+
+/// Tiny night emissive floor on mesa stone so banding hues survive ACES
+/// without a second directional key. Fast stays at zero. Crystals are
+/// not in this list — they already sit well above the bloom threshold.
+fn night_terrain_emissive_floor(
+    settings: Res<WorldSettings>,
+    lib: Option<Res<MaterialLibrary>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut last: Local<Option<u8>>,
+) {
+    let Some(lib) = lib else {
+        return;
+    };
+    let sun = sun_direction(settings.time_of_day);
+    let night_amt = (1.0 - day_factor(sun)).powf(1.55);
+    let band = if night_amt > 0.55 {
+        0u8
+    } else if night_amt > 0.18 {
+        1
+    } else {
+        2
+    };
+    if *last == Some(band) {
+        return;
+    }
+    *last = Some(band);
+    let floor = if settings.graphics == GraphicsMode::Fast {
+        0.0
+    } else {
+        night_amt * 0.050
+    };
+    let e = LinearRgba::rgb(floor * 1.22, floor * 0.52, floor * 0.34);
+    for block in [
+        BlockType::RedStone,
+        BlockType::MesaClay,
+        BlockType::AmberStone,
+        BlockType::VioletStone,
+        BlockType::RedSand,
+        BlockType::Basalt,
+    ] {
+        if let Some(handle) = lib.handle_for(block as u16) {
+            if let Some(mat) = materials.get_mut(&handle) {
+                mat.emissive = e;
+            }
+        }
     }
 }
 
@@ -437,7 +508,7 @@ fn update_sun(
     }
 
     let night_amt = (1.0 - day).powf(1.35);
-    let dusk_glow = sunset * 0.18;
+    let dusk_glow = sunset * 0.32;
     for (spec, mut point) in &mut bounce_lights {
         point.intensity = spec.base_intensity * (night_amt + dusk_glow);
     }
@@ -628,14 +699,14 @@ mod tests {
 
     #[test]
     fn postcard_bounce_stays_off_fast_and_local() {
-        assert_eq!(POSTCARD_BOUNCE.len(), 6);
-        for &(x, _y, z, _r, _g, _b, lumens, range) in &POSTCARD_BOUNCE {
+        assert_eq!(POSTCARD_BOUNCE.len(), 10);
+        for &(wx, wz, _y, _r, _g, _b, lumens, range) in &POSTCARD_BOUNCE {
             assert!(
-                crate::frontier::in_hero_postcard(x as i32, z as i32),
-                "bounce light at {x},{z} left the postcard AABB"
+                crate::frontier::in_hero_postcard(wx, wz),
+                "bounce light at {wx},{wz} left the postcard AABB"
             );
-            assert!(range <= 36.0, "bounce range {range} would light the whole mesa");
-            assert!(lumens <= 400_000.0, "bounce lumens {lumens} would flatten night");
+            assert!(range <= 40.0, "bounce range {range} would light the whole mesa");
+            assert!(lumens <= 450_000.0, "bounce lumens {lumens} would flatten night");
         }
     }
 }
