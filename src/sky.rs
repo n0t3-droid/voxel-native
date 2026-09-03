@@ -796,12 +796,12 @@ fn follow_and_animate_sky(
             // really punches once the sun is down. Hour 17 used to keep
             // night-level filaments plus stars.
             let night_vol = (1.0 - day).powf(2.8);
-            let base_day = Vec3::new(0.22, 0.10, 0.38);
+            let base_day = Vec3::new(0.16, 0.08, 0.32);
             let base_night = Vec3::new(1.65, 0.92, 2.25);
-            let base_sunset = Vec3::new(0.55, 0.18, 0.22);
-            let e = (base_day * (0.06 + 0.10 * day)
+            let base_sunset = Vec3::new(0.85, 0.28, 0.12);
+            let e = (base_day * (0.04 + 0.08 * day)
                 + base_night * night_vol
-                + base_sunset * sunset * 0.16)
+                + base_sunset * sunset * 0.22)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
@@ -815,14 +815,14 @@ fn follow_and_animate_sky(
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
-        // Horizon band: a thin warm rim at dusk, not a white wall.
-        // Additive + bloom made the old 3.0 dusk emissive bleach the
-        // whole lower third of the frame. Noon stays a cool carrier so
-        // hour 11 does not go milky-pink; dusk is allowed to warm up.
+        // Horizon band: a thin golden rim at 17:00, a cool whisper at
+        // noon. Additive + bloom made a fat dusk emissive bleach the
+        // lower third; keep noon dim and let sunset_factor (now peaked
+        // at hour 17) drive the warmth.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
-            let noon = Vec3::new(0.018, 0.038, 0.062);
-            let dusk = Vec3::new(0.58, 0.22, 0.07);
-            let deep = Vec3::new(0.10, 0.05, 0.18);
+            let noon = Vec3::new(0.010, 0.028, 0.052);
+            let dusk = Vec3::new(1.35, 0.48, 0.08);
+            let deep = Vec3::new(0.10, 0.04, 0.20);
             let e = noon * day * (1.0 - sunset) + deep * night + dusk * sunset;
             let e = e * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
@@ -1226,8 +1226,9 @@ fn build_horizon_gradient_image(height: u32) -> Image {
             // Fade out fast below the horizon line.
             (1.0 + elevation * 5.0).max(0.0)
         } else {
-            // Smooth falloff to nothing well before the zenith.
-            (1.0 - (elevation / 0.45).min(1.0)).powf(1.7)
+            // Smooth falloff to nothing well before the zenith — a thin
+            // rim, not a milky wall climbing the sky.
+            (1.0 - (elevation / 0.28).min(1.0)).powf(1.85)
         };
         let intensity = intensity.clamp(0.0, 1.0);
         // Greyscale carrier — live emissive supplies the colour so noon
