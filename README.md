@@ -13,6 +13,9 @@ The project goal is not just a voxel sandbox.
   materials, structure, architecture, texture, and detail rows.
 - **Cinematic voxel terrain:** procedural coastline, forests, terrain height,
   water, caves, and sci-fi landmarks are generated as real voxels.
+- **Invention workshop:** players stamp working machines — crystal generators,
+  energy turrets, portal gates, monorail nodes, and hover pads — that share a
+  joule/watt energy network inside the voxel world.
 - **Shuttle and shooter loop:** ships, weapons, drone combat, editor tools, and
   bot companions live in the same world instead of separate demos.
 - **Liquid-glass engine UI:** HUD, toolbelt, bot panels, and system surfaces are
@@ -228,6 +231,7 @@ Status and live screenshots are written under `agent_runs\live_<timestamp>\`.
 | Runtime budgets | `src/neurocore.rs`, `src/settings.rs` |
 | Player, weapons, ships | `src/player.rs`, `src/weapons.rs`, `src/ships.rs` |
 | Bots and city autonomy | `src/bots.rs`, `src/city.rs` |
+| Inventions (machines that run) | `src/inventions.rs` |
 | UI and engine tools | `src/hud.rs`, `src/editor.rs`, `src/toolbelt.rs`, `src/theme.rs` |
 | QA and automation | `src/qa.rs`, `src/agent_control.rs` |
 

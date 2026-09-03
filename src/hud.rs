@@ -824,6 +824,11 @@ fn workflow_steps_for_profile(profile: HudProfile) -> Vec<WorkflowStep> {
             icon: Icon::City,
         },
         WorkflowStep {
+            label: "INVENT",
+            key: "I",
+            icon: Icon::LightBulb,
+        },
+        WorkflowStep {
             label: "BOTS",
             key: "F1",
             icon: Icon::Wand,
@@ -848,8 +853,11 @@ fn active_workflow_label(mode: Option<&crate::mode::ModeContext>) -> &'static st
                 | ToolbeltTool::CityBuilding
                 | ToolbeltTool::CityFacade
                 | ToolbeltTool::SmartTower
+                | ToolbeltTool::Invent
         ) {
             "CITY"
+        } else if tool == ToolbeltTool::Invent {
+            "INVENT"
         } else {
             "BUILD"
         }
@@ -965,7 +973,10 @@ mod tests {
     fn guided_workflow_exposes_the_core_engine_loop() {
         let steps = workflow_steps_for_profile(HudProfile::Guided);
         let labels: Vec<&str> = steps.iter().map(|step| step.label).collect();
-        assert_eq!(labels, vec!["MOVE", "BUILD", "CITY", "BOTS", "SAVE"]);
+        assert_eq!(
+            labels,
+            vec!["MOVE", "BUILD", "CITY", "INVENT", "BOTS", "SAVE"]
+        );
         assert!(steps.iter().any(|step| step.key == "LMB/RMB"));
         assert!(steps.iter().any(|step| step.key == "F1"));
     }

@@ -29,6 +29,7 @@ enum InventoryPage {
     Blocks,
     Ships,
     Companions,
+    Inventions,
     Hotbar,
 }
 
@@ -541,6 +542,8 @@ fn draw_inventory_menu(
     mut ship_placement: ResMut<crate::ships::ShipPlacementState>,
     mut mode: ResMut<ModeContext>,
     mut brain: ResMut<crate::bots::FriendlyWorldBrain>,
+    mut workshop: ResMut<crate::inventions::InventionWorkshop>,
+    mut toolbelt: ResMut<crate::toolbelt::ToolbeltState>,
 ) {
     if *pause_screen != PauseScreen::Inventory {
         return;
@@ -556,6 +559,8 @@ fn draw_inventory_menu(
         &mut ship_placement,
         &mut mode,
         &mut brain,
+        &mut workshop,
+        &mut toolbelt,
     );
 }
 
@@ -654,7 +659,7 @@ fn draw_pause_main(
                     ui,
                     Icon::Cube,
                     "Inventory",
-                    "Blocks, ships, companions",
+                    "Blocks, ships, inventions",
                     false,
                     settings.theme,
                 )
@@ -805,6 +810,8 @@ fn draw_inventory(
     ship_placement: &mut crate::ships::ShipPlacementState,
     mode: &mut ModeContext,
     brain: &mut crate::bots::FriendlyWorldBrain,
+    workshop: &mut crate::inventions::InventionWorkshop,
+    toolbelt: &mut crate::toolbelt::ToolbeltState,
 ) {
     let theme = settings.theme;
     // Glassmorphism backdrop: deep gradient + subtle vignette so the
@@ -956,6 +963,7 @@ fn draw_inventory(
                     (InventoryPage::Blocks, Icon::Cube, "Blocks"),
                     (InventoryPage::Ships, Icon::Globe, "Ships"),
                     (InventoryPage::Companions, Icon::Follow, "Companions"),
+                    (InventoryPage::Inventions, Icon::LightBulb, "Inventions"),
                     (InventoryPage::Hotbar, Icon::Grid, "Hotbar"),
                 ] {
                     if crate::ui_kit::tab_chip(ui, icon, label, active_page == page, theme)
@@ -1182,6 +1190,63 @@ fn draw_inventory(
                     ));
                 }
             });
+            }
+
+            if active_page == InventoryPage::Inventions {
+                ui.label(
+                    egui::RichText::new("INVENTION WORKSHOP")
+                        .size(11.5)
+                        .color(egui::Color32::from_rgb(40, 230, 255))
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Place working machines into the voxel world. Generators harvest crystal and feed turrets, portals, rails, and hover pads.",
+                    )
+                    .size(10.5)
+                    .color(egui::Color32::from_gray(145)),
+                );
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    for kind in crate::inventions::InventionKind::ALL {
+                        let selected = workshop.selected == kind;
+                        let fill = if selected {
+                            kind.egui_accent()
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(24, 30, 45, 220)
+                        };
+                        let text_color = if selected {
+                            egui::Color32::from_rgb(5, 10, 18)
+                        } else {
+                            egui::Color32::from_rgb(230, 245, 255)
+                        };
+                        let resp = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(kind.chip())
+                                    .size(13.0)
+                                    .strong()
+                                    .color(text_color),
+                            )
+                            .fill(fill)
+                            .stroke(egui::Stroke::new(1.0, kind.egui_accent()))
+                            .rounding(egui::Rounding::same(8.0))
+                            .min_size(egui::vec2(130.0, 48.0)),
+                        );
+                        if resp.clicked() {
+                            crate::inventions::arm_invention_tool(workshop, toolbelt, mode, kind);
+                            *pause_screen = PauseScreen::Menu;
+                            next.set(GameState::InGame);
+                        }
+                        resp.on_hover_text(format!("{} — {}", kind.label(), kind.blurb()));
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(workshop.status.as_str())
+                        .size(11.0)
+                        .color(egui::Color32::from_gray(180)),
+                );
             }
 
             ui.add_space(14.0);

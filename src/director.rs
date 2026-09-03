@@ -32,6 +32,7 @@ pub struct UnifiedTelemetry {
     pub build_actions: u32,
     pub build_blocks_changed: u64,
     pub city_actions: u32,
+    pub invention_actions: u32,
     pub luminite_units: u64,
     pub magnetite_units: u64,
     pub iridium_units: u64,
@@ -43,6 +44,7 @@ impl UnifiedTelemetry {
             + self.ground_blocks_broken as f32 * 0.05
             + self.build_blocks_changed as f32 * 0.03
             + self.city_actions as f32 * 2.0
+            + self.invention_actions as f32 * 3.0
             + self.luminite_units as f32 * 1.2
             + self.magnetite_units as f32 * 1.0
             + self.iridium_units as f32 * 2.5
