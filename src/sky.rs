@@ -53,8 +53,8 @@ const SKY_DISTANCE: f32 = 950.0;
 
 /// Hero gas giant: parked upper-right of the default spawn look so it
 /// reads as the painting's Saturn, not a distant marble.
-const PLANET_DIR: Vec3 = Vec3::new(0.60, 0.42, -0.50);
-const PLANET_DIST: f32 = SKY_DISTANCE * 0.64;
+const PLANET_DIR: Vec3 = Vec3::new(0.58, 0.34, -0.52);
+const PLANET_DIST: f32 = SKY_DISTANCE * 0.58;
 
 /// Stars should be a night thing. (1-day)^2 still left them glittering
 /// through golden hour; ^4 kills them by 17:00 and keeps 21:30 bright.
@@ -817,21 +817,24 @@ fn follow_and_animate_sky(
 
         // Horizon band: a thin warm rim at dusk, not a white wall.
         // Additive + bloom made the old 3.0 dusk emissive bleach the
-        // whole lower third of the frame.
+        // whole lower third of the frame. Noon stays a cool carrier so
+        // hour 11 does not go milky-pink; dusk is allowed to warm up.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
-            let noon = Vec3::new(0.025, 0.045, 0.070);
-            let dusk = Vec3::new(0.42, 0.16, 0.06);
-            let deep = Vec3::new(0.12, 0.05, 0.20);
-            let e = (noon * day + deep * night) * (1.0 - sunset * 0.45) + dusk * sunset;
+            let noon = Vec3::new(0.018, 0.038, 0.062);
+            let dusk = Vec3::new(0.58, 0.22, 0.07);
+            let deep = Vec3::new(0.10, 0.05, 0.18);
+            let e = noon * day * (1.0 - sunset) + deep * night + dusk * sunset;
             let e = e * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
-        // Stars: only after true dusk. (1-day)^2 still left them
-        // glittering at hour 17.
+        // Stars: only after true dusk. Unlit + Additive still draws
+        // `base_color` even when emissive is 0, which is why hour 11/17
+        // stills glittered after the emissive-only fade.
         if let Some(mat) = materials.get_mut(&sky_mats.stars) {
             let star_night = star_night_factor(day);
             let intensity = 16.0 * star_night * intel.profile.sky_saturation.max(0.7);
+            mat.base_color = Color::srgba(star_night, star_night, star_night, star_night);
             mat.emissive = LinearRgba::rgb(intensity, intensity, intensity * 1.15);
         }
     }
