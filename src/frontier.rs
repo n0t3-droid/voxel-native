@@ -36,6 +36,20 @@ pub const STATION_CELL: i32 = 512;
 /// Crystal clusters are common: they are ground detail, not landmarks.
 pub const CRYSTAL_CELL: i32 = 96;
 
+/// Altitude band for sky islands.
+///
+/// Airborne landmarks are only worth generating inside the vertical slab
+/// the streamer actually loads (`settings.vertical_chunks` × 16 blocks,
+/// measured from y = 0). An island above that ceiling is invisible no
+/// matter how good it looks, so the band is clamped to fit the default
+/// streaming budget with the whole root and cap inside it.
+pub const SKY_ISLAND_MIN_Y: i32 = 86;
+pub const SKY_ISLAND_MAX_Y: i32 = 138;
+/// Altitude band for docking stations — above the islands, still under
+/// the default ceiling once the mast is accounted for.
+pub const STATION_MIN_Y: i32 = 112;
+pub const STATION_MAX_Y: i32 = 132;
+
 /// Half-width of a skyway carriageway, in blocks. Nine blocks wide plus
 /// guardrails reads as a real multi-lane highway at flight speed.
 const SKYWAY_HALF_WIDTH: f64 = 4.5;
@@ -122,8 +136,9 @@ pub struct SkyIsland {
 
 impl SkyIsland {
     /// Roll the island anchored in lattice cell `(ix, iz)`, if that cell
-    /// has one. `ground` yields the terrain surface height at a column and
-    /// is used to keep the island clear of the peaks below it.
+    /// has one. `ground` is the *smooth macro* elevation, not the real
+    /// surface: islands should ride the broad shape of the land rather
+    /// than pop up and down with every ridge they pass over.
     pub fn for_cell(
         seed: u32,
         ix: i32,
@@ -139,18 +154,12 @@ impl SkyIsland {
         let jitter_z = (cell_rand(seed, 0x15_1A_13, ix, iz) * SKY_ISLAND_CELL as f64) as i32;
         let cx = ix * SKY_ISLAND_CELL + jitter_x;
         let cz = iz * SKY_ISLAND_CELL + jitter_z;
-        let radius = 13 + (cell_rand(seed, 0x15_1A_14, ix, iz) * 15.0) as i32;
+        let radius = 13 + (cell_rand(seed, 0x15_1A_14, ix, iz) * 12.0) as i32;
 
-        // Float well above the local skyline. Sampling the four rim
-        // columns as well as the centre stops an island from spawning
-        // half-buried in a ridge that happens to peak off-centre.
-        let below = ground(cx, cz)
-            .max(ground(cx - radius, cz))
-            .max(ground(cx + radius, cz))
-            .max(ground(cx, cz - radius))
-            .max(ground(cx, cz + radius));
-        let lift = 46 + (cell_rand(seed, 0x15_1A_15, ix, iz) * 40.0) as i32;
-        let cy = (below + lift).clamp(96, 224);
+        // Lift scales with radius: a wide island grows a proportionally
+        // longer root, and a fixed lift would plant that root in the dirt.
+        let lift = 30 + radius + (cell_rand(seed, 0x15_1A_15, ix, iz) * 28.0) as i32;
+        let cy = (ground(cx, cz) + lift).clamp(SKY_ISLAND_MIN_Y, SKY_ISLAND_MAX_Y);
 
         Some(SkyIsland {
             cx,
@@ -161,7 +170,7 @@ impl SkyIsland {
         })
     }
 
-    /// Every island whose bounding box can reach `chunk_pos`.
+    /// Every island whose bounding box can reach the chunk at `(cx, cz)`.
     pub fn near(seed: u32, cx: i32, cz: i32, ground: impl Fn(i32, i32) -> i32 + Copy) -> Vec<Self> {
         let ix = cx.div_euclid(SKY_ISLAND_CELL);
         let iz = cz.div_euclid(SKY_ISLAND_CELL);
@@ -491,8 +500,8 @@ impl SkyStation {
         let cz =
             iz * STATION_CELL + (cell_rand(seed, 0x57_A7_03, ix, iz) * STATION_CELL as f64) as i32;
         let radius = 8 + (cell_rand(seed, 0x57_A7_04, ix, iz) * 5.0) as i32;
-        let lift = 74 + (cell_rand(seed, 0x57_A7_05, ix, iz) * 46.0) as i32;
-        let cy = (ground(cx, cz) + lift).clamp(120, 232);
+        let lift = 62 + (cell_rand(seed, 0x57_A7_05, ix, iz) * 40.0) as i32;
+        let cy = (ground(cx, cz) + lift).clamp(STATION_MIN_Y, STATION_MAX_Y);
         Some(SkyStation {
             cx,
             cz,
@@ -861,19 +870,37 @@ impl FrontierPlanner {
     }
 
     /// Stamp every lattice-anchored feature that reaches this chunk.
-    pub fn stamp_landmarks(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32 + Copy) {
+    ///
+    /// `ground` is the true surface height (crystal clusters must be
+    /// rooted in it); `macro_ground` is the smooth base elevation, which
+    /// is an order of magnitude cheaper to sample and is all the airborne
+    /// features need. Both are only called for features that survive the
+    /// altitude prune, so a chunk deep underground pays for neither.
+    pub fn stamp_landmarks(
+        &self,
+        chunk: &mut Chunk,
+        ground: impl Fn(i32, i32) -> i32 + Copy,
+        macro_ground: impl Fn(i32, i32) -> i32 + Copy,
+    ) {
         let ChunkPos { x: cx, z: cz, .. } = chunk.pos;
         let wx = cx * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
         let wz = cz * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
+        let base_y = chunk.pos.y * CHUNK_SIZE_I;
+        let top_y = base_y + CHUNK_SIZE_I - 1;
 
         for cluster in CrystalCluster::near(self.seed, wx, wz) {
             cluster.stamp(self.seed, chunk, ground);
         }
-        for island in SkyIsland::near(self.seed, wx, wz, ground) {
-            island.stamp(self.seed, chunk);
+        // Widest island root reaches ~1.6 radii below the core.
+        if top_y >= SKY_ISLAND_MIN_Y - 48 && base_y <= SKY_ISLAND_MAX_Y + 12 {
+            for island in SkyIsland::near(self.seed, wx, wz, macro_ground) {
+                island.stamp(self.seed, chunk);
+            }
         }
-        for station in SkyStation::near(self.seed, wx, wz, ground) {
-            station.stamp(chunk);
+        if top_y >= STATION_MIN_Y - 6 && base_y <= STATION_MAX_Y + 28 {
+            for station in SkyStation::near(self.seed, wx, wz, macro_ground) {
+                station.stamp(chunk);
+            }
         }
     }
 }
@@ -941,9 +968,15 @@ mod tests {
                     .expect("the centre column of an island always has material");
                 assert!(top > bottom);
                 assert!(
-                    bottom > flat(island.cx, island.cz) + 4,
-                    "island root at {bottom} would fuse with ground at {}",
+                    bottom > flat(island.cx, island.cz) + 12,
+                    "radius-{} island root at {bottom} would fuse with ground at {}",
+                    island.radius,
                     flat(island.cx, island.cz)
+                );
+                assert!(
+                    (SKY_ISLAND_MIN_Y..=SKY_ISLAND_MAX_Y).contains(&island.cy),
+                    "island core at {} escaped the streamed altitude band",
+                    island.cy
                 );
             }
         }
@@ -1149,7 +1182,33 @@ mod tests {
         for cy in 0..14 {
             for cx in -2..3 {
                 let mut chunk = Chunk::new(ChunkPos::new(cx, cy, 1));
-                planner.stamp_landmarks(&mut chunk, flat);
+                planner.stamp_landmarks(&mut chunk, flat, flat);
+            }
+        }
+    }
+
+    #[test]
+    fn airborne_landmarks_fit_inside_the_default_streamed_slab() {
+        // The streamer only loads chunk y in [0, vertical_chunks). An
+        // island or station above that ceiling is generated, meshed and
+        // never seen. Default is 10 vertical chunks = 160 blocks.
+        const DEFAULT_CEILING: i32 = 10 * CHUNK_SIZE_I;
+        for ix in -8..8 {
+            for iz in -8..8 {
+                if let Some(island) = SkyIsland::for_cell(2718, ix, iz, |_, _| 200) {
+                    let top = island.cy + (island.radius as f32 * 0.30).round() as i32 + 6;
+                    assert!(
+                        top < DEFAULT_CEILING,
+                        "island cap at {top} is above the ceiling"
+                    );
+                }
+                if let Some(station) = SkyStation::for_cell(2718, ix, iz, |_, _| 200) {
+                    let top = station.cy + station.tower + 7;
+                    assert!(
+                        top < DEFAULT_CEILING,
+                        "station mast at {top} is above the ceiling"
+                    );
+                }
             }
         }
     }

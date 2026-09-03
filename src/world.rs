@@ -357,30 +357,24 @@ fn override_looks_like_visual_artifact(
     let wx = pos.x * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
     let wz = pos.z * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
     let biome = generator.biome_at(wx, wz);
-    if biome.is_showcase_terrain() {
-        return false;
-    }
 
+    // Crystal, moss, glow-sand and lava are ordinary frontier materials
+    // now, and the palette is a headline building feature, so a chunk
+    // full of them is a player's neon build - not an artifact. The only
+    // surviving signature is the old bug that flooded a chunk with solid
+    // ice or snow in a biome that has no business being frozen.
     let mut non_air = 0usize;
-    let mut showcase = 0usize;
     let mut cold = 0usize;
     for &voxel in &data.voxels {
         if voxel == AIR {
             continue;
         }
         non_air += 1;
-        match BlockType::from_voxel(voxel) {
-            BlockType::Crystal
-            | BlockType::LuminiteCrystal
-            | BlockType::MagnetiteOre
-            | BlockType::IridiumVein
-            | BlockType::AlienMoss
-            | BlockType::BoneRock
-            | BlockType::GlowSand
-            | BlockType::Basalt
-            | BlockType::Lava => showcase += 1,
-            BlockType::Snow | BlockType::Ice => cold += 1,
-            _ => {}
+        if matches!(
+            BlockType::from_voxel(voxel),
+            BlockType::Snow | BlockType::Ice
+        ) {
+            cold += 1;
         }
     }
 
@@ -388,16 +382,15 @@ fn override_looks_like_visual_artifact(
         return false;
     }
 
-    let showcase_ratio = showcase as f32 / non_air as f32;
     let cold_ratio = cold as f32 / non_air as f32;
-    showcase_ratio >= 0.35
-        || (cold_ratio >= 0.72
-            && !matches!(
-                biome,
-                crate::terrain::Biome::SnowyMountains
-                    | crate::terrain::Biome::Tundra
-                    | crate::terrain::Biome::Ocean
-            ))
+    cold_ratio >= 0.72
+        && !matches!(
+            biome,
+            crate::terrain::Biome::SnowyMountains
+                | crate::terrain::Biome::Tundra
+                | crate::terrain::Biome::Ocean
+                | crate::terrain::Biome::GlacierShards
+        )
 }
 
 fn now_epoch() -> u64 {
@@ -1985,14 +1978,12 @@ mod tests {
     }
 
     #[test]
-    fn visual_artifact_repair_removes_showcase_override_and_regenerates_loaded_chunk() {
+    fn visual_artifact_repair_removes_frozen_override_and_regenerates_loaded_chunk() {
         let mut world = VoxelWorld::new();
         let pos = ChunkPos::new(0, 3, 0);
-        let alien_moss: Voxel = BlockType::AlienMoss.into();
-        world
-            .edited_overrides
-            .insert(pos, override_chunk(alien_moss));
-        world.insert_chunk(pos, solid_chunk(pos, alien_moss));
+        let ice: Voxel = BlockType::Ice.into();
+        world.edited_overrides.insert(pos, override_chunk(ice));
+        world.insert_chunk(pos, solid_chunk(pos, ice));
 
         let report = world.repair_visual_artifact_overrides();
 
@@ -2003,7 +1994,7 @@ mod tests {
         assert!(!world.edited_overrides.contains_key(&pos));
         assert!(world.edit_save_dirty);
         assert!(world.edit_dirty_chunks.contains(&pos));
-        assert_ne!(world.chunks.get(&pos).unwrap().get(0, 0, 0), alien_moss);
+        assert_ne!(world.chunks.get(&pos).unwrap().get(0, 0, 0), ice);
     }
 
     #[test]
@@ -2022,5 +2013,35 @@ mod tests {
         assert_eq!(world.last_repair_report, Some(report));
         assert!(world.edited_overrides.contains_key(&pos));
         assert!(!world.edit_save_dirty);
+    }
+
+    #[test]
+    fn visual_artifact_repair_keeps_neon_builds_made_from_the_frontier_palette() {
+        // Crystal and glow-sand are ordinary frontier materials and a
+        // headline building feature. Wiping a player's neon tower as an
+        // "artifact" would be the single most destructive thing the
+        // repair pass could do.
+        for block in [
+            BlockType::Crystal,
+            BlockType::LuminiteCrystal,
+            BlockType::AlienMoss,
+            BlockType::GlowSand,
+            BlockType::CrystalMagenta,
+            BlockType::PlatingWhite,
+        ] {
+            let mut world = VoxelWorld::new();
+            let pos = ChunkPos::new(2, 3, 2);
+            world
+                .edited_overrides
+                .insert(pos, override_chunk(block.into()));
+
+            let report = world.repair_visual_artifact_overrides();
+
+            assert_eq!(
+                report.removed_chunks, 0,
+                "repair pass deleted a build made of {block:?}"
+            );
+            assert!(world.edited_overrides.contains_key(&pos));
+        }
     }
 }
