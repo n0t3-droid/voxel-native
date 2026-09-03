@@ -324,30 +324,21 @@ fn night_terrain_emissive_floor(
     settings: Res<WorldSettings>,
     lib: Option<Res<MaterialLibrary>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut last: Local<Option<u8>>,
 ) {
     let Some(lib) = lib else {
         return;
     };
-    let sun = sun_direction(settings.time_of_day);
-    let night_amt = (1.0 - day_factor(sun)).powf(1.55);
-    let band = if night_amt > 0.55 {
-        0u8
-    } else if night_amt > 0.18 {
-        1
-    } else {
-        2
-    };
-    if *last == Some(band) {
+    if lib.handles.is_empty() {
         return;
     }
-    *last = Some(band);
+    let sun = sun_direction(settings.time_of_day);
+    let night_amt = (1.0 - day_factor(sun)).powf(1.55);
     let floor = if settings.graphics == GraphicsMode::Fast {
         0.0
     } else {
-        night_amt * 0.085
+        night_amt * 0.12
     };
-    let e = LinearRgba::rgb(floor * 1.22, floor * 0.52, floor * 0.34);
+    let e = LinearRgba::rgb(floor * 1.25, floor * 0.55, floor * 0.36);
     for block in [
         BlockType::RedStone,
         BlockType::MesaClay,
