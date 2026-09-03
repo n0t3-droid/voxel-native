@@ -12,7 +12,8 @@ The project goal is not just a voxel sandbox.
   player-safe build buffer, and store project concepts with phases, owners,
   materials, structure, architecture, texture, and detail rows.
 - **Cinematic voxel terrain:** procedural coastline, forests, terrain height,
-  water, caves, and sci-fi landmarks are generated as real voxels.
+  water, caves, sci-fi landmarks, and the Aether Frontier overlay (floating
+  islands, bloom crystals, plasma rivers, skyways) are generated as real voxels.
 - **Shuttle and shooter loop:** ships, weapons, drone combat, editor tools, and
   bot companions live in the same world instead of separate demos.
 - **Liquid-glass engine UI:** HUD, toolbelt, bot panels, and system surfaces are
@@ -20,7 +21,31 @@ The project goal is not just a voxel sandbox.
 
 ## Current Focus
 
-The latest engine work turns bot construction into a road-first city planner:
+The latest engine work is the Aether Frontier overlay — inventions that push
+default worlds toward the voxel sci-fi goal image without converting Earth-like
+provinces into the old neon-showcase biomes:
+
+- floating sky islands stream through the real chunk pipeline: grass decks,
+  stone keels, and magenta/verdant bloom-crystal undersides, placed on a
+  seed-stable 96-block lattice so neighbouring chunks agree on the same island;
+- plasma coolant channels follow ridged-noise filaments along mesa, mountain,
+  and karst canyon floors — swimmable, emissive, and budgeted as thin rivers
+  instead of a glowing flood;
+- skyway decks span neighbouring islands with smoothstep grades, cyan guard
+  rails, and hull-dark pylons; the same `Skyway` road style is a player/bot
+  road component so crews can build monorails by hand;
+- rare orbital station prefabs sit on hero islands (pad, mast, amber dish,
+  docking arm); Shift+F11 stamps the same prefab at the player, Shift+F10 warps
+  to the nearest island deck;
+- the celestial sky uses Saturn-proportioned rings (C-inner to A-outer, Cassini
+  Division density drop), Lambert moon phases, and a Kepler-faster inner moon;
+- Build Studio exposes a SKYWAY workflow and the new Magenta Bloom, Verdant
+  Bloom, Plasma Flow, and Skyway Deck swatches in the material catalog;
+- overlay column-tops feed the streamer so island decks are not clipped by the
+  surface-only chunk ceiling, while decks stay inside the default 8-chunk
+  vertical band for low-end machines.
+
+Bot construction remains a road-first city planner:
 
 - bot autonomy is command-gated by default: workers stay parked on load until
   the player places a city area or explicitly queues a bot task;
@@ -84,6 +109,12 @@ which math keeps the engine fast. Current bot-planning details live in
 
 Verified update for this snapshot:
 
+- the Aether Frontier overlay generates floating islands, bloom-crystal keels,
+  plasma canyon channels, skyway spans, and orbital pads as real voxels;
+- Saturn-proportioned rings, Lambert moon phases, and a Kepler-faster inner
+  moon keep the celestial sky on documented astronomical ratios;
+- Skyway is a first-class road style and Build Studio workflow, with Shift+F10
+  island warp and Shift+F11 station stamp on the Command Deck;
 - bot load defaults keep workers parked until the player commands them;
 - placed bot city areas persist as the marked footprint and queue road-skeleton
   projects before clearing, civic, residential, park, and skyline parcels inside
