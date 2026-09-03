@@ -843,7 +843,7 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
 #[inline]
 pub fn ore_units_for_mined_voxel(v: Voxel) -> u32 {
     match v {
-        VOXEL_LUMINITE => 2,
+        VOXEL_LUMINITE | VOXEL_CRYSTAL_MAGENTA | VOXEL_CRYSTAL_VERDANT => 2,
         VOXEL_MAGNETITE => 2,
         VOXEL_IRIDIUM => 1,
         _ => 0,
@@ -898,6 +898,10 @@ mod tests {
         assert!(!voxel_is_opaque(VOXEL_PLASMA_FLOW));
         assert!(voxel_is_opaque(VOXEL_SKYWAY_DECK));
         assert!(voxel_is_weapon_target(VOXEL_PLASMA_FLOW));
+        assert_eq!(ore_units_for_mined_voxel(VOXEL_CRYSTAL_MAGENTA), 2);
+        assert_eq!(ore_units_for_mined_voxel(VOXEL_CRYSTAL_VERDANT), 2);
+        assert_eq!(ore_units_for_mined_voxel(VOXEL_PLASMA_FLOW), 0);
+        assert_eq!(ore_units_for_mined_voxel(VOXEL_SKYWAY_DECK), 0);
     }
 
     #[test]

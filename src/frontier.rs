@@ -16,7 +16,7 @@
 use noise::{NoiseFn, Perlin};
 
 use crate::blocks::{
-    BlockType, Voxel, AIR, VOXEL_CRYSTAL_MAGENTA, VOXEL_CRYSTAL_VERDANT, VOXEL_PLASMA_FLOW,
+    BlockType, AIR, VOXEL_CRYSTAL_MAGENTA, VOXEL_CRYSTAL_VERDANT, VOXEL_PLASMA_FLOW,
     VOXEL_SKYWAY_DECK,
 };
 use crate::chunk::{Chunk, CHUNK_SIZE, CHUNK_SIZE_I};
@@ -117,7 +117,15 @@ pub fn decorate_chunk(
 
             if let Some((lo, hi)) = plasma_band(seed, wx, wz, surface, biome, &plasma_noise) {
                 for y in lo..=hi {
-                    set_in_chunk(chunk, wx, y, wz, origin_y, BlockType::PlasmaFlow, true);
+                    set_in_chunk(
+                        chunk,
+                        wx,
+                        y,
+                        wz,
+                        origin_y,
+                        BlockType::from_voxel(VOXEL_PLASMA_FLOW),
+                        true,
+                    );
                 }
             }
 
@@ -203,7 +211,7 @@ pub fn find_nearest_island(
                 if dist2 > (max_radius as i64) * (max_radius as i64) {
                     continue;
                 }
-                if best.map_or(true, |(best_d, _)| dist2 < best_d) {
+                if best.is_none_or(|(best_d, _)| dist2 < best_d) {
                     best = Some((dist2, spec));
                 }
             }
@@ -263,9 +271,9 @@ fn island_from_anchor(
     let keel_depth = 6 + (hash01(seed, cell_x, cell_z, 6) * 6.0) as i32;
     let has_station = hash01(seed, cell_x, cell_z, 7) < 0.12;
     let crystal = if hash01(seed, cell_x, cell_z, 8) < 0.5 {
-        BlockType::CrystalMagenta
+        BlockType::from_voxel(VOXEL_CRYSTAL_MAGENTA)
     } else {
-        BlockType::CrystalVerdant
+        BlockType::from_voxel(VOXEL_CRYSTAL_VERDANT)
     };
     Some(IslandSpec {
         cx,
@@ -313,7 +321,7 @@ fn islands_crystal(wx: i32, wz: i32, islands: &[Option<IslandSpec>]) -> BlockTyp
         .flatten()
         .find(|spec| column_in_island(wx, wz, **spec).is_some())
         .map(|spec| spec.crystal)
-        .unwrap_or(BlockType::CrystalMagenta)
+        .unwrap_or(BlockType::from_voxel(VOXEL_CRYSTAL_MAGENTA))
 }
 
 fn island_chance(biome: Biome) -> f64 {
@@ -326,6 +334,7 @@ fn island_chance(biome: Biome) -> f64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fill_island_column(
     chunk: &mut Chunk,
     seed: u32,
@@ -396,6 +405,7 @@ pub fn plasma_band(
     Some((surface - 1, surface + 1))
 }
 
+#[cfg(test)]
 pub fn plasma_band_at(
     seed: u32,
     wx: i32,
@@ -498,7 +508,7 @@ fn fill_skyway_column(
     let deck = if sky.is_rail {
         BlockType::ShipHullAlloy
     } else {
-        BlockType::SkywayDeck
+        BlockType::from_voxel(VOXEL_SKYWAY_DECK)
     };
     set_in_chunk(chunk, wx, sky.deck_y, wz, origin_y, deck, true);
     if sky.is_rail {
@@ -550,7 +560,7 @@ pub fn station_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
             if adx == 4 || adz == 4 {
                 return Some(BlockType::NeonCyan);
             }
-            return Some(BlockType::SkywayDeck);
+            return Some(BlockType::from_voxel(VOXEL_SKYWAY_DECK));
         }
         return None;
     }
@@ -590,6 +600,7 @@ fn stamp_station_into_chunk(chunk: &mut Chunk, ox: i32, oy: i32, oz: i32) {
 
 /// Compact XZ occupancy map for tests and visual dumps.
 /// `I` island, `C` crystal keel, `P` plasma, `S` skyway, `O` station, `.` empty.
+#[cfg(test)]
 pub fn ascii_overlay_map(
     seed: u32,
     x0: i32,
@@ -614,6 +625,7 @@ pub fn ascii_overlay_map(
     out
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn overlay_glyph(
     seed: u32,
@@ -728,6 +740,7 @@ fn hash01(seed: u32, x: i32, z: i32, salt: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::Voxel;
     use crate::chunk::ChunkPos;
     use crate::terrain::TerrainGenerator;
 
@@ -858,6 +871,41 @@ mod tests {
             plasma * 4 < mesa,
             "plasma should stay a filament, not a flood ({plasma}/{mesa})"
         );
+        let artifact_dir = std::path::Path::new("/opt/cursor/artifacts");
+        if artifact_dir.is_dir() {
+            let mut sample = None;
+            'scan: for z in (-8_000..=8_000).step_by(16) {
+                for x in (-8_000..=8_000).step_by(16) {
+                    let biome = g.biome_at(x, z);
+                    if biome != Biome::Mesa && biome != Biome::Mountains && biome != Biome::Karst {
+                        continue;
+                    }
+                    let surface = g.surface_height_at(x, z);
+                    if plasma_band_at(12345, x, z, surface, biome).is_some() {
+                        sample = Some((x, z, surface, biome));
+                        break 'scan;
+                    }
+                }
+            }
+            if let Some((px, pz, surface, biome)) = sample {
+                let map = ascii_overlay_map(
+                    12345,
+                    px - 24,
+                    pz - 24,
+                    48,
+                    |x, z| g.surface_height_at(x, z),
+                    |x, z| g.biome_at(x, z),
+                );
+                let _ = std::fs::write(artifact_dir.join("aether_plasma_xz_map.txt"), &map);
+                let _ = std::fs::write(
+                    artifact_dir.join("aether_plasma_sample.txt"),
+                    format!(
+                        "seed=12345\nsample_xz=({}, {})\nsurface_y={}\nbiome={:?}\ncanyon_samples={}\nplasma_hits={}\nfilament_ratio={:.4}\nlegend=P plasma  I island  C crystal  S skyway  O station  . empty\n",
+                        px, pz, surface, biome, mesa, plasma, plasma as f64 / mesa as f64
+                    ),
+                );
+            }
+        }
     }
 
     #[test]
@@ -889,6 +937,18 @@ mod tests {
         let mid = skyway_column(36, 5, span).expect("deck at midpoint");
         assert!((mid.deck_y - 91).abs() <= 1);
         assert!(skyway_column(36, 20, span).is_none());
+        let artifact_dir = std::path::Path::new("/opt/cursor/artifacts");
+        if artifact_dir.is_dir() {
+            let dx = (span.bx - span.ax) as f64;
+            let dz = (span.bz - span.az) as f64;
+            let _ = std::fs::write(
+                artifact_dir.join("aether_skyway_span.txt"),
+                format!(
+                    "span_a=({}, {}, {})\nspan_b=({}, {}, {})\nlength={:.3}\nmid_deck_y={}\nreject_short=20\nreject_long=200\naccept=72,10\n",
+                    span.ax, span.ay, span.az, span.bx, span.by, span.bz, (dx * dx + dz * dz).sqrt(), mid.deck_y
+                ),
+            );
+        }
     }
 
     #[test]
@@ -920,6 +980,15 @@ mod tests {
         assert_eq!(station_block(0, 0, 0), Some(BlockType::EngineCore));
         assert_eq!(station_block(0, 7, 0), Some(BlockType::NeonAmber));
         assert!(station_block(5, 5, 5).is_none());
+        let artifact_dir = std::path::Path::new("/opt/cursor/artifacts");
+        if artifact_dir.is_dir() {
+            let _ = std::fs::write(
+                artifact_dir.join("aether_orbital_station.txt"),
+                format!(
+                    "origin=(0, 80, 0)\npad_skyway_deck={pad}\nneon_cyan_lights={lights}\namber_dish={dish}\ndocking_arm_tip={arm}\nmast_core=EngineCore at (0,80,0)\ndish_tip=NeonAmber at (0,87,0)\nbounds_xz=[-5,5]\nbounds_y=[80,88]\n"
+                ),
+            );
+        }
     }
 
     #[test]
@@ -999,6 +1068,38 @@ mod tests {
             map.chars().filter(|c| *c == 'I' || *c == 'C').count() > 20,
             "island footprint too small:\n{map}"
         );
+        let artifact_dir = std::path::Path::new("/opt/cursor/artifacts");
+        if artifact_dir.is_dir() {
+            let _ = std::fs::write(artifact_dir.join("aether_island_xz_map.txt"), &map);
+            let spans =
+                outbound_spans_lookup(12345, spec, &|x, z| g.surface_height_at(x, z), &|x, z| {
+                    g.biome_at(x, z)
+                });
+            let col_top = overlay_column_top(
+                12345,
+                spec.cx,
+                spec.cz,
+                |x, z| g.surface_height_at(x, z),
+                |x, z| g.biome_at(x, z),
+            );
+            let _ = std::fs::write(
+                artifact_dir.join("aether_island_spec.txt"),
+                format!(
+                    "seed=12345\ncenter_xz=({}, {})\ndeck_y={}\nradius_xz=({}, {})\nkeel_depth={}\nhas_station={}\ncrystal={:?}\ncolumn_top={}\neast_skyway={:?}\nsouth_skyway={:?}\nlegend=I island body  C crystal rim/keel  S skyway  O station  P plasma  . empty\n",
+                    spec.cx,
+                    spec.cz,
+                    spec.deck_y,
+                    spec.radius_x,
+                    spec.radius_z,
+                    spec.keel_depth,
+                    spec.has_station,
+                    spec.crystal,
+                    col_top,
+                    spans[0],
+                    spans[1]
+                ),
+            );
+        }
     }
 
     #[test]

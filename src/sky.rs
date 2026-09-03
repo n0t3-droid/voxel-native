@@ -60,12 +60,17 @@ pub const SATURN_A_RING_OUTER_KM: f64 = 136_775.0;
 /// Cassini Division centre (km). NASA Saturn Fact Sheet.
 pub const SATURN_CASSINI_DIVISION_KM: f64 = 117_580.0;
 /// Mean synodic month (days). Meeus, Astronomical Algorithms.
+/// Physical reference for `VISUAL_LUNAR_MONTH_DAYS` compression.
 pub const SYNODIC_MONTH_DAYS: f64 = 29.530_588_853;
 /// Compressed in-game month so a full phase cycle is visible across a
 /// short play session (8 in-game days ≈ one visual month).
 pub const VISUAL_LUNAR_MONTH_DAYS: f64 = 8.0;
 /// Secondary moon semi-major axis as a fraction of the primary moon.
 pub const MOON_B_SEMI_MAJOR: f64 = 0.85;
+
+const _: () = assert!(SATURN_C_RING_INNER_KM > SATURN_EQUATORIAL_RADIUS_KM);
+const _: () = assert!(SATURN_A_RING_OUTER_KM > SATURN_CASSINI_DIVISION_KM);
+const _: () = assert!(SYNODIC_MONTH_DAYS > VISUAL_LUNAR_MONTH_DAYS);
 
 /// Inner/outer sky radii of a Saturn-proportioned ring around a disc of
 /// `planet_radius` world units.
@@ -103,9 +108,9 @@ pub fn kepler_period_ratio(semi_major: f64, semi_major_ref: f64) -> f64 {
     (semi_major / semi_major_ref).powf(1.5)
 }
 
-/// Mean-motion ratio n / n_ref = (a_ref / a)^{3/2}.
+/// Mean-motion ratio n / n_ref = (a_ref / a)^{3/2} = 1 / period_ratio.
 pub fn kepler_mean_motion_ratio(semi_major: f64, semi_major_ref: f64) -> f64 {
-    (semi_major_ref / semi_major).powf(1.5)
+    1.0 / kepler_period_ratio(semi_major, semi_major_ref)
 }
 
 /// Unit direction of a moon that has drifted `phase_angle` ahead of the
@@ -1048,7 +1053,6 @@ mod tests {
         assert!((moon_illuminated_fraction(0.0) - 1.0).abs() < 1e-9);
         assert!((moon_illuminated_fraction(std::f64::consts::PI) - 0.0).abs() < 1e-9);
         assert!((moon_illuminated_fraction(std::f64::consts::FRAC_PI_2) - 0.5).abs() < 1e-9);
-        assert!(SYNODIC_MONTH_DAYS > VISUAL_LUNAR_MONTH_DAYS);
         let a = lunar_phase_angle(12.0, 12345);
         let b = lunar_phase_angle(12.0, 12345);
         let c = lunar_phase_angle(12.0, 99);
@@ -1056,6 +1060,32 @@ mod tests {
         assert_ne!(a, c);
         let wrap = lunar_phase_angle(24.0 * VISUAL_LUNAR_MONTH_DAYS, 0);
         assert!(wrap.abs() < 1e-9 || (wrap - std::f64::consts::TAU).abs() < 1e-9);
+        let artifact_dir = std::path::Path::new("/opt/cursor/artifacts");
+        if artifact_dir.is_dir() {
+            let (inner, outer) = saturn_ring_radii(100.0);
+            let _ = std::fs::write(
+                artifact_dir.join("aether_celestial_sky.txt"),
+                format!(
+                    "saturn_req_km={}\nsaturn_c_inner_km={}\nsaturn_a_outer_km={}\ncassini_km={}\nring_inner_per_100={:.4}\nring_outer_per_100={:.4}\ncassini_norm={:.4}\nsynodic_month_days={}\nvisual_month_days={}\nmoon_b_semi_major={}\nkepler_period_ratio={:.6}\nkepler_mean_motion={:.6}\nlambert_full={:.3}\nlambert_quarter={:.3}\nlambert_new={:.3}\nphase_seed_12345_noon={:.6}\n",
+                    SATURN_EQUATORIAL_RADIUS_KM,
+                    SATURN_C_RING_INNER_KM,
+                    SATURN_A_RING_OUTER_KM,
+                    SATURN_CASSINI_DIVISION_KM,
+                    inner / 100.0,
+                    outer / 100.0,
+                    cassini_division_norm(),
+                    SYNODIC_MONTH_DAYS,
+                    VISUAL_LUNAR_MONTH_DAYS,
+                    MOON_B_SEMI_MAJOR,
+                    kepler_period_ratio(MOON_B_SEMI_MAJOR, 1.0),
+                    kepler_mean_motion_ratio(MOON_B_SEMI_MAJOR, 1.0),
+                    moon_illuminated_fraction(0.0),
+                    moon_illuminated_fraction(std::f64::consts::FRAC_PI_2),
+                    moon_illuminated_fraction(std::f64::consts::PI),
+                    lunar_phase_angle(12.0, 12345)
+                ),
+            );
+        }
     }
 
     #[test]
