@@ -833,7 +833,7 @@ fn follow_and_animate_sky(
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
             let noon = Vec3::new(0.004, 0.010, 0.018);
             // Under ACES clip so 17:00 stays golden, not a grey wall.
-            let dusk = Vec3::new(0.85, 0.34, 0.07);
+            let dusk = Vec3::new(0.95, 0.52, 0.10);
             let deep = Vec3::new(0.020, 0.018, 0.055);
             let vis = horizon_band_visibility(sunset, night);
             let dusk_gate = sunset * (1.0 - night).powf(1.4);

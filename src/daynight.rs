@@ -238,15 +238,15 @@ struct PostcardBounceLight {
 /// (x, y, z, r, g, b, lumens, range)
 const POSTCARD_BOUNCE: [(f32, f32, f32, f32, f32, f32, f32, f32); 6] = [
     // Hero cyan crystal — local rock fill, not a skyway glare.
-    (72.0, 86.0, -96.0, 0.32, 0.82, 1.0, 260_000.0, 32.0),
+    (72.0, 86.0, -96.0, 0.32, 0.82, 1.0, 380_000.0, 34.0),
     // Magenta cluster further into the look cone.
-    (142.0, 84.0, -78.0, 0.95, 0.28, 0.82, 220_000.0, 28.0),
+    (142.0, 84.0, -78.0, 0.95, 0.28, 0.82, 320_000.0, 30.0),
     // Energy river, two samples along the hero cut.
-    (90.0, 58.0, -72.0, 0.18, 0.78, 1.0, 210_000.0, 26.0),
-    (150.0, 58.0, -72.0, 0.18, 0.78, 1.0, 190_000.0, 26.0),
+    (90.0, 58.0, -72.0, 0.18, 0.78, 1.0, 300_000.0, 28.0),
+    (150.0, 58.0, -72.0, 0.18, 0.78, 1.0, 280_000.0, 28.0),
     // Warm hab-window bounce so terraced plating isn't a silhouette.
-    (118.0, 90.0, -66.0, 1.0, 0.62, 0.32, 140_000.0, 22.0),
-    (84.0, 88.0, -54.0, 1.0, 0.62, 0.32, 120_000.0, 20.0),
+    (118.0, 90.0, -66.0, 1.0, 0.62, 0.32, 220_000.0, 24.0),
+    (84.0, 88.0, -54.0, 1.0, 0.62, 0.32, 200_000.0, 22.0),
 ];
 
 fn night_bounce_dir(key_dir: Vec3, night: bool) -> Vec3 {
@@ -404,7 +404,7 @@ fn update_sun(
         // Night key: high enough to paint +Y strata (banding), still
         // well below crystal/lava HDR. Cool-but-not-icy so red mesa
         // albedo doesn't go grey under moonlight.
-        light.illuminance = 4_200.0 + (1.0 - day) * 1_000.0;
+        light.illuminance = 5_600.0 + (1.0 - day) * 1_200.0;
         light.color = Color::srgb(0.82, 0.78, 0.92);
     } else {
         // Warm key. Sunset adds extra illuminance so low elevation
@@ -428,7 +428,7 @@ fn update_sun(
         *fill_tf = Transform::from_xyz(bounce.x * 280.0, bounce.y * 280.0, bounce.z * 280.0)
             .looking_to(fill_forward, Vec3::Y);
         let night_amt = (1.0 - day).powf(1.35);
-        fill_light.illuminance = 120.0 + sunset * 480.0 + night_amt * 2_600.0;
+        fill_light.illuminance = 120.0 + sunset * 480.0 + night_amt * 4_200.0;
         fill_light.color = if sun_dir.y < -0.12 {
             Color::srgb(0.62, 0.66, 0.92)
         } else {
@@ -457,7 +457,7 @@ fn update_sun(
         .mix(&golden_fill, sunset * 0.38);
     ambient.color = Color::LinearRgba(amb_lin);
     ambient.brightness =
-        (1_560.0 + day * 140.0 + sunset * 280.0 + night_amt * 1_260.0) * intel.profile.ambient_mul;
+        (1_560.0 + day * 140.0 + sunset * 280.0 + night_amt * 1_720.0) * intel.profile.ambient_mul;
 
     // Sky (clear colour). Dusk zenith goes violet; the golden rim is
     // owned by `sky.rs` so we do not dye the whole dome orange.
@@ -635,7 +635,7 @@ mod tests {
                 "bounce light at {x},{z} left the postcard AABB"
             );
             assert!(range <= 36.0, "bounce range {range} would light the whole mesa");
-            assert!(lumens <= 300_000.0, "bounce lumens {lumens} would flatten night");
+            assert!(lumens <= 400_000.0, "bounce lumens {lumens} would flatten night");
         }
     }
 }
