@@ -182,6 +182,11 @@ fn cascade_config_for(mode: GraphicsMode) -> bevy::pbr::CascadeShadowConfig {
 #[derive(Component)]
 pub struct Sun;
 
+/// Shadowless bounce fill. Cheap on Fast (no cascades) and is what
+/// keeps mesa banding readable at night without a second noon key.
+#[derive(Component)]
+pub struct FillLight;
+
 fn spawn_sun(mut commands: Commands, settings: Res<WorldSettings>) {
     let cascades = cascade_config_for(settings.graphics);
 
@@ -198,6 +203,20 @@ fn spawn_sun(mut commands: Commands, settings: Res<WorldSettings>) {
             ..default()
         },
         Sun,
+    ));
+
+    commands.spawn((
+        DirectionalLightBundle {
+            directional_light: DirectionalLight {
+                illuminance: 0.0,
+                shadows_enabled: false,
+                color: Color::srgb(0.55, 0.62, 0.88),
+                ..default()
+            },
+            transform: Transform::from_xyz(-80.0, 240.0, -40.0).looking_at(Vec3::ZERO, Vec3::Y),
+            ..default()
+        },
+        FillLight,
     ));
 
     commands.insert_resource(AmbientLight {
@@ -268,13 +287,14 @@ pub fn day_factor(sun_dir: Vec3) -> f32 {
     ((sun_dir.y + 0.18) / 0.90).clamp(0.0, 1.0)
 }
 
-/// Bell curve peaking around ~12° solar elevation — the golden-hour
-/// band — including a few degrees below the horizon for dusk fill.
+/// Bell curve peaking near hour 17 (sun_dir.y ≈ 0.48). Pass-2 peaked
+/// too close to true sunset, so the 17:00 postcard stayed a cool
+/// afternoon instead of a golden rim. Hour 11 (y ≈ 0.95) is still 0.
 pub fn sunset_factor(sun_dir: Vec3) -> f32 {
-    let peak = 0.25;
-    let width = 0.55;
+    let peak = 0.46;
+    let width = 0.44;
     let t = ((sun_dir.y - peak) / width).abs();
-    (1.0 - t.min(1.0)).powf(1.4)
+    (1.0 - t.min(1.0)).powf(1.25)
 }
 
 fn update_sun(
@@ -283,6 +303,7 @@ fn update_sun(
     mut clear_color: ResMut<ClearColor>,
     mut ambient: ResMut<AmbientLight>,
     mut sun: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
+    mut fill: Query<(&mut Transform, &mut DirectionalLight), (With<FillLight>, Without<Sun>)>,
     mut fog: Query<&mut FogSettings>,
 ) {
     let Ok((mut transform, mut light)) = sun.get_single_mut() else {
@@ -309,50 +330,65 @@ fn update_sun(
         .looking_to(forward, Vec3::Y);
 
     if sun_dir.y < -0.12 {
-        // Night: cool moonlight strong enough to read strata, still
-        // well below crystal/lava HDR so emissives stay the brightest
-        // thing in the frame (concept-art mood, not a second noon).
-        // Pass-2 stills at 21.5 crushed ~80% of walkable faces below
-        // lum 25 with 1800 lux; ACES needs more key to keep red mesa
-        // albedo readable without flattening to dusk-noon.
-        light.illuminance = 2_800.0 + (1.0 - day) * 700.0;
-        light.color = Color::srgb(0.74, 0.82, 1.0);
+        // Night key: high enough to paint +Y strata (banding), still
+        // well below crystal/lava HDR. Cool-but-not-icy so red mesa
+        // albedo doesn't go grey under moonlight.
+        light.illuminance = 3_600.0 + (1.0 - day) * 900.0;
+        light.color = Color::srgb(0.82, 0.78, 0.92);
     } else {
         // Warm key. Sunset adds extra illuminance so low elevation
         // still rims the mesas instead of silhouetting them.
-        light.illuminance = 3_200.0 + day.powf(0.85) * 13_000.0 + sunset * 4_400.0;
+        light.illuminance = 3_200.0 + day.powf(0.85) * 13_000.0 + sunset * 5_200.0;
         light.color = Color::srgb(
             1.0,
-            0.78 + day * 0.16 - sunset * 0.14,
-            0.50 + day * 0.40 - sunset * 0.30,
+            0.78 + day * 0.16 - sunset * 0.22,
+            0.50 + day * 0.40 - sunset * 0.38,
         );
+    }
+
+    // Opposite-azimuth bounce. No shadows, so Fast pays one extra
+    // unshadowed directional. Night is the whole point; noon stays
+    // near zero so the look does not flatten.
+    if let Ok((mut fill_tf, mut fill_light)) = fill.get_single_mut() {
+        let bounce = Vec3::new(-key_dir.x * 0.35, 0.82, -key_dir.z * 0.55).normalize();
+        let fill_forward = -bounce;
+        *fill_tf = Transform::from_xyz(bounce.x * 280.0, bounce.y * 280.0, bounce.z * 280.0)
+            .looking_to(fill_forward, Vec3::Y);
+        let night_amt = (1.0 - day).powf(1.35);
+        fill_light.illuminance = 80.0 + sunset * 420.0 + night_amt * 1_450.0;
+        fill_light.color = if sun_dir.y < -0.12 {
+            Color::srgb(0.58, 0.64, 0.90)
+        } else {
+            Color::srgb(1.0, 0.70, 0.38)
+        };
     }
 
     // Ambient: warm fill through dusk so shadowed canyon floors stay
     // readable; a lifted cool floor at night so ground never crushes.
     // Keep dusk ambient well below the key so long shadows survive.
+    // Night isotropic is modest now that FillLight carries the bounce.
     let day_color = Color::srgb(0.80, 0.88, 1.0).to_linear();
-    let night_color = Color::srgb(0.32, 0.36, 0.55).to_linear();
+    let night_color = Color::srgb(0.38, 0.36, 0.52).to_linear();
     let sunset_color = Color::srgb(1.0, 0.52, 0.26).to_linear();
     let golden_fill = Color::srgb(1.0, 0.74, 0.44).to_linear();
     let night_amt = (1.0 - day).powf(1.55);
     let amb_lin = day_color
         .mix(&night_color, night_amt)
-        .mix(&sunset_color, sunset * 0.42)
-        .mix(&golden_fill, sunset * 0.28);
+        .mix(&sunset_color, sunset * 0.50)
+        .mix(&golden_fill, sunset * 0.38);
     ambient.color = Color::LinearRgba(amb_lin);
     ambient.brightness =
-        (1_720.0 + day * 120.0 + sunset * 340.0 + night_amt * 780.0) * intel.profile.ambient_mul;
+        (1_480.0 + day * 140.0 + sunset * 280.0 + night_amt * 520.0) * intel.profile.ambient_mul;
 
-    // Sky (clear colour). Only a hint of sunset goes into the flat
-    // dome — `sky.rs` owns the warm rim through its horizon gradient.
+    // Sky (clear colour). Dusk zenith goes violet; the golden rim is
+    // owned by `sky.rs` so we do not dye the whole dome orange.
     let sky_day = Color::srgb(0.42, 0.68, 0.96).to_linear();
     let sky_night = Color::srgb(0.018, 0.020, 0.09).to_linear();
-    let sky_violet = Color::srgb(0.10, 0.04, 0.22).to_linear();
+    let sky_violet = Color::srgb(0.12, 0.04, 0.26).to_linear();
     let sky = sky_night
-        .mix(&sky_day, day)
-        .mix(&sky_violet, (1.0 - day) * 0.45)
-        .mix(&sunset_color, sunset * 0.12);
+        .mix(&sky_day, day * (1.0 - sunset * 0.62))
+        .mix(&sky_violet, (1.0 - day) * 0.50 + sunset * 0.38)
+        .mix(&sunset_color, sunset * 0.06);
     let sat: f32 = intel.profile.sky_saturation;
     let sky = sky.mix(
         &Color::srgb(0.5, 0.5, 0.5).to_linear(),
@@ -389,17 +425,19 @@ fn update_sun(
         // terrain isn't dyed with the zenith. Inscatter is separate.
         // Alpha is the *maximum* mix amount — 1.0 fully replaces distant
         // geometry with the fog colour (the milky-horizon bug).
-        let mut fog_fill = sky.mix(&horizon, 0.28).mix(&golden_fill, sunset * 0.16);
-        fog_fill.alpha = (0.22 + sunset * 0.10 + (1.0 - day) * 0.10 - day.powf(1.6) * 0.12)
-            .clamp(0.10, 0.38);
+        let mut fog_fill = sky.mix(&horizon, 0.22).mix(&golden_fill, sunset * 0.28);
+        // Midday alpha stays low (no milky wall). Dusk gets a warm veil
+        // without replacing distant mesas.
+        fog_fill.alpha = (0.14 + sunset * 0.12 + (1.0 - day) * 0.08 - day.powf(1.8) * 0.06)
+            .clamp(0.08, 0.30);
         fog_settings.color = Color::LinearRgba(fog_fill);
         fog_settings.falloff = FogFalloff::ExponentialSquared {
-            density: 0.00010
-                * (1.0 + sunset * 0.28 + (1.0 - day) * 0.10 - day.powf(1.6) * 0.55)
+            density: 0.00009
+                * (1.0 + sunset * 0.22 + (1.0 - day) * 0.08 - day.powf(1.8) * 0.62)
                 * intel.profile.fog_density_mul,
         };
         let mut sun_scatter = horizon;
-        sun_scatter.alpha = 0.16 + sunset * 0.18;
+        sun_scatter.alpha = 0.12 + sunset * 0.28;
         fog_settings.directional_light_color = Color::LinearRgba(sun_scatter);
         fog_settings.directional_light_exponent = 14.0;
     }
@@ -453,7 +491,11 @@ mod tests {
         let hour = sun_direction(17.0);
         assert!(hour.y > 0.20, "hour 17 sun is too low ({:.3})", hour.y);
         assert!(day_factor(hour) > 0.45);
-        assert!(sunset_factor(hour) > 0.15);
+        assert!(
+            sunset_factor(hour) > 0.55,
+            "hour 17 must sit in the golden-hour peak (sunset factor {})",
+            sunset_factor(hour)
+        );
     }
 
     #[test]
@@ -461,7 +503,11 @@ mod tests {
         let noon = sun_direction(11.0);
         assert!(noon.y > 0.70, "hour 11 should be near zenith, got {:.3}", noon.y);
         assert!(day_factor(noon) > 0.90);
-        assert!(sunset_factor(noon) < 0.15);
+        assert!(
+            sunset_factor(noon) < 0.08,
+            "hour 11 must not pick up the golden rim (sunset factor {})",
+            sunset_factor(noon)
+        );
 
         let night = sun_direction(21.5);
         assert!(night.y < -0.20, "hour 21.5 should be true night, y={:.3}", night.y);
