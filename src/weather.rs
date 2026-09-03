@@ -53,18 +53,19 @@ fn fog_recipe(
     let weather_density =
         (weather_fog_density * weather_fx_scale * profile_weather_fx_mul * profile_fog_density_mul)
             .clamp(0.0, 1.0);
-    let rd_blocks = (render_distance_chunks.max(8) as f32) * CHUNK_WORLD_SIZE;
-
     if weather_density <= 0.001 {
-        let end = (rd_blocks * 0.96).clamp(220.0, 980.0);
-        let start = (rd_blocks * 0.55).clamp(120.0, end - 80.0);
+        // Clear weather: leave daynight.rs's cinematic aerial-perspective
+        // fog alone. Applying a Linear streaming haze here was bleaching
+        // noon to milky white and crushing dusk/night ground to the sky
+        // colour.
         return FogRecipe {
             weather_density,
-            start,
-            end,
+            start: 0.0,
+            end: 0.0,
         };
     }
 
+    let rd_blocks = (render_distance_chunks.max(8) as f32) * CHUNK_WORLD_SIZE;
     let end_factor = 0.35 + (1.0 - weather_density) * 0.55;
     let end = (rd_blocks * end_factor).clamp(70.0, 900.0);
     let start = (end * 0.25).clamp(18.0, end - 40.0);
@@ -168,6 +169,10 @@ fn apply_fog(
         intel.profile.weather_fx_mul,
         intel.profile.fog_density_mul,
     );
+    if recipe.end <= 0.0 {
+        // Clear: daynight.rs owns atmospheric fog.
+        return;
+    }
     fog.color = clear.0;
     fog.falloff = FogFalloff::Linear {
         start: recipe.start,
@@ -288,12 +293,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clear_weather_keeps_a_soft_streaming_haze() {
+    fn clear_weather_does_not_override_cinematic_fog() {
         let recipe = fog_recipe(0.0, 40, 1.0, 1.0, 1.0);
-
-        assert!(recipe.end < 10_000.0);
-        assert!(recipe.start > 100.0);
-        assert!(recipe.end > recipe.start);
+        assert_eq!(recipe.weather_density, 0.0);
+        assert_eq!(recipe.end, 0.0);
     }
 
     #[test]
@@ -302,7 +305,8 @@ mod tests {
         let foggy = fog_recipe(0.8, 40, 1.0, 1.0, 1.0);
 
         assert!(foggy.weather_density > clear.weather_density);
-        assert!(foggy.end < clear.end);
-        assert!(foggy.start < clear.start);
+        assert!(foggy.end > 40.0);
+        assert!(foggy.start < foggy.end);
+        assert!(foggy.end < 500.0);
     }
 }

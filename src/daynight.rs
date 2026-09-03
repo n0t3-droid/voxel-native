@@ -3,7 +3,7 @@
 //! dawn/dusk. Port target: the `DayNightCycle` component from
 //! `components/VoxelEngine.tsx`.
 
-use bevy::pbr::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
+use bevy::pbr::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, FogFalloff};
 use bevy::prelude::*;
 
 use crate::player::Player;
@@ -242,6 +242,41 @@ fn advance_time(
     }
 }
 
+/// Cinematic solar geometry shared with `sky.rs`.
+///
+/// A naive 24 h mapping (`hour/24 * τ − π/2`) puts sunset at 18:00 with
+/// `sun_dir.y == 0`. Lambert shading on walkable +Y faces then goes to
+/// black and `day = y.max(0)` trips the night colour branch — the
+/// silhouette-dusk bug. The key art is golden hour, so we linger the
+/// sun above the horizon through 18:00 (sunset ~19:15) and keep a
+/// shallow +Z lean so the disc never sits in a perfect cardinal plane.
+pub fn sun_direction(time_of_day: f32) -> Vec3 {
+    let hour = time_of_day.rem_euclid(24.0);
+    // Civil-ish day length: sunrise ~05:45, sunset ~19:15.
+    // Hour 17 sits ~25–30° up (late afternoon); hour 18 is ~12–16°
+    // (true golden hour). Night at 21.5 has the sun well below.
+    const SUNRISE: f32 = 5.75;
+    const SUNSET: f32 = 19.25;
+    let solar = (hour - SUNRISE) / (SUNSET - SUNRISE);
+    let elev = solar * std::f32::consts::PI;
+    Vec3::new(elev.cos(), elev.sin(), 0.3).normalize()
+}
+
+/// 1 at noon, still clearly "day" through golden hour, 0 at true night.
+/// Using raw `sun_dir.y.max(0)` treated the horizon as night.
+pub fn day_factor(sun_dir: Vec3) -> f32 {
+    ((sun_dir.y + 0.18) / 0.90).clamp(0.0, 1.0)
+}
+
+/// Bell curve peaking around ~12° solar elevation — the golden-hour
+/// band — including a few degrees below the horizon for dusk fill.
+pub fn sunset_factor(sun_dir: Vec3) -> f32 {
+    let peak = 0.25;
+    let width = 0.55;
+    let t = ((sun_dir.y - peak) / width).abs();
+    (1.0 - t.min(1.0)).powf(1.4)
+}
+
 fn update_sun(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
@@ -254,59 +289,67 @@ fn update_sun(
         return;
     };
 
-    // hour in radians, noon = π/2
-    let t = (settings.time_of_day / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-    let sun_dir = Vec3::new(t.cos(), t.sin(), 0.3).normalize();
+    let sun_dir = sun_direction(settings.time_of_day);
+    let day = day_factor(sun_dir);
+    let sunset = sunset_factor(sun_dir);
 
-    // Directional lights in Bevy shine along their -Z. Orient so -Z == -sun_dir.
-    let forward = -sun_dir;
-    *transform = Transform::from_xyz(sun_dir.x * 400.0, sun_dir.y * 400.0, sun_dir.z * 400.0)
+    // Keep a shallow key so ground N·L never hits zero during dusk.
+    // Once the sun is truly down this becomes a cool moonlight from
+    // the same azimuth, high enough to light walkable faces.
+    let mut key_dir = sun_dir;
+    if key_dir.y < 0.10 {
+        key_dir.y = if sun_dir.y < -0.12 { 0.38 } else { 0.12 };
+        key_dir = key_dir.normalize();
+    }
+
+    // Directional lights in Bevy shine along their -Z.
+    let forward = -key_dir;
+    *transform = Transform::from_xyz(key_dir.x * 400.0, key_dir.y * 400.0, key_dir.z * 400.0)
         .looking_to(forward, Vec3::Y);
 
-    // Day factor 0..1 where 1 = high noon, 0 = deep night.
-    let day = sun_dir.y.max(0.0);
-    // The falloff is deliberately shallow near the horizon. A linear ramp
-    // collapses golden hour into a couple of in-game minutes, and golden
-    // hour is exactly the light the frontier is meant to be seen in.
-    light.illuminance = 3_400.0 + day.powf(0.7) * 12_000.0;
-    // Warm sun, cool moon — the cinematic directional tint that
-    // gives grass its golden rim at dusk and a silvery wash at night.
-    let warmth = ((sun_dir.y - 0.05).clamp(-0.3, 0.4) / 0.4).clamp(-1.0, 1.0);
-    let sun_tint = Color::srgb(1.0, 0.82 + warmth * 0.12, 0.62 + warmth * 0.32);
-    light.color = sun_tint;
+    if sun_dir.y < -0.12 {
+        // Night: cool moonlight, dim but enough to read terrain.
+        light.illuminance = 420.0 + (1.0 - day) * 160.0;
+        light.color = Color::srgb(0.62, 0.74, 1.0);
+    } else {
+        // Warm key. Sunset adds extra illuminance so low elevation
+        // still rims the mesas instead of silhouetting them.
+        light.illuminance = 3_200.0 + day.powf(0.85) * 13_000.0 + sunset * 4_400.0;
+        light.color = Color::srgb(
+            1.0,
+            0.78 + day * 0.16 - sunset * 0.14,
+            0.50 + day * 0.40 - sunset * 0.30,
+        );
+    }
 
-    // Ambient gets a cool tint at night, warm at sunrise/sunset.
-    let sunset = (1.0 - (sun_dir.y.abs()).clamp(0.0, 1.0)).powf(3.0);
-    let day_color = Color::srgb(0.72, 0.85, 1.0).to_linear();
-    let night_color = Color::srgb(0.14, 0.18, 0.38).to_linear();
-    let sunset_color = Color::srgb(1.0, 0.48, 0.25).to_linear();
-
-    let base = if day > 0.0 { day_color } else { night_color };
-    let amb_lin = base.mix(&sunset_color, sunset * 0.40);
+    // Ambient: warm fill through dusk so shadowed canyon floors stay
+    // readable; a lifted cool floor at night so ground never crushes.
+    let day_color = Color::srgb(0.80, 0.88, 1.0).to_linear();
+    let night_color = Color::srgb(0.24, 0.28, 0.50).to_linear();
+    let sunset_color = Color::srgb(1.0, 0.52, 0.26).to_linear();
+    let golden_fill = Color::srgb(1.0, 0.74, 0.44).to_linear();
+    let night_amt = (1.0 - day).powf(1.55);
+    let amb_lin = day_color
+        .mix(&night_color, night_amt)
+        .mix(&sunset_color, sunset * 0.50)
+        .mix(&golden_fill, sunset * 0.38);
     ambient.color = Color::LinearRgba(amb_lin);
-    // The frontier glows in the dark, so the floor matters more than the
-    // ceiling: with the sun down, ambient is the *only* thing separating
-    // a banded cliff from a black cut-out. The old 380 floor left dusk
-    // and night as pure silhouette, with the lit surfaces of skyways and
-    // platforms blowing out against nothing.
-    ambient.brightness = (640.0 + day * 420.0) * intel.profile.ambient_mul;
+    ambient.brightness = (920.0 + day * 360.0 + sunset * 260.0) * intel.profile.ambient_mul;
 
-    // Sky (clear colour) interpolates similarly — richer gradient from
-    // deep indigo night → fiery horizon → deep cyan midday.
-    let sky_day = Color::srgb(0.48, 0.74, 0.98).to_linear();
-    let sky_night = Color::srgb(0.012, 0.022, 0.08).to_linear();
-    let sky = sky_night.mix(&sky_day, day);
-    // Only a hint of sunset goes into the flat dome colour. `sky.rs` owns
-    // the warm rim through its horizon gradient, and doubling up here is
-    // what turned the whole sky into one uniform red wash at dusk instead
-    // of the deep violet zenith over a burning horizon in the key art.
-    let sky = sky.mix(&sunset_color, sunset * 0.15);
+    // Sky (clear colour). Only a hint of sunset goes into the flat
+    // dome — `sky.rs` owns the warm rim through its horizon gradient.
+    let sky_day = Color::srgb(0.42, 0.68, 0.96).to_linear();
+    let sky_night = Color::srgb(0.018, 0.020, 0.09).to_linear();
+    let sky_violet = Color::srgb(0.10, 0.04, 0.22).to_linear();
+    let sky = sky_night
+        .mix(&sky_day, day)
+        .mix(&sky_violet, (1.0 - day) * 0.45)
+        .mix(&sunset_color, sunset * 0.12);
     let sat: f32 = intel.profile.sky_saturation;
     let sky = sky.mix(
         &Color::srgb(0.5, 0.5, 0.5).to_linear(),
         (1.0_f32 - sat).max(0.0),
     );
-    // Extra wash for showcase biomes — reads closer to neon concept art.
     let sky = match intel.biome {
         Biome::CrystalSpires => {
             let void_v = Color::srgb(0.06, 0.02, 0.20).to_linear();
@@ -322,29 +365,29 @@ fn update_sun(
     };
     clear_color.0 = Color::LinearRgba(sky);
 
-    // Drive fog colour from the same sky interpolation so the horizon
-    // haze always matches the actual sky. This is THE trick that hides
-    // the chunk-streaming edge for free. Uses a slightly brighter tint
-    // near the horizon for atmospheric scattering feel.
+    // Atmospheric fog. Weather's Linear fog is skipped on Clear days
+    // so this ExponentialSquared aerial perspective actually lands.
+    // Midday is thinned (no milky bleach). Dusk keeps warm inscatter
+    // without a density wall on walkable ground. Night fog is a lifted
+    // fill, never a black cut-out.
     if let Ok(mut fog_settings) = fog.get_single_mut() {
-        let horizon = sky
-            .mix(&Color::srgb(1.0, 1.0, 1.0).to_linear(), 0.15)
-            .mix(&sunset_color, sunset * 0.25);
-        fog_settings.color = Color::LinearRgba(sky);
-        if let FogFalloff::ExponentialSquared { density } = &mut fog_settings.falloff {
-            // Fog thins at clear noon for epic long-distance vistas of
-            // alien spires and mountain ranges, thickens dramatically
-            // at sunset/sunrise for fiery god-ray haze.
-            let base_density = 0.00055;
-            *density = base_density
-                * (1.0 + sunset * 1.4 + (1.0 - day) * 0.25)
-                * intel.profile.fog_density_mul;
-        }
-        // Directional light scattering — makes god-ray / atmospheric
-        // tints at sunset and during the night. Much stronger sunset
-        // inscatter so the horizon glows fiery orange.
+        let horizon_day = Color::srgb(0.62, 0.76, 0.94).to_linear();
+        let horizon_dusk = Color::srgb(1.0, 0.50, 0.24).to_linear();
+        let horizon_night = Color::srgb(0.16, 0.14, 0.30).to_linear();
+        let horizon = horizon_night
+            .mix(&horizon_day, day)
+            .mix(&horizon_dusk, sunset * 0.85);
+        // Fog colour is a *brighter* cousin of the sky so nearby
+        // terrain isn't dyed with the zenith. Inscatter is separate.
+        let fog_fill = sky.mix(&horizon, 0.40).mix(&golden_fill, sunset * 0.22);
+        fog_settings.color = Color::LinearRgba(fog_fill);
+        fog_settings.falloff = FogFalloff::ExponentialSquared {
+            density: 0.00020
+                * (1.0 + sunset * 0.50 + (1.0 - day) * 0.18 - day.powf(1.7) * 0.42)
+                * intel.profile.fog_density_mul,
+        };
         fog_settings.directional_light_color = Color::LinearRgba(horizon);
-        fog_settings.directional_light_exponent = 18.0;
+        fog_settings.directional_light_exponent = 11.0;
     }
 }
 
@@ -364,4 +407,51 @@ fn update_world_intel_runtime(
     }
     intel.biome = biome;
     intel.profile = BiomeArtProfile::for_biome(biome);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn golden_hour_keeps_the_sun_above_the_horizon() {
+        // Hour 18 used to map to sun_dir.y ≈ 0 → night branch + black terrain.
+        let dusk = sun_direction(18.0);
+        assert!(
+            dusk.y > 0.10,
+            "hour 18 sun elevation is {y:.3}; terrain would silhouette",
+            y = dusk.y
+        );
+        assert!(
+            day_factor(dusk) > 0.30,
+            "hour 18 day factor is {}; dusk would fall through to night",
+            day_factor(dusk)
+        );
+        assert!(
+            sunset_factor(dusk) > 0.45,
+            "hour 18 is not in the golden-hour band (sunset factor {})",
+            sunset_factor(dusk)
+        );
+    }
+
+    #[test]
+    fn late_afternoon_is_warm_sunlit_dusk_not_night() {
+        let hour = sun_direction(17.0);
+        assert!(hour.y > 0.20, "hour 17 sun is too low ({:.3})", hour.y);
+        assert!(day_factor(hour) > 0.45);
+        assert!(sunset_factor(hour) > 0.15);
+    }
+
+    #[test]
+    fn midday_sun_is_high_and_night_sun_is_down() {
+        let noon = sun_direction(11.0);
+        assert!(noon.y > 0.70, "hour 11 should be near zenith, got {:.3}", noon.y);
+        assert!(day_factor(noon) > 0.90);
+        assert!(sunset_factor(noon) < 0.15);
+
+        let night = sun_direction(21.5);
+        assert!(night.y < -0.20, "hour 21.5 should be true night, y={:.3}", night.y);
+        assert!(day_factor(night) < 0.12);
+        assert!(sunset_factor(night) < 0.20);
+    }
 }
