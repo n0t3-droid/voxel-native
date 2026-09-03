@@ -51,6 +51,17 @@ pub const SKY_LAYER: usize = 1;
 /// normal play, close enough that floating-point precision is fine.
 const SKY_DISTANCE: f32 = 950.0;
 
+/// Hero gas giant: parked upper-right of the default spawn look so it
+/// reads as the painting's Saturn, not a distant marble.
+const PLANET_DIR: Vec3 = Vec3::new(0.60, 0.42, -0.50);
+const PLANET_DIST: f32 = SKY_DISTANCE * 0.64;
+
+/// Stars should be a night thing. (1-day)^2 still left them glittering
+/// through golden hour; ^4 kills them by 17:00 and keeps 21:30 bright.
+fn star_night_factor(day: f32) -> f32 {
+    (1.0 - day).powf(4.0)
+}
+
 /// Fixed bearing of the great cratered moon: high and to the left.
 ///
 /// The sun sweeps the x/y plane with a constant +z lean, so parking the
@@ -168,11 +179,12 @@ fn setup_sky(
     // Nebula resolution + star count scale with graphics tier so low-end
     // GPUs still get the look for a fraction of the fill cost.
     use crate::settings::GraphicsMode;
-    let (nebula_res, star_count) = match settings.graphics {
-        GraphicsMode::Fast => (256u32, 1800usize),
-        GraphicsMode::Balanced => (512, 3200),
-        GraphicsMode::High => (1024, 5200),
-    };
+    let (nebula_res, star_count, planet_r, ring_inner, ring_outer, ring_segs) =
+        match settings.graphics {
+            GraphicsMode::Fast => (256u32, 1800usize, 150.0_f32, 220.0_f32, 380.0_f32, 96usize),
+            GraphicsMode::Balanced => (512, 3200, 185.0, 270.0, 470.0, 128),
+            GraphicsMode::High => (1024, 5200, 220.0, 320.0, 560.0, 192),
+        };
 
     // ----- Sky camera --------------------------------------------------
     // order = -1 → renders BEFORE the world camera in `player.rs` and
@@ -463,7 +475,7 @@ fn setup_sky(
     let planet_res = nebula_res.min(512);
     let planet_image = images.add(build_planet_image(planet_res, settings.seed as u64));
     let planet_mesh = meshes.add(
-        Sphere::new(128.0)
+        Sphere::new(planet_r)
             .mesh()
             .ico(4)
             .expect("subdivision 4 is within ico limits"),
@@ -475,17 +487,17 @@ fn setup_sky(
         base_color: Color::srgb(0.92, 0.86, 0.78),
         base_color_texture: Some(planet_image.clone()),
         emissive_texture: Some(planet_image),
-        emissive: LinearRgba::rgb(1.35, 1.10, 0.92),
+        emissive: LinearRgba::rgb(1.85, 1.48, 1.12),
         unlit: true,
         ..default()
     });
     // Dusty Saturn-like rings with a Cassini-style gap. Vertex colours
     // carry the band albedo; keep emissive modest so they read as ice
     // and dust, not a rainbow debug disc.
-    let ring_mesh = meshes.add(build_ring_mesh(190.0, 340.0, 192));
+    let ring_mesh = meshes.add(build_ring_mesh(ring_inner, ring_outer, ring_segs));
     let ring_mat = materials.add(StandardMaterial {
         base_color: Color::srgba(0.92, 0.84, 0.70, 1.0),
-        emissive: LinearRgba::rgb(1.15, 0.95, 0.72),
+        emissive: LinearRgba::rgb(1.85, 1.55, 1.12),
         unlit: true,
         cull_mode: None,
         alpha_mode: AlphaMode::Blend,
@@ -493,8 +505,8 @@ fn setup_sky(
     });
     // Fixed sky direction: upper-right, high enough to dominate the
     // horizon without blocking gameplay sight-lines.
-    let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-    let planet_pos = planet_dir * SKY_DISTANCE * 0.9;
+    let planet_dir = PLANET_DIR.normalize();
+    let planet_pos = planet_dir * PLANET_DIST;
     commands
         .spawn((
             PbrBundle {
@@ -503,7 +515,7 @@ fn setup_sky(
                 transform: Transform::from_translation(planet_pos)
                     // Fixed tilt — ring plane tipped toward the viewer.
                     // Never rotates (planets are stationary landmarks).
-                    .with_rotation(Quat::from_rotation_x(0.55) * Quat::from_rotation_z(-0.18)),
+                    .with_rotation(Quat::from_rotation_x(0.72) * Quat::from_rotation_z(-0.22)),
                 ..default()
             },
             NotShadowCaster,
@@ -712,8 +724,8 @@ fn follow_and_animate_sky(
     }
     if let Ok(mut planet_tf) = planet_q.get_single_mut() {
         // Fixed direction, NEVER rotates — stationary landmark.
-        let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-        planet_tf.translation = trans + planet_dir * SKY_DISTANCE * 0.9;
+        let planet_dir = PLANET_DIR.normalize();
+        planet_tf.translation = trans + planet_dir * PLANET_DIST;
     }
     if let Ok(mut planet_b_tf) = planet_b_q.get_single_mut() {
         // Fixed direction on the opposite horizon, NEVER rotates.
@@ -758,14 +770,14 @@ fn follow_and_animate_sky(
         // Ringed planet & rings — a shaded gas giant, not a neon gizmo.
         // Slight extra glow at night/sunset so bands stay readable
         // against the dark sky without blowing out at noon.
-        let planet_scale = 0.72 + 0.38 * night + sunset * 0.18;
+        let planet_scale = 1.05 + 0.22 * night + sunset * 0.12;
         if let Some(mat) = materials.get_mut(&sky_mats.planet) {
-            let base = Vec3::new(1.55, 1.22, 0.98);
+            let base = Vec3::new(2.15, 1.72, 1.28);
             let s = base * planet_scale;
             mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
         }
         if let Some(mat) = materials.get_mut(&sky_mats.ring) {
-            let base = Vec3::new(1.35, 1.12, 0.82);
+            let base = Vec3::new(2.05, 1.72, 1.22);
             let s = base * planet_scale;
             mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
         }
@@ -780,12 +792,16 @@ fn follow_and_animate_sky(
         // plus a high emissive is what bleached noon into milky fog, so
         // the live multipliers stay well below the old 2–7 range.
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
-            let base_day = Vec3::new(0.55, 0.28, 0.95);
-            let base_night = Vec3::new(1.85, 1.05, 2.55);
-            let base_sunset = Vec3::new(0.95, 0.38, 0.42);
-            let e = (base_day * (0.22 + 0.38 * day)
-                + base_night * night
-                + base_sunset * sunset * 0.40)
+            // Day/dusk keep a whisper of structure; the volume only
+            // really punches once the sun is down. Hour 17 used to keep
+            // night-level filaments plus stars.
+            let night_vol = (1.0 - day).powf(2.8);
+            let base_day = Vec3::new(0.22, 0.10, 0.38);
+            let base_night = Vec3::new(1.65, 0.92, 2.25);
+            let base_sunset = Vec3::new(0.55, 0.18, 0.22);
+            let e = (base_day * (0.06 + 0.10 * day)
+                + base_night * night_vol
+                + base_sunset * sunset * 0.16)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
@@ -803,17 +819,19 @@ fn follow_and_animate_sky(
         // Additive + bloom made the old 3.0 dusk emissive bleach the
         // whole lower third of the frame.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
-            let noon = Vec3::new(0.12, 0.22, 0.38);
-            let dusk = Vec3::new(0.55, 0.22, 0.08);
-            let deep = Vec3::new(0.16, 0.06, 0.28);
+            let noon = Vec3::new(0.025, 0.045, 0.070);
+            let dusk = Vec3::new(0.42, 0.16, 0.06);
+            let deep = Vec3::new(0.12, 0.05, 0.20);
             let e = (noon * day + deep * night) * (1.0 - sunset * 0.45) + dusk * sunset;
             let e = e * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
-        // Stars: fade in linearly with night.
+        // Stars: only after true dusk. (1-day)^2 still left them
+        // glittering at hour 17.
         if let Some(mat) = materials.get_mut(&sky_mats.stars) {
-            let intensity = 14.0 * night * intel.profile.sky_saturation.max(0.7);
+            let star_night = star_night_factor(day);
+            let intensity = 16.0 * star_night * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(intensity, intensity, intensity * 1.15);
         }
     }
@@ -990,20 +1008,20 @@ fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
             let k = (t - 0.16) / 0.32;
             let pulse = (k * 11.0).sin().abs() * 0.07;
             return [
-                0.78 + pulse,
-                0.68 + pulse * 0.7,
-                0.52 + pulse * 0.4,
-                0.82 - k * 0.08,
+                0.92 + pulse,
+                0.80 + pulse * 0.7,
+                0.60 + pulse * 0.4,
+                0.95 - k * 0.05,
             ];
         }
         // A ring: dustier, slightly greyer, with Encke-like dips.
         let k = ((t - 0.58) / 0.42).clamp(0.0, 1.0);
         let dip = if (k - 0.55).abs() < 0.04 { 0.35 } else { 1.0 };
         [
-            (0.70 - k * 0.12) * dip,
-            (0.62 - k * 0.10) * dip,
-            (0.50 - k * 0.08) * dip,
-            (0.70 - k * 0.28) * dip,
+            (0.82 - k * 0.10) * dip,
+            (0.72 - k * 0.08) * dip,
+            (0.58 - k * 0.06) * dip,
+            (0.82 - k * 0.20) * dip,
         ]
     };
 
@@ -1153,9 +1171,11 @@ fn build_planet_image(size: u32, seed: u64) -> Image {
             };
 
             let ndl = n.dot(light).max(0.0);
-            let limb = 0.28 + 0.72 * ndl.powf(0.72);
-            let night = 0.16 + 0.20 * (1.0 - ndl);
-            let shade = if ndl > 0.0 { limb } else { night };
+            // Stronger limb darkening than pass 1 so the disc reads as a
+            // sphere, not a flat sticker, even at the larger hero size.
+            let limb = 0.10 + 0.90 * ndl.powf(1.25);
+            let night = 0.06 + 0.12 * (1.0 - ndl);
+            let shade = if ndl > 0.02 { limb } else { night };
             let col = col * shade;
 
             data.push((col.x.clamp(0.0, 1.0) * 255.0) as u8);
@@ -1207,16 +1227,14 @@ fn build_horizon_gradient_image(height: u32) -> Image {
             (1.0 - (elevation / 0.45).min(1.0)).powf(1.7)
         };
         let intensity = intensity.clamp(0.0, 1.0);
-        // Warm rim (dusk-leaning cream) in RGB; alpha carries the band
-        // so Blend composites over ClearColor instead of adding light.
-        let r = (1.00 * intensity * 255.0) as u8;
-        let g = (0.58 * intensity * 255.0) as u8;
-        let b = (0.28 * intensity * 255.0) as u8;
-        let a = (intensity * 0.62 * 255.0) as u8;
+        // Greyscale carrier — live emissive supplies the colour so noon
+        // stays cool instead of inheriting a baked dusk-orange rim.
+        let byte = (intensity * 255.0) as u8;
+        let a = (intensity * 0.50 * 255.0) as u8;
         for _ in 0..WIDTH {
-            data.push(r);
-            data.push(g);
-            data.push(b);
+            data.push(byte);
+            data.push(byte);
+            data.push(byte);
             data.push(a);
         }
     }
@@ -1358,6 +1376,19 @@ mod tests {
             "planet body only spans {} levels; it would read as a flat disc",
             max - min
         );
+    }
+
+    #[test]
+    fn stars_are_gone_at_golden_hour_and_present_at_night() {
+        let dusk = star_night_factor(day_factor(sun_direction(17.0)));
+        let noon = star_night_factor(day_factor(sun_direction(11.0)));
+        let night = star_night_factor(day_factor(sun_direction(21.5)));
+        assert!(
+            dusk < 0.08,
+            "hour 17 still has star factor {dusk}; stars would glitter through dusk"
+        );
+        assert!(noon < 0.01);
+        assert!(night > 0.55, "hour 21.5 star factor is only {night}");
     }
 }
 
