@@ -2151,6 +2151,19 @@ fn ship_trail_material(
     }
 }
 
+fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
+    let u = u.clamp(0.0, 1.0);
+    // Cross the +X New World look left-to-right, above the canyon, so
+    // the white/orange shuttle is in frame from spawn through the first
+    // 15–25s of streaming.
+    let x = origin.x + 22.0 + u * 70.0;
+    let z = origin.z - 22.0 + u * 36.0;
+    let y = origin.y + 30.0 + (u * std::f32::consts::TAU).sin() * 7.0;
+    let yaw = 70.0_f32.atan2(-36.0);
+    let roll = -0.38 + (u * std::f32::consts::TAU).sin() * 0.28;
+    (Vec3::new(x, y, z), yaw, roll)
+}
+
 fn update_hero_flyby(
     time: Res<Time>,
     pilot: Res<PilotState>,
@@ -2161,27 +2174,13 @@ fn update_hero_flyby(
         if pilot.active_ship == Some(entity) {
             continue;
         }
-        // Slow enough that a 40s streaming wait still finds the ship in
-        // the postcard look (yaw -0.62 → +X/-Z), not already behind the
-        // camera. First ~10s from spawn also catch it.
-        fly.t = (fly.t + dt * 0.028).rem_euclid(1.0);
-        let u = fly.t;
-        // Postcard camera looks +X/-Z (yaw -0.62) and has typically
-        // flown to ~(90, 110, -44) by the time chunks finish streaming.
-        // Keep the orbiter AHEAD of that frustum, large enough to read
-        // as the painting's white/orange shuttle, with a bank and plume.
-        let x = fly.origin.x + 72.0 + u * 100.0;
-        let z = fly.origin.z - 78.0 - (u * std::f32::consts::PI).sin() * 18.0;
-        let y = fly.origin.y + 16.0 + (u * std::f32::consts::TAU).sin() * 5.0;
-        let vx: f32 = 100.0;
-        let vz: f32 = -std::f32::consts::PI * 18.0 * (u * std::f32::consts::PI).cos();
-        let yaw = f32::atan2(vx, -vz);
-        let roll = (u * std::f32::consts::TAU).sin() * 0.50;
-        tf.translation = Vec3::new(x, y, z);
+        fly.t = (fly.t + dt * 0.008).rem_euclid(1.0);
+        let (pos, yaw, roll) = hero_flyby_pose(fly.origin, fly.t);
+        tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(2.85);
+        tf.scale = Vec3::splat(3.35);
         motion.yaw = yaw;
-        motion.pitch = -0.12;
+        motion.pitch = -0.10;
         motion.roll = roll;
         motion.speed = 110.0;
     }
@@ -2640,6 +2639,8 @@ fn spawn_saved_ships_once(
             false,
             None,
         );
+        let t0 = 0.28;
+        let (fly_pos, fly_yaw, _) = hero_flyby_pose(player_anchor, t0);
         let fly = spawn_ship_entity(
             &mut commands,
             &mut meshes,
@@ -2647,13 +2648,13 @@ fn spawn_saved_ships_once(
             &mut images,
             &mut fx,
             ShipKind::ScoutShuttle,
-            player_anchor + Vec3::new(-8.0, 14.0, -36.0),
-            player_yaw,
+            fly_pos,
+            fly_yaw,
             false,
             None,
         );
         commands.entity(fly).insert(HeroFlyby {
-            t: 0.18,
+            t: t0,
             origin: player_anchor,
         });
     }
@@ -4698,5 +4699,25 @@ mod tests {
         let saved: SavedShipInstance = ron::from_str(text).unwrap();
         assert_eq!(saved.kind, ShipKind::ScoutShuttle);
         assert_eq!(saved.shield, 100.0);
+    }
+
+    #[test]
+    fn hero_flyby_crosses_in_front_of_the_new_world_look() {
+        let origin = Vec3::new(54.5, 64.0, -76.5);
+        for u in [0.20, 0.28, 0.40, 0.55] {
+            let (pos, yaw, roll) = super::hero_flyby_pose(origin, u);
+            assert!(
+                pos.x > origin.x + 16.0,
+                "flyby at u={u} is not ahead of the camera (x={})",
+                pos.x
+            );
+            assert!(
+                pos.y > origin.y + 18.0,
+                "flyby at u={u} is not in the sky (y={})",
+                pos.y
+            );
+            assert!(yaw.abs() > 0.4, "flyby should bank across +X, yaw={yaw}");
+            assert!(roll.abs() < 1.2);
+        }
     }
 }
