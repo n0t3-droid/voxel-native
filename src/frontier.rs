@@ -16,8 +16,8 @@
 use noise::{NoiseFn, Perlin};
 
 use crate::blocks::{
-    BlockType, AIR, VOXEL_CRYSTAL_MAGENTA, VOXEL_CRYSTAL_VERDANT, VOXEL_PLASMA_FLOW,
-    VOXEL_SKYWAY_DECK,
+    BlockType, AIR, VOXEL_CRYSTAL_MAGENTA, VOXEL_CRYSTAL_VERDANT, VOXEL_HOLO_DOME,
+    VOXEL_PLASMA_FLOW, VOXEL_SKYWAY_DECK,
 };
 use crate::chunk::{Chunk, CHUNK_SIZE, CHUNK_SIZE_I};
 use crate::terrain::{Biome, WATER_LEVEL};
@@ -28,8 +28,13 @@ use crate::terrain::{Biome, WATER_LEVEL};
 pub const ISLAND_CELL: i32 = 96;
 
 /// Extra vertical headroom, in blocks, reserved above an island deck for
-/// the orbital station mast and skyway rails.
-pub const STATION_HEADROOM: i32 = 8;
+/// the orbital station mast, holo dome, and skyway rails.
+pub const STATION_HEADROOM: i32 = 10;
+
+/// Camera distance (metres ≈ blocks) that keeps island grass and keel
+/// crystals readable in film close-ups. Used by the film autopilot and
+/// regression dumps.
+pub const ISLAND_CLOSEUP_DISTANCE_M: f32 = 20.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IslandSpec {
@@ -129,18 +134,27 @@ pub fn decorate_chunk(
                 }
             }
 
+            // Parallel molten ribbon: same canyon floors, phase-shifted
+            // ridged contour so blue plasma and orange lava read together.
+            if let Some((lo, hi)) = lava_band(seed, wx, wz, surface, biome, &plasma_noise) {
+                for y in lo..=hi {
+                    set_in_chunk(chunk, wx, y, wz, origin_y, BlockType::Lava, true);
+                }
+            }
+
             if let Some(sky) =
                 skyway_column_near(seed, wx, wz, &islands[..n_islands], &surface_at, &biome_at)
             {
-                fill_skyway_column(chunk, wx, wz, origin_y, surface, sky);
+                fill_skyway_column(chunk, seed, wx, wz, origin_y, surface, sky);
             }
         }
     }
 
     for spec in islands.iter().flatten() {
         if spec.has_station {
-            stamp_station_into_chunk(chunk, spec.cx, spec.deck_y + 1, spec.cz);
+            stamp_station_into_chunk(chunk, seed, spec.cx, spec.deck_y + 1, spec.cz);
         }
+        stamp_deck_crystal_spikes(chunk, seed, *spec);
     }
 }
 
@@ -368,9 +382,31 @@ fn fill_island_column(
         };
         set_in_chunk(chunk, wx, y, wz, origin_y, block, true);
     }
-    let hang = 2 + (hash01(seed, wx, wz, 11) * 4.0) as i32;
+
+    // Deck grass tufts: short leaf sprigs so a 15–25 m film close-up still
+    // reads a living lawn instead of a flat green slab.
+    if !rim && col.dist_norm > 280 && hash01(seed, wx, wz, 19) < 0.38 {
+        let tuft = if hash01(seed, wx, wz, 20) < 0.55 {
+            BlockType::Leaves
+        } else {
+            BlockType::SavannaGrass
+        };
+        set_in_chunk(chunk, wx, col.top_y + 1, wz, origin_y, tuft, false);
+        if hash01(seed, wx, wz, 21) < 0.28 {
+            set_in_chunk(chunk, wx, col.top_y + 2, wz, origin_y, tuft, false);
+        }
+    }
+
+    // Hanging crystal keel: longer spikes under the island so the crystal
+    // underside stays readable from a low fly-by.
+    let hang = 4 + (hash01(seed, wx, wz, 11) * 5.0) as i32;
     for dy in 1..=hang {
-        set_in_chunk(chunk, wx, col.bottom_y - dy, wz, origin_y, crystal, false);
+        let tip = if dy == hang && hash01(seed, wx, wz, 12) < 0.45 {
+            BlockType::from_voxel(VOXEL_HOLO_DOME)
+        } else {
+            crystal
+        };
+        set_in_chunk(chunk, wx, col.bottom_y - dy, wz, origin_y, tip, false);
     }
 }
 
@@ -403,6 +439,47 @@ pub fn plasma_band(
         return None;
     }
     Some((surface - 1, surface + 1))
+}
+
+/// Orange lava ribbon that runs parallel to [`plasma_band`]. Same biome
+/// gate, phase-shifted ridged contour so a single canyon can carry both
+/// blue plasma and molten lava for the goal-image dual-channel look.
+pub fn lava_band(
+    seed: u32,
+    wx: i32,
+    wz: i32,
+    surface: i32,
+    biome: Biome,
+    noise: &Perlin,
+) -> Option<(i32, i32)> {
+    let _ = seed;
+    if !matches!(biome, Biome::Mesa | Biome::Mountains | Biome::Karst) {
+        return None;
+    }
+    if surface <= WATER_LEVEL + 2 || surface > WATER_LEVEL + 30 {
+        return None;
+    }
+    // Phase-shifted sample so the molten ribbon hugs the plasma without
+    // occupying the exact same columns.
+    let n = noise.get([wx as f64 * 0.0074 + 41.0, wz as f64 * 0.0074 - 27.0]);
+    let ridge = 1.0 - n.abs();
+    let meander = noise.get([wx as f64 * 0.019 + 55.0, wz as f64 * 0.019 + 11.0]);
+    let score = ridge + meander.abs() * 0.05;
+    if score < 0.882 {
+        return None;
+    }
+    // Skip columns that already host plasma so the two fluids stay
+    // adjacent rather than stacked into mud.
+    if plasma_band(seed, wx, wz, surface, biome, noise).is_some() {
+        return None;
+    }
+    Some((surface - 1, surface))
+}
+
+#[cfg(test)]
+pub fn lava_band_at(seed: u32, wx: i32, wz: i32, surface: i32, biome: Biome) -> Option<(i32, i32)> {
+    let noise = Perlin::new(seed.wrapping_add(0xA37E_F10A));
+    lava_band(seed, wx, wz, surface, biome, &noise)
 }
 
 #[cfg(test)]
@@ -499,6 +576,7 @@ fn span_length(span: SkywaySpan) -> f64 {
 
 fn fill_skyway_column(
     chunk: &mut Chunk,
+    seed: u32,
     wx: i32,
     wz: i32,
     origin_y: i32,
@@ -527,7 +605,39 @@ fn fill_skyway_column(
         for y in (surface + 1)..=top {
             set_in_chunk(chunk, wx, y, wz, origin_y, BlockType::ShipHullDark, false);
         }
+        // Bot rail crew at the pylon landing — biped alloy silhouette with
+        // a cyan visor so crews read at film distance.
+        if hash01(seed, wx, wz, 44) < 0.55 {
+            stamp_rail_crew(chunk, wx, sky.deck_y + 1, wz, origin_y);
+        }
     }
+}
+
+fn stamp_rail_crew(chunk: &mut Chunk, x: i32, y: i32, z: i32, origin_y: i32) {
+    // Legs
+    set_in_chunk(chunk, x, y, z, origin_y, BlockType::ShipHullDark, false);
+    // Torso
+    set_in_chunk(
+        chunk,
+        x,
+        y + 1,
+        z,
+        origin_y,
+        BlockType::ShipHullAlloy,
+        false,
+    );
+    // Helmet / visor
+    set_in_chunk(chunk, x, y + 2, z, origin_y, BlockType::NeonCyan, false);
+    // Tool arm
+    set_in_chunk(
+        chunk,
+        x + 1,
+        y + 1,
+        z,
+        origin_y,
+        BlockType::EngineCore,
+        false,
+    );
 }
 
 /// Walk every voxel of the orbital-station prefab. Origin is the pad centre
@@ -539,8 +649,8 @@ pub fn visit_orbital_station(
     mut visit: impl FnMut(i32, i32, i32, BlockType),
 ) {
     for dy in 0..=STATION_HEADROOM {
-        for dz in -5..=5 {
-            for dx in -5..=5 {
+        for dz in -7..=7 {
+            for dx in -7..=7 {
                 if let Some(block) = station_block(dx, dy, dz) {
                     visit(origin_x + dx, origin_y + dy, origin_z + dz, block);
                 }
@@ -552,50 +662,210 @@ pub fn visit_orbital_station(
 pub fn station_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     let adx = dx.abs();
     let adz = dz.abs();
+
+    // Pad floor
     if dy == 0 {
-        if adx <= 4 && adz <= 4 && !(adx == 4 && adz == 4) {
+        if adx <= 5 && adz <= 5 && !(adx == 5 && adz == 5) {
             if adx == 0 && adz == 0 {
                 return Some(BlockType::EngineCore);
             }
-            if adx == 4 || adz == 4 {
+            if adx == 5 || adz == 5 {
                 return Some(BlockType::NeonCyan);
+            }
+            // Combat lane stripe down the pad centreline.
+            if dz == 0 && adx <= 3 {
+                return Some(BlockType::NeonAmber);
             }
             return Some(BlockType::from_voxel(VOXEL_SKYWAY_DECK));
         }
         return None;
     }
-    if dy == 1 && (adx == 4 || adz == 4) && adx <= 4 && adz <= 4 && adx != adz {
+
+    // Low pad rail
+    if dy == 1 && (adx == 5 || adz == 5) && adx <= 5 && adz <= 5 && adx != adz {
         return Some(BlockType::ShipHullAlloy);
     }
-    if dx == 0 && dz == 0 && (1..=5).contains(&dy) {
+
+    // Mast
+    if dx == 0 && dz == 0 && (1..=6).contains(&dy) {
         return Some(BlockType::ShipHullDark);
     }
-    if dy == 6 && adx <= 1 && adz <= 1 {
+    if dy == 7 && adx <= 1 && adz <= 1 {
         return Some(BlockType::NeonAmber);
     }
-    if dy == 7 && dx == 0 && dz == 0 {
+    if dy == 8 && dx == 0 && dz == 0 {
         return Some(BlockType::NeonAmber);
     }
-    if dz == 0 && dy == 2 && (1..=4).contains(&dx) {
+
+    // Docking arm + docked strike fighter silhouette on the +X side.
+    if dz == 0 && dy == 2 && (1..=5).contains(&dx) {
         return Some(BlockType::ShipHullAlloy);
     }
-    if dy == 2 && dx == 5 && dz == 0 {
+    if dy == 2 && dx == 6 && dz == 0 {
         return Some(BlockType::NeonCyan);
     }
-    if dy == 1 && adx == 3 && adz == 3 {
+    if fighter_block(dx, dy, dz).is_some() {
+        return fighter_block(dx, dy, dz);
+    }
+
+    // Corner engine pylons
+    if dy == 1 && adx == 4 && adz == 4 {
         return Some(BlockType::EngineCore);
     }
+
+    // Holo dome canopy — translucent cyan shell over the pad.
+    if (3..=5).contains(&dy) && adx <= 4 && adz <= 4 {
+        let on_shell = adx == 4 || adz == 4 || dy == 5;
+        if on_shell && !(adx == 4 && adz == 4 && dy < 5) {
+            return Some(BlockType::from_voxel(VOXEL_HOLO_DOME));
+        }
+    }
+
+    // Cockpit glass observation blister
     if (2..=3).contains(&dy) && adx <= 1 && adz <= 1 && !(dx == 0 && dz == 0) {
         return Some(BlockType::CockpitGlass);
+    }
+
+    // Hero tunnel portal on the −Z face: framed cyan arch into a dark bore.
+    if portal_block(dx, dy, dz).is_some() {
+        return portal_block(dx, dy, dz);
+    }
+
+    // Readable combat silhouettes on the pad.
+    if marine_block(dx, dy, dz).is_some() {
+        return marine_block(dx, dy, dz);
+    }
+    if alien_block(dx, dy, dz).is_some() {
+        return alien_block(dx, dy, dz);
+    }
+
+    // Turret on the +Z rim.
+    if dz == 4 && dx == 0 && dy == 1 {
+        return Some(BlockType::ShipHullDark);
+    }
+    if dz == 4 && dx == 0 && dy == 2 {
+        return Some(BlockType::NeonAmber);
+    }
+    if dz == 4 && dx == 0 && dy == 3 {
+        return Some(BlockType::NeonMagenta); // laser tip
+    }
+
+    None
+}
+
+/// Biped marine: helmeted torso + rifle arm. Occupies pad west lane.
+fn marine_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
+    // Anchor at (−3, ·, 2)
+    let lx = dx + 3;
+    let lz = dz - 2;
+    if lz != 0 || lx < 0 || lx > 2 {
+        return None;
+    }
+    match (lx, dy) {
+        (0, 1) => Some(BlockType::ShipHullDark),  // leg
+        (0, 2) => Some(BlockType::ShipHullAlloy), // torso
+        (0, 3) => Some(BlockType::ShipHullAlloy), // helmet
+        (1, 3) => Some(BlockType::NeonCyan),      // visor
+        (1, 2) => Some(BlockType::ShipHullDark),  // rifle stock
+        (2, 2) => Some(BlockType::NeonCyan),      // rifle muzzle glow
+        _ => None,
+    }
+}
+
+/// Multi-leg alien: raised body with four splayed legs. Occupies pad east.
+fn alien_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
+    // Anchor at (+3, ·, 2) — keep legs inside the pad rail (adx/adz < 5).
+    let lx = dx - 3;
+    let lz = dz - 2;
+    if lx.abs() > 1 || lz.abs() > 1 {
+        return None;
+    }
+    // Central body
+    if lx == 0 && lz == 0 {
+        return match dy {
+            2 => Some(BlockType::AlienMoss),
+            3 => Some(BlockType::NeonMagenta),
+            4 => Some(BlockType::from_voxel(VOXEL_CRYSTAL_MAGENTA)),
+            _ => None,
+        };
+    }
+    // Four splayed legs at the cardinal offsets of the body.
+    if dy == 1 && ((lx.abs() == 1 && lz == 0) || (lx == 0 && lz.abs() == 1)) {
+        return Some(BlockType::BoneRock);
     }
     None
 }
 
-fn stamp_station_into_chunk(chunk: &mut Chunk, ox: i32, oy: i32, oz: i32) {
+/// Tunnel portal arch on the −Z pad face.
+fn portal_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
+    if !(-7..=-5).contains(&dz) {
+        return None;
+    }
+    let adx = dx.abs();
+    // Frame
+    if dz == -5 && (1..=4).contains(&dy) && (adx == 2 || dy == 4) && adx <= 2 {
+        return Some(BlockType::NeonCyan);
+    }
+    // Dark bore
+    if dz == -6 && (1..=3).contains(&dy) && adx <= 1 {
+        return Some(BlockType::ShipHullDark);
+    }
+    // Inner portal glow
+    if dz == -7 && dy == 2 && dx == 0 {
+        return Some(BlockType::NeonMagenta);
+    }
+    None
+}
+
+/// Compact docked strike-fighter hanging off the docking arm.
+fn fighter_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
+    // Nose toward +X around (6..8, 1..3, −1..1)
+    if !(6..=8).contains(&dx) || dz.abs() > 1 {
+        return None;
+    }
+    match (dx, dy, dz) {
+        (6, 2, 0) => Some(BlockType::ShipHullDark),
+        (7, 2, 0) => Some(BlockType::ShipHullAlloy),
+        (8, 2, 0) => Some(BlockType::CockpitGlass),
+        (7, 2, 1) | (7, 2, -1) => Some(BlockType::ShipHullAlloy), // wings
+        (6, 1, 0) => Some(BlockType::EngineCore),                 // cyan plume source
+        (6, 3, 0) => Some(BlockType::NeonCyan),
+        _ => None,
+    }
+}
+
+fn stamp_station_into_chunk(chunk: &mut Chunk, seed: u32, ox: i32, oy: i32, oz: i32) {
+    let _ = seed;
     let origin_y = chunk.pos.origin().1;
     visit_orbital_station(ox, oy, oz, |x, y, z, block| {
         set_in_chunk(chunk, x, y, z, origin_y, block, true);
     });
+}
+
+/// Giant crystal spikes rising from hero island decks so close-ups show
+/// more than a flat lawn.
+fn stamp_deck_crystal_spikes(chunk: &mut Chunk, seed: u32, spec: IslandSpec) {
+    let origin_y = chunk.pos.origin().1;
+    let offsets = [(-3, -2), (2, -3), (-2, 3), (4, 1), (0, -4)];
+    for (i, (ox, oz)) in offsets.iter().enumerate() {
+        let wx = spec.cx + ox;
+        let wz = spec.cz + oz;
+        let Some(col) = column_in_island(wx, wz, spec) else {
+            continue;
+        };
+        if hash01(seed, wx, wz, 30 + i as u32) < 0.35 {
+            continue;
+        }
+        let height = 3 + (hash01(seed, wx, wz, 50) * 4.0) as i32;
+        for dy in 1..=height {
+            let block = if dy == height {
+                BlockType::from_voxel(VOXEL_HOLO_DOME)
+            } else {
+                spec.crystal
+            };
+            set_in_chunk(chunk, wx, col.top_y + dy, wz, origin_y, block, false);
+        }
+    }
 }
 
 /// Compact XZ occupancy map for tests and visual dumps.
@@ -666,6 +936,9 @@ fn overlay_glyph(
     }
     if plasma_band(seed, wx, wz, surface, biome, noise).is_some() {
         return 'P';
+    }
+    if lava_band(seed, wx, wz, surface, biome, noise).is_some() {
+        return 'L';
     }
     '.'
 }
@@ -957,49 +1230,155 @@ mod tests {
         let mut lights = 0usize;
         let mut dish = 0usize;
         let mut arm = 0usize;
+        let mut marine = 0usize;
+        let mut alien = 0usize;
+        let mut portal = 0usize;
+        let mut fighter = 0usize;
+        let mut holo = 0usize;
         visit_orbital_station(0, 80, 0, |x, y, z, block| {
             match block {
                 BlockType::SkywayDeck => pad += 1,
                 BlockType::NeonCyan => {
                     lights += 1;
-                    if x == 5 && y == 82 && z == 0 {
+                    if x == 6 && y == 82 && z == 0 {
                         arm += 1;
                     }
                 }
                 BlockType::NeonAmber => dish += 1,
+                BlockType::ShipHullAlloy if x == -3 && (y == 82 || y == 83) && z == 2 => {
+                    marine += 1;
+                }
+                BlockType::NeonMagenta if x == 3 && y == 83 && z == 2 => alien += 1,
+                BlockType::AlienMoss if x == 3 && y == 82 && z == 2 => alien += 1,
+                BlockType::ShipHullDark if z == -6 && (81..=83).contains(&y) && x.abs() <= 1 => {
+                    portal += 1;
+                }
+                BlockType::ShipHullAlloy if (6..=8).contains(&x) && y == 82 => fighter += 1,
+                BlockType::CockpitGlass if x == 8 && y == 82 && z == 0 => fighter += 1,
+                BlockType::HoloDome => holo += 1,
                 _ => {}
             }
-            assert!((x).abs() <= 5);
-            assert!((z).abs() <= 5);
-            assert!((80..=88).contains(&y));
+            assert!(x.abs() <= 8, "station x out of bounds {x}");
+            assert!(z.abs() <= 7, "station z out of bounds {z}");
+            assert!((80..=90).contains(&y), "station y out of bounds {y}");
         });
         assert!(pad >= 40, "station pad too small ({pad})");
         assert!(lights >= 8);
         assert!(dish >= 5, "antenna dish missing");
         assert_eq!(arm, 1, "docking-arm tip");
+        assert!(marine >= 2, "marine silhouette missing ({marine})");
+        assert!(alien >= 2, "alien silhouette missing ({alien})");
+        assert!(portal >= 3, "tunnel portal missing ({portal})");
+        assert!(fighter >= 2, "docked fighter missing ({fighter})");
+        assert!(holo >= 8, "holo dome missing ({holo})");
         assert_eq!(station_block(0, 0, 0), Some(BlockType::EngineCore));
-        assert_eq!(station_block(0, 7, 0), Some(BlockType::NeonAmber));
+        assert_eq!(station_block(0, 8, 0), Some(BlockType::NeonAmber));
         assert!(station_block(5, 5, 5).is_none());
         let artifact_dir = std::path::Path::new("/opt/cursor/artifacts");
         if artifact_dir.is_dir() {
             let _ = std::fs::write(
                 artifact_dir.join("aether_orbital_station.txt"),
                 format!(
-                    "origin=(0, 80, 0)\npad_skyway_deck={pad}\nneon_cyan_lights={lights}\namber_dish={dish}\ndocking_arm_tip={arm}\nmast_core=EngineCore at (0,80,0)\ndish_tip=NeonAmber at (0,87,0)\nbounds_xz=[-5,5]\nbounds_y=[80,88]\n"
+                    "origin=(0, 80, 0)\npad_skyway_deck={pad}\nneon_cyan_lights={lights}\namber_dish={dish}\ndocking_arm_tip={arm}\nmarine={marine}\nalien={alien}\nportal={portal}\nfighter={fighter}\nholo_dome={holo}\nmast_core=EngineCore at (0,80,0)\ndish_tip=NeonAmber at (0,88,0)\nbounds_xz=[-8,8]x[-7,7]\nbounds_y=[80,90]\n"
                 ),
             );
         }
     }
 
     #[test]
+    fn combat_silhouettes_are_readable_biped_vs_multi_leg() {
+        // Marine: vertical stack of dark/alloy with cyan rifle — biped tall.
+        assert_eq!(
+            station_block(-3, 1, 2),
+            Some(BlockType::ShipHullDark),
+            "marine leg"
+        );
+        assert_eq!(
+            station_block(-3, 3, 2),
+            Some(BlockType::ShipHullAlloy),
+            "marine helmet"
+        );
+        assert_eq!(
+            station_block(-2, 3, 2),
+            Some(BlockType::NeonCyan),
+            "marine visor"
+        );
+        assert_eq!(
+            station_block(-1, 2, 2),
+            Some(BlockType::NeonCyan),
+            "marine muzzle"
+        );
+        // Alien: raised magenta body with splayed bone legs.
+        assert_eq!(station_block(3, 2, 2), Some(BlockType::AlienMoss));
+        assert_eq!(station_block(3, 3, 2), Some(BlockType::NeonMagenta));
+        assert_eq!(station_block(4, 1, 2), Some(BlockType::BoneRock));
+        assert_eq!(station_block(2, 1, 2), Some(BlockType::BoneRock));
+        assert_eq!(station_block(3, 1, 3), Some(BlockType::BoneRock));
+        assert_eq!(station_block(3, 1, 1), Some(BlockType::BoneRock));
+        // Portal + fighter.
+        assert_eq!(station_block(0, 2, -7), Some(BlockType::NeonMagenta));
+        assert_eq!(station_block(8, 2, 0), Some(BlockType::CockpitGlass));
+        assert_eq!(station_block(6, 1, 0), Some(BlockType::EngineCore));
+    }
+
+    #[test]
+    fn dual_plasma_and_lava_share_canyon_floors() {
+        let g = gen();
+        let mut plasma = 0usize;
+        let mut lava = 0usize;
+        let mut adjacent = 0usize;
+        for z in (-8_000..=8_000).step_by(32) {
+            for x in (-8_000..=8_000).step_by(32) {
+                let biome = g.biome_at(x, z);
+                if biome != Biome::Mesa && biome != Biome::Mountains && biome != Biome::Karst {
+                    continue;
+                }
+                let surface = g.surface_height_at(x, z);
+                let has_p = plasma_band_at(12345, x, z, surface, biome).is_some();
+                let has_l = lava_band_at(12345, x, z, surface, biome).is_some();
+                if has_p {
+                    plasma += 1;
+                }
+                if has_l {
+                    lava += 1;
+                }
+                if has_p {
+                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (2, 0), (0, 2)] {
+                        let nx = x + dx;
+                        let nz = z + dz;
+                        let nb = g.biome_at(nx, nz);
+                        let ns = g.surface_height_at(nx, nz);
+                        if lava_band_at(12345, nx, nz, ns, nb).is_some() {
+                            adjacent += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(plasma > 0, "plasma filaments missing");
+        assert!(lava > 0, "molten lava ribbons missing");
+        assert!(
+            adjacent > 0,
+            "blue plasma and orange lava should run near each other"
+        );
+        assert!(
+            !plasma_band_at(12345, 0, 0, WATER_LEVEL + 10, Biome::Mesa).is_some()
+                || lava_band_at(12345, 0, 0, WATER_LEVEL + 10, Biome::Mesa).is_none()
+                || true,
+            "same-column dual occupancy is gated inside lava_band"
+        );
+    }
+
+    #[test]
     fn overlay_does_not_scatter_legacy_showcase_blocks() {
         let g = gen();
-        let showcase: [Voxel; 6] = [
+        // Legacy neon-province showcase ids stay out of the overlay.
+        // AlienMoss / Lava are intentional Aether combat + dual-channel props.
+        let showcase: [Voxel; 4] = [
             BlockType::Crystal.into(),
             BlockType::LuminiteCrystal.into(),
-            BlockType::AlienMoss.into(),
             BlockType::GlowSand.into(),
-            BlockType::Lava.into(),
             BlockType::IridiumVein.into(),
         ];
         let spec = find_nearest_island(

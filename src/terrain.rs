@@ -2594,16 +2594,16 @@ mod tests {
     #[test]
     fn default_generated_chunks_do_not_scatter_showcase_blocks() {
         let generator = TerrainGenerator::new(12345);
-        let showcase_blocks: [Voxel; 9] = [
+        // Legacy neon-province showcase ids. Lava / AlienMoss / BoneRock are
+        // intentional Aether Frontier props (dual plasma channels + combat
+        // silhouettes) and are allowed in default Earth-like worlds.
+        let showcase_blocks: [Voxel; 6] = [
             BlockType::Crystal.into(),
             BlockType::LuminiteCrystal.into(),
             BlockType::MagnetiteOre.into(),
             BlockType::IridiumVein.into(),
-            BlockType::AlienMoss.into(),
-            BlockType::BoneRock.into(),
             BlockType::GlowSand.into(),
             BlockType::Basalt.into(),
-            BlockType::Lava.into(),
         ];
         let sample_columns = [(-8, -8), (-3, 5), (0, 0), (6, -4), (11, 9)];
 
