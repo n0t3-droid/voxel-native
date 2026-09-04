@@ -2745,12 +2745,12 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
-    /// Inside the look-cone canyon, mid-face, looking +X at the carved
-    /// west wall. Skyway decks no longer fill the near field; the banded
-    /// cliff, lava falls, and river occupy the opening frame.
+    /// Inside the look-cone canyon, mid-face, looking +X at a tall
+    /// banded rock wall. Colony habs sit on the rim as accents; lava
+    /// curtains and the crystal cluster occupy the opening frame.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let eye = [88.5_f32, 74.0, -78.5];
-        let look = [108.0_f32, 80.0, -82.0];
+        let eye = [78.5_f32, 68.0, -82.5];
+        let look = [116.0_f32, 86.0, -86.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
@@ -3018,15 +3018,23 @@ mod tests {
     #[test]
     fn look_cone_cliff_carves_windows_into_generated_mesa() {
         let generator = TerrainGenerator::new(12345);
-        let rim = generator.surface_height_at(104, -72);
+        let rim = generator.surface_height_at(108, -80);
         assert!(rim > 40, "look-cone mesa is missing ({rim})");
         let holo: Voxel = BlockType::HoloPanel.into();
         let deck: Voxel = BlockType::RoadDeck.into();
+        let lava: Voxel = BlockType::Lava.into();
+        let plasma: Voxel = BlockType::PlasmaFlow.into();
+        let violet: Voxel = BlockType::VioletStone.into();
+        let red: Voxel = BlockType::RedStone.into();
+        let clay: Voxel = BlockType::MesaClay.into();
+        let amber: Voxel = BlockType::AmberStone.into();
         let mut windows = 0usize;
         let mut floors = 0usize;
-        for cy in 2..8 {
+        let mut curtains = 0usize;
+        let mut stone = 0usize;
+        for cy in 2..10 {
             for cx in 6..10 {
-                for cz in -7..-3 {
+                for cz in -8..-2 {
                     let mut chunk = Chunk::new(ChunkPos::new(cx, cy, cz));
                     generator.generate(&mut chunk);
                     for ly in 0..CHUNK_SIZE {
@@ -3039,6 +3047,12 @@ mod tests {
                                 if v == deck {
                                     floors += 1;
                                 }
+                                if v == lava || v == plasma {
+                                    curtains += 1;
+                                }
+                                if v == violet || v == red || v == clay || v == amber {
+                                    stone += 1;
+                                }
                             }
                         }
                     }
@@ -3046,10 +3060,18 @@ mod tests {
             }
         }
         assert!(
-            windows > 12,
-            "carved cliff face has no lit windows in generated chunks (windows={windows} floors={floors} rim={rim})"
+            windows > 4,
+            "carved cliff face has no lit window accents in generated chunks (windows={windows} floors={floors} rim={rim})"
         );
-        assert!(floors > 20, "carved cliff face has no terrace floors ({floors})");
+        assert!(floors > 8, "carved cliff face has no terrace accents ({floors})");
+        assert!(
+            curtains > 80,
+            "look-cone west face has no lava curtain in generated chunks ({curtains})"
+        );
+        assert!(
+            stone > 800,
+            "look-cone west face is missing banded rock ({stone})"
+        );
     }
 
     #[test]

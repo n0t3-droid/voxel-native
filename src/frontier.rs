@@ -504,14 +504,14 @@ impl CrystalCluster {
         }
     }
 
-    /// Shard group on the look-cone river bank so the opening vista
-    /// has crystals in frame, not only behind the camera.
+    /// Hero shard cluster in the look-cone canyon, between camera and
+    /// the west wall so it occupies a real slice of the opening frame.
     pub fn hero_d() -> Self {
         Self {
-            cx: 100,
-            cz: -74,
-            shards: 9,
-            scale: 40,
+            cx: 92,
+            cz: -92,
+            shards: 14,
+            scale: 56,
         }
     }
 
@@ -553,7 +553,7 @@ impl CrystalCluster {
         let origin = chunk.pos.origin();
         let (ox, _, oz) = origin;
         // Widest possible footprint: shard offsets plus lean plus radius.
-        let reach = 12 + self.scale / 3;
+        let reach = 16 + self.scale / 2;
         if (ox + CHUNK_SIZE_I <= self.cx - reach)
             || (ox > self.cx + reach)
             || (oz + CHUNK_SIZE_I <= self.cz - reach)
@@ -562,16 +562,18 @@ impl CrystalCluster {
             return;
         }
 
+        let spread = 10.0 + self.scale as f64 * 0.22;
         for s in 0..self.shards {
             let salt = 0x0C_20_00 + s * 7919;
-            let bx = self.cx + ((cell_rand(seed, salt, self.cx, self.cz) - 0.5) * 14.0) as i32;
-            let bz = self.cz + ((cell_rand(seed, salt + 1, self.cx, self.cz) - 0.5) * 14.0) as i32;
+            let bx = self.cx + ((cell_rand(seed, salt, self.cx, self.cz) - 0.5) * spread) as i32;
+            let bz = self.cz + ((cell_rand(seed, salt + 1, self.cx, self.cz) - 0.5) * spread) as i32;
             let height =
                 (self.scale as f64 * (0.55 + cell_rand(seed, salt + 2, bx, bz) * 0.85)) as i32;
             if height < 4 {
                 continue;
             }
-            let base_radius = 1 + (height / 9).min(3);
+            let thick = if self.scale >= 40 { 5 } else { 3 };
+            let base_radius = 1 + (height / 8).min(thick);
             // Lean, expressed as horizontal drift per block of height.
             let lean_x = (cell_rand(seed, salt + 3, bx, bz) - 0.5) * 0.5;
             let lean_z = (cell_rand(seed, salt + 4, bx, bz) - 0.5) * 0.5;
@@ -1284,29 +1286,31 @@ pub struct CliffHab {
 
 impl CliffHab {
     pub fn hero_cluster() -> [Self; 22] {
+        // Rim accents east of the west mesa wall — habs silhouette on the
+        // crest instead of filling the New World look as a pylon forest.
         [
-            Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5, drop: 0, ledge: 0 },
-            Self { cx: 84, cz: -54, floors: 6, width: 6, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 22, cz: -82, floors: 6, width: 4, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 108, cz: -66, floors: 8, width: 5, depth: 3, drop: 0, ledge: 0 },
-            Self { cx: 70, cz: -40, floors: 4, width: 7, depth: 5, drop: 0, ledge: 0 },
-            Self { cx: 128, cz: -92, floors: 7, width: 5, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 146, cz: -74, floors: 9, width: 4, depth: 5, drop: 0, ledge: 0 },
-            Self { cx: 96, cz: -108, floors: 6, width: 6, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 168, cz: -88, floors: 8, width: 5, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 118, cz: -58, floors: 5, width: 6, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 138, cz: -108, floors: 8, width: 4, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 158, cz: -64, floors: 6, width: 5, depth: 5, drop: 0, ledge: 0 },
-            Self { cx: 112, cz: -84, floors: 10, width: 4, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 78, cz: -96, floors: 5, width: 7, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 48, cz: -98, floors: 7, width: 4, depth: 5, drop: 0, ledge: 0 },
-            Self { cx: 64, cz: -52, floors: 3, width: 8, depth: 6, drop: 0, ledge: 0 },
-            Self { cx: 100, cz: -48, floors: 4, width: 5, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 124, cz: -76, floors: 6, width: 5, depth: 3, drop: 0, ledge: 0 },
-            Self { cx: 152, cz: -96, floors: 5, width: 6, depth: 4, drop: 0, ledge: 0 },
-            Self { cx: 90, cz: -80, floors: 3, width: 9, depth: 5, drop: 0, ledge: 0 },
-            Self { cx: 174, cz: -70, floors: 7, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 142, cz: -100, floors: 4, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 150, cz: -84, floors: 5, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 158, cz: -68, floors: 4, width: 5, depth: 3, drop: 0, ledge: 0 },
+            Self { cx: 146, cz: -52, floors: 3, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 164, cz: -92, floors: 5, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 138, cz: -116, floors: 3, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 172, cz: -76, floors: 5, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 154, cz: -44, floors: 3, width: 4, depth: 3, drop: 0, ledge: 0 },
+            Self { cx: 180, cz: -88, floors: 4, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 166, cz: -108, floors: 4, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 148, cz: -60, floors: 3, width: 6, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 176, cz: -48, floors: 4, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 160, cz: -120, floors: 3, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 186, cz: -72, floors: 5, width: 4, depth: 3, drop: 0, ledge: 0 },
+            Self { cx: 170, cz: -56, floors: 3, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 144, cz: -80, floors: 4, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 182, cz: -100, floors: 4, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 152, cz: -96, floors: 3, width: 5, depth: 3, drop: 0, ledge: 0 },
+            Self { cx: 168, cz: -64, floors: 4, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 190, cz: -80, floors: 5, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 156, cz: -40, floors: 3, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 174, cz: -112, floors: 4, width: 4, depth: 4, drop: 0, ledge: 0 },
         ]
     }
 
@@ -1439,11 +1443,10 @@ impl CliffHab {
     }
 }
 
-/// West-facing terraces cut *into* a raised mesa butte the settled
-/// postcard actually sees. Camera rests at ~(90, 110, −44) looking
-/// +X/−Z; a lip below the cap hides in the plateau, so this stacks
-/// banded stone *above* the rim and bites shallow lit ledges into
-/// that west face — pueblo dwellings, not skyway boxes.
+/// West-facing banded mesa wall the New World overlook actually sees.
+/// Camera stands in the canyon looking +X at a tens-of-blocks-tall
+/// rock face; colony habs and a thin skyway sit on/near the crest as
+/// accents, not as the subject.
 #[derive(Debug, Clone, Copy)]
 pub struct CliffFace {
     pub face_x: i32,
@@ -1465,38 +1468,48 @@ impl CliffFace {
     pub fn look_cone() -> [Self; 2] {
         [
             Self {
-                // West face of the look-cone butte. A wide apron carves
-                // a real canyon so the New World camera looks across a
-                // drop at a tall banded wall, not down at a mesa cap.
-                face_x: 104,
-                z0: -112,
-                z1: -44,
-                levels: 6,
-                depth: 10,
-                drop: 22,
-                rise: 6,
-                apron: 28,
-                crest: 30,
+                // Hero west mesa: a real banded rock wall tens of blocks
+                // tall filling the New World look, not a stack of colony
+                // pylons. Habs / skyway stay rim accents on/near it.
+                face_x: 108,
+                z0: -128,
+                z1: -36,
+                levels: 4,
+                depth: 24,
+                drop: 36,
+                rise: 8,
+                apron: 34,
+                crest: 48,
             },
             Self {
-                face_x: 116,
-                z0: -88,
+                face_x: 136,
+                z0: -100,
                 z1: -60,
-                levels: 4,
-                depth: 6,
-                drop: 4,
+                levels: 3,
+                depth: 8,
+                drop: 8,
                 rise: 5,
                 apron: 0,
-                crest: 14,
+                crest: 12,
             },
         ]
+    }
+
+    fn face_at(&self, z: i32) -> i32 {
+        let jag = (((z as f32) * 0.17).sin() * 4.0).round() as i32 + ((z * 5).rem_euclid(7) - 3);
+        self.face_x + jag
+    }
+
+    fn extra_crest(&self, z: i32) -> i32 {
+        ((z * 11).rem_euclid(17) / 2).min(14)
     }
 
     pub fn stamp(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
         let origin = chunk.pos.origin();
         let (ox, oy, oz) = origin;
-        let west = self.face_x - self.apron.max(1);
-        let east = self.face_x + self.depth + 3;
+        const JAG: i32 = 8;
+        let west = self.face_x - self.apron.max(1) - JAG;
+        let east = self.face_x + self.depth + 3 + JAG;
         if (ox + CHUNK_SIZE_I <= west) || (ox > east) {
             return;
         }
@@ -1507,111 +1520,122 @@ impl CliffFace {
         let mut y_hi = i32::MIN;
         for z in self.z0..=self.z1 {
             let rim = ground(self.face_x + self.depth, z);
-            let bottom = rim - self.drop - (self.levels - 1) * self.rise - 4;
+            let extra = self.extra_crest(z);
+            let bottom = rim - self.drop - 4;
             y_lo = y_lo.min(bottom);
-            y_hi = y_hi.max(rim + self.crest + 1);
+            y_hi = y_hi.max(rim + self.crest + extra + 1);
         }
         if oy > y_hi || oy + CHUNK_SIZE_I <= y_lo {
             return;
         }
 
         for z in self.z0..=self.z1 {
+            let face = self.face_at(z);
             let rim = ground(self.face_x + self.depth, z);
-            let pit = rim - self.drop - (self.levels - 1) * self.rise - 3;
-            let crest_y = rim + self.crest;
+            let extra = self.extra_crest(z);
+            let pit = rim - self.drop;
+            let crest_y = rim + self.crest + extra;
             for dx in 1..=self.apron {
-                let wx = self.face_x - dx;
+                let wx = face - dx;
                 for wy in pit..=crest_y {
                     carve(chunk, origin, wx, wy, z);
                 }
             }
             for dx in 0..=(self.depth + 2) {
-                let wx = self.face_x + dx;
+                let wx = face + dx;
                 for wy in pit..=crest_y {
                     place_over_unless_glow(chunk, origin, wx, wy, z, strata_block(wy));
                 }
             }
-            let stair = (z - self.z0).rem_euclid(12) == 0;
-            let dwelling = (z - self.z0).rem_euclid(10) == 4;
-            let top_floor = crest_y - 2;
-            for level in 0..self.levels {
-                let floor = top_floor - level * self.rise;
-                // Shallow west-face ledge so windows sit ~3 blocks in,
-                // not buried at the back of a 10-block cave. Leave a
-                // 2-block lintel of stone between levels.
-                let ledge = 3.min(self.depth);
-                let bite = if dwelling { self.depth } else { ledge };
-                let head = floor + 3;
-                for dx in 0..bite {
-                    let wx = self.face_x + dx;
-                    place_over_unless_glow(
-                        chunk,
-                        origin,
-                        wx,
-                        floor,
-                        z,
-                        if dx <= 1 {
-                            BlockType::PlatingTeal
-                        } else {
-                            BlockType::RoadDeck
-                        },
-                    );
-                    for wy in (floor + 1)..=head {
-                        carve(chunk, origin, wx, wy, z);
+            // Sparse pueblo bites so the wall stays rock, not a pylon stack.
+            let dwelling = z.rem_euclid(10) == 0;
+            if dwelling {
+                let top_floor = crest_y - 6;
+                for level in 0..self.levels {
+                    let floor = top_floor - level * self.rise;
+                    if floor <= pit + 4 {
+                        break;
                     }
-                }
-                let back = self.face_x + bite;
-                place_over_unless_glow(
-                    chunk,
-                    origin,
-                    back,
-                    floor + 2,
-                    z,
-                    BlockType::HoloPanel,
-                );
-                place_over_unless_glow(
-                    chunk,
-                    origin,
-                    back,
-                    floor + 1,
-                    z,
-                    BlockType::HoloPanel,
-                );
-                place_over_unless_glow(
-                    chunk,
-                    origin,
-                    self.face_x,
-                    floor + 1,
-                    z,
-                    BlockType::NeonAmber,
-                );
-                if stair {
-                    for step in 0..self.rise {
-                        let wx = self.face_x + 1 + (step / 2).min(ledge.saturating_sub(1));
+                    let bite = 3.min(self.depth);
+                    let head = floor + 3;
+                    for dx in 0..bite {
+                        let wx = face + dx;
                         place_over_unless_glow(
                             chunk,
                             origin,
                             wx,
-                            floor + step,
+                            floor,
                             z,
-                            BlockType::RoadDeck,
+                            if dx <= 1 {
+                                BlockType::PlatingTeal
+                            } else {
+                                BlockType::RoadDeck
+                            },
                         );
-                        carve(chunk, origin, wx, floor + step + 1, z);
-                        carve(chunk, origin, wx, floor + step + 2, z);
+                        for wy in (floor + 1)..=head {
+                            carve(chunk, origin, wx, wy, z);
+                        }
                     }
+                    let back = face + bite;
+                    place_over_unless_glow(
+                        chunk,
+                        origin,
+                        back,
+                        floor + 2,
+                        z,
+                        BlockType::HoloPanel,
+                    );
+                    place_over_unless_glow(
+                        chunk,
+                        origin,
+                        back,
+                        floor + 1,
+                        z,
+                        BlockType::HoloPanel,
+                    );
+                    place_over_unless_glow(
+                        chunk,
+                        origin,
+                        face,
+                        floor + 1,
+                        z,
+                        BlockType::NeonAmber,
+                    );
                 }
             }
-            // Vertical lava / plasma falls on the west lip. Emissive,
-            // so later terrace carves leave them standing.
-            if (z - self.z0).rem_euclid(14) == 3 {
-                let fluid = if ((z - self.z0) / 14).rem_euclid(2) == 0 {
-                    BlockType::Lava
-                } else {
-                    BlockType::PlasmaFlow
-                };
+        }
+        self.stamp_lava_curtains(chunk, ground);
+    }
+
+    /// Wide glowing curtains down the west face — a focal point, not dribbles.
+    fn stamp_lava_curtains(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
+        if self.apron < 8 {
+            return;
+        }
+        let origin = chunk.pos.origin();
+        const SITES: [i32; 3] = [-108, -80, -52];
+        let half = 3i32;
+        for &cz in &SITES {
+            if cz < self.z0 + 4 || cz > self.z1 - 4 {
+                continue;
+            }
+            for z in (cz - half)..=(cz + half) {
+                let face = self.face_at(z);
+                let rim = ground(self.face_x + self.depth, z);
+                let extra = self.extra_crest(z);
+                let pit = rim - self.drop;
+                let crest_y = rim + self.crest + extra;
+                let edge = (z - cz).unsigned_abs() as i32;
                 for wy in pit..=crest_y {
-                    place_over(chunk, origin, self.face_x, wy, z, fluid);
-                    place_over(chunk, origin, self.face_x + 1, wy, z, fluid);
+                    let taper = if wy > crest_y - 6 { 1 } else { 0 };
+                    if edge > half - taper {
+                        continue;
+                    }
+                    place_over(chunk, origin, face, wy, z, BlockType::Lava);
+                    place_over(chunk, origin, face + 1, wy, z, BlockType::Lava);
+                    if edge <= 1 {
+                        place_over(chunk, origin, face + 2, wy, z, BlockType::PlasmaFlow);
+                    }
                 }
             }
         }
@@ -1968,6 +1992,9 @@ mod tests {
         assert_eq!(hero.cx, HERO_CRYSTAL_X);
         assert_eq!(hero.cz, HERO_CRYSTAL_Z);
         assert!(hero.shards >= 5);
+        let hero_d = CrystalCluster::hero_d();
+        assert!(hero_d.shards >= 12, "hero crystal cluster is still a sprinkle ({})", hero_d.shards);
+        assert!(hero_d.scale >= 48, "hero crystal cluster is still too short ({})", hero_d.scale);
     }
 
     #[test]
@@ -2019,29 +2046,47 @@ mod tests {
             canyon.apron
         );
         assert!(canyon.drop >= 16, "canyon drop {} is too shallow", canyon.drop);
-        let mut terrace = Chunk::new(ChunkPos::new(6, 5, -5));
-        for ly in 0..CHUNK_SIZE {
-            for lz in 0..CHUNK_SIZE {
-                for lx in 0..CHUNK_SIZE {
-                    terrace.set(lx, ly, lz, BlockType::RedStone.into());
+        let mut holo = 0usize;
+        let mut neon = 0usize;
+        let mut deck = 0usize;
+        let mut lava = 0usize;
+        let mut stone = 0usize;
+        let mut plating = 0usize;
+        for cy in 4..9 {
+            for cx in 6..9 {
+                for cz in -7..-3 {
+                    let mut terrace = Chunk::new(ChunkPos::new(cx, cy, cz));
+                    for ly in 0..CHUNK_SIZE {
+                        for lz in 0..CHUNK_SIZE {
+                            for lx in 0..CHUNK_SIZE {
+                                terrace.set(lx, ly, lz, BlockType::Grass.into());
+                            }
+                        }
+                    }
+                    CliffFace::look_cone()[0].stamp(&mut terrace, |_, _| 70);
+                    holo += count_blocks(&terrace, BlockType::HoloPanel);
+                    neon += count_blocks(&terrace, BlockType::NeonAmber);
+                    deck += count_blocks(&terrace, BlockType::RoadDeck);
+                    lava += count_blocks(&terrace, BlockType::Lava)
+                        + count_blocks(&terrace, BlockType::PlasmaFlow);
+                    stone += count_blocks(&terrace, BlockType::VioletStone)
+                        + count_blocks(&terrace, BlockType::RedStone)
+                        + count_blocks(&terrace, BlockType::MesaClay)
+                        + count_blocks(&terrace, BlockType::AmberStone)
+                        + count_blocks(&terrace, BlockType::RedSand);
+                    plating += count_blocks(&terrace, BlockType::PlatingWhite)
+                        + count_blocks(&terrace, BlockType::PlatingTeal);
                 }
             }
         }
-        CliffFace::look_cone()[0].stamp(&mut terrace, |_, _| 70);
+        assert!(holo > 4, "carved terrace has no lit windows ({holo})");
+        assert!(neon > 0, "carved terrace has no rail lights");
+        assert!(deck > 8, "carved terrace has no floor ({deck})");
+        assert!(lava > 40, "look-cone west face has no lava/energy curtain ({lava})");
         assert!(
-            count_blocks(&terrace, BlockType::HoloPanel) > 4,
-            "carved terrace has no lit windows"
+            stone > plating * 4,
+            "west face should read as banded rock, not colony pylons (stone={stone} plating={plating})"
         );
-        assert!(
-            count_blocks(&terrace, BlockType::NeonAmber) > 0,
-            "carved terrace has no rail lights"
-        );
-        assert!(
-            count_blocks(&terrace, BlockType::RoadDeck) > 8,
-            "carved terrace has no floor"
-        );
-        let lava = count_blocks(&terrace, BlockType::Lava) + count_blocks(&terrace, BlockType::PlasmaFlow);
-        assert!(lava > 8, "look-cone west face has no lava/energy fall ({lava})");
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
         assert!(in_hero_postcard(CrystalCluster::hero_c().cx, CrystalCluster::hero_c().cz));
         assert!(in_hero_postcard(CrystalCluster::hero_d().cx, CrystalCluster::hero_d().cz));
