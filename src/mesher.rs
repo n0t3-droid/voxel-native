@@ -24,6 +24,66 @@ use crate::blocks::{
 };
 use crate::chunk::{ChunkPos, CHUNK_SIZE, CHUNK_SIZE_I};
 
+/// Cyan (bit 0) / orange (bit 1) from a neighboring emissive. Crystal,
+/// luminite and plasma paint cyan; lava paints orange. Fast/LOD skip
+/// this by passing `compute_ao = false`.
+#[inline]
+fn glow_kind(v: Voxel) -> u8 {
+    match v {
+        20 | 33 | 39 | 40 => 1,
+        22 => 2,
+        38 => 1,
+        _ => 0,
+    }
+}
+
+#[inline]
+fn neighbor_glow<F: Fn(i32, i32, i32) -> Voxel>(
+    sample: &F,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    voxel: Voxel,
+) -> u8 {
+    if voxel_is_emissive(voxel) {
+        return 0;
+    }
+    let mut glow = 0u8;
+    for (dx, dy, dz) in [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ] {
+        glow |= glow_kind(sample(wx + dx, wy + dy, wz + dz));
+        if glow == 3 {
+            break;
+        }
+    }
+    glow
+}
+
+#[inline]
+fn apply_neighbor_glow(color: [f32; 4], glow: u8) -> [f32; 4] {
+    if glow == 0 {
+        return color;
+    }
+    let mut c = color;
+    if glow & 1 != 0 {
+        c[0] = c[0] * 0.62 + 0.12;
+        c[1] = c[1] * 0.62 + 0.42;
+        c[2] = c[2] * 0.62 + 0.70;
+    }
+    if glow & 2 != 0 {
+        c[0] = c[0] * 0.62 + 0.55;
+        c[1] = c[1] * 0.62 + 0.22;
+        c[2] = c[2] * 0.62 + 0.05;
+    }
+    c
+}
+
 /// Greedy-mesh a chunk into a Bevy `Mesh`. Positions are in world-space
 /// offset so the owning entity can sit at the origin.
 #[allow(dead_code)]
@@ -64,6 +124,7 @@ pub fn build_mesh_ex<F: Fn(i32, i32, i32) -> Voxel>(
         voxel: Voxel,
         positive: bool,
         ao: [u8; 4],
+        glow: u8,
     }
 
     let mut mask: Vec<Option<MaskCell>> = vec![None; CHUNK_SIZE * CHUNK_SIZE];
@@ -171,10 +232,24 @@ pub fn build_mesh_ex<F: Fn(i32, i32, i32) -> Voxel>(
                             }
                         }
 
+                        let glow = if compute_ao {
+                            let solid = if positive { back } else { front };
+                            neighbor_glow(
+                                &sample,
+                                ox + solid[0],
+                                oy + solid[1],
+                                oz + solid[2],
+                                voxel,
+                            )
+                        } else {
+                            0
+                        };
+
                         MaskCell {
                             voxel,
                             positive,
                             ao,
+                            glow,
                         }
                     });
 
@@ -224,6 +299,7 @@ pub fn build_mesh_ex<F: Fn(i32, i32, i32) -> Voxel>(
                             DEFAULT_MATERIAL,
                             current.positive,
                             current.ao,
+                            current.glow,
                         );
 
                         // Clear the consumed rectangle.
@@ -297,6 +373,7 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
         material: MaterialId,
         positive: bool,
         ao: [u8; 4],
+        glow: u8,
     }
 
     let mut buckets: std::collections::BTreeMap<MaterialId, MeshBuffers> =
@@ -383,11 +460,25 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
                             }
                         }
 
+                        let glow = if compute_ao {
+                            let solid = if positive { back } else { front };
+                            neighbor_glow(
+                                &|wx, wy, wz| sample(wx, wy, wz).0,
+                                ox + solid[0],
+                                oy + solid[1],
+                                oz + solid[2],
+                                voxel,
+                            )
+                        } else {
+                            0
+                        };
+
                         MaskCell {
                             voxel,
                             material,
                             positive,
                             ao,
+                            glow,
                         }
                     });
 
@@ -435,6 +526,7 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
                             current.material,
                             current.positive,
                             current.ao,
+                            current.glow,
                         );
 
                         for dv in 0..h {
@@ -482,6 +574,7 @@ fn emit_quad(
     material: MaterialId,
     positive: bool,
     ao: [u8; 4],
+    glow: u8,
 ) {
     // Four corners of the quad in chunk-local coordinates.
     let mut p00 = [0i32; 3];
@@ -561,12 +654,15 @@ fn emit_quad(
         } else {
             AO_MUL[a as usize] * face_light
         };
-        [
-            base_color[0] * m,
-            base_color[1] * m,
-            base_color[2] * m,
-            base_color[3],
-        ]
+        apply_neighbor_glow(
+            [
+                base_color[0] * m,
+                base_color[1] * m,
+                base_color[2] * m,
+                base_color[3],
+            ],
+            glow,
+        )
     };
     // Color order must match the position order chosen above.
     let (c_a, c_b, c_c, c_d) = if positive {
@@ -590,4 +686,36 @@ fn emit_quad(
         base_idx + 2,
         base_idx + 3,
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::BlockType;
+
+    #[test]
+    fn neighbor_glow_paints_cyan_from_crystal_and_orange_from_lava() {
+        let crystal: Voxel = BlockType::Crystal.into();
+        let lava: Voxel = BlockType::Lava.into();
+        let stone: Voxel = BlockType::RedStone.into();
+        let sample = |wx: i32, wy: i32, wz: i32| -> Voxel {
+            if wx == 1 && wy == 0 && wz == 0 {
+                crystal
+            } else if wx == 0 && wy == 0 && wz == 1 {
+                lava
+            } else {
+                stone
+            }
+        };
+        let cyan = neighbor_glow(&sample, 0, 0, 0, stone);
+        assert_eq!(cyan, 3, "crystal + lava should set both bits, got {cyan}");
+        let none = neighbor_glow(&sample, 8, 8, 8, stone);
+        assert_eq!(none, 0);
+        let skip = neighbor_glow(&sample, 0, 0, 0, crystal);
+        assert_eq!(skip, 0, "emissive voxels must not self-tint");
+        let c = apply_neighbor_glow([0.4, 0.2, 0.15, 1.0], 1);
+        assert!(c[2] > c[0], "cyan bleed should raise blue over red");
+        let o = apply_neighbor_glow([0.4, 0.2, 0.15, 1.0], 2);
+        assert!(o[0] > o[2], "orange bleed should raise red over blue");
+    }
 }
