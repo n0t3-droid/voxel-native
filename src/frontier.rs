@@ -1392,22 +1392,22 @@ impl CliffFace {
     pub fn look_cone() -> [Self; 2] {
         [
             Self {
-                face_x: 102,
-                z0: -124,
-                z1: -60,
+                face_x: 128,
+                z0: -118,
+                z1: -70,
                 levels: 5,
                 depth: 9,
                 drop: 6,
                 rise: 6,
-                apron: 14,
+                apron: 16,
             },
             Self {
-                face_x: 118,
+                face_x: 142,
                 z0: -108,
-                z1: -72,
+                z1: -78,
                 levels: 3,
                 depth: 6,
-                drop: 18,
+                drop: 16,
                 rise: 5,
                 apron: 0,
             },
@@ -1909,9 +1909,9 @@ mod tests {
                 face.z1
             );
             assert!(face.levels >= 3, "need stacked terraces, got {}", face.levels);
-            assert!(face.face_x >= 96 && face.face_x <= 120, "face_x {} is not in the look cone", face.face_x);
+            assert!(face.face_x >= 120 && face.face_x <= 148, "face_x {} is not in the look cone", face.face_x);
         }
-        let mut terrace = Chunk::new(ChunkPos::new(6, 3, -6));
+        let mut terrace = Chunk::new(ChunkPos::new(8, 3, -6));
         for ly in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
                 for lx in 0..CHUNK_SIZE {
