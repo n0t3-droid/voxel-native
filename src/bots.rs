@@ -2200,6 +2200,7 @@ fn load_or_seed_bot_world(
     active: Option<Res<ActiveWorld>>,
     world: Res<VoxelWorld>,
     mut brain: ResMut<FriendlyWorldBrain>,
+    photo: Option<Res<crate::hud::PhotoMode>>,
 ) {
     if !pending.0 {
         return;
@@ -2211,15 +2212,22 @@ fn load_or_seed_bot_world(
     let from_files = load_bot_world_files(&world_name);
     let mut save = from_files.unwrap_or_else(|| active.meta.bot_world.clone());
     if save.is_empty() {
-        let hub = Vec3::new(
-            active.meta.player_pos[0],
-            active.meta.player_pos[1],
-            active.meta.player_pos[2],
-        );
-        save = BotWorldSave::seed(&world_name, hub, &world);
+        // Photo-mode stills are the New World postcard; a seeded companion
+        // swarm in the foreground reads as a crowd, not a frontier vista.
+        let photo = photo.map(|p| p.hidden).unwrap_or(false);
+        if !photo {
+            let hub = Vec3::new(
+                active.meta.player_pos[0],
+                active.meta.player_pos[1],
+                active.meta.player_pos[2],
+            );
+            save = BotWorldSave::seed(&world_name, hub, &world);
+        }
     }
-    save.normalize();
-    prime_autonomous_city_defaults(&mut save);
+    if !save.is_empty() {
+        save.normalize();
+        prime_autonomous_city_defaults(&mut save);
+    }
     brain.selected_bot = save.agents.first().map(|b| b.id).unwrap_or(0);
     brain.selected_district = save.districts.first().map(|d| d.id).unwrap_or(1);
     brain.command_draft.bot_id = brain.selected_bot;
