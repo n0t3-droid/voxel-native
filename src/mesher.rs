@@ -633,17 +633,19 @@ fn emit_quad(
     // AO -> brightness multiplier. 0 (deeply occluded) → dim; 3 (open
     // air) → full colour. Combined with a face-light term below so
     // chunky voxel silhouettes read like shaped objects, not flat tiles.
-    const AO_MUL: [f32; 4] = [0.48, 0.68, 0.86, 1.02];
+    const AO_MUL: [f32; 4] = [0.42, 0.64, 0.84, 1.04];
+    let emissive = voxel_is_emissive(voxel);
     let base_color = if material_is_custom(material) {
         [1.0, 1.0, 1.0, 1.0]
-    } else {
+    } else if emissive {
         voxel_color(voxel)
+    } else {
+        // Albedo lives in the repeating swatch. Vertex colour is AO +
+        // face light only — baking the designer colour here made every
+        // face a flat cube and erased strata / panel / crystal detail.
+        let a = voxel_color(voxel)[3];
+        [1.0, 1.0, 1.0, a]
     };
-    // Emissive blocks (lava, crystal, alien moss, glow-sand, ice) are
-    // treated as self-lit and ignore ambient occlusion — darkening them
-    // at crevices would kill the glow. The HDR values in `base_color`
-    // (> 1.0) bloom through the world camera's bloom pass.
-    let emissive = voxel_is_emissive(voxel);
     let face_light = match (axis, positive) {
         (1, true) => 1.12,  // top faces catch the sky
         (1, false) => 0.58, // undersides stay grounded
@@ -723,5 +725,35 @@ mod tests {
         assert!(c[2] > c[0], "cyan bleed should raise blue over red");
         let o = apply_neighbor_glow([0.4, 0.2, 0.15, 1.0], 2);
         assert!(o[0] > o[2], "orange bleed should raise red over blue");
+    }
+
+    #[test]
+    fn non_emissive_vertex_color_is_ao_not_flat_albedo() {
+        let grass: Voxel = BlockType::Grass.into();
+        let sample = |wx: i32, wy: i32, wz: i32| -> Voxel {
+            if wx == 0 && wy == 0 && wz == 0 {
+                grass
+            } else {
+                AIR
+            }
+        };
+        let mesh = build_mesh(ChunkPos::new(0, 0, 0), sample);
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x4(colors)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("mesh missing vertex colors");
+        };
+        assert!(!colors.is_empty());
+        let [r, g, b, _] = colors[0];
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        assert!(
+            max - min < 0.20,
+            "grass vertex colour should be near-white AO, got ({r:.3},{g:.3},{b:.3})"
+        );
+        assert!(
+            mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some(),
+            "textured path needs UVs"
+        );
     }
 }

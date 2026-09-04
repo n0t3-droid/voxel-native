@@ -60,12 +60,14 @@ impl MaterialLibrary {
         &mut self,
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
+        swatch_size: u32,
     ) {
         self.handles.clear();
         self.names.clear();
         self.custom_ids.clear();
 
-        for swatch in bake_all_block_swatches(BUILTIN_SWATCH_SIZE) {
+        let size = swatch_size.clamp(32, 256);
+        for swatch in bake_all_block_swatches(size) {
             let image = images.add(make_repeating_image(
                 swatch.width,
                 swatch.height,
@@ -86,8 +88,8 @@ impl MaterialLibrary {
                 base_color: Color::WHITE.with_alpha(alpha),
                 base_color_texture: Some(image),
                 emissive,
-                perceptual_roughness: 1.0,
-                reflectance: 0.05,
+                perceptual_roughness: roughness_for_block(swatch.block),
+                reflectance: reflectance_for_block(swatch.block),
                 alpha_mode: terrain_alpha_mode_for_block(swatch.block),
                 ..default()
             });
@@ -323,36 +325,36 @@ pub fn bake_all_block_swatches(size: u32) -> Vec<BlockSwatch> {
         (Gravel, "gravel", BlockStyle::Rock),
         (Bedrock, "bedrock", BlockStyle::Rock),
         (RedSand, "red_sand", BlockStyle::Sand),
-        (RedStone, "red_stone", BlockStyle::Rock),
-        (MesaClay, "mesa_clay", BlockStyle::Rock),
+        (RedStone, "red_stone", BlockStyle::Strata),
+        (MesaClay, "mesa_clay", BlockStyle::Strata),
         (MossStone, "moss_stone", BlockStyle::Rock),
         (Limestone, "limestone", BlockStyle::Rock),
-        (Crystal, "crystal", BlockStyle::Ice),
-        (Basalt, "basalt", BlockStyle::Rock),
+        (Crystal, "crystal", BlockStyle::Crystal),
+        (Basalt, "basalt", BlockStyle::Strata),
         (Lava, "lava", BlockStyle::Lava),
         (AlienMoss, "alien_moss", BlockStyle::Grass),
         (BoneRock, "bone_rock", BlockStyle::Rock),
         (GlowSand, "glow_sand", BlockStyle::Sand),
-        (ShipHullDark, "ship_hull_dark", BlockStyle::Rock),
-        (ShipHullAlloy, "ship_hull_alloy", BlockStyle::Rock),
+        (ShipHullDark, "ship_hull_dark", BlockStyle::Metal),
+        (ShipHullAlloy, "ship_hull_alloy", BlockStyle::Metal),
         (CockpitGlass, "cockpit_glass", BlockStyle::Ice),
-        (NeonCyan, "neon_cyan", BlockStyle::Ice),
-        (NeonMagenta, "neon_magenta", BlockStyle::Ice),
+        (NeonCyan, "neon_cyan", BlockStyle::Energy),
+        (NeonMagenta, "neon_magenta", BlockStyle::Energy),
         (NeonAmber, "neon_amber", BlockStyle::Lava),
         (EngineCore, "engine_core", BlockStyle::Lava),
-        (LuminiteCrystal, "luminite_crystal", BlockStyle::Ice),
+        (LuminiteCrystal, "luminite_crystal", BlockStyle::Crystal),
         (MagnetiteOre, "magnetite_ore", BlockStyle::Rock),
-        (IridiumVein, "iridium_vein", BlockStyle::Ice),
-        (VioletStone, "violet_stone", BlockStyle::Rock),
-        (AmberStone, "amber_stone", BlockStyle::Rock),
-        (PlasmaFlow, "plasma_flow", BlockStyle::Water),
-        (CrystalMagenta, "crystal_magenta", BlockStyle::Ice),
-        (CrystalGreen, "crystal_green", BlockStyle::Ice),
-        (HoloPanel, "holo_panel", BlockStyle::Ice),
-        (PlatingWhite, "plating_white", BlockStyle::Rock),
-        (PlatingTeal, "plating_teal", BlockStyle::Rock),
-        (RoadDeck, "road_deck", BlockStyle::Rock),
-        (RoadMarking, "road_marking", BlockStyle::Rock),
+        (IridiumVein, "iridium_vein", BlockStyle::Crystal),
+        (VioletStone, "violet_stone", BlockStyle::Strata),
+        (AmberStone, "amber_stone", BlockStyle::Strata),
+        (PlasmaFlow, "plasma_flow", BlockStyle::Energy),
+        (CrystalMagenta, "crystal_magenta", BlockStyle::Crystal),
+        (CrystalGreen, "crystal_green", BlockStyle::Crystal),
+        (HoloPanel, "holo_panel", BlockStyle::Crystal),
+        (PlatingWhite, "plating_white", BlockStyle::Metal),
+        (PlatingTeal, "plating_teal", BlockStyle::Metal),
+        (RoadDeck, "road_deck", BlockStyle::Metal),
+        (RoadMarking, "road_marking", BlockStyle::Metal),
     ];
     list.iter()
         .map(|(b, n, style)| bake_block_swatch(*b, n, *style, size))
@@ -362,6 +364,7 @@ pub fn bake_all_block_swatches(size: u32) -> Vec<BlockSwatch> {
 #[derive(Clone, Copy, Debug)]
 enum BlockStyle {
     Rock,
+    Strata,
     Soil,
     Grass,
     Sand,
@@ -371,6 +374,9 @@ enum BlockStyle {
     Snow,
     Ice,
     Lava,
+    Metal,
+    Crystal,
+    Energy,
 }
 
 fn bake_block_swatch(
@@ -609,20 +615,103 @@ fn bake_block_swatch(
                 }
                 BlockStyle::Lava => {
                     let heat = cell_n.max(vein_wide);
-                    let b = 0.62 + macro_n.abs() * 0.08 + heat * 0.54 + fbm * 0.18;
+                    let crust = (1.0 - heat) * 0.35;
+                    let b = 0.48 + macro_n.abs() * 0.10 + heat * 0.72 + fbm * 0.16 - crust;
                     (
                         b,
-                        (heat as f32) * 0.28,
-                        (heat as f32) * 0.11 + (vein as f32) * 0.04,
+                        (heat as f32) * 0.38,
+                        (heat as f32) * 0.10 + (vein as f32) * 0.05,
+                        -(crust as f32) * 0.12,
+                    )
+                }
+                BlockStyle::Strata => {
+                    let band = ((v * 8.0 + strat * 0.55 + fbm * 0.12).floor() as i32).rem_euclid(4);
+                    let (mul, tr, tg, tb) = match band {
+                        0 => (0.62, 0.10, -0.04, 0.14),
+                        1 => (0.88, 0.16, 0.04, -0.08),
+                        2 => (1.12, 0.04, 0.06, 0.00),
+                        _ => (0.74, 0.14, -0.02, -0.10),
+                    };
+                    let grit = grain_n.abs() * 0.10;
+                    let crack = cell_n * 0.28;
+                    (
+                        mul + macro_shadow * 0.8 + fbm * 0.16 + micro * 0.10 + grit - crack,
+                        tr + (fbm as f32) * 0.03,
+                        tg,
+                        tb - (crack as f32) * 0.04,
+                    )
+                }
+                BlockStyle::Metal => {
+                    let cells = 4.0;
+                    let px = (u * cells).fract();
+                    let py = (v * cells).fract();
+                    let grout = if px < 0.07 || py < 0.07 || px > 0.93 || py > 0.93 {
+                        0.48
+                    } else {
+                        1.0
+                    };
+                    let rivet_u = (px - 0.14).abs() + (py - 0.14).abs();
+                    let rivet = if rivet_u < 0.07 { 0.35 } else { 0.0 };
+                    let brush = (u * 48.0 + fbm * 2.0).sin() * 0.07;
+                    let b = 0.82 + macro_shadow * 0.4 + brush + micro * 0.04;
+                    (
+                        b * grout - rivet,
+                        (brush as f32) * 0.02,
                         0.0,
+                        -(grout as f32 - 1.0) * 0.04,
+                    )
+                }
+                BlockStyle::Crystal => {
+                    let facet = cell_n;
+                    let grout = facet * 0.55;
+                    let sparkle = detail.get([tx * 32.0, ty * 32.0, tz * 32.0, tw * 32.0]);
+                    let sp = if sparkle > 0.72 {
+                        (sparkle - 0.72) * 2.4
+                    } else {
+                        0.0
+                    };
+                    let face = macro_n * 0.12 + fbm * 0.08;
+                    (
+                        0.78 + face + sp - grout,
+                        (sp as f32) * 0.08,
+                        (sp as f32) * 0.10 + (face as f32) * 0.04,
+                        0.10 + (sp as f32) * 0.12 - (grout as f32) * 0.08,
+                    )
+                }
+                BlockStyle::Energy => {
+                    let flow = ((u * 6.0 + v * 0.35 + fbm * 0.8).sin() * 0.5 + 0.5).powf(2.2);
+                    let core = (flow - 0.55).max(0.0) * 1.6;
+                    (
+                        0.55 + flow * 0.70 + micro * 0.08,
+                        -(core as f32) * 0.05,
+                        (flow as f32) * 0.18,
+                        (core as f32) * 0.22 + 0.08,
                     )
                 }
             };
 
-            let bright = bright.clamp(0.55, 1.30) as f32;
-            let r = (base[0] * bright + tint_r).clamp(0.0, 1.0);
-            let g = (base[1] * bright + tint_g).clamp(0.0, 1.0);
-            let bl = (base[2] * bright + tint_b).clamp(0.0, 1.0);
+            let bright = bright.clamp(0.38, 1.45) as f32;
+            let mut r = (base[0] * bright + tint_r).clamp(0.0, 1.0);
+            let mut g = (base[1] * bright + tint_g).clamp(0.0, 1.0);
+            let mut bl = (base[2] * bright + tint_b).clamp(0.0, 1.0);
+
+            // Per-tile bevel so greedy-merged faces still read as cubes
+            // instead of a stretched wallpaper. ~7% rim, darker 1px lip.
+            let margin = (size as f32 * 0.08).max(3.0);
+            let dxe = (x as f32).min((size - 1 - x) as f32);
+            let dye = (y as f32).min((size - 1 - y) as f32);
+            let edge = dxe.min(dye);
+            let mut bevel = if edge < margin {
+                0.52 + 0.48 * (edge / margin)
+            } else {
+                1.0
+            };
+            if edge < 1.6 {
+                bevel *= 0.70;
+            }
+            r = (r * bevel).clamp(0.0, 1.0);
+            g = (g * bevel).clamp(0.0, 1.0);
+            bl = (bl * bevel).clamp(0.0, 1.0);
 
             data.push((r * 255.0).round() as u8);
             data.push((g * 255.0).round() as u8);
@@ -643,6 +732,61 @@ fn bake_block_swatch(
 // ---------------------------------------------------------------------------
 // Helpers -------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+
+fn roughness_for_block(block: BlockType) -> f32 {
+    if matches!(
+        block,
+        BlockType::PlatingWhite
+            | BlockType::PlatingTeal
+            | BlockType::RoadDeck
+            | BlockType::RoadMarking
+            | BlockType::ShipHullDark
+            | BlockType::ShipHullAlloy
+    ) {
+        0.38
+    } else if matches!(
+        block,
+        BlockType::Crystal
+            | BlockType::CrystalMagenta
+            | BlockType::CrystalGreen
+            | BlockType::LuminiteCrystal
+            | BlockType::IridiumVein
+            | BlockType::Ice
+            | BlockType::HoloPanel
+            | BlockType::CockpitGlass
+    ) {
+        0.14
+    } else if block.is_emissive() {
+        0.42
+    } else if matches!(block, BlockType::Sand | BlockType::RedSand | BlockType::GlowSand) {
+        0.94
+    } else {
+        0.84
+    }
+}
+
+fn reflectance_for_block(block: BlockType) -> f32 {
+    if matches!(
+        block,
+        BlockType::PlatingWhite
+            | BlockType::PlatingTeal
+            | BlockType::ShipHullAlloy
+            | BlockType::RoadMarking
+    ) {
+        0.14
+    } else if matches!(
+        block,
+        BlockType::Crystal
+            | BlockType::CrystalMagenta
+            | BlockType::CrystalGreen
+            | BlockType::Ice
+            | BlockType::HoloPanel
+    ) {
+        0.10
+    } else {
+        0.045
+    }
+}
 
 fn make_repeating_image(w: u32, h: u32, data: Vec<u8>) -> Image {
     let mut image = Image::new(
@@ -751,6 +895,24 @@ mod tests {
 
         assert!(unique_rgb_count(stone) > 512);
         assert!(luma_range(stone) > 54);
+        let red = swatch_for(&swatches, BlockType::RedStone);
+        let crystal = swatch_for(&swatches, BlockType::Crystal);
+        let plate = swatch_for(&swatches, BlockType::PlatingWhite);
+        assert!(
+            luma_range(red) > 90,
+            "mesa strata tile is still too flat ({})",
+            luma_range(red)
+        );
+        assert!(
+            luma_range(crystal) > 70,
+            "crystal tile is still too flat ({})",
+            luma_range(crystal)
+        );
+        assert!(
+            luma_range(plate) > 70,
+            "metal tile is still too flat ({})",
+            luma_range(plate)
+        );
         assert!(
             stone_signatures > 20,
             "stone only preserved {stone_signatures} far-distance material signatures"
