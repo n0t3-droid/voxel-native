@@ -403,7 +403,15 @@ fn fill_island_column(
             set_in_chunk(chunk, wx, col.top_y + 2, wz, origin_y, tuft, false);
         }
         if hash01(seed, wx, wz, 22) < 0.30 {
-            set_in_chunk(chunk, wx, col.top_y + 3, wz, origin_y, BlockType::Leaves, false);
+            set_in_chunk(
+                chunk,
+                wx,
+                col.top_y + 3,
+                wz,
+                origin_y,
+                BlockType::Leaves,
+                false,
+            );
         }
     }
 
@@ -646,7 +654,15 @@ fn stamp_rail_crew(chunk: &mut Chunk, x: i32, y: i32, z: i32, origin_y: i32) {
         BlockType::ShipHullAlloy,
         false,
     );
-    set_in_chunk(chunk, x, y + 2, z, origin_y, BlockType::ShipHullAlloy, false);
+    set_in_chunk(
+        chunk,
+        x,
+        y + 2,
+        z,
+        origin_y,
+        BlockType::ShipHullAlloy,
+        false,
+    );
     set_in_chunk(chunk, x, y + 2, z + 1, origin_y, BlockType::NeonCyan, false);
     set_in_chunk(
         chunk,
@@ -746,11 +762,16 @@ pub fn station_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
         return Some(BlockType::EngineCore);
     }
 
-    // Holo dome canopy — translucent cyan shell over the pad.
+    // Holo dome canopy — translucent cyan SHELL (walls + rim only).
+    // No solid glowing roof: a dy==5 slab bloomed into an unreadable
+    // blob that erased pad silhouettes in film close-ups.
     if (3..=5).contains(&dy) && adx <= 4 && adz <= 4 {
-        let on_shell = adx == 4 || adz == 4 || dy == 5;
-        if on_shell && !(adx == 4 && adz == 4 && dy < 5) {
-            return Some(BlockType::from_voxel(VOXEL_HOLO_DOME));
+        let on_wall = adx == 4 || adz == 4;
+        let on_rim = dy == 5 && (adx == 4 || adz == 4);
+        if (on_wall && dy < 5) || on_rim {
+            if !(adx == 4 && adz == 4 && dy < 5) {
+                return Some(BlockType::from_voxel(VOXEL_HOLO_DOME));
+            }
         }
     }
 
@@ -1369,7 +1390,7 @@ mod tests {
         assert!(alien >= 2, "alien silhouette missing ({alien})");
         assert!(portal >= 3, "tunnel portal missing ({portal})");
         assert!(fighter >= 2, "docked fighter missing ({fighter})");
-        assert!(holo >= 8, "holo dome missing ({holo})");
+        assert!(holo >= 4, "holo dome missing ({holo})");
         assert_eq!(station_block(0, 0, 0), Some(BlockType::EngineCore));
         assert_eq!(station_block(0, 8, 0), Some(BlockType::NeonAmber));
         assert!(station_block(5, 5, 5).is_none());

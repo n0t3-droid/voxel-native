@@ -572,14 +572,15 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // Combat pad — mid-distance (~14 m) full-body marine vs alien.
-            let pos = station + Vec3::new(-10.0, 6.5, 14.0);
-            let look = station + Vec3::new(-0.5, 2.8, 2.2);
+            // Combat pad — side-on ~15 m so legs + torso read as biped vs
+            // multi-leg (not a top-down emissive blob).
+            let pos = station + Vec3::new(-14.0, 4.5, 4.0);
+            let look = station + Vec3::new(-0.5, 2.5, 2.2);
             (pos, look)
         }
         3 => {
-            // Pad rail-crew pair — ~12 m so legs + torso read.
-            let pos = station + Vec3::new(-12.0, 5.0, 6.0);
+            // Pad rail-crew pair — ~14 m side-on.
+            let pos = station + Vec3::new(-14.0, 4.0, -1.0);
             let look = station + Vec3::new(-4.0, 2.2, -2.5);
             (pos, look)
         }

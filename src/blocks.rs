@@ -208,17 +208,19 @@ impl BlockType {
             BlockType::Air => Color::NONE,
             BlockType::Stone => Color::srgb(0.34, 0.36, 0.44),
             BlockType::Dirt => Color::srgb(0.24, 0.15, 0.11),
-            BlockType::Grass => Color::srgb(0.11, 0.40, 0.15),
+            // Grass / leaf albedos lifted so island lawns survive ACES +
+            // lavapipe crush in film close-ups (still clearly "green").
+            BlockType::Grass => Color::srgb(0.22, 0.58, 0.24),
             BlockType::Sand => Color::srgb(0.76, 0.67, 0.45),
             // Turquoise energy-water read (concept underground river).
             BlockType::Water => Color::srgba(0.06, 0.78, 0.92, 0.62),
             BlockType::Wood => Color::srgb(0.24, 0.14, 0.08),
-            BlockType::Leaves => Color::srgb(0.06, 0.32, 0.11),
+            BlockType::Leaves => Color::srgb(0.18, 0.55, 0.22),
             BlockType::Snow => Color::srgb(0.96, 0.97, 0.99),
             BlockType::Ice => Color::srgba(0.70, 0.88, 0.98, 0.85),
             BlockType::TundraGrass => Color::srgb(0.62, 0.76, 0.55),
-            BlockType::JungleLeaves => Color::srgb(0.03, 0.38, 0.13),
-            BlockType::SavannaGrass => Color::srgb(0.46, 0.50, 0.20),
+            BlockType::JungleLeaves => Color::srgb(0.10, 0.45, 0.20),
+            BlockType::SavannaGrass => Color::srgb(0.58, 0.62, 0.28),
             BlockType::Gravel => Color::srgb(0.42, 0.40, 0.45),
             BlockType::Bedrock => Color::srgb(0.12, 0.12, 0.14),
             // Sedona red — saturated rust-orange surface dust.
@@ -233,21 +235,22 @@ impl BlockType {
             BlockType::Limestone => Color::srgb(0.86, 0.84, 0.76),
             // Alien crystal — saturated cyan-violet, slightly translucent.
             BlockType::Crystal => Color::srgba(0.18, 0.72, 1.00, 0.70),
-            // Volcanic basalt — dark, but not unreadable black. Keeping
-            // it above pure black makes ledges and jump targets visible
-            // under strong bloom from nearby lava.
+            // Volcanic basalt — dark, but not unreadable black.
             BlockType::Basalt => Color::srgb(0.26, 0.24, 0.28),
-            // Lava — saturated orange-red. Read as glowing thanks to
-            // the player camera's HDR + tonemapping.
+            // Lava — saturated orange-red.
             BlockType::Lava => Color::srgba(1.00, 0.48, 0.12, 0.88),
             // Bioluminescent magenta moss for alien reef floors.
-            BlockType::AlienMoss => Color::srgb(0.26, 0.06, 0.44),
-            // Bone-white organic pillar rock.
-            BlockType::BoneRock => Color::srgb(0.62, 0.54, 0.70),
+            BlockType::AlienMoss => Color::srgb(0.40, 0.12, 0.55),
+            // Bone-white organic pillar rock — lifted for mid-distance
+            // alien-leg silhouette reads in film.
+            BlockType::BoneRock => Color::srgb(0.78, 0.72, 0.82),
             // Pale glowing crystal-biome sand — almost white-cyan.
             BlockType::GlowSand => Color::srgb(0.12, 0.30, 0.42),
-            BlockType::ShipHullDark => Color::srgb(0.055, 0.065, 0.095),
-            BlockType::ShipHullAlloy => Color::srgb(0.56, 0.68, 0.78),
+            // Hull dark lifted slightly above crushed black so film
+            // silhouettes of marines / rail crews stay readable under
+            // ACES + lavapipe (still darker than alloy).
+            BlockType::ShipHullDark => Color::srgb(0.12, 0.14, 0.18),
+            BlockType::ShipHullAlloy => Color::srgb(0.72, 0.80, 0.88),
             BlockType::CockpitGlass => Color::srgba(0.03, 0.48, 0.78, 0.50),
             BlockType::NeonCyan => Color::srgb(0.00, 0.92, 1.00),
             BlockType::NeonMagenta => Color::srgb(1.00, 0.04, 0.82),
@@ -256,23 +259,14 @@ impl BlockType {
             BlockType::LuminiteCrystal => Color::srgba(0.12, 0.82, 1.00, 0.68),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
-            // Crystal triad (sRGB IEC 61966-2-1, D65). The three hues are
-            // spaced ~120° apart in sRGB hue so magenta / cyan / green
-            // clusters stay separable at long range and under bloom.
-            // Magenta #E01FC6, verdant #2EE86B; the cyan third of the
-            // triad is the existing `Crystal` / `LuminiteCrystal` pair.
+            // Crystal triad (sRGB IEC 61966-2-1, D65).
             BlockType::CrystalMagenta => Color::srgba(0.878, 0.122, 0.776, 0.70),
             BlockType::CrystalVerdant => Color::srgba(0.180, 0.910, 0.420, 0.70),
-            // Plasma coolant #1C8CFF — an electric blue well inside the
-            // sRGB gamut so it survives ACES tonemapping without clipping
-            // to white the way a pure-primary blue does.
+            // Plasma coolant #1C8CFF.
             BlockType::PlasmaFlow => Color::srgba(0.110, 0.549, 1.000, 0.84),
-            // Structural deck alloy #2A3140 — dark but never crushed to
-            // black, so skyway rails and guard edges stay readable when
-            // the deck is silhouetted against a bright nebula.
+            // Structural deck alloy #2A3140.
             BlockType::SkywayDeck => Color::srgb(0.165, 0.192, 0.251),
-            // Holo dome #4DE8FF — cyan force-field glass (sRGB D65). Alpha
-            // 0.42 keeps pad silhouettes readable through the canopy.
+            // Holo dome #4DE8FF — cyan force-field glass (sRGB D65).
             BlockType::HoloDome => Color::srgba(0.302, 0.910, 1.000, 0.42),
         }
     }
