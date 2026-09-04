@@ -260,6 +260,17 @@ impl SkyIsland {
         }
     }
 
+    /// Third island parked on the New World look ray, past the butte.
+    pub fn hero_c() -> Self {
+        Self {
+            cx: 128,
+            cz: -70,
+            cy: 124,
+            radius: 15,
+            phase: 0.55,
+        }
+    }
+
     /// Every island whose bounding box can reach the chunk at `(cx, cz)`.
     pub fn near(seed: u32, cx: i32, cz: i32, ground: impl Fn(i32, i32) -> i32 + Copy) -> Vec<Self> {
         let ix = cx.div_euclid(SKY_ISLAND_CELL);
@@ -491,6 +502,17 @@ impl CrystalCluster {
             cz: -40,
             shards: 6,
             scale: 20,
+        }
+    }
+
+    /// Shard group on the look-cone river bank so the opening vista
+    /// has crystals in frame, not only behind the camera.
+    pub fn hero_d() -> Self {
+        Self {
+            cx: 96,
+            cz: -80,
+            shards: 6,
+            scale: 24,
         }
     }
 
@@ -1627,6 +1649,7 @@ impl FrontierPlanner {
         CrystalCluster::hero().stamp(self.seed, chunk, ground);
         CrystalCluster::hero_b().stamp(self.seed, chunk, ground);
         CrystalCluster::hero_c().stamp(self.seed, chunk, ground);
+        CrystalCluster::hero_d().stamp(self.seed, chunk, ground);
         for hab in CliffHab::hero_cluster() {
             hab.stamp(chunk, ground);
         }
@@ -1637,6 +1660,7 @@ impl FrontierPlanner {
         if top_y >= SKY_ISLAND_MIN_Y - 48 && base_y <= SKY_ISLAND_MAX_Y + 12 {
             SkyIsland::hero().stamp(self.seed, chunk);
             SkyIsland::hero_b().stamp(self.seed, chunk);
+            SkyIsland::hero_c().stamp(self.seed, chunk);
             for island in SkyIsland::near(self.seed, wx, wz, macro_ground) {
                 island.stamp(self.seed, chunk);
             }
@@ -2000,7 +2024,9 @@ mod tests {
         );
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
         assert!(in_hero_postcard(CrystalCluster::hero_c().cx, CrystalCluster::hero_c().cz));
+        assert!(in_hero_postcard(CrystalCluster::hero_d().cx, CrystalCluster::hero_d().cz));
         assert!(in_spawn_frontier(SkyIsland::hero().cx, SkyIsland::hero().cz));
+        assert!(in_spawn_frontier(SkyIsland::hero_c().cx, SkyIsland::hero_c().cz));
         let sky = SkywayNetwork::new(1);
         let rail = sky.column(80, -88, 70.0).expect("mesa rail missing on postcard");
         assert!(rail.half < SKYWAY_HALF_WIDTH, "mesa rail should be a thin ribbon");
