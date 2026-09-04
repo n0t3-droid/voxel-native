@@ -2745,12 +2745,13 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
-    /// West rim of the look-cone canyon, looking +X/−Z at the carved
-    /// west face with the energy river at the bottom. The mesa cap sits
-    /// behind the near rim so the first frame is a drop, not a tabletop.
+    /// West of the look-cone canyon, high enough to keep the skyway as a
+    /// crossing ribbon, looking +X/−Z at the carved west face with the
+    /// energy river at the bottom. Camera x is west of the apron so the
+    /// mesa cap is a near rim, not the whole frame.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let eye = [62.5_f32, 96.0, -36.5];
-        let look = [110.0_f32, 50.0, -86.0];
+        let eye = [36.5_f32, 104.0, -14.5];
+        let look = [114.0_f32, 44.0, -98.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
