@@ -320,11 +320,12 @@ fn snap_postcard_bounce_to_ground(
 }
 
 /// Night-only unlit ambient on mesa stone. A uniform 0.18 floor was
-/// eaten by ACES whenever HDR crystals shared the frame; scaling each
-/// block's own albedo keeps strata hues and stays below crystal/river
-/// emissive. Fast writes black. `emissive_exposure_weight` stays 0 so
-/// this is not divided by EV100.
-const NIGHT_STONE_EMISSIVE_SCALE: f32 = 2.45;
+/// eaten by ACES whenever HDR crystals shared the frame; a constant
+/// ambient plus each block's own albedo keeps dark faces out of crush
+/// while strata hues still read. Fast writes black.
+/// `emissive_exposure_weight` stays 0 so this is not divided by EV100.
+const NIGHT_STONE_EMISSIVE_SCALE: f32 = 1.85;
+const NIGHT_STONE_AMBIENT: f32 = 0.72;
 
 fn night_stone_emissive(block: BlockType, night_amt: f32, fast: bool) -> LinearRgba {
     if fast || night_amt <= 0.001 {
@@ -332,7 +333,12 @@ fn night_stone_emissive(block: BlockType, night_amt: f32, fast: bool) -> LinearR
     }
     let lin = block.color().to_linear();
     let s = night_amt * NIGHT_STONE_EMISSIVE_SCALE;
-    LinearRgba::rgb(lin.red * s, lin.green * s, lin.blue * s)
+    let a = night_amt * NIGHT_STONE_AMBIENT;
+    LinearRgba::rgb(
+        a * 1.05 + lin.red * s,
+        a * 0.58 + lin.green * s,
+        a * 0.48 + lin.blue * s,
+    )
 }
 
 fn night_terrain_emissive_floor(
@@ -734,8 +740,15 @@ mod tests {
         assert!(red.red > red.blue, "redstone floor lost its rust hue");
         assert!(clay.green > red.green, "mesa clay should read as the bright stripe");
         assert!(violet.blue > violet.red, "violet band should stay violet");
+        let basalt = night_stone_emissive(BlockType::Basalt, 1.0, false);
+        assert!(
+            basalt.red > 0.75,
+            "dark stone needs an ambient floor or ACES keeps it in dark25 ({})",
+            basalt.red
+        );
         assert_eq!(noon, LinearRgba::BLACK);
         assert_eq!(fast, LinearRgba::BLACK);
-        assert!(NIGHT_STONE_EMISSIVE_SCALE > 2.0);
+        assert!(NIGHT_STONE_EMISSIVE_SCALE > 1.5);
+        assert!(NIGHT_STONE_AMBIENT > 0.5);
     }
 }
