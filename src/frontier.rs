@@ -244,20 +244,20 @@ impl SkyIsland {
     /// the illustration's hovering landmasses.
     pub fn hero() -> Self {
         Self {
-            cx: 88,
-            cz: -108,
-            cy: 116,
-            radius: 14,
+            cx: 86,
+            cz: -104,
+            cy: 94,
+            radius: 13,
             phase: 1.15,
         }
     }
 
     pub fn hero_b() -> Self {
         Self {
-            cx: 102,
-            cz: -124,
-            cy: 126,
-            radius: 11,
+            cx: 98,
+            cz: -118,
+            cy: 100,
+            radius: 10,
             phase: 2.4,
         }
     }
@@ -265,10 +265,10 @@ impl SkyIsland {
     /// Closer left-mid island so the opening look has more than one slab.
     pub fn hero_c() -> Self {
         Self {
-            cx: 78,
-            cz: -96,
-            cy: 108,
-            radius: 12,
+            cx: 76,
+            cz: -92,
+            cy: 90,
+            radius: 11,
             phase: 0.55,
         }
     }
@@ -404,6 +404,26 @@ impl SkyIsland {
                 }
             }
         }
+        // A guaranteed cyan/magenta spire on the cap so the mid-sky
+        // islands silhouette like the key art, not bare grass tables.
+        if let Some((_, top)) = self.column(self.cx, self.cz) {
+            if top + 1 >= oy && top + 1 < oy + CHUNK_SIZE_I {
+                let h = 6 + (self.radius / 3).min(6);
+                for k in 1..=h {
+                    if top + k >= oy + CHUNK_SIZE_I {
+                        break;
+                    }
+                    let tint = if k <= 2 {
+                        BlockType::LuminiteCrystal
+                    } else if k % 2 == 0 {
+                        BlockType::CrystalMagenta
+                    } else {
+                        BlockType::Crystal
+                    };
+                    place(chunk, origin, self.cx, top + k, self.cz, tint);
+                }
+            }
+        }
     }
 }
 
@@ -522,10 +542,10 @@ impl CrystalCluster {
     /// (camera left = −Z) so it owns a real slice of the opening frame.
     pub fn hero_d() -> Self {
         Self {
-            cx: 70,
-            cz: -98,
-            shards: 18,
-            scale: 70,
+            cx: 72,
+            cz: -88,
+            shards: 20,
+            scale: 80,
         }
     }
 
@@ -911,6 +931,9 @@ impl SkywayNetwork {
         if let Some(look_west) = hero_look_west_face_rail(wx, wz, macro_h) {
             return Some(look_west);
         }
+        if in_opening_look(wx, wz) {
+            return None;
+        }
         let x = wx as f64;
         let z = wz as f64;
         let a = self.route_field(x, z);
@@ -1126,6 +1149,9 @@ fn hero_skyway_column(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 /// butte isn't hidden behind a full-width carriageway.
 fn hero_skyway_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const SPUR_X: i32 = 96;
+    if in_opening_look(wx, wz) {
+        return None;
+    }
     if wz < -120 || wz > -18 {
         return None;
     }
@@ -1154,6 +1180,9 @@ fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const RAIL_Z: i32 = -88;
     const HALF: f64 = 2.4;
     // Stop west of the canyon so the deck does not cross the opening look.
+    if in_opening_look(wx, wz) {
+        return None;
+    }
     if wx < 16 || wx > 52 {
         return None;
     }
@@ -1200,7 +1229,12 @@ fn hero_cliff_walk(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 fn hero_terrace_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const SPUR_X: i32 = 118;
     const HALF: f64 = 2.0;
-    if wz < -100 || wz > -48 {
+    // Keep the N–S terrace off the opening frustum; a short ribbon
+    // south of the look cone still ties the rim habs together.
+    if in_opening_look(wx, wz) {
+        return None;
+    }
+    if wz < -100 || wz > -20 {
         return None;
     }
     if wz >= -114 && wz <= -80 {
@@ -1503,7 +1537,7 @@ impl CliffFace {
                 depth: 24,
                 drop: 36,
                 rise: 8,
-                apron: 58,
+                apron: 64,
                 crest: 52,
             },
             Self {
@@ -1641,7 +1675,7 @@ impl CliffFace {
         }
         let origin = chunk.pos.origin();
         const SITES: [i32; 3] = [-100, -82, -64];
-        let half = 5i32;
+        let half = 6i32;
         for &cz in &SITES {
             if cz < self.z0 + 4 || cz > self.z1 - 4 {
                 continue;
@@ -1653,18 +1687,19 @@ impl CliffFace {
                 let pit = rim - self.drop;
                 let crest_y = rim + self.crest + extra;
                 let edge = (z - cz).unsigned_abs() as i32;
-                for wy in pit..=crest_y {
-                    let taper = if wy > crest_y - 8 { 2 } else { 0 };
+                // Leave the canyon floor dark — the curtain hangs off the
+                // lip and falls as a sheet, it does not pool.
+                for wy in (pit + 6)..=crest_y {
+                    let taper = if wy > crest_y - 10 { 2 } else { 0 };
                     if edge > half - taper {
                         continue;
                     }
-                    // Hang the sheet off the west lip so it reads as a
-                    // vertical curtain, not a stain on the canyon floor.
+                    place_over(chunk, origin, face - 3, wy, z, BlockType::Lava);
+                    place_over(chunk, origin, face - 2, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 1, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face + 1, wy, z, BlockType::Lava);
                     if edge <= 2 {
-                        place_over(chunk, origin, face + 2, wy, z, BlockType::PlasmaFlow);
+                        place_over(chunk, origin, face + 1, wy, z, BlockType::PlasmaFlow);
                     }
                 }
             }
@@ -1728,6 +1763,12 @@ impl FrontierPlanner {
             SkyIsland::hero_b().stamp(self.seed, chunk);
             SkyIsland::hero_c().stamp(self.seed, chunk);
             for island in SkyIsland::near(self.seed, wx, wz, macro_ground) {
+                // Opening look keeps the three staged hero islands; extra
+                // lattice slabs there fight the mesa sheet. Fast streaming
+                // also stays a thin AABB of three islands in that cone.
+                if in_opening_look(island.cx, island.cz) {
+                    continue;
+                }
                 island.stamp(self.seed, chunk);
             }
         }
@@ -2025,7 +2066,7 @@ mod tests {
         let hero_d = CrystalCluster::hero_d();
         assert!(hero_d.shards >= 16, "hero crystal cluster is still a sprinkle ({})", hero_d.shards);
         assert!(hero_d.scale >= 60, "hero crystal cluster is still too short ({})", hero_d.scale);
-        assert!(hero_d.cz < -90, "hero crystals should sit in the left third of the +X look");
+        assert!(hero_d.cz <= -84, "hero crystals should sit in the left third of the +X look");
     }
 
     #[test]
@@ -2125,6 +2166,10 @@ mod tests {
         assert!(in_hero_postcard(SkyIsland::hero_b().cx, SkyIsland::hero_b().cz));
         assert!(in_hero_postcard(SkyIsland::hero_c().cx, SkyIsland::hero_c().cz));
         assert!(SkyIsland::hero().cz < -90, "hero islands should sit in the left sky of the +X look");
+        assert!(
+            SkyIsland::hero().cy >= SKY_ISLAND_MIN_Y && SkyIsland::hero().cy <= 110,
+            "look-cone islands should sit in the opening sky, not above the frustum"
+        );
         let sky = SkywayNetwork::new(1);
         assert!(
             sky.column(80, -80, 70.0).is_none(),
@@ -2134,8 +2179,20 @@ mod tests {
         assert!(rail.half < SKYWAY_HALF_WIDTH, "mesa rail should be a thin ribbon");
         let walk = sky.column(40, -112, 70.0).expect("cliff walk missing west of the canyon");
         assert!(walk.half < SKYWAY_HALF_WIDTH);
-        let terrace = sky.column(118, -76, 70.0).expect("terrace spur missing on postcard");
+        let terrace = sky
+            .column(118, -36, 70.0)
+            .expect("terrace spur missing south of the opening look");
         assert!(terrace.half < SKYWAY_HALF_WIDTH);
+        for wx in (48..=132).step_by(4) {
+            for wz in (-120..=-48).step_by(4) {
+                if let Some(col) = sky.column(wx, wz, 70.0) {
+                    assert!(
+                        (wx - 134).abs() as f64 <= col.half + 0.5,
+                        "opening look still has a skyway deck at {wx},{wz}"
+                    );
+                }
+            }
+        }
         let face = sky.column(80, -130, 70.0).expect("face rail missing on postcard");
         assert!(face.half < SKYWAY_HALF_WIDTH);
         assert!(face.deck_y < rail.deck_y, "face rail should sit below the mesa rail");
