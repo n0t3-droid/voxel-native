@@ -2745,12 +2745,12 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
-    /// Aerial overlook of the postcard butte / canyon, not the mesa tabletop.
-    /// A menu "New World" opens on the same vista the cinematic rest camera
-    /// was built around (west of the look-cone wall, looking +X/−Z).
+    /// West rim of the look-cone canyon, looking +X/−Z at the carved
+    /// west face with the energy river at the bottom. The mesa cap sits
+    /// behind the near rim so the first frame is a drop, not a tabletop.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let eye = [68.5_f32, 110.0, -22.5];
-        let look = [112.0_f32, 78.0, -82.0];
+        let eye = [62.5_f32, 96.0, -36.5];
+        let look = [110.0_f32, 50.0, -86.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
@@ -2964,12 +2964,12 @@ mod tests {
             "scenic spawn left the frontier disc"
         );
         assert!(
-            pos[1] > 95.0,
-            "scenic spawn should be an aerial overlook, not mesa-top (y={})",
+            pos[1] > 85.0,
+            "scenic spawn should be an aerial canyon overlook, not mesa-top (y={})",
             pos[1]
         );
-        assert!(yaw > 0.25, "should look +X/−Z into the postcard canyon");
-        assert!(pitch < -0.12, "should look down at the butte / river");
+        assert!(yaw > 0.40, "should look +X/−Z into the postcard canyon");
+        assert!(pitch < -0.20, "should look down the canyon drop");
         let meta = crate::settings::WorldMeta::new("test_frontier".into(), 12345);
         assert!((meta.time_of_day - 17.0).abs() < 0.01);
         assert!((meta.player_pos[0] - pos[0]).abs() < 0.1);
