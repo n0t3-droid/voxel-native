@@ -1061,11 +1061,12 @@ fn hero_skyway_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 
 /// Low mesa-edge rail: a narrower ribbon sitting closer to the cliff
 /// so the postcard reads as a colony with stacked transit, not one
-/// lonely skyway. Postcard AABB only.
+/// lonely skyway. Stops at the look-cone butte so the deck docks
+/// instead of punching a tunnel through the terraces.
 fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const RAIL_Z: i32 = -88;
     const HALF: f64 = 2.4;
-    if wx < 16 || wx > 172 {
+    if wx < 16 || wx > 128 {
         return None;
     }
     let dist = (wz - RAIL_Z).abs() as f64;
@@ -1086,7 +1087,7 @@ fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 fn hero_cliff_walk(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const RAIL_Z: i32 = -112;
     const HALF: f64 = 2.0;
-    if wx < 32 || wx > 156 {
+    if wx < 32 || wx > 128 {
         return None;
     }
     let dist = (wz - RAIL_Z).abs() as f64;
@@ -1104,10 +1105,14 @@ fn hero_cliff_walk(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 }
 
 /// Short N–S terrace deck that ties the stacked habs together.
+/// Gapped in front of the look-cone butte so the west face stays open.
 fn hero_terrace_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const SPUR_X: i32 = 118;
     const HALF: f64 = 2.0;
     if wz < -100 || wz > -48 {
+        return None;
+    }
+    if wz >= -114 && wz <= -80 {
         return None;
     }
     let dist = (wx - SPUR_X).abs() as f64;
@@ -1370,10 +1375,11 @@ impl CliffHab {
     }
 }
 
-/// West-facing terraces cut *into* the mesa wall the settled postcard
-/// actually sees. Camera rests at ~(90, 110, −44) looking +X/−Z, so the
-/// lip sits around x=100–116 — a notch in the rock with a floor, lit
-/// back-wall windows, a rail, and short stairs, not a floating box.
+/// West-facing terraces cut *into* a raised mesa butte the settled
+/// postcard actually sees. Camera rests at ~(90, 110, −44) looking
+/// +X/−Z; a lip below the cap hides in the plateau, so this stacks
+/// banded stone *above* the rim and bites shallow lit ledges into
+/// that west face — pueblo dwellings, not skyway boxes.
 #[derive(Debug, Clone, Copy)]
 pub struct CliffFace {
     pub face_x: i32,
@@ -1383,33 +1389,38 @@ pub struct CliffFace {
     pub depth: i32,
     pub drop: i32,
     pub rise: i32,
-    /// Blocks WEST of the lip to excavate so a flat mesa still presents
-    /// a west-facing wall to the camera at ~x=90. 0 = no apron.
+    /// Blocks WEST of the lip to excavate so the butte has a west face.
+    /// Keep this small: a wide apron turns the wall into a quarry backstop.
     pub apron: i32,
+    /// Blocks of banded stone stacked above the mesa cap so the colony
+    /// silhouettes above the plateau in the rest look.
+    pub crest: i32,
 }
 
 impl CliffFace {
     pub fn look_cone() -> [Self; 2] {
         [
             Self {
-                face_x: 128,
-                z0: -118,
-                z1: -70,
+                face_x: 132,
+                z0: -116,
+                z1: -76,
                 levels: 5,
-                depth: 9,
-                drop: 6,
-                rise: 6,
-                apron: 16,
+                depth: 8,
+                drop: 8,
+                rise: 5,
+                apron: 5,
+                crest: 16,
             },
             Self {
-                face_x: 142,
+                face_x: 144,
                 z0: -108,
-                z1: -78,
-                levels: 3,
+                z1: -84,
+                levels: 4,
                 depth: 6,
-                drop: 16,
+                drop: 4,
                 rise: 5,
                 apron: 0,
+                crest: 10,
             },
         ]
     }
@@ -1431,7 +1442,7 @@ impl CliffFace {
             let rim = ground(self.face_x + self.depth, z);
             let bottom = rim - self.drop - (self.levels - 1) * self.rise - 4;
             y_lo = y_lo.min(bottom);
-            y_hi = y_hi.max(rim + 1);
+            y_hi = y_hi.max(rim + self.crest + 1);
         }
         if oy > y_hi || oy + CHUNK_SIZE_I <= y_lo {
             return;
@@ -1440,22 +1451,30 @@ impl CliffFace {
         for z in self.z0..=self.z1 {
             let rim = ground(self.face_x + self.depth, z);
             let pit = rim - self.drop - (self.levels - 1) * self.rise - 3;
+            let crest_y = rim + self.crest;
             for dx in 1..=self.apron {
                 let wx = self.face_x - dx;
-                for wy in pit..=rim {
+                for wy in pit..=crest_y {
                     carve(chunk, origin, wx, wy, z);
+                }
+            }
+            for dx in 0..=(self.depth + 2) {
+                let wx = self.face_x + dx;
+                for wy in pit..=crest_y {
+                    place_over_unless_glow(chunk, origin, wx, wy, z, strata_block(wy));
                 }
             }
             let stair = (z - self.z0).rem_euclid(12) == 0;
             let dwelling = (z - self.z0).rem_euclid(10) == 4;
+            let top_floor = crest_y - 2;
             for level in 0..self.levels {
-                let floor = rim - self.drop - level * self.rise;
-                let head = floor + self.rise - 1;
-                let bite = if dwelling {
-                    self.depth + 3
-                } else {
-                    self.depth
-                };
+                let floor = top_floor - level * self.rise;
+                // Shallow west-face ledge so windows sit ~3 blocks in,
+                // not buried at the back of a 10-block cave. Leave a
+                // 2-block lintel of stone between levels.
+                let ledge = 3.min(self.depth);
+                let bite = if dwelling { self.depth } else { ledge };
+                let head = floor + 3;
                 for dx in 0..bite {
                     let wx = self.face_x + dx;
                     place_over_unless_glow(
@@ -1475,37 +1494,33 @@ impl CliffFace {
                     }
                 }
                 let back = self.face_x + bite;
-                if (floor + 2 - z).rem_euclid(3) != 1 {
-                    place_over_unless_glow(
-                        chunk,
-                        origin,
-                        back,
-                        floor + 2,
-                        z,
-                        BlockType::HoloPanel,
-                    );
-                    place_over_unless_glow(
-                        chunk,
-                        origin,
-                        back,
-                        floor + 1,
-                        z,
-                        BlockType::PlatingWhite,
-                    );
-                }
-                if z.rem_euclid(2) == 0 {
-                    place_over_unless_glow(
-                        chunk,
-                        origin,
-                        self.face_x,
-                        floor + 1,
-                        z,
-                        BlockType::NeonAmber,
-                    );
-                }
+                place_over_unless_glow(
+                    chunk,
+                    origin,
+                    back,
+                    floor + 2,
+                    z,
+                    BlockType::HoloPanel,
+                );
+                place_over_unless_glow(
+                    chunk,
+                    origin,
+                    back,
+                    floor + 1,
+                    z,
+                    BlockType::PlatingWhite,
+                );
+                place_over_unless_glow(
+                    chunk,
+                    origin,
+                    self.face_x,
+                    floor + 1,
+                    z,
+                    BlockType::NeonAmber,
+                );
                 if stair {
                     for step in 0..self.rise {
-                        let wx = self.face_x + 1 + (step / 2).min(self.depth - 2);
+                        let wx = self.face_x + 1 + (step / 2).min(ledge.saturating_sub(1));
                         place_over_unless_glow(
                             chunk,
                             origin,
@@ -1909,9 +1924,11 @@ mod tests {
                 face.z1
             );
             assert!(face.levels >= 3, "need stacked terraces, got {}", face.levels);
-            assert!(face.face_x >= 120 && face.face_x <= 148, "face_x {} is not in the look cone", face.face_x);
+            assert!(face.face_x >= 120 && face.face_x <= 152, "face_x {} is not in the look cone", face.face_x);
+            assert!(face.crest >= 8, "butte crest {} is too short to clear the plateau lip", face.crest);
+            assert!(face.apron <= 8, "apron {} would hide the wall behind a quarry", face.apron);
         }
-        let mut terrace = Chunk::new(ChunkPos::new(8, 3, -6));
+        let mut terrace = Chunk::new(ChunkPos::new(8, 4, -6));
         for ly in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
                 for lx in 0..CHUNK_SIZE {
@@ -1919,7 +1936,7 @@ mod tests {
                 }
             }
         }
-        CliffFace::look_cone()[0].stamp(&mut terrace, |_, _| 64);
+        CliffFace::look_cone()[0].stamp(&mut terrace, |_, _| 70);
         assert!(
             count_blocks(&terrace, BlockType::HoloPanel) > 4,
             "carved terrace has no lit windows"

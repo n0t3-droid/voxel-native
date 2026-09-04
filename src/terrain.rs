@@ -2977,6 +2977,43 @@ mod tests {
     }
 
     #[test]
+    fn look_cone_cliff_carves_windows_into_generated_mesa() {
+        let generator = TerrainGenerator::new(12345);
+        let rim = generator.surface_height_at(132, -90);
+        assert!(rim > 40, "look-cone mesa is missing ({rim})");
+        let holo: Voxel = BlockType::HoloPanel.into();
+        let deck: Voxel = BlockType::RoadDeck.into();
+        let mut windows = 0usize;
+        let mut floors = 0usize;
+        for cy in 2..8 {
+            for cx in 8..11 {
+                for cz in -8..-4 {
+                    let mut chunk = Chunk::new(ChunkPos::new(cx, cy, cz));
+                    generator.generate(&mut chunk);
+                    for ly in 0..CHUNK_SIZE {
+                        for lz in 0..CHUNK_SIZE {
+                            for lx in 0..CHUNK_SIZE {
+                                let v = chunk.get(lx, ly, lz);
+                                if v == holo {
+                                    windows += 1;
+                                }
+                                if v == deck {
+                                    floors += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            windows > 12,
+            "carved cliff face has no lit windows in generated chunks (windows={windows} floors={floors} rim={rim})"
+        );
+        assert!(floors > 20, "carved cliff face has no terrace floors ({floors})");
+    }
+
+    #[test]
     fn peaks_stay_under_the_streamed_ceiling_so_nothing_is_decapitated() {
         // The default budget streams 10 chunk layers = 160 blocks. A
         // spire that pokes through that is not tall, it is sheared flat.
