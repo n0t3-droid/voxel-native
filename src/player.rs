@@ -439,13 +439,7 @@ fn update_cinematic_exposure(
         };
         // Highlights stay neutral so HDR crystals/rivers do not bloom
         // into a white sheet when we open the shadows.
-        grading.highlights = ColorGradingSection {
-            saturation: 1.0,
-            contrast: 1.0,
-            gamma: grade.highlight_gamma,
-            gain: grade.highlight_gain,
-            lift: 0.0,
-        };
+        grading.highlights = ColorGradingSection::default();
     }
 }
 
@@ -458,8 +452,6 @@ struct LookPassGrade {
     shadow_gamma: f32,
     mid_gain: f32,
     mid_sat: f32,
-    highlight_gain: f32,
-    highlight_gamma: f32,
     temperature: f32,
 }
 
@@ -473,8 +465,6 @@ fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> Lo
             shadow_gamma: 1.0,
             mid_gain: 1.0,
             mid_sat: 1.0,
-            highlight_gain: 1.0,
-            highlight_gamma: 1.0,
             temperature: 0.0,
         };
     }
@@ -491,10 +481,6 @@ fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> Lo
         shadow_gamma: 1.0 - n * 0.32 * mul,
         mid_gain: 1.0 + n * 0.16 * mul + dusk * 0.04,
         mid_sat: 1.0 + n * 0.08 + dusk * 0.10,
-        // Compress HDR crystals so ACES leaves display range for the
-        // stone floor. No black-point lift — sky stays black.
-        highlight_gain: 1.0 - n * 0.22 * mul,
-        highlight_gamma: 1.0 + n * 0.14 * mul,
         temperature: dusk * 0.10,
     }
 }
@@ -1216,8 +1202,5 @@ mod tests {
         assert_eq!(fast.ev100, Exposure::EV100_BLENDER);
         assert_eq!(fast.shadow_lift, 0.0);
         assert_eq!(fast.mid_gain, 1.0);
-        assert!(night.highlight_gain < 0.90);
-        assert_eq!(noon.highlight_gain, 1.0);
-        assert_eq!(fast.highlight_gain, 1.0);
     }
 }
