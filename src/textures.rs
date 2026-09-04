@@ -21,7 +21,9 @@
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::texture::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::render::texture::{
+    Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor,
+};
 use noise::{NoiseFn, Perlin};
 
 use crate::blocks::{BlockType, MaterialId, CUSTOM_MATERIAL_BASE};
@@ -627,25 +629,22 @@ fn bake_block_swatch(
                     )
                 }
                 BlockStyle::Strata => {
-                    // Hard colour bands (not just luma noise) so mesa
-                    // cliffs read as geological strata from a distance.
-                    let band =
-                        ((v * 10.0 + strat * 0.35 + fbm * 0.08).floor() as i32).rem_euclid(6);
+                    // Three thick world-readable bands. Thin 6-band
+                    // stripes averaged to mud under mips at flying
+                    // distance; 3 bands survive an 8× box filter.
+                    let band = ((v * 3.0 + strat * 0.12).floor() as i32).rem_euclid(3);
                     let (mul, tr, tg, tb) = match band {
-                        0 => (0.48, 0.16, -0.06, 0.10),
-                        1 => (0.78, 0.20, 0.02, -0.10),
-                        2 => (1.18, 0.06, 0.08, -0.02),
-                        3 => (0.62, 0.12, -0.04, 0.16),
-                        4 => (0.96, 0.18, 0.05, -0.08),
-                        _ => (0.70, 0.08, 0.00, -0.12),
+                        0 => (0.42, 0.22, -0.10, 0.18),
+                        1 => (1.22, 0.08, 0.10, -0.06),
+                        _ => (0.70, 0.18, 0.00, -0.14),
                     };
-                    let grit = grain_n.abs() * 0.14;
-                    let crack = cell_n * 0.36;
+                    let grit = grain_n.abs() * 0.08;
+                    let crack = cell_n * 0.22;
                     (
-                        mul + macro_shadow * 0.9 + fbm * 0.14 + micro * 0.10 + grit - crack,
-                        tr + (fbm as f32) * 0.04,
+                        mul + macro_shadow * 0.5 + fbm * 0.08 + grit - crack,
+                        tr,
                         tg,
-                        tb - (crack as f32) * 0.05,
+                        tb,
                     )
                 }
                 BlockStyle::Metal => {
@@ -704,19 +703,19 @@ fn bake_block_swatch(
             let mut g = (base[1] * bright + tint_g).clamp(0.0, 1.0);
             let mut bl = (base[2] * bright + tint_b).clamp(0.0, 1.0);
 
-            // Per-tile bevel so greedy-merged faces still read as cubes
-            // instead of a stretched wallpaper. ~10% rim, darker 1px lip.
-            let margin = (size as f32 * 0.10).max(3.0);
+            // Thin 1px lip only. A 10% bevel ate the mip average and
+            // washed flying-distance faces into grey-brown.
+            let margin = 2.0_f32;
             let dxe = (x as f32).min((size - 1 - x) as f32);
             let dye = (y as f32).min((size - 1 - y) as f32);
             let edge = dxe.min(dye);
             let mut bevel = if edge < margin {
-                0.42 + 0.58 * (edge / margin)
+                0.55 + 0.45 * (edge / margin)
             } else {
                 1.0
             };
-            if edge < 1.6 {
-                bevel *= 0.62;
+            if edge < 0.6 {
+                bevel *= 0.72;
             }
             r = (r * bevel).clamp(0.0, 1.0);
             g = (g * bevel).clamp(0.0, 1.0);
@@ -813,6 +812,11 @@ fn make_repeating_image(w: u32, h: u32, data: Vec<u8>) -> Image {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
         address_mode_w: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        // Nearest mips keep thick strata / grass / sand hues from
+        // blending into a single flying-distance mud.
+        mipmap_filter: ImageFilterMode::Nearest,
         ..ImageSamplerDescriptor::linear()
     });
     image
@@ -883,6 +887,17 @@ mod tests {
         unique.len()
     }
 
+    fn mean_rgb(swatch: &BlockSwatch) -> [f32; 3] {
+        let mut acc = [0.0f32; 3];
+        let n = (swatch.rgba.len() / 4) as f32;
+        for pixel in swatch.rgba.chunks_exact(4) {
+            acc[0] += pixel[0] as f32;
+            acc[1] += pixel[1] as f32;
+            acc[2] += pixel[2] as f32;
+        }
+        [acc[0] / n / 255.0, acc[1] / n / 255.0, acc[2] / n / 255.0]
+    }
+
     fn swatch_for(swatches: &[BlockSwatch], block: BlockType) -> &BlockSwatch {
         swatches
             .iter()
@@ -908,7 +923,7 @@ mod tests {
         let crystal = swatch_for(&swatches, BlockType::Crystal);
         let plate = swatch_for(&swatches, BlockType::PlatingWhite);
         assert!(
-            luma_range(red) > 110,
+            luma_range(red) > 90,
             "mesa strata tile is still too flat ({})",
             luma_range(red)
         );
@@ -933,6 +948,46 @@ mod tests {
         assert!(
             lava_signatures > 14,
             "lava only preserved {lava_signatures} far-distance material signatures"
+        );
+    }
+
+    #[test]
+    fn flying_distance_swatch_means_keep_grass_rock_and_sand_apart() {
+        let swatches = bake_all_block_swatches(128);
+        let grass = mean_rgb(swatch_for(&swatches, BlockType::Grass));
+        let red = mean_rgb(swatch_for(&swatches, BlockType::RedStone));
+        let clay = mean_rgb(swatch_for(&swatches, BlockType::MesaClay));
+        let sand = mean_rgb(swatch_for(&swatches, BlockType::RedSand));
+        let violet = mean_rgb(swatch_for(&swatches, BlockType::VioletStone));
+        let crystal = mean_rgb(swatch_for(&swatches, BlockType::Crystal));
+        let lava = mean_rgb(swatch_for(&swatches, BlockType::Lava));
+        assert!(
+            grass[1] > red[1] + 0.18,
+            "grass mean lost its green vs brick ({grass:?} vs {red:?})"
+        );
+        assert!(
+            red[0] > grass[0] + 0.18,
+            "brick mean lost its rust vs grass ({red:?} vs {grass:?})"
+        );
+        assert!(
+            clay[1] > red[1] + 0.12,
+            "cream stripe should stay brighter than brick ({clay:?} vs {red:?})"
+        );
+        assert!(
+            sand[0] > sand[1] + 0.08,
+            "red sand should stay warm ({sand:?})"
+        );
+        assert!(
+            violet[2] > violet[0] + 0.08,
+            "violet band should stay cool ({violet:?})"
+        );
+        assert!(
+            crystal[2] > crystal[0] + 0.20,
+            "crystal should stay cyan ({crystal:?})"
+        );
+        assert!(
+            lava[0] > lava[2] + 0.35,
+            "lava should stay molten ({lava:?})"
         );
     }
 

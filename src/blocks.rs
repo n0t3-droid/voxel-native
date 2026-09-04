@@ -212,8 +212,8 @@ impl BlockType {
             BlockType::Air => Color::NONE,
             BlockType::Stone => Color::srgb(0.46, 0.48, 0.58),
             BlockType::Dirt => Color::srgb(0.40, 0.25, 0.17),
-            BlockType::Grass => Color::srgb(0.26, 0.70, 0.26),
-            BlockType::Sand => Color::srgb(0.80, 0.71, 0.48),
+            BlockType::Grass => Color::srgb(0.14, 0.82, 0.22),
+            BlockType::Sand => Color::srgb(0.93, 0.78, 0.38),
             // Turquoise energy-water read (concept underground river).
             BlockType::Water => Color::srgba(0.06, 0.78, 0.92, 0.62),
             BlockType::Wood => Color::srgb(0.38, 0.23, 0.13),
@@ -226,24 +226,24 @@ impl BlockType {
             BlockType::Gravel => Color::srgb(0.54, 0.52, 0.58),
             BlockType::Bedrock => Color::srgb(0.14, 0.14, 0.17),
             // Sedona red — saturated rust-orange surface dust.
-            BlockType::RedSand => Color::srgb(0.92, 0.46, 0.24),
+            BlockType::RedSand => Color::srgb(0.98, 0.38, 0.12),
             // Brick-red sandstone cliff body.
-            BlockType::RedStone => Color::srgb(0.86, 0.40, 0.26),
+            BlockType::RedStone => Color::srgb(0.78, 0.26, 0.14),
             // Pale yellow mesa cap, the bright stripe between reds.
-            BlockType::MesaClay => Color::srgb(0.94, 0.76, 0.48),
+            BlockType::MesaClay => Color::srgb(0.97, 0.88, 0.58),
             // Mossy limestone — wet karst pillar bodies.
             BlockType::MossStone => Color::srgb(0.33, 0.56, 0.37),
             // Bright pale limestone — sun-lit karst sides.
             BlockType::Limestone => Color::srgb(0.86, 0.84, 0.76),
             // Alien crystal — saturated cyan-violet, slightly translucent.
-            BlockType::Crystal => Color::srgba(0.18, 0.72, 1.00, 0.70),
+            BlockType::Crystal => Color::srgba(0.08, 0.78, 1.00, 0.72),
             // Volcanic basalt — dark, but not unreadable black. Keeping
             // it above pure black makes ledges and jump targets visible
             // under strong bloom from nearby lava.
             BlockType::Basalt => Color::srgb(0.34, 0.31, 0.38),
             // Lava — saturated orange-red. Read as glowing thanks to
             // the player camera's HDR + tonemapping.
-            BlockType::Lava => Color::srgba(1.00, 0.48, 0.12, 0.88),
+            BlockType::Lava => Color::srgba(1.00, 0.36, 0.04, 0.90),
             // Bioluminescent magenta moss for alien reef floors.
             BlockType::AlienMoss => Color::srgb(0.40, 0.11, 0.62),
             // Bone-white organic pillar rock.
@@ -262,12 +262,12 @@ impl BlockType {
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
             // Violet sedimentary band — saturated enough to read as an
             // alien mineral stripe from a kilometre out.
-            BlockType::VioletStone => Color::srgb(0.60, 0.36, 0.80),
+            BlockType::VioletStone => Color::srgb(0.48, 0.18, 0.82),
             // Ochre band that separates the violet from the buff cap.
-            BlockType::AmberStone => Color::srgb(0.90, 0.54, 0.22),
+            BlockType::AmberStone => Color::srgb(0.98, 0.46, 0.08),
             // Coolant-blue energy current in the canyon floors.
-            BlockType::PlasmaFlow => Color::srgba(0.14, 0.84, 1.00, 0.80),
-            BlockType::CrystalMagenta => Color::srgba(0.96, 0.20, 0.86, 0.70),
+            BlockType::PlasmaFlow => Color::srgba(0.06, 0.88, 1.00, 0.82),
+            BlockType::CrystalMagenta => Color::srgba(1.00, 0.10, 0.78, 0.72),
             BlockType::CrystalGreen => Color::srgba(0.30, 1.00, 0.56, 0.70),
             // Holo pane — mostly transparent, tinted cyan.
             BlockType::HoloPanel => Color::srgba(0.32, 0.90, 1.00, 0.36),
