@@ -130,6 +130,10 @@ pub enum BlockType {
     /// Skyway deck plating — dark structural alloy for elevated roads,
     /// monorail bridges and station decks.
     SkywayDeck = 39,
+    /// Holo dome panel — translucent cyan force-field glass for orbital
+    /// station canopies and combat-pad shields. Reads as a lit volume
+    /// rather than a solid wall so interior silhouettes stay visible.
+    HoloDome = 40,
 }
 
 /// Voxel ids for the three mineable neon resources (HUD + telemetry).
@@ -144,13 +148,14 @@ pub const VOXEL_CRYSTAL_MAGENTA: Voxel = BlockType::CrystalMagenta as Voxel;
 pub const VOXEL_CRYSTAL_VERDANT: Voxel = BlockType::CrystalVerdant as Voxel;
 pub const VOXEL_PLASMA_FLOW: Voxel = BlockType::PlasmaFlow as Voxel;
 pub const VOXEL_SKYWAY_DECK: Voxel = BlockType::SkywayDeck as Voxel;
+pub const VOXEL_HOLO_DOME: Voxel = BlockType::HoloDome as Voxel;
 
 impl BlockType {
     #[inline]
     pub fn is_solid(self) -> bool {
         !matches!(
             self,
-            BlockType::Air | BlockType::Water | BlockType::PlasmaFlow
+            BlockType::Air | BlockType::Water | BlockType::PlasmaFlow | BlockType::HoloDome
         )
     }
 
@@ -167,6 +172,7 @@ impl BlockType {
                 | BlockType::CrystalMagenta
                 | BlockType::CrystalVerdant
                 | BlockType::PlasmaFlow
+                | BlockType::HoloDome
         )
     }
 
@@ -192,6 +198,7 @@ impl BlockType {
                 | BlockType::CrystalMagenta
                 | BlockType::CrystalVerdant
                 | BlockType::PlasmaFlow
+                | BlockType::HoloDome
         )
     }
 
@@ -264,6 +271,9 @@ impl BlockType {
             // black, so skyway rails and guard edges stay readable when
             // the deck is silhouetted against a bright nebula.
             BlockType::SkywayDeck => Color::srgb(0.165, 0.192, 0.251),
+            // Holo dome #4DE8FF — cyan force-field glass (sRGB D65). Alpha
+            // 0.42 keeps pad silhouettes readable through the canopy.
+            BlockType::HoloDome => Color::srgba(0.302, 0.910, 1.000, 0.42),
         }
     }
 
@@ -308,6 +318,7 @@ impl BlockType {
             37 => BlockType::CrystalVerdant,
             38 => BlockType::PlasmaFlow,
             39 => BlockType::SkywayDeck,
+            40 => BlockType::HoloDome,
             _ => BlockType::Air,
         }
     }
@@ -320,7 +331,7 @@ impl From<BlockType> for Voxel {
     }
 }
 
-pub const BUILDABLE_BLOCKS: [BlockType; 39] = [
+pub const BUILDABLE_BLOCKS: [BlockType; 40] = [
     BlockType::Stone,
     BlockType::Dirt,
     BlockType::Grass,
@@ -360,6 +371,7 @@ pub const BUILDABLE_BLOCKS: [BlockType; 39] = [
     BlockType::CrystalVerdant,
     BlockType::PlasmaFlow,
     BlockType::SkywayDeck,
+    BlockType::HoloDome,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,6 +459,11 @@ const GLASS: &[BlockPaletteEntry] = &[
         block: BlockType::CrystalVerdant,
         label: "Verdant Bloom",
         role: "green crystal cluster",
+    },
+    BlockPaletteEntry {
+        block: BlockType::HoloDome,
+        label: "Holo Dome",
+        role: "force-field canopy glass",
     },
 ];
 
@@ -683,11 +700,12 @@ pub fn block_label(block: BlockType) -> &'static str {
 }
 
 /// Fast voxel → solid? (without converting through the enum).
-/// AIR (0), Water (5), Lava (22) and PlasmaFlow (38) are non-solid for
-/// collision — plasma channels are swimmable/hazard volumes, not walls.
+/// AIR (0), Water (5), Lava (22), PlasmaFlow (38) and HoloDome (40) are
+/// non-solid for collision — plasma channels and force-field canopies are
+/// volumes you can walk through, not walls.
 #[inline]
 pub fn voxel_is_solid(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 22 | 38)
+    !matches!(v, 0 | 5 | 22 | 38 | 40)
 }
 
 /// Fast voxel -> can weapons intentionally hit and destroy this block?
@@ -702,13 +720,13 @@ pub fn voxel_is_weapon_target(v: Voxel) -> bool {
 /// Fast voxel → opaque? (used for face-culling).
 /// Air (0), water (5), leaves (7), ice (9), jungle leaves (11),
 /// crystal (20), lava (22), cockpit (28), luminite/iridium glass,
-/// the magenta/verdant bloom crystals (36, 37) and plasma (38) are
-/// non-opaque.
+/// the magenta/verdant bloom crystals (36, 37), plasma (38) and holo
+/// dome (40) are non-opaque.
 #[inline]
 pub fn voxel_is_opaque(v: Voxel) -> bool {
     !matches!(
         v,
-        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 36 | 37 | 38
+        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 36 | 37 | 38 | 40
     )
 }
 
@@ -719,11 +737,11 @@ pub fn voxel_is_opaque(v: Voxel) -> bool {
 #[inline]
 pub fn voxel_is_emissive(v: Voxel) -> bool {
     // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9,
-    // bloom crystals 36–37, plasma 38.
+    // bloom crystals 36–37, plasma 38, holo dome 40.
     // Ice gets a whisper of glow so glacier biomes shimmer at night.
     matches!(
         v,
-        9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38
+        9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 40
     )
 }
 
@@ -834,6 +852,13 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[1] *= 5.0;
             c[2] *= 3.6;
         }
+        40 => {
+            // Holo dome — soft cyan wash so canopies glow without blowing
+            // out the combat-pad silhouettes underneath.
+            c[0] *= 1.8;
+            c[1] *= 3.4;
+            c[2] *= 4.2;
+        }
         _ => {}
     }
     c
@@ -881,27 +906,33 @@ mod tests {
         assert_eq!(BlockType::from_voxel(37), BlockType::CrystalVerdant);
         assert_eq!(BlockType::from_voxel(38), BlockType::PlasmaFlow);
         assert_eq!(BlockType::from_voxel(39), BlockType::SkywayDeck);
+        assert_eq!(BlockType::from_voxel(40), BlockType::HoloDome);
         assert_eq!(VOXEL_CRYSTAL_MAGENTA, 36);
         assert_eq!(VOXEL_CRYSTAL_VERDANT, 37);
         assert_eq!(VOXEL_PLASMA_FLOW, 38);
         assert_eq!(VOXEL_SKYWAY_DECK, 39);
+        assert_eq!(VOXEL_HOLO_DOME, 40);
 
         assert!(!voxel_is_solid(VOXEL_PLASMA_FLOW));
         assert!(!BlockType::PlasmaFlow.is_solid());
+        assert!(!voxel_is_solid(VOXEL_HOLO_DOME));
         assert!(voxel_is_solid(VOXEL_SKYWAY_DECK));
         assert!(voxel_is_emissive(VOXEL_CRYSTAL_MAGENTA));
         assert!(voxel_is_emissive(VOXEL_CRYSTAL_VERDANT));
         assert!(voxel_is_emissive(VOXEL_PLASMA_FLOW));
+        assert!(voxel_is_emissive(VOXEL_HOLO_DOME));
         assert!(!voxel_is_emissive(VOXEL_SKYWAY_DECK));
         assert!(!voxel_is_opaque(VOXEL_CRYSTAL_MAGENTA));
         assert!(!voxel_is_opaque(VOXEL_CRYSTAL_VERDANT));
         assert!(!voxel_is_opaque(VOXEL_PLASMA_FLOW));
+        assert!(!voxel_is_opaque(VOXEL_HOLO_DOME));
         assert!(voxel_is_opaque(VOXEL_SKYWAY_DECK));
         assert!(voxel_is_weapon_target(VOXEL_PLASMA_FLOW));
         assert_eq!(ore_units_for_mined_voxel(VOXEL_CRYSTAL_MAGENTA), 2);
         assert_eq!(ore_units_for_mined_voxel(VOXEL_CRYSTAL_VERDANT), 2);
         assert_eq!(ore_units_for_mined_voxel(VOXEL_PLASMA_FLOW), 0);
         assert_eq!(ore_units_for_mined_voxel(VOXEL_SKYWAY_DECK), 0);
+        assert_eq!(ore_units_for_mined_voxel(VOXEL_HOLO_DOME), 0);
     }
 
     #[test]
