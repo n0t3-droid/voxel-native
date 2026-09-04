@@ -2156,10 +2156,10 @@ fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     // Cross the +X New World look left-to-right, above the canyon, so
     // the white/orange shuttle is in frame from spawn through the first
     // 15–25s of streaming.
-    let x = origin.x + 16.0 + u * 32.0;
-    let z = origin.z - 16.0 + u * 28.0;
-    let y = origin.y + 22.0 + (u * std::f32::consts::TAU).sin() * 5.0;
-    let yaw = 32.0_f32.atan2(-28.0);
+    let x = origin.x + 18.0 + u * 28.0;
+    let z = origin.z - 14.0 + u * 24.0;
+    let y = origin.y + 14.0 + (u * std::f32::consts::TAU).sin() * 5.0;
+    let yaw = 28.0_f32.atan2(-24.0);
     let roll = -0.38 + (u * std::f32::consts::TAU).sin() * 0.28;
     (Vec3::new(x, y, z), yaw, roll)
 }
@@ -4717,12 +4717,12 @@ mod tests {
                 pos.x
             );
             assert!(
-                pos.y > origin.y + 18.0,
+                pos.y > origin.y + 8.0,
                 "flyby at u={u} is not in the sky (y={})",
                 pos.y
             );
             assert!(
-                pos.y < origin.y + 36.0,
+                pos.y < origin.y + 28.0,
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );
