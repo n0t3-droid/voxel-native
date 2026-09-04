@@ -192,8 +192,8 @@ fn setup_sky(
     let (nebula_res, star_count, planet_r, ring_inner, ring_outer, ring_segs) =
         match settings.graphics {
             GraphicsMode::Fast => (256u32, 1800usize, 150.0_f32, 220.0_f32, 380.0_f32, 96usize),
-            GraphicsMode::Balanced => (512, 3200, 185.0, 270.0, 470.0, 128),
-            GraphicsMode::High => (1024, 5200, 220.0, 320.0, 560.0, 192),
+            GraphicsMode::Balanced => (512, 4000, 185.0, 270.0, 470.0, 128),
+            GraphicsMode::High => (1024, 7200, 220.0, 320.0, 560.0, 192),
         };
 
     // ----- Sky camera --------------------------------------------------
@@ -811,13 +811,13 @@ fn follow_and_animate_sky(
             // Day/dusk keep a whisper of structure; the volume only
             // really punches once the sun is down. Hour 17 used to keep
             // night-level filaments plus stars.
-            let night_vol = (1.0 - day).powf(2.8);
+            let night_vol = (1.0 - day).powf(2.2);
             let base_day = Vec3::new(0.16, 0.08, 0.32);
-            let base_night = Vec3::new(1.65, 0.92, 2.25);
-            let base_sunset = Vec3::new(0.85, 0.28, 0.12);
+            let base_night = Vec3::new(1.55, 1.05, 2.35);
+            let base_sunset = Vec3::new(0.95, 0.32, 0.62);
             let e = (base_day * (0.04 + 0.08 * day)
                 + base_night * night_vol
-                + base_sunset * sunset * 0.22)
+                + base_sunset * sunset * 0.38)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
@@ -917,7 +917,7 @@ fn build_star_mesh(count: usize, seed: u64, radius: f32) -> Mesh {
         // so the visible blob is smaller than `star_size` — that's
         // what makes stars read as round points rather than diamonds.
         let r: f32 = rng.gen();
-        let star_size = 0.6 + r.powf(7.0) * 4.5;
+        let star_size = 0.6 + r.powf(6.5) * 5.5;
 
         // Per-star brightness multiplier — a few punchy, most dim.
         let b: f32 = rng.gen();
@@ -1550,7 +1550,7 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
             let u = (x as f64 / w as f64) * std::f64::consts::TAU;
             // Swirl: rotate longitude by a latitude-dependent twist so
             // the clouds read as a volume, not a painted sheet.
-            let twist = 0.85 * (v * 2.2).sin() + n_swirl.get([v * 1.3, 0.2]) * 0.55;
+            let twist = 1.25 * (v * 2.6).sin() + n_swirl.get([v * 1.8, u * 0.18]) * 0.85;
             let u_s = u + twist;
             let (su, cu) = u_s.sin_cos();
             let px = cv * cu;
@@ -1570,15 +1570,15 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
                 }
                 sum / norm.max(1e-6)
             };
-            let filament = (fbm(&n_fil, 1.4, 5) * 0.5 + 0.5).powf(1.35);
+            let filament = (fbm(&n_fil, 1.65, 6) * 0.5 + 0.5).powf(1.18);
             let picker = fbm(&n_pick, 0.7, 3);
-            let mask = (fbm(&n_mask, 0.55, 3) + 0.25).max(0.0).powf(1.7);
+            let mask = (fbm(&n_mask, 0.48, 4) + 0.32).max(0.0).powf(1.35);
             let amp = (filament * mask).clamp(0.0, 1.0);
 
             // Magenta vs cyan: pick a side, don't average them into purple mud.
-            let magenta = Vec3::new(1.00, 0.18, 0.82);
-            let cyan = Vec3::new(0.12, 0.85, 1.00);
-            let mix = ((picker + 0.15) * 1.6).clamp(0.0, 1.0) as f32;
+            let magenta = Vec3::new(1.00, 0.16, 0.88);
+            let cyan = Vec3::new(0.08, 0.92, 1.00);
+            let mix = ((picker + 0.05) * 1.85).clamp(0.0, 1.0) as f32;
             let mut col = cyan.lerp(magenta, mix) * amp as f32;
 
             // Deep-violet zenith fill so the dome never goes empty-black
