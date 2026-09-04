@@ -25,22 +25,26 @@ The latest engine work is the Aether Frontier overlay — inventions that push
 default worlds toward the voxel sci-fi goal image without converting Earth-like
 provinces into the old neon-showcase biomes:
 
-- floating sky islands stream through the real chunk pipeline: grass decks,
-  stone keels, and magenta/verdant bloom-crystal undersides, placed on a
-  seed-stable 96-block lattice so neighbouring chunks agree on the same island;
-- plasma coolant channels follow ridged-noise filaments along mesa, mountain,
-  and karst canyon floors — swimmable, emissive, and budgeted as thin rivers
-  instead of a glowing flood;
-- skyway decks span neighbouring islands with smoothstep grades, cyan guard
-  rails, and hull-dark pylons; the same `Skyway` road style is a player/bot
-  road component so crews can build monorails by hand;
-- rare orbital station prefabs sit on hero islands (pad, mast, amber dish,
-  docking arm); Shift+F11 stamps the same prefab at the player, Shift+F10 warps
-  to the nearest island deck;
-- the celestial sky uses Saturn-proportioned rings (C-inner to A-outer, Cassini
-  Division density drop), Lambert moon phases, and a Kepler-faster inner moon;
-- Build Studio exposes a SKYWAY workflow and the new Magenta Bloom, Verdant
-  Bloom, Plasma Flow, and Skyway Deck swatches in the material catalog;
+- floating sky islands stream through the real chunk pipeline: grass decks with
+  leaf tufts, stone keels, longer hanging bloom-crystal undersides, and giant
+  deck spikes, placed on a seed-stable 96-block lattice so neighbouring chunks
+  agree on the same island;
+- dual canyon channels: electric-blue plasma coolant beside orange lava ribbons
+  on mesa / mountain / karst floors;
+- skyway decks span neighbouring islands with cyan rails, hull-dark pylons, and
+  readable biped rail crews at pylon landings;
+- orbital station prefabs now include a holo dome, combat pad with biped marine
+  vs multi-leg alien silhouettes, a tunnel portal, turret, and docked fighter
+  with cyan plume core; Shift+F11 stamps the same prefab, Shift+F10 warps to the
+  nearest island deck;
+- the celestial sky uses Saturn-proportioned **3D extruded rings** (C-inner to
+  A-outer, Cassini Division density drop, visual half-height 3.5 % of planet
+  radius), Lambert moon phases, and a Kepler three-moon hierarchy;
+- `--film` / `VOXEL_NATIVE_FILM=1` runs an HUD-off hero-shot recorder with fill
+  and rim lights so dark voxels stay readable in captures under
+  `video_captures/aether_film_*`;
+- Build Studio exposes a SKYWAY workflow and Magenta Bloom, Verdant Bloom,
+  Plasma Flow, Skyway Deck, and Holo Dome swatches in the material catalog;
 - overlay column-tops feed the streamer so island decks are not clipped by the
   surface-only chunk ceiling, while decks stay inside the default 8-chunk
   vertical band for low-end machines.

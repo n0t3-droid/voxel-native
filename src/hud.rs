@@ -91,6 +91,7 @@ fn toggle_hud_visibility(
     state: Res<State<crate::menu::GameState>>,
     overlay: Res<DebugOverlay>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
     mut crosshair_q: Query<
         &mut Visibility,
         (
@@ -131,23 +132,24 @@ fn toggle_hud_visibility(
     >,
 ) {
     let in_game = *state.get() == crate::menu::GameState::InGame;
+    let film_hide = film.as_ref().map(|f| f.hide_hud).unwrap_or(false);
     let build_mode = mode.as_deref().map(|m| m.is_build()).unwrap_or(false);
     let ship_mode = mode.as_deref().map(|m| m.is_ship()).unwrap_or(false);
     let build_picker = mode
         .as_deref()
         .map(|m| m.is_build_picker())
         .unwrap_or(false);
-    let stats_vis = if in_game && overlay.visible {
+    let stats_vis = if in_game && overlay.visible && !film_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    let crosshair_vis = if in_game && !build_picker {
+    let crosshair_vis = if in_game && !build_picker && !film_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    let hotbar_vis = if in_game && !build_mode && !ship_mode {
+    let hotbar_vis = if in_game && !build_mode && !ship_mode && !film_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden

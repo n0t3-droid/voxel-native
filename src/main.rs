@@ -13,6 +13,7 @@ mod commands;
 mod daynight;
 mod director;
 mod editor;
+mod film;
 mod frontier;
 mod hud;
 mod icons;
@@ -133,6 +134,7 @@ fn main() {
         .add_plugins(mode::ModePlugin)
         .add_plugins(neurocore::NeuroCorePlugin)
         .add_plugins(qa::QaPlugin)
+        .add_plugins(film::FilmPlugin)
         .add_plugins(toolbelt::ToolbeltPlugin)
         .add_plugins(commands::CommandDeckPlugin)
         .add_plugins(sculpt::SculptPlugin)
