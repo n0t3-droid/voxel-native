@@ -78,7 +78,11 @@ fn reload_material_library(
     if !library.reload_requested {
         return;
     }
-    library.rebuild(&mut materials, &mut images);
+    library.rebuild(
+        &mut materials,
+        &mut images,
+        crate::textures::BUILTIN_SWATCH_SIZE,
+    );
     let mut dirty = Vec::new();
     for chunk in world.chunks.values_mut() {
         chunk.dirty = true;
@@ -132,6 +136,7 @@ fn reinit_world_for_active(
     streamer.frontier_complete = false;
     streamer.last_anchor_cxz = None;
     streamer.needs_orphan_scan = true;
+    streamer.stream_elapsed = 0.0;
     for (_, group) in streamer.entities.drain() {
         for entry in group {
             if let Some(entity_commands) = commands.get_entity(entry.entity) {
@@ -887,6 +892,10 @@ pub struct ChunkStreamer {
     /// this flag only when the player crosses a chunk boundary (new
     /// chunks might be needed) or a chunk unloads (slot opened up).
     pub frontier_complete: bool,
+    /// Seconds since this world started streaming. First few seconds
+    /// fill a small disc as fast as possible so the player sees ground
+    /// instead of an empty sky.
+    pub stream_elapsed: f32,
     /// Last anchor chunk position we scanned from. When this changes, a
     /// new frontier sweep is required.
     pub last_anchor_cxz: Option<(i32, i32)>,
@@ -908,7 +917,12 @@ fn init_world(
     settings: Res<WorldSettings>,
 ) {
     world.generator = TerrainGenerator::new(settings.seed);
-    material_library.rebuild(&mut materials, &mut images);
+    let swatch_size = match settings.graphics {
+        crate::settings::GraphicsMode::Fast => 64,
+        crate::settings::GraphicsMode::Balanced => 128,
+        crate::settings::GraphicsMode::High => 256,
+    };
+    material_library.rebuild(&mut materials, &mut images, swatch_size);
 
     // Bake the procedural surface-grain texture once. 128×128 is the
     // sweet spot: still crisp at arm's length under `Repeat` sampling,
@@ -916,11 +930,7 @@ fn init_world(
     // the 6-octave + warp + Worley + strata + sparkle pipeline). Users
     // who drop a real 512²/1024² PNG in ./textures/universal_grain.png
     // get photorealistic detail for free via the override path.
-    let grain_size = match settings.graphics {
-        crate::settings::GraphicsMode::Fast => 64,
-        crate::settings::GraphicsMode::Balanced => 128,
-        crate::settings::GraphicsMode::High => 256,
-    };
+    let grain_size = swatch_size;
     let grain = images.add(crate::textures::universal_grain_or_override(grain_size));
 
     streamer.material = Some(materials.add(StandardMaterial {
@@ -1077,6 +1087,7 @@ fn stream_chunks(
     anchors: Query<&Transform, With<ChunkAnchor>>,
     settings: Res<WorldSettings>,
     budget: Res<RuntimeBudget>,
+    time: Res<Time>,
     mut world: ResMut<VoxelWorld>,
     mut streamer: ResMut<ChunkStreamer>,
     mut governor: ResMut<StreamingGovernor>,
@@ -1092,7 +1103,13 @@ fn stream_chunks(
     let pcx = px.div_euclid(CHUNK_SIZE_I);
     let pcz = pz.div_euclid(CHUNK_SIZE_I);
 
-    let rd = sync_streaming_governor(&mut governor, &budget, &streamer);
+    streamer.stream_elapsed += time.delta_seconds();
+    let warmup = streamer.stream_elapsed < 4.0;
+
+    let mut rd = sync_streaming_governor(&mut governor, &budget, &streamer);
+    if warmup {
+        rd = rd.min(8);
+    }
     let retain = rd + 2;
     let retain2 = retain * retain;
     let vertical = settings.vertical_chunks as i32;
@@ -1165,7 +1182,14 @@ fn stream_chunks(
     // Cap installs too: terrain generation finishes on worker threads in
     // waves, and installing every completed chunk in one frame causes the
     // one-second hitch the player sees while flying at max distance.
-    let terrain_apply_cap = (budget.chunks_per_frame.max(1) as usize).min(6);
+    let terrain_apply_cap = if warmup {
+        (budget.chunks_per_frame.max(1) as usize)
+            .saturating_mul(3)
+            .max(16)
+            .min(32)
+    } else {
+        (budget.chunks_per_frame.max(1) as usize).min(12)
+    };
     let mut applied_terrain = 0usize;
     let mut done: Vec<ChunkPos> = Vec::new();
     let mut newly_loaded: Vec<ChunkPos> = Vec::new();
@@ -1323,7 +1347,14 @@ fn mesh_dirty_chunks(
     // 1. Poll finished meshing tasks. Cap how many we actually *apply*
     //    (spawn entities for) per frame so a flood of finished tasks
     //    can't spike the frame budget with mesh.add() + commands.spawn().
-    let spawn_cap = budget.mesh_applies_per_frame as usize;
+    let spawn_cap = if streamer.stream_elapsed < 4.0 {
+        (budget.mesh_applies_per_frame as usize)
+            .saturating_mul(3)
+            .max(16)
+            .min(48)
+    } else {
+        budget.mesh_applies_per_frame as usize
+    };
     let mut applied = 0usize;
     let mut done_keys: Vec<ChunkPos> = Vec::new();
     let mut finished: Vec<(ChunkPos, Vec<(MaterialId, Mesh)>)> = Vec::new();

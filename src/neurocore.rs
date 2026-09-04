@@ -506,7 +506,9 @@ impl NeuroCore {
         };
 
         if self.effective_render_distance <= 0 {
-            self.effective_render_distance = target.min(32).max(floor);
+            // Start with a small disc so the first seconds fill ground
+            // around the player instead of queuing a 32-chunk empty sky.
+            self.effective_render_distance = target.min(8).max(6);
         }
         if self.effective_render_distance > target {
             self.effective_render_distance = target;
