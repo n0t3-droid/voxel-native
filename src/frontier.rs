@@ -1744,19 +1744,31 @@ impl FrontierPlanner {
         let base_y = chunk.pos.y * CHUNK_SIZE_I;
         let top_y = base_y + CHUNK_SIZE_I - 1;
 
-        for cluster in CrystalCluster::near(self.seed, wx, wz) {
-            cluster.stamp(self.seed, chunk, ground);
-        }
-        CrystalCluster::hero().stamp(self.seed, chunk, ground);
-        CrystalCluster::hero_b().stamp(self.seed, chunk, ground);
-        CrystalCluster::hero_c().stamp(self.seed, chunk, ground);
-        CrystalCluster::hero_d().stamp(self.seed, chunk, ground);
         for hab in CliffHab::hero_cluster() {
             hab.stamp(chunk, ground);
         }
         for face in CliffFace::look_cone() {
             face.stamp(chunk, ground);
         }
+        // Crystals after the west-face carve so the hero cluster is not
+        // deleted with the apron. Root them in the pit so they occupy
+        // the left third of the opening look instead of sitting inside
+        // the mesa cap.
+        let canyon_floor = |x: i32, z: i32| {
+            let g = ground(x, z);
+            if in_opening_look(x, z) {
+                g - 28
+            } else {
+                g
+            }
+        };
+        for cluster in CrystalCluster::near(self.seed, wx, wz) {
+            cluster.stamp(self.seed, chunk, canyon_floor);
+        }
+        CrystalCluster::hero().stamp(self.seed, chunk, canyon_floor);
+        CrystalCluster::hero_b().stamp(self.seed, chunk, ground);
+        CrystalCluster::hero_c().stamp(self.seed, chunk, canyon_floor);
+        CrystalCluster::hero_d().stamp(self.seed, chunk, canyon_floor);
         // Widest island root reaches ~1.6 radii below the core.
         if top_y >= SKY_ISLAND_MIN_Y - 48 && base_y <= SKY_ISLAND_MAX_Y + 12 {
             SkyIsland::hero().stamp(self.seed, chunk);

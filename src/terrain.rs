@@ -2750,7 +2750,7 @@ impl TerrainGenerator {
     /// lava curtains hang on the face; skyway is a crest ribbon only.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
         let eye = [46.5_f32, 64.0, -76.5];
-        let look = [130.0_f32, 78.0, -82.0];
+        let look = [108.0_f32, 56.0, -82.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
@@ -2974,6 +2974,10 @@ mod tests {
             pos[1]
         );
         assert!(yaw > 0.90, "should look +X at the carved west face");
+        assert!(
+            pitch < 0.05,
+            "should look at the wall, not over the crest (pitch={pitch})"
+        );
         assert!(
             pitch.abs() < 0.45,
             "should look nearly level at the west wall (pitch={pitch})"
