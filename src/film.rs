@@ -272,9 +272,9 @@ fn film_spawn_shuttle(
     };
     film.shuttle_spawned = true;
     let pos = Vec3::new(
-        island.cx as f32 + 14.0,
-        island.deck_y as f32 + 4.5,
-        island.cz as f32 + 1.0,
+        island.cx as f32 + 24.0,
+        island.deck_y as f32 + 6.0,
+        island.cz as f32 + 4.0,
     );
     // Nose toward −X so wakes stream past a rear-quarter camera.
     let yaw = std::f32::consts::FRAC_PI_2;
@@ -332,7 +332,7 @@ fn film_drive_camera(
     mut mode: ResMut<ModeContext>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut sun_q: Query<&mut DirectionalLight, With<Sun>>,
-    mut query: Query<(&mut Transform, &mut Player)>,
+    mut query: Query<(&mut Transform, &mut Player, &mut Projection)>,
     mut fill_q: Query<
         &mut Transform,
         (With<FilmFillLight>, Without<Player>, Without<FilmRimLight>),
@@ -342,11 +342,17 @@ fn film_drive_camera(
     if !film.enabled || film.finished {
         return;
     }
-    let Ok((mut transform, mut player)) = query.get_single_mut() else {
+    let Ok((mut transform, mut player, mut projection)) = query.get_single_mut() else {
         return;
     };
     let dt = time.delta_seconds().min(1.0);
     film.elapsed += dt;
+
+    // Tighter hero FOV so pad figures and grass fill the frame.
+    if let Projection::Perspective(ref mut persp) = *projection {
+        let target: f32 = if film.shot_index == 6 { 42.0 } else { 52.0 };
+        persp.fov = target.to_radians();
+    }
 
     ambient.brightness = ambient.brightness.max(1_450.0);
     ambient.color = Color::srgb(0.72, 0.78, 0.88);
@@ -498,62 +504,63 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
 
     match index {
         0 => {
-            // Grass close-up: hover over the lawn looking down at tufts.
-            let dist = ISLAND_CLOSEUP_DISTANCE_M;
-            let pos = deck + Vec3::new(3.5, dist * 0.55, 6.5);
-            let look = deck + Vec3::new(0.5, 0.8, -0.5);
+            // Grass lawn on the +X deck (outside the ±5 pad) looking down.
+            let lawn = deck + Vec3::new(9.0, 0.0, -1.0);
+            let pos = lawn + Vec3::new(2.0, 8.5, 5.0);
+            let look = lawn + Vec3::new(0.0, 1.2, 0.0);
             (pos, look)
         }
         1 => {
-            // Under-keel hanging crystals.
-            let pos = deck + Vec3::new(-5.0, -3.5, 5.0);
-            let look = deck + Vec3::new(0.0, -3.0, 0.0);
+            // Under-keel hanging crystals — stand off so spikes fill mid-frame.
+            let pos = deck + Vec3::new(-7.0, -4.0, 9.0);
+            let look = deck + Vec3::new(0.0, -4.5, 0.0);
             (pos, look)
         }
         2 => {
-            // Combat pad — marine (−3,2) vs alien (+2,2), ~6 m.
-            let pos = station + Vec3::new(-5.5, 3.2, 6.0);
-            let look = station + Vec3::new(-0.5, 2.6, 2.2);
+            // Combat pad — elevated three-quarter on marine vs alien (~10 m).
+            let pos = station + Vec3::new(-7.5, 5.0, 10.0);
+            let look = station + Vec3::new(-0.5, 2.8, 2.2);
             (pos, look)
         }
         3 => {
             // Pad rail-crew pair at (−4, ·, −2/−3).
-            let pos = station + Vec3::new(-6.5, 2.8, 1.0);
-            let look = station + Vec3::new(-4.0, 2.4, -2.5);
+            let pos = station + Vec3::new(-9.0, 4.0, 3.0);
+            let look = station + Vec3::new(-4.0, 2.6, -2.5);
             (pos, look)
         }
         4 => {
-            // Tunnel portal (−Z) + fighter plume (+X).
-            let pos = station + Vec3::new(5.5, 3.0, -3.5);
-            let look = station + Vec3::new(6.0, 2.2, -0.5);
+            // Tunnel portal (−Z) + fighter plume (+X) from a clear stand-off.
+            let pos = station + Vec3::new(11.0, 5.5, -9.0);
+            let look = station + Vec3::new(6.5, 2.4, -1.0);
             (pos, look)
         }
         5 => {
-            // Hero shuttle rear-quarter so cyan wakes fill the frame.
+            // Hero shuttle rear-quarter so cyan wakes read.
             let shuttle = Vec3::new(
-                island.cx as f32 + 14.0,
-                island.deck_y as f32 + 4.5,
-                island.cz as f32 + 1.0,
+                island.cx as f32 + 24.0,
+                island.deck_y as f32 + 6.0,
+                island.cz as f32 + 4.0,
             );
-            let pos = shuttle + Vec3::new(5.5, 2.2, 4.5);
-            let look = shuttle + Vec3::new(-2.0, 0.3, 0.0);
+            let pos = shuttle + Vec3::new(8.0, 3.0, 7.0);
+            let look = shuttle + Vec3::new(-3.0, 0.4, 0.0);
             (pos, look)
         }
         6 => {
-            // Ringed planet — tip camera up into the sky landmark.
-            let pos = deck + Vec3::new(-12.0, 18.0, 20.0);
-            let look = pos + Vec3::new(0.25, 0.65, -0.55).normalize() * 60.0;
+            // Ringed planet — match sky.rs planet_dir so the giant fills frame.
+            let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
+            let pos = deck + Vec3::new(-6.0, 14.0, 12.0);
+            let look = pos + planet_dir * 120.0;
             (pos, look)
         }
         _ => {
             // Skyway rail — rim of the island toward a span.
-            let pos = deck + Vec3::new(island.radius_x as f32 + 6.0, 4.0, 2.0);
+            let pos = deck + Vec3::new(island.radius_x as f32 + 8.0, 5.0, 4.0);
             let surface =
                 world.surface_height_at(island.cx + island.radius_x + 16, island.cz) as f32;
             let look = Vec3::new(
-                island.cx as f32 + island.radius_x as f32 + 4.0,
-                (island.deck_y as f32 + 2.0).max(surface + 3.0),
-                island.cz as f32,
+                island.cx as f32 + island.radius_x as f32 + 5.0,
+                (island.deck_y as f32 + 2.5).max(surface + 3.0),
+                island.cz as f32 + 1.0,
             );
             (pos, look)
         }

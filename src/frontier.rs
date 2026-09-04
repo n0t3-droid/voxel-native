@@ -384,17 +384,28 @@ fn fill_island_column(
         set_in_chunk(chunk, wx, y, wz, origin_y, block, true);
     }
 
-    // Deck grass tufts: short leaf sprigs so a 15–25 m film close-up still
+    // Deck grass tufts: denser leaf sprigs so a mid-close film pass still
     // reads a living lawn instead of a flat green slab.
-    if !rim && col.dist_norm > 280 && hash01(seed, wx, wz, 19) < 0.38 {
+    if !rim && col.dist_norm > 220 && hash01(seed, wx, wz, 19) < 0.55 {
         let tuft = if hash01(seed, wx, wz, 20) < 0.55 {
             BlockType::Leaves
         } else {
             BlockType::SavannaGrass
         };
         set_in_chunk(chunk, wx, col.top_y + 1, wz, origin_y, tuft, false);
-        if hash01(seed, wx, wz, 21) < 0.28 {
+        if hash01(seed, wx, wz, 21) < 0.45 {
             set_in_chunk(chunk, wx, col.top_y + 2, wz, origin_y, tuft, false);
+        }
+        if hash01(seed, wx, wz, 22) < 0.22 {
+            set_in_chunk(
+                chunk,
+                wx,
+                col.top_y + 3,
+                wz,
+                origin_y,
+                BlockType::NeonCyan,
+                false,
+            );
         }
     }
 
@@ -835,6 +846,10 @@ fn marine_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     if lx == 0 && lz == 1 && dy == 4 {
         return Some(BlockType::NeonCyan);
     }
+    // Shoulder beacon so the biped pops under bloom at ~10 m.
+    if lx == 0 && lz == 0 && dy == 5 {
+        return Some(BlockType::NeonAmber);
+    }
     // Rifle arm extending +X (stops short of the mast at x=0).
     if lz == 0 && dy == 3 && (1..=2).contains(&lx) {
         return Some(if lx == 2 {
@@ -861,6 +876,7 @@ fn alien_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
             3 => Some(BlockType::NeonMagenta),
             4 => Some(BlockType::NeonMagenta),
             5 => Some(BlockType::from_voxel(VOXEL_CRYSTAL_MAGENTA)),
+            6 => Some(BlockType::NeonMagenta), // crest beacon
             _ => None,
         };
     }
