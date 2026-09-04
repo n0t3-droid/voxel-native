@@ -1137,45 +1137,48 @@ pub struct CliffHab {
     pub floors: i32,
     pub width: i32,
     pub depth: i32,
-    /// Blocks below local ground. 0 sits on the mesa; >0 hangs the hab
-    /// on the cliff face so the colony terraces down instead of floating
-    /// as a row of pillars on the cap.
+    /// Blocks below the height sample. 0 sits on the mesa; >0 hangs the
+    /// hab on the cliff face.
     pub drop: i32,
+    /// Extra blocks EAST of `cx` used as the height sample and as a
+    /// westward deck so the hab sits on a ledge in front of the mesa
+    /// instead of inside the cap. 0 = no ledge (mesa-top cluster).
+    pub ledge: i32,
 }
 
 impl CliffHab {
     pub fn hero_cluster() -> [Self; 28] {
         [
-            Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4, drop: 0 },
-            Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5, drop: 0 },
-            Self { cx: 84, cz: -54, floors: 6, width: 6, depth: 4, drop: 0 },
-            Self { cx: 22, cz: -82, floors: 6, width: 4, depth: 4, drop: 0 },
-            Self { cx: 108, cz: -66, floors: 8, width: 5, depth: 3, drop: 0 },
-            Self { cx: 70, cz: -40, floors: 4, width: 7, depth: 5, drop: 0 },
-            Self { cx: 128, cz: -92, floors: 7, width: 5, depth: 4, drop: 0 },
-            Self { cx: 146, cz: -74, floors: 9, width: 4, depth: 5, drop: 0 },
-            Self { cx: 96, cz: -108, floors: 6, width: 6, depth: 4, drop: 0 },
-            Self { cx: 168, cz: -88, floors: 8, width: 5, depth: 4, drop: 0 },
-            Self { cx: 118, cz: -58, floors: 5, width: 6, depth: 4, drop: 0 },
-            Self { cx: 138, cz: -108, floors: 8, width: 4, depth: 4, drop: 0 },
-            Self { cx: 158, cz: -64, floors: 6, width: 5, depth: 5, drop: 0 },
-            Self { cx: 112, cz: -84, floors: 10, width: 4, depth: 4, drop: 0 },
-            Self { cx: 78, cz: -96, floors: 5, width: 7, depth: 4, drop: 0 },
-            Self { cx: 48, cz: -98, floors: 7, width: 4, depth: 5, drop: 0 },
-            Self { cx: 64, cz: -52, floors: 3, width: 8, depth: 6, drop: 0 },
-            Self { cx: 100, cz: -48, floors: 4, width: 5, depth: 4, drop: 0 },
-            Self { cx: 124, cz: -76, floors: 6, width: 5, depth: 3, drop: 0 },
-            Self { cx: 152, cz: -96, floors: 5, width: 6, depth: 4, drop: 0 },
-            Self { cx: 90, cz: -80, floors: 3, width: 9, depth: 5, drop: 0 },
-            Self { cx: 174, cz: -70, floors: 7, width: 4, depth: 4, drop: 0 },
-            // West face, toward the postcard camera (+X/−Z from origin).
-            // South-face drops sat inside the cap and never read as a cliff city.
-            Self { cx: 24, cz: -72, floors: 5, width: 6, depth: 5, drop: 8 },
-            Self { cx: 36, cz: -86, floors: 6, width: 5, depth: 5, drop: 14 },
-            Self { cx: 18, cz: -64, floors: 4, width: 5, depth: 4, drop: 10 },
-            Self { cx: 44, cz: -98, floors: 5, width: 6, depth: 4, drop: 16 },
-            Self { cx: 32, cz: -54, floors: 4, width: 7, depth: 5, drop: 6 },
-            Self { cx: 28, cz: -108, floors: 3, width: 8, depth: 5, drop: 18 },
+            Self { cx: 38, cz: -58, floors: 5, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 56, cz: -70, floors: 7, width: 4, depth: 5, drop: 0, ledge: 0 },
+            Self { cx: 84, cz: -54, floors: 6, width: 6, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 22, cz: -82, floors: 6, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 108, cz: -66, floors: 8, width: 5, depth: 3, drop: 0, ledge: 0 },
+            Self { cx: 70, cz: -40, floors: 4, width: 7, depth: 5, drop: 0, ledge: 0 },
+            Self { cx: 128, cz: -92, floors: 7, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 146, cz: -74, floors: 9, width: 4, depth: 5, drop: 0, ledge: 0 },
+            Self { cx: 96, cz: -108, floors: 6, width: 6, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 168, cz: -88, floors: 8, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 118, cz: -58, floors: 5, width: 6, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 138, cz: -108, floors: 8, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 158, cz: -64, floors: 6, width: 5, depth: 5, drop: 0, ledge: 0 },
+            Self { cx: 112, cz: -84, floors: 10, width: 4, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 78, cz: -96, floors: 5, width: 7, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 48, cz: -98, floors: 7, width: 4, depth: 5, drop: 0, ledge: 0 },
+            Self { cx: 64, cz: -52, floors: 3, width: 8, depth: 6, drop: 0, ledge: 0 },
+            Self { cx: 100, cz: -48, floors: 4, width: 5, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 124, cz: -76, floors: 6, width: 5, depth: 3, drop: 0, ledge: 0 },
+            Self { cx: 152, cz: -96, floors: 5, width: 6, depth: 4, drop: 0, ledge: 0 },
+            Self { cx: 90, cz: -80, floors: 3, width: 9, depth: 5, drop: 0, ledge: 0 },
+            Self { cx: 174, cz: -70, floors: 7, width: 4, depth: 4, drop: 0, ledge: 0 },
+            // Habs on westward ledges: height from the mesa rim (`cx+ledge`),
+            // building parked in front of the west face the postcard sees.
+            Self { cx: 12, cz: -72, floors: 5, width: 5, depth: 5, drop: 10, ledge: 30 },
+            Self { cx: 16, cz: -86, floors: 6, width: 5, depth: 4, drop: 14, ledge: 28 },
+            Self { cx: 10, cz: -64, floors: 4, width: 5, depth: 4, drop: 8, ledge: 26 },
+            Self { cx: 20, cz: -98, floors: 5, width: 6, depth: 4, drop: 16, ledge: 32 },
+            Self { cx: 14, cz: -54, floors: 4, width: 6, depth: 5, drop: 6, ledge: 24 },
+            Self { cx: 12, cz: -108, floors: 3, width: 7, depth: 5, drop: 18, ledge: 28 },
         ]
     }
 
@@ -1185,15 +1188,19 @@ impl CliffHab {
         let hw = self.width / 2;
         let hd = self.depth / 2;
         let pad = 2;
-        let reach = hw.max(hd) + pad + 1;
-        if (ox + CHUNK_SIZE_I <= self.cx - reach)
-            || (ox > self.cx + reach)
-            || (oz + CHUNK_SIZE_I <= self.cz - reach)
-            || (oz > self.cz + reach)
+        let east = self.cx + self.ledge.max(hw) + pad + 1;
+        let west = self.cx - hw - pad - 1;
+        let north = self.cz - hd - pad - 1;
+        let south = self.cz + hd + pad + 1;
+        if (ox + CHUNK_SIZE_I <= west)
+            || (ox > east)
+            || (oz + CHUNK_SIZE_I <= north)
+            || (oz > south)
         {
             return;
         }
-        let base = ground(self.cx, self.cz) - self.drop;
+        let sample_x = self.cx + self.ledge;
+        let base = ground(sample_x, self.cz) - self.drop;
         let top = base + self.floors * 3 + 2;
         if oy > top || oy + CHUNK_SIZE_I <= base {
             return;
@@ -1270,6 +1277,34 @@ impl CliffHab {
                 );
                 if outer && (dx + dz).rem_euclid(3) == 0 {
                     place_over(chunk, origin, wx, base + 2, wz, BlockType::NeonAmber);
+                }
+            }
+        }
+        // Westward cliff deck so hanging habs sit in front of the mesa
+        // face the postcard camera actually sees after the fly-in.
+        if self.ledge > 0 {
+            let deck_half = hd + 1;
+            for dx in 1..=self.ledge {
+                for dz in -deck_half..=deck_half {
+                    let wx = self.cx + dx;
+                    let wz = self.cz + dz;
+                    let edge = dz.abs() == deck_half || dx == 1 || dx == self.ledge;
+                    place_over(chunk, origin, wx, base, wz, BlockType::PlatingTeal);
+                    place_over(
+                        chunk,
+                        origin,
+                        wx,
+                        base + 1,
+                        wz,
+                        if edge {
+                            BlockType::PlatingWhite
+                        } else {
+                            BlockType::RoadDeck
+                        },
+                    );
+                    if edge && (dx + dz).rem_euclid(2) == 0 {
+                        place_over(chunk, origin, wx, base + 2, wz, BlockType::NeonAmber);
+                    }
                 }
             }
         }
@@ -1629,6 +1664,7 @@ mod tests {
             width: 5,
             depth: 4,
             drop: 0,
+            ledge: 0,
         };
         let mut chunk = Chunk::new(ChunkPos::new(0, 4, 0));
         hab.stamp(&mut chunk, |_, _| 64);
@@ -1641,14 +1677,20 @@ mod tests {
         assert_eq!(CliffHab::hero_cluster().len(), 28);
         for h in CliffHab::hero_cluster() {
             assert!(in_hero_postcard(h.cx, h.cz), "hab {},{} left the postcard", h.cx, h.cz);
+            assert!(
+                in_hero_postcard(h.cx + h.ledge, h.cz),
+                "hab ledge {},{} left the postcard",
+                h.cx + h.ledge,
+                h.cz
+            );
         }
         assert!(
             CliffHab::hero_cluster()
                 .iter()
-                .filter(|h| h.cx < 50 && h.drop >= 6)
+                .filter(|h| h.cx < 24 && h.ledge >= 24 && h.drop >= 6)
                 .count()
                 >= 4,
-            "west-face terraces missing from the postcard look cone"
+            "west-face ledges missing from the postcard look cone"
         );
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
         let sky = SkywayNetwork::new(1);
