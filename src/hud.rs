@@ -388,6 +388,7 @@ fn draw_neon_combat_hud(
     mut contexts: EguiContexts,
     state: Res<State<crate::menu::GameState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
     settings: Res<WorldSettings>,
     world: Res<VoxelWorld>,
     governor: Res<StreamingGovernor>,
@@ -399,6 +400,9 @@ fn draw_neon_combat_hud(
     suit: Res<SuitVitals>,
 ) {
     if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if film.as_ref().map(|f| f.hide_hud).unwrap_or(false) {
         return;
     }
     if mode

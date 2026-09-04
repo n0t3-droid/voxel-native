@@ -17,9 +17,11 @@ use crate::frontier::{
     find_nearest_island, IslandSpec, ISLAND_CLOSEUP_DISTANCE_M, STATION_HEADROOM,
 };
 use crate::menu::{GameState, PendingWorldLoad};
+use crate::mode::{ActiveMode, ModeContext};
 use crate::player::Player;
 use crate::settings::{ActiveWorld, TimeMode, WorldMeta, WorldSettings};
-use crate::world::VoxelWorld;
+use crate::toolbelt::ToolbeltState;
+use crate::world::{ChunkStreamer, VoxelWorld};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -94,7 +96,7 @@ impl FilmRuntime {
             elapsed: 0.0,
             duration,
             shot_index: 0,
-            next_capture_at: 2.5,
+            next_capture_at: 8.0,
             capture_interval,
             lights_spawned: false,
             island: None,
@@ -133,6 +135,8 @@ fn film_enter_game(
     mut next: ResMut<NextState<GameState>>,
     mut pending: ResMut<PendingWorldLoad>,
     mut settings: ResMut<WorldSettings>,
+    mut mode: ResMut<ModeContext>,
+    mut toolbelt: ResMut<ToolbeltState>,
 ) {
     if !film.enabled || film.started || *state.get() != GameState::MainMenu {
         return;
@@ -150,6 +154,10 @@ fn film_enter_game(
     settings.seed = seed;
     settings.time_mode = meta.time_mode;
     settings.time_of_day = meta.time_of_day;
+    // Combat mode hides the Build Studio egui dock so film frames stay clean.
+    mode.set(ActiveMode::Combat, "Film recorder: HUD-off combat framing.");
+    toolbelt.live = false;
+    toolbelt.palette_open = false;
     commands.insert_resource(ActiveWorld { meta });
     pending.0 = true;
     next.set(GameState::InGame);
@@ -176,9 +184,9 @@ fn film_spawn_lights(
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
-                color: Color::srgb(0.72, 0.84, 1.0),
-                intensity: 85_000.0,
-                range: 90.0,
+                color: Color::srgb(0.78, 0.88, 1.0),
+                intensity: 220_000.0,
+                range: 140.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -192,9 +200,9 @@ fn film_spawn_lights(
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
-                color: Color::srgb(1.0, 0.62, 0.38),
-                intensity: 55_000.0,
-                range: 70.0,
+                color: Color::srgb(1.0, 0.68, 0.42),
+                intensity: 160_000.0,
+                range: 120.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -204,12 +212,28 @@ fn film_spawn_lights(
         FilmRimLight,
         Name::new("FilmRimLight"),
     ));
+    // Key fill above the deck — keeps grass readable at 15–25 m.
+    commands.spawn((
+        PointLightBundle {
+            point_light: PointLight {
+                color: Color::srgb(0.95, 0.92, 0.85),
+                intensity: 280_000.0,
+                range: 160.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            transform: Transform::from_xyz(0.0, 40.0, 0.0),
+            ..default()
+        },
+        FilmFillLight,
+        Name::new("FilmKeyLight"),
+    ));
 
-    ambient.brightness = ambient.brightness.max(620.0);
-    ambient.color = Color::srgb(0.55, 0.62, 0.78);
+    ambient.brightness = ambient.brightness.max(980.0);
+    ambient.color = Color::srgb(0.62, 0.68, 0.82);
     if let Ok(mut bloom) = bloom_q.get_single_mut() {
-        bloom.intensity = bloom.intensity.max(0.16);
-        bloom.prefilter_settings.threshold = 0.55;
+        bloom.intensity = bloom.intensity.max(0.18);
+        bloom.prefilter_settings.threshold = 0.45;
     }
 }
 
@@ -250,7 +274,11 @@ const SHOTS: &[FilmShot] = &[
 fn film_drive_camera(
     time: Res<Time>,
     world: Res<VoxelWorld>,
+    streamer: Res<ChunkStreamer>,
     mut film: ResMut<FilmRuntime>,
+    mut ambient: ResMut<AmbientLight>,
+    mut mode: ResMut<ModeContext>,
+    mut toolbelt: ResMut<ToolbeltState>,
     mut query: Query<(&mut Transform, &mut Player)>,
     mut fill_q: Query<
         &mut Transform,
@@ -267,15 +295,38 @@ fn film_drive_camera(
     let dt = time.delta_seconds().min(1.0);
     film.elapsed += dt;
 
+    // Day/night rewrites ambient each frame — reassert the film floor so
+    // dark voxels do not crush under ACES.
+    ambient.brightness = ambient.brightness.max(980.0);
+    ambient.color = Color::srgb(0.62, 0.68, 0.82);
+    if !matches!(mode.mode, ActiveMode::Combat) {
+        mode.set(ActiveMode::Combat, "Film recorder: HUD-off combat framing.");
+        toolbelt.live = false;
+        toolbelt.palette_open = false;
+    }
+
     if film.island.is_none() {
-        film.island = find_nearest_island(
-            world.generator.seed,
-            0,
-            0,
-            8000,
-            |x, z| world.generator.surface_height_at(x, z),
-            |x, z| world.generator.biome_at(x, z),
-        );
+        // Prefer a station island so combat / portal / fighter beats land.
+        let mut best = None;
+        for origin in [(0, 0), (500, 0), (0, 500), (-500, 0), (0, -500), (900, 900)] {
+            if let Some(spec) = find_nearest_island(
+                world.generator.seed,
+                origin.0,
+                origin.1,
+                6000,
+                |x, z| world.generator.surface_height_at(x, z),
+                |x, z| world.generator.biome_at(x, z),
+            ) {
+                if spec.has_station {
+                    best = Some(spec);
+                    break;
+                }
+                if best.is_none() {
+                    best = Some(spec);
+                }
+            }
+        }
+        film.island = best;
     }
     let Some(island) = film.island else {
         return;
@@ -300,11 +351,19 @@ fn film_drive_camera(
     let right = transform.right();
     let up = transform.up();
     let forward = transform.forward();
-    if let Ok(mut fill_tf) = fill_q.get_single_mut() {
-        fill_tf.translation = pos + right * 10.0 + up * 6.0 - forward * 4.0;
+    for mut fill_tf in fill_q.iter_mut() {
+        fill_tf.translation = pos + right * 8.0 + up * 16.0 - forward * 2.0;
     }
     if let Ok(mut rim_tf) = rim_q.get_single_mut() {
-        rim_tf.translation = pos - right * 12.0 + up * 3.0 + forward * 8.0;
+        rim_tf.translation = pos - right * 12.0 + up * 4.0 + forward * 8.0;
+    }
+
+    // Soft stream gate: give the hero island a few seconds to mesh, but
+    // never starve the whole film on slow software adapters.
+    let pending = streamer.pending_terrain.len() + streamer.pending_meshes.len();
+    let loaded = world.chunks.len();
+    if film.elapsed < 14.0 && film.captures.is_empty() && (pending > 120 || loaded < 24) {
+        film.next_capture_at = film.next_capture_at.max(film.elapsed + 0.75);
     }
 
     let shot_i = SHOTS.iter().rposition(|s| t + 1e-3 >= s.at).unwrap_or(0);

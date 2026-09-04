@@ -9,3 +9,5 @@
 /voxel-web-smoke.png
 /engine-current-window.png
 /.playwright-mcp/*.png
+video_captures/
+saves/

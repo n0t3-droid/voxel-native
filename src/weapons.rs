@@ -3653,6 +3653,7 @@ fn animate_viewmodel(
     active: Res<ActiveWeapon>,
     toolbelt: Option<Res<crate::toolbelt::ToolbeltState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
     mut holster: ResMut<WeaponHolster>,
     mut q: Query<(&mut Transform, &Weapon, &WeaponRestPose, &mut Visibility)>,
 ) {
@@ -3669,7 +3670,8 @@ fn animate_viewmodel(
                 .as_deref()
                 .map(|toolbelt| toolbelt.blocks_weapons())
                 .unwrap_or(false)
-        });
+        })
+        || film.as_ref().map(|f| f.hide_hud).unwrap_or(false);
     let holster_target = if hide_for_edit { 1.0 } else { 0.0 };
     let holster_speed = if hide_for_edit { 7.0 } else { 6.0 };
     let holster_k = (time.delta_seconds() * holster_speed).min(1.0);
