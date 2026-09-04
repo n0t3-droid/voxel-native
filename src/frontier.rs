@@ -1383,28 +1383,33 @@ pub struct CliffFace {
     pub depth: i32,
     pub drop: i32,
     pub rise: i32,
+    /// Blocks WEST of the lip to excavate so a flat mesa still presents
+    /// a west-facing wall to the camera at ~x=90. 0 = no apron.
+    pub apron: i32,
 }
 
 impl CliffFace {
     pub fn look_cone() -> [Self; 2] {
         [
             Self {
-                face_x: 100,
-                z0: -122,
-                z1: -62,
-                levels: 4,
-                depth: 8,
-                drop: 8,
+                face_x: 102,
+                z0: -124,
+                z1: -60,
+                levels: 5,
+                depth: 9,
+                drop: 6,
                 rise: 6,
+                apron: 14,
             },
             Self {
-                face_x: 116,
+                face_x: 118,
                 z0: -108,
                 z1: -72,
                 levels: 3,
-                depth: 7,
-                drop: 16,
+                depth: 6,
+                drop: 18,
                 rise: 5,
+                apron: 0,
             },
         ]
     }
@@ -1412,7 +1417,7 @@ impl CliffFace {
     pub fn stamp(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
         let origin = chunk.pos.origin();
         let (ox, oy, oz) = origin;
-        let west = self.face_x - 1;
+        let west = self.face_x - self.apron.max(1);
         let east = self.face_x + self.depth + 3;
         if (ox + CHUNK_SIZE_I <= west) || (ox > east) {
             return;
@@ -1424,7 +1429,7 @@ impl CliffFace {
         let mut y_hi = i32::MIN;
         for z in self.z0..=self.z1 {
             let rim = ground(self.face_x + self.depth, z);
-            let bottom = rim - self.drop - (self.levels - 1) * self.rise - 2;
+            let bottom = rim - self.drop - (self.levels - 1) * self.rise - 4;
             y_lo = y_lo.min(bottom);
             y_hi = y_hi.max(rim + 1);
         }
@@ -1434,6 +1439,13 @@ impl CliffFace {
 
         for z in self.z0..=self.z1 {
             let rim = ground(self.face_x + self.depth, z);
+            let pit = rim - self.drop - (self.levels - 1) * self.rise - 3;
+            for dx in 1..=self.apron {
+                let wx = self.face_x - dx;
+                for wy in pit..=rim {
+                    carve(chunk, origin, wx, wy, z);
+                }
+            }
             let stair = (z - self.z0).rem_euclid(12) == 0;
             let dwelling = (z - self.z0).rem_euclid(10) == 4;
             for level in 0..self.levels {
@@ -1889,7 +1901,8 @@ mod tests {
         }
         for face in CliffFace::look_cone() {
             assert!(
-                in_hero_postcard(face.face_x, face.z0) && in_hero_postcard(face.face_x + face.depth, face.z1),
+                in_hero_postcard(face.face_x - face.apron, face.z0)
+                    && in_hero_postcard(face.face_x + face.depth, face.z1),
                 "cliff face {},{}..{} left the postcard",
                 face.face_x,
                 face.z0,
