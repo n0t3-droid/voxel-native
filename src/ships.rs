@@ -1736,13 +1736,14 @@ pub fn spawn_aether_film_shuttle(
         yaw,
         false,
         None,
+        true, // cyan wakes only — amber bloom washes the painting cue
     );
     // Replace the default parked motion with a cruise so trails bloom.
     commands.entity(entity).insert(ShipMotion {
         yaw,
         pitch: -0.08,
         roll: 0.0,
-        speed: blueprint(ShipKind::ScoutShuttle).max_speed * 0.55,
+        speed: blueprint(ShipKind::ScoutShuttle).max_speed * 0.72,
         yaw_rate: 0.0,
         pitch_rate: 0.0,
         lateral_speed: 0.0,
@@ -1762,6 +1763,7 @@ fn spawn_ship_entity(
     yaw: f32,
     preview: bool,
     shield_override: Option<f32>,
+    cyan_trails_only: bool,
 ) -> Entity {
     let bp = blueprint(kind);
     let root = commands
@@ -1807,7 +1809,7 @@ fn spawn_ship_entity(
         spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview);
         if !preview {
             spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp);
-            spawn_ship_energy_trails(p, materials, fx, &cube, kind);
+            spawn_ship_energy_trails(p, materials, fx, &cube, kind, cyan_trails_only);
             p.spawn(PointLightBundle {
                 point_light: PointLight {
                     color: Color::srgb(0.64, 0.92, 1.0),
@@ -2099,8 +2101,18 @@ fn spawn_ship_energy_trails(
     fx: &mut ShipFxCache,
     cube: &Handle<Mesh>,
     kind: ShipKind,
+    cyan_trails_only: bool,
 ) {
-    for spec in ship_trail_specs(kind) {
+    for mut spec in ship_trail_specs(kind) {
+        if cyan_trails_only && spec.tone == ShipTrailTone::Amber {
+            continue;
+        }
+        if cyan_trails_only {
+            // Longer / thicker cyan plumes for the film rear-quarter beat.
+            spec.base_scale.x *= 1.55;
+            spec.base_scale.y *= 1.45;
+            spec.base_scale.z *= 1.35;
+        }
         let material = ship_trail_material(fx, materials, spec.tone);
         parent.spawn((
             PbrBundle {
@@ -2592,6 +2604,7 @@ fn spawn_saved_ships_once(
             saved.yaw,
             false,
             Some(saved.shield),
+            false,
         );
     }
 
@@ -2614,6 +2627,7 @@ fn spawn_saved_ships_once(
             player_yaw + std::f32::consts::PI,
             false,
             None,
+            false,
         );
     }
 }
@@ -2725,6 +2739,7 @@ fn ship_placement_input(
                 placement.yaw,
                 true,
                 None,
+                false,
             );
             placement.preview = Some(e);
             e
@@ -2764,6 +2779,7 @@ fn ship_placement_input(
             placement.yaw,
             false,
             None,
+            false,
         );
         placement.active = false;
         mode.set(
