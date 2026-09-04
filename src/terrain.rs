@@ -2745,22 +2745,19 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
-    /// Overlook on the spawn mesa looking at the hero crystal / river.
-    /// Used by a normal menu "New World" so the first seconds match the
-    /// frontier postcard instead of a random plains column.
+    /// Aerial overlook of the postcard butte / canyon, not the mesa tabletop.
+    /// A menu "New World" opens on the same vista the cinematic rest camera
+    /// was built around (west of the look-cone wall, looking +X/−Z).
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let x = 34;
-        let z = -8;
-        let surface = self.surface_height_at(x, z).max(WATER_LEVEL + 6);
-        let y = surface + 12;
-        let dx = crate::frontier::HERO_CRYSTAL_X as f32 + 0.5 - (x as f32 + 0.5);
-        let dz = crate::frontier::HERO_CRYSTAL_Z as f32 + 0.5 - (z as f32 + 0.5);
+        let eye = [68.5_f32, 110.0, -22.5];
+        let look = [112.0_f32, 78.0, -82.0];
+        let dx = look[0] - eye[0];
+        let dy = look[1] - eye[1];
+        let dz = look[2] - eye[2];
         let yaw = dx.atan2(-dz);
-        (
-            [x as f32 + 0.5, y as f32, z as f32 + 0.5],
-            yaw,
-            -0.20,
-        )
+        let horiz = (dx * dx + dz * dz).sqrt();
+        let pitch = dy.atan2(horiz).clamp(-1.2, 0.35);
+        (eye, yaw, pitch)
     }
 
     pub fn find_natural_spawn(
@@ -2966,12 +2963,17 @@ mod tests {
             crate::frontier::in_spawn_frontier(pos[0] as i32, pos[2] as i32),
             "scenic spawn left the frontier disc"
         );
-        assert!(pos[1] > WATER_LEVEL as f32 + 8.0);
-        assert!(yaw.abs() > 0.05, "should face the crystal cluster");
-        assert!(pitch < 0.0, "should look slightly down at the mesa");
+        assert!(
+            pos[1] > 95.0,
+            "scenic spawn should be an aerial overlook, not mesa-top (y={})",
+            pos[1]
+        );
+        assert!(yaw > 0.25, "should look +X/−Z into the postcard canyon");
+        assert!(pitch < -0.12, "should look down at the butte / river");
         let meta = crate::settings::WorldMeta::new("test_frontier".into(), 12345);
         assert!((meta.time_of_day - 17.0).abs() < 0.01);
         assert!((meta.player_pos[0] - pos[0]).abs() < 0.1);
+        assert!((meta.player_yaw - yaw).abs() < 0.01);
     }
 
     #[test]

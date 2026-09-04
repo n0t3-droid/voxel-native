@@ -137,7 +137,7 @@ fn tick_suit_vitals(time: Res<Time>, mut vitals: ResMut<SuitVitals>, player_q: Q
 fn load_player_from_world(
     active: Option<Res<crate::settings::ActiveWorld>>,
     pending: Res<crate::menu::PendingWorldLoad>,
-    settings: Res<WorldSettings>,
+    _settings: Res<WorldSettings>,
     mut query: Query<(&mut Transform, &mut Player)>,
 ) {
     if !pending.0 {
@@ -172,13 +172,15 @@ fn load_player_from_world(
             );
         }
     }
-    // Aim the first look at the hero postcard (crystal cluster + energy
-    // river + skyway) so the opening seconds match the key art.
-    if translation.x.abs() < 280.0 && translation.z.abs() < 280.0 {
+    // Keep an authored New World look (scenic yaw is never ~0). Only
+    // retarget at the hero crystal when the save has the old default
+    // heading, otherwise the mesa-top spawn got overwritten into a
+    // tabletop stare and the canyon postcard never appeared.
+    if translation.x.abs() < 280.0 && translation.z.abs() < 280.0 && yaw.abs() < 0.05 {
         let dx = crate::frontier::HERO_CRYSTAL_X as f32 + 0.5 - translation.x;
         let dz = crate::frontier::HERO_CRYSTAL_Z as f32 + 0.5 - translation.z;
         yaw = dx.atan2(-dz);
-        pitch = -0.14;
+        pitch = -0.22;
     }
     tf.translation = translation;
     player.yaw = yaw;
