@@ -154,6 +154,7 @@ fn film_enter_game(
     settings.seed = seed;
     settings.time_mode = meta.time_mode;
     settings.time_of_day = meta.time_of_day;
+    settings.companion_ui.show_companion_dock = false;
     // Combat mode hides the Build Studio egui dock so film frames stay clean.
     mode.set(ActiveMode::Combat, "Film recorder: HUD-off combat framing.");
     toolbelt.live = false;

@@ -871,8 +871,12 @@ fn draw_workflow_rail(
     state: Res<State<crate::menu::GameState>>,
     settings: Res<WorldSettings>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
 ) {
     if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if film.as_ref().map(|f| f.hide_hud).unwrap_or(false) {
         return;
     }
     let steps = workflow_steps_for_profile(settings.hud_profile);
