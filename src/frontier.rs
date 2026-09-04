@@ -1039,10 +1039,14 @@ fn hero_skyway_column(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 }
 
 /// North–south spur so the postcard has a crossing instead of a single
-/// lonely east–west deck.
+/// lonely east–west deck. Gapped in the look cone so the west-face
+/// butte isn't hidden behind a full-width carriageway.
 fn hero_skyway_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const SPUR_X: i32 = 96;
     if wz < -120 || wz > -18 {
+        return None;
+    }
+    if wz >= -104 && wz <= -48 {
         return None;
     }
     let dist = (wx - SPUR_X).abs() as f64;
@@ -1412,7 +1416,7 @@ impl CliffFace {
                 drop: 8,
                 rise: 5,
                 apron: 4,
-                crest: 22,
+                crest: 32,
             },
             Self {
                 face_x: 116,
@@ -1511,7 +1515,7 @@ impl CliffFace {
                     back,
                     floor + 1,
                     z,
-                    BlockType::PlatingWhite,
+                    BlockType::HoloPanel,
                 );
                 place_over_unless_glow(
                     chunk,
