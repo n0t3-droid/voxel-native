@@ -84,11 +84,11 @@ impl FilmRuntime {
     fn from_env() -> Self {
         let enabled = film_enabled();
         let settle_secs = env_f32("VOXEL_NATIVE_FILM_SETTLE")
-            .unwrap_or(3.5)
+            .unwrap_or(4.0)
             .clamp(1.0, 20.0);
         let hold_after_secs = env_f32("VOXEL_NATIVE_FILM_HOLD")
-            .unwrap_or(2.0)
-            .clamp(0.5, 10.0);
+            .unwrap_or(6.0)
+            .clamp(0.5, 30.0);
         #[cfg(not(target_arch = "wasm32"))]
         let out_dir = {
             let stamp = std::time::SystemTime::now()
@@ -437,9 +437,21 @@ fn film_drive_camera(
         return;
     }
 
-    // Advance beat after settle + capture + post-hold.
+    // Advance beat only after the PNG has landed on disk (lavapipe blit
+    // often lags several seconds past queue time) plus a short hold.
     if let Some(queued_at) = film.capture_queued_at {
-        if film.elapsed >= queued_at + film.hold_after_secs {
+        let last = film.captures.last().cloned();
+        let file_ready = last
+            .as_ref()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .metadata()
+                    .map(|m| m.len() > 8_000)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        let waited = film.elapsed >= queued_at + film.hold_after_secs;
+        if file_ready && waited {
             if film.shot_index + 1 >= SHOTS.len() {
                 // Stay on last pose until finish timer.
             } else {
