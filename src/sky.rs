@@ -76,7 +76,7 @@ pub const MOON_C_SEMI_MAJOR: f64 = 1.25;
 /// exaggerate to 8 % of the disc radius so the annulus reads as a true
 /// 3D volume when viewed near edge-on, while radial proportions stay
 /// NASA-true (C-inner / A-outer / Cassini).
-pub const SATURN_RING_VISUAL_HALF_HEIGHT_FRAC: f32 = 0.08;
+pub const SATURN_RING_VISUAL_HALF_HEIGHT_FRAC: f32 = 0.12;
 
 const _: () = assert!(SATURN_C_RING_INNER_KM > SATURN_EQUATORIAL_RADIUS_KM);
 const _: () = assert!(SATURN_A_RING_OUTER_KM > SATURN_CASSINI_DIVISION_KM);
@@ -470,7 +470,7 @@ fn setup_sky(
     // ----- Ringed gas-giant planet ------------------------------------
     // Parked in a fixed sky direction; doesn't track the sun. Serves as
     // a dramatic backdrop feature like in reference image 2.
-    let planet_radius = 78.0;
+    let planet_radius = 110.0;
     let (ring_inner, ring_outer) = saturn_ring_radii(planet_radius);
     let ring_half_h = saturn_ring_half_height(planet_radius);
     let planet_mesh = meshes.add(
@@ -1197,7 +1197,7 @@ mod tests {
             "Cassini Division should be a real density drop"
         );
         let half_h = saturn_ring_half_height(100.0);
-        assert!((half_h - 8.0).abs() < 1e-4);
+        assert!((half_h - 12.0).abs() < 1e-4);
         let mesh = build_ring_mesh(inner, outer, half_h, 48);
         let y_extent = ring_mesh_y_extent(&mesh);
         assert!(

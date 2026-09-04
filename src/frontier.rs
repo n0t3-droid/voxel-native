@@ -820,8 +820,8 @@ fn rail_crew_pad_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
 
 /// Biped marine: helmeted torso + rifle arm. Occupies pad west lane.
 /// Sized ~adult-human (WHO/NCD-RisC mean adult height ~1.7 m ≈ 2 blocks
-/// plus helmet) with a lateral rifle so the silhouette reads as biped
-/// vs the multi-leg alien at film distance.
+/// plus helmet) but laterally thickened so the biped cue survives a
+/// ~10 m film pass under bloom.
 fn marine_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     // Anchor at (−3, ·, 2)
     let lx = dx + 3;
@@ -829,30 +829,28 @@ fn marine_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     if lz.abs() > 1 || lx < 0 || lx > 3 {
         return None;
     }
-    // Dual-leg stance
-    if dy == 1 && lx == 0 && (lz == 0 || lz == 1) {
+    // Dual-leg stance (2×2 footprint)
+    if dy == 1 && lx <= 1 && lz.abs() <= 1 {
         return Some(BlockType::ShipHullDark);
     }
-    // Torso column
-    if lx == 0 && lz == 0 {
-        return match dy {
-            2 => Some(BlockType::ShipHullAlloy),
-            3 => Some(BlockType::ShipHullAlloy),
-            4 => Some(BlockType::ShipHullAlloy), // helmet
-            _ => None,
-        };
+    // Thick torso column
+    if lx <= 1 && lz == 0 && (2..=4).contains(&dy) {
+        return Some(BlockType::ShipHullAlloy);
     }
     // Cyan visor on the face
     if lx == 0 && lz == 1 && dy == 4 {
         return Some(BlockType::NeonCyan);
     }
-    // Shoulder beacon so the biped pops under bloom at ~10 m.
-    if lx == 0 && lz == 0 && dy == 5 {
+    if lx == 1 && lz == 1 && dy == 4 {
+        return Some(BlockType::NeonCyan);
+    }
+    // Shoulder / crest beacon
+    if lx <= 1 && lz == 0 && dy == 5 {
         return Some(BlockType::NeonAmber);
     }
-    // Rifle arm extending +X (stops short of the mast at x=0).
-    if lz == 0 && dy == 3 && (1..=2).contains(&lx) {
-        return Some(if lx == 2 {
+    // Rifle arm extending +X
+    if lz == 0 && dy == 3 && (2..=3).contains(&lx) {
+        return Some(if lx == 3 {
             BlockType::NeonCyan
         } else {
             BlockType::ShipHullDark
@@ -869,12 +867,11 @@ fn alien_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     if lx.abs() > 2 || lz.abs() > 2 {
         return None;
     }
-    // Raised central body (taller than the marine torso)
-    if lx == 0 && lz == 0 {
+    // Raised central body (taller / thicker than the marine torso)
+    if lx.abs() <= 1 && lz.abs() <= 1 {
         return match dy {
             2 => Some(BlockType::AlienMoss),
-            3 => Some(BlockType::NeonMagenta),
-            4 => Some(BlockType::NeonMagenta),
+            3 | 4 => Some(BlockType::NeonMagenta),
             5 => Some(BlockType::from_voxel(VOXEL_CRYSTAL_MAGENTA)),
             6 => Some(BlockType::NeonMagenta), // crest beacon
             _ => None,
@@ -1399,7 +1396,7 @@ mod tests {
             "marine leg"
         );
         assert_eq!(
-            station_block(-3, 1, 3),
+            station_block(-2, 1, 3),
             Some(BlockType::ShipHullDark),
             "marine second leg"
         );
@@ -1414,7 +1411,12 @@ mod tests {
             "marine visor"
         );
         assert_eq!(
-            station_block(-1, 3, 2),
+            station_block(-3, 5, 2),
+            Some(BlockType::NeonAmber),
+            "marine beacon"
+        );
+        assert_eq!(
+            station_block(0, 3, 2),
             Some(BlockType::NeonCyan),
             "marine muzzle"
         );

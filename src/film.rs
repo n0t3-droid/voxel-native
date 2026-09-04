@@ -504,10 +504,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
 
     match index {
         0 => {
-            // Grass lawn on the +X deck (outside the ±5 pad) looking down.
-            let lawn = deck + Vec3::new(9.0, 0.0, -1.0);
-            let pos = lawn + Vec3::new(2.0, 8.5, 5.0);
-            let look = lawn + Vec3::new(0.0, 1.2, 0.0);
+            // Grass lawn just outside the ±5 pad, inside the island body.
+            let lawn = deck + Vec3::new(7.0, 0.0, 0.0);
+            let pos = lawn + Vec3::new(3.0, 7.5, 6.0);
+            let look = lawn + Vec3::new(0.0, 1.5, 0.0);
             (pos, look)
         }
         1 => {
@@ -518,8 +518,8 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
         }
         2 => {
             // Combat pad — elevated three-quarter on marine vs alien (~10 m).
-            let pos = station + Vec3::new(-7.5, 5.0, 10.0);
-            let look = station + Vec3::new(-0.5, 2.8, 2.2);
+            let pos = station + Vec3::new(-8.0, 6.0, 11.0);
+            let look = station + Vec3::new(-0.5, 3.2, 2.2);
             (pos, look)
         }
         3 => {
