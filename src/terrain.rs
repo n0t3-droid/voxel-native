@@ -2745,18 +2745,18 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
-    /// Inside the look-cone canyon, mid-face, looking +X at a tall
+    /// Inside the look-cone canyon, mid-face, looking level +X at a tall
     /// banded rock wall. Colony habs sit on the rim as accents; lava
     /// curtains and the crystal cluster occupy the opening frame.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let eye = [78.5_f32, 68.0, -82.5];
-        let look = [116.0_f32, 86.0, -86.0];
+        let eye = [72.5_f32, 62.0, -80.5];
+        let look = [120.0_f32, 70.0, -84.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
         let yaw = dx.atan2(-dz);
         let horiz = (dx * dx + dz * dz).sqrt();
-        let pitch = dy.atan2(horiz).clamp(-1.2, 0.35);
+        let pitch = dy.atan2(horiz).clamp(-1.2, 0.22);
         (eye, yaw, pitch)
     }
 

@@ -1140,7 +1140,7 @@ fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
         return None;
     }
     let deck_y = (macro_h + 10.0).round() as i32;
-    let pylon = wx.rem_euclid(SKYWAY_PYLON_PITCH) < 2 && dist < HALF - 0.6;
+    let pylon = false;
     Some(SkywayColumn {
         deck_y,
         dist,
@@ -1251,8 +1251,8 @@ fn hero_look_west_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColu
     if dist > HALF {
         return None;
     }
-    let deck_y = (macro_h - 4.0).round() as i32;
-    let pylon = wz.rem_euclid(SKYWAY_PYLON_PITCH) < 2 && dist < HALF - 0.5;
+    let deck_y = (macro_h + 8.0).round() as i32;
+    let pylon = false;
     Some(SkywayColumn {
         deck_y,
         dist,

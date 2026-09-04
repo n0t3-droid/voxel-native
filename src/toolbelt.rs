@@ -669,7 +669,12 @@ fn draw_toolbelt(
     mut history: ResMut<BuilderHistory>,
     mut world: ResMut<VoxelWorld>,
     mut wheel: EventReader<MouseWheel>,
+    photo: Option<Res<crate::hud::PhotoMode>>,
 ) {
+    if photo.map(|p| p.hidden).unwrap_or(false) {
+        wheel.clear();
+        return;
+    }
     if !mode.is_build() {
         wheel.clear();
         return;
