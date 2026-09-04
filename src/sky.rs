@@ -192,8 +192,8 @@ fn setup_sky(
     let (nebula_res, star_count, planet_r, ring_inner, ring_outer, ring_segs) =
         match settings.graphics {
             GraphicsMode::Fast => (256u32, 1800usize, 150.0_f32, 220.0_f32, 380.0_f32, 96usize),
-            GraphicsMode::Balanced => (512, 4000, 185.0, 270.0, 470.0, 128),
-            GraphicsMode::High => (1024, 7200, 220.0, 320.0, 560.0, 192),
+            GraphicsMode::Balanced => (512, 5000, 185.0, 270.0, 470.0, 128),
+            GraphicsMode::High => (1024, 8600, 220.0, 320.0, 560.0, 192),
         };
 
     // ----- Sky camera --------------------------------------------------
@@ -814,10 +814,10 @@ fn follow_and_animate_sky(
             let night_vol = (1.0 - day).powf(2.2);
             let base_day = Vec3::new(0.16, 0.08, 0.32);
             let base_night = Vec3::new(1.55, 1.05, 2.35);
-            let base_sunset = Vec3::new(0.95, 0.32, 0.62);
+            let base_sunset = Vec3::new(1.05, 0.36, 0.78);
             let e = (base_day * (0.04 + 0.08 * day)
                 + base_night * night_vol
-                + base_sunset * sunset * 0.38)
+                + base_sunset * sunset * 0.52)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
@@ -1550,7 +1550,7 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
             let u = (x as f64 / w as f64) * std::f64::consts::TAU;
             // Swirl: rotate longitude by a latitude-dependent twist so
             // the clouds read as a volume, not a painted sheet.
-            let twist = 1.25 * (v * 2.6).sin() + n_swirl.get([v * 1.8, u * 0.18]) * 0.85;
+            let twist = 1.70 * (v * 2.85).sin() + n_swirl.get([v * 2.15, u * 0.22]) * 1.12;
             let u_s = u + twist;
             let (su, cu) = u_s.sin_cos();
             let px = cv * cu;
@@ -1570,26 +1570,26 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
                 }
                 sum / norm.max(1e-6)
             };
-            let filament = (fbm(&n_fil, 1.65, 6) * 0.5 + 0.5).powf(1.18);
-            let picker = fbm(&n_pick, 0.7, 3);
-            let mask = (fbm(&n_mask, 0.48, 4) + 0.32).max(0.0).powf(1.35);
+            let filament = (fbm(&n_fil, 1.85, 6) * 0.5 + 0.5).powf(1.06);
+            let picker = fbm(&n_pick, 0.62, 3);
+            let mask = (fbm(&n_mask, 0.40, 4) + 0.40).max(0.0).powf(1.18);
             let amp = (filament * mask).clamp(0.0, 1.0);
 
             // Magenta vs cyan: pick a side, don't average them into purple mud.
-            let magenta = Vec3::new(1.00, 0.16, 0.88);
-            let cyan = Vec3::new(0.08, 0.92, 1.00);
-            let mix = ((picker + 0.05) * 1.85).clamp(0.0, 1.0) as f32;
-            let mut col = cyan.lerp(magenta, mix) * amp as f32;
+            let magenta = Vec3::new(1.10, 0.12, 0.96);
+            let cyan = Vec3::new(0.04, 0.98, 1.08);
+            let mix = ((picker + 0.08) * 1.95).clamp(0.0, 1.0) as f32;
+            let mut col = cyan.lerp(magenta, mix) * (0.82 + 0.55 * amp as f32);
 
             // Deep-violet zenith fill so the dome never goes empty-black
             // or pale-fog, plus a warm horizon burn for golden hour.
-            let violet = Vec3::new(0.16, 0.04, 0.38) * (0.18 + 0.55 * zenith as f32);
+            let violet = Vec3::new(0.14, 0.03, 0.36) * (0.16 + 0.58 * zenith as f32);
             let warm = Vec3::new(0.95, 0.38, 0.12) * (horizon as f32).powf(2.2) * 0.32;
-            col = col + violet * (0.35 + 0.25 * (1.0 - amp as f32)) + warm;
+            col = col + violet * (0.32 + 0.22 * (1.0 - amp as f32)) + warm;
             col = col.min(Vec3::splat(1.0));
             // Put density in alpha so Additive empty sky does not wash
             // the ClearColor to milky pink. Filaments stay punchy.
-            let alpha = (amp * 0.90 + 0.06 * zenith + 0.10 * horizon.powf(1.6)).clamp(0.0, 1.0);
+            let alpha = (amp * 0.94 + 0.05 * zenith + 0.09 * horizon.powf(1.6)).clamp(0.0, 1.0);
 
             data.push((col.x * 255.0) as u8);
             data.push((col.y * 255.0) as u8);
