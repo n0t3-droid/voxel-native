@@ -67,7 +67,7 @@ fn star_night_factor(day: f32) -> f32 {
 /// Noon and true night must sit near zero so the orange texture cannot
 /// paint a 24h red stripe; hour 17 is the golden band.
 fn horizon_band_visibility(sunset: f32, night: f32) -> f32 {
-    (sunset.max(0.0).powf(1.35) * (1.0 - night) * 0.95).clamp(0.0, 1.0)
+    (sunset.max(0.0).powf(1.45) * (1.0 - night) * 0.70).clamp(0.0, 1.0)
 }
 
 /// Fixed bearing of the great cratered moon: high and to the left.
@@ -205,6 +205,9 @@ fn setup_sky(
             camera: Camera {
                 order: -1,
                 hdr: true,
+                // Sky writes the window first. World (order 0) alpha-blits
+                // on top without clearing, so this pass stays the space
+                // backdrop and never inherits world ColorGrading.
                 ..default()
             },
             tonemapping: Tonemapping::AcesFitted,
@@ -831,14 +834,14 @@ fn follow_and_animate_sky(
         // gold → peach → violet; multiplying by orange was the hard stripe.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
             let noon = Vec3::new(0.004, 0.010, 0.018);
-            let dusk = Vec3::new(0.46, 0.32, 0.28);
+            let dusk = Vec3::new(0.32, 0.24, 0.30);
             let deep = Vec3::new(0.020, 0.018, 0.055);
             let vis = horizon_band_visibility(sunset, night);
             let dusk_gate = sunset * (1.0 - night).powf(1.4);
             let e = noon * day * (1.0 - sunset) * 0.15 + deep * night * vis.max(0.02) * 0.25
                 + dusk * dusk_gate;
             let e = e * intel.profile.sky_saturation.max(0.7);
-            mat.base_color = Color::srgba(vis * 0.90, vis * 0.74, vis * 0.66, vis * 0.52);
+            mat.base_color = Color::srgba(vis * 0.78, vis * 0.70, vis * 0.72, vis * 0.38);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
@@ -1271,27 +1274,27 @@ fn horizon_scatter_rgba(elevation: f32) -> [u8; 4] {
     let intensity = if elevation < 0.0 {
         (1.0 + elevation * 5.0).max(0.0)
     } else {
-        (1.0 - (elevation / 0.82).min(1.0)).powf(0.70)
+        (1.0 - (elevation / 0.88).min(1.0)).powf(0.55)
     };
     let intensity = intensity.clamp(0.0, 1.0);
     let u = elevation.clamp(0.0, 1.0);
     let (hr, hg, hb) = if elevation <= 0.0 {
-        (255.0, 176.0, 78.0)
-    } else if u < 0.14 {
-        let t = u / 0.14;
-        (255.0, 176.0 + 44.0 * t, 78.0 + 102.0 * t)
-    } else if u < 0.46 {
-        let t = (u - 0.14) / 0.32;
-        (255.0 - 145.0 * t, 220.0 - 130.0 * t, 180.0 + 36.0 * t)
+        (255.0, 186.0, 92.0)
+    } else if u < 0.12 {
+        let t = u / 0.12;
+        (255.0, 186.0 + 40.0 * t, 92.0 + 100.0 * t)
+    } else if u < 0.42 {
+        let t = (u - 0.12) / 0.30;
+        (255.0 - 155.0 * t, 226.0 - 140.0 * t, 192.0 + 40.0 * t)
     } else {
-        let t = ((u - 0.46) / 0.36).clamp(0.0, 1.0);
-        (110.0 - 30.0 * t, 90.0 - 20.0 * t, 216.0 - 16.0 * t)
+        let t = ((u - 0.42) / 0.46).clamp(0.0, 1.0);
+        (100.0 - 28.0 * t, 86.0 - 22.0 * t, 232.0 - 12.0 * t)
     };
     [
         (hr * intensity) as u8,
         (hg * intensity) as u8,
         (hb * intensity) as u8,
-        (intensity * 0.30 * 255.0) as u8,
+        (intensity * 0.22 * 255.0) as u8,
     ]
 }
 
