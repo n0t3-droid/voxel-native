@@ -243,17 +243,17 @@ struct PostcardBounceLight {
 
 /// wx, wz, y_offset above surface, r, g, b, lumens, range.
 const POSTCARD_BOUNCE: [(i32, i32, f32, f32, f32, f32, f32, f32); 10] = [
-    (72, -96, 6.0, 0.32, 0.82, 1.0, 420_000.0, 36.0),
-    (64, -90, 5.0, 0.28, 0.78, 1.0, 300_000.0, 28.0),
-    (80, -90, 5.0, 0.28, 0.78, 1.0, 260_000.0, 22.0),
-    (142, -78, 8.0, 0.95, 0.28, 0.82, 360_000.0, 32.0),
-    (90, -72, 3.0, 0.18, 0.78, 1.0, 340_000.0, 28.0),
-    (90, -78, 4.0, 1.0, 0.42, 0.12, 300_000.0, 24.0),
-    (120, -72, 3.0, 0.18, 0.78, 1.0, 280_000.0, 24.0),
-    // West-face rock + hanging ledges in the look cone.
-    (16, -72, 4.0, 0.30, 0.80, 1.0, 320_000.0, 26.0),
-    (20, -86, 5.0, 1.0, 0.48, 0.16, 280_000.0, 22.0),
-    (36, -64, 4.0, 1.0, 0.55, 0.22, 240_000.0, 20.0),
+    (72, -96, 6.0, 0.32, 0.82, 1.0, 440_000.0, 38.0),
+    (80, -90, 5.0, 0.28, 0.78, 1.0, 360_000.0, 32.0),
+    (142, -78, 8.0, 0.95, 0.28, 0.82, 420_000.0, 36.0),
+    (90, -72, 3.0, 0.18, 0.78, 1.0, 380_000.0, 32.0),
+    (90, -78, 4.0, 1.0, 0.42, 0.12, 400_000.0, 34.0),
+    (120, -72, 3.0, 0.18, 0.78, 1.0, 340_000.0, 30.0),
+    // Look-cone west face (camera rests ~x=90 looking +X/−Z).
+    (108, -86, 5.0, 0.30, 0.82, 1.0, 440_000.0, 38.0),
+    (118, -98, 6.0, 0.28, 0.78, 1.0, 400_000.0, 34.0),
+    (124, -76, 5.0, 1.0, 0.48, 0.16, 420_000.0, 36.0),
+    (110, -112, 4.0, 1.0, 0.55, 0.22, 360_000.0, 32.0),
 ];
 
 fn night_bounce_dir(key_dir: Vec3, night: bool) -> Vec3 {
@@ -540,15 +540,20 @@ fn update_sun(
     ambient.brightness =
         (1_560.0 + day * 140.0 + sunset * 280.0 + night_amt * 1_720.0) * intel.profile.ambient_mul;
 
-    // Sky (clear colour). Dusk zenith goes violet; the golden rim is
-    // owned by `sky.rs` so we do not dye the whole dome orange.
+    // Sky (clear colour). Night zenith stays violet. At 17:00 the
+    // golden dome is the horizon scatter in `sky.rs` — mixing half the
+    // ClearColor toward violet was what let purple bleed down over
+    // the gold postcard. A little peach keeps the uncovered mid-sky
+    // from going ice-blue behind the band.
     let sky_day = Color::srgb(0.42, 0.68, 0.96).to_linear();
     let sky_night = Color::srgb(0.018, 0.020, 0.09).to_linear();
     let sky_violet = Color::srgb(0.12, 0.04, 0.26).to_linear();
+    let sky_peach = Color::srgb(1.0, 0.72, 0.48).to_linear();
     let sky = sky_night
-        .mix(&sky_day, day * (1.0 - sunset * 0.62))
-        .mix(&sky_violet, (1.0 - day) * 0.50 + sunset * 0.38)
-        .mix(&sunset_color, sunset * 0.06);
+        .mix(&sky_day, day * (1.0 - sunset * 0.55))
+        .mix(&sky_violet, (1.0 - day) * 0.50 + sunset * 0.10)
+        .mix(&sky_peach, sunset * 0.16)
+        .mix(&sunset_color, sunset * 0.05);
     let sat: f32 = intel.profile.sky_saturation;
     let sky = sky.mix(
         &Color::srgb(0.5, 0.5, 0.5).to_linear(),
@@ -719,12 +724,16 @@ mod tests {
             assert!(lumens <= 450_000.0, "bounce lumens {lumens} would flatten night");
         }
         assert!(
-            POSTCARD_BOUNCE.iter().any(|&(wx, _, _, r, g, b, _, _)| wx < 48 && b > r && g > r),
-            "west-face cyan bounce missing from the look cone"
+            POSTCARD_BOUNCE
+                .iter()
+                .any(|&(wx, wz, _, r, g, b, _, _)| wx >= 96 && wx <= 140 && wz <= -64 && b > r && g > r),
+            "look-cone west-face cyan bounce missing"
         );
         assert!(
-            POSTCARD_BOUNCE.iter().any(|&(wx, _, _, r, g, b, _, _)| wx < 48 && r > b && r > g),
-            "west-face warm bounce missing from the look cone"
+            POSTCARD_BOUNCE
+                .iter()
+                .any(|&(wx, wz, _, r, g, b, _, _)| wx >= 96 && wx <= 140 && wz <= -64 && r > b && r > g),
+            "look-cone west-face warm bounce missing"
         );
     }
 
