@@ -833,9 +833,13 @@ fn marine_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     if dy == 1 && lx <= 1 && lz.abs() <= 1 {
         return Some(BlockType::ShipHullDark);
     }
-    // Thick torso column
+    // Thick torso column — cyan chest band so the biped survives bloom.
     if lx <= 1 && lz == 0 && (2..=4).contains(&dy) {
-        return Some(BlockType::ShipHullAlloy);
+        return Some(if dy == 3 {
+            BlockType::NeonCyan
+        } else {
+            BlockType::ShipHullAlloy
+        });
     }
     // Cyan visor on the face
     if lx == 0 && lz == 1 && dy == 4 {

@@ -333,6 +333,7 @@ fn film_drive_camera(
     mut toolbelt: ResMut<ToolbeltState>,
     mut sun_q: Query<&mut DirectionalLight, With<Sun>>,
     mut query: Query<(&mut Transform, &mut Player, &mut Projection)>,
+    mut bloom_q: Query<&mut BloomSettings, With<Player>>,
     mut fill_q: Query<
         &mut Transform,
         (With<FilmFillLight>, Without<Player>, Without<FilmRimLight>),
@@ -350,8 +351,20 @@ fn film_drive_camera(
 
     // Tighter hero FOV so pad figures and grass fill the frame.
     if let Projection::Perspective(ref mut persp) = *projection {
-        let target: f32 = if film.shot_index == 6 { 42.0 } else { 52.0 };
+        let target: f32 = match film.shot_index {
+            2 | 3 => 38.0, // combat + crew
+            6 => 40.0,     // planet
+            _ => 50.0,
+        };
         persp.fov = target.to_radians();
+    }
+    if let Ok(mut bloom) = bloom_q.get_single_mut() {
+        // Pad silhouettes need less bloom wash than the nebula planet beat.
+        bloom.intensity = if matches!(film.shot_index, 2 | 3 | 0) {
+            0.10
+        } else {
+            0.20
+        };
     }
 
     ambient.brightness = ambient.brightness.max(1_450.0);
@@ -529,9 +542,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // Combat pad — elevated three-quarter on marine vs alien (~10 m).
-            let pos = station + Vec3::new(-8.0, 6.0, 11.0);
-            let look = station + Vec3::new(-0.5, 3.2, 2.2);
+            // Combat pad — tight FOV three-quarter on marine vs alien.
+            let pos = station + Vec3::new(-6.5, 5.0, 9.0);
+            let look = station + Vec3::new(-0.5, 3.5, 2.2);
             (pos, look)
         }
         3 => {
@@ -634,15 +647,25 @@ fn film_finish(mut film: ResMut<FilmRuntime>, mut exit: EventWriter<AppExit>) {
     if !film.ready_to_roll {
         return;
     }
-    // Done when every shot captured and the last hold finished.
+    // Done when every shot captured, the PNG exists, and the last hold finished.
     let all_captured = film.last_captured_shot + 1 >= SHOTS.len() as i32;
+    let last_file_ready = film
+        .captures
+        .last()
+        .map(|p| {
+            std::path::Path::new(p)
+                .metadata()
+                .map(|m| m.len() > 8_000)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
     let last_hold_done = film
         .capture_queued_at
         .map(|t| film.elapsed >= t + film.hold_after_secs)
         .unwrap_or(false);
-    if !(all_captured && last_hold_done) {
+    if !(all_captured && last_file_ready && last_hold_done) {
         // Safety valve so a stuck blit cannot hang forever.
-        if film.elapsed < film.duration_estimate() + 20.0 {
+        if film.elapsed < film.duration_estimate() + 40.0 {
             return;
         }
     }
