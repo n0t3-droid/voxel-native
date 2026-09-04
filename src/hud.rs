@@ -18,7 +18,7 @@ use crate::settings::{HudProfile, WorldSettings};
 use crate::terrain::Biome;
 use crate::toolbelt::ToolbeltTool;
 use crate::weapons::DestructionStats;
-use crate::world::{StreamingGovernor, VoxelWorld};
+use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
 
 pub struct HudPlugin;
 
@@ -63,6 +63,7 @@ impl Plugin for HudPlugin {
                     hotbar_input.run_if(in_state(crate::menu::GameState::InGame)),
                     hotbar_highlight,
                     toggle_hud_visibility,
+                    draw_generating_overlay,
                     update_scope_overlay,
                     update_combo_text,
                     flash_crosshair_on_hit,
@@ -221,6 +222,40 @@ fn toggle_hud_visibility(
     if let Ok(mut v) = hotbar_root_q.get_single_mut() {
         *v = hotbar_vis;
     }
+}
+
+/// True while nearby chunks have not streamed in yet. Cheap to evaluate;
+/// the overlay is a single egui rect.
+pub fn world_is_still_generating(mesh_entities: usize, stream_elapsed: f32) -> bool {
+    mesh_entities < 24 && stream_elapsed < 8.0
+}
+
+fn draw_generating_overlay(
+    mut contexts: EguiContexts,
+    state: Res<State<crate::menu::GameState>>,
+    streamer: Res<ChunkStreamer>,
+) {
+    if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if !world_is_still_generating(streamer.entities.len(), streamer.stream_elapsed) {
+        return;
+    }
+    let ctx = contexts.ctx_mut();
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("generating_world"),
+    ));
+    painter.rect_filled(screen, 0.0, egui::Color32::from_rgba_unmultiplied(4, 8, 10, 140));
+    let label = "Generating world…";
+    let font = egui::FontId::proportional(28.0);
+    let galley = painter.layout_no_wrap(label.to_string(), font, crate::theme::CYAN);
+    let pos = egui::pos2(
+        screen.center().x - galley.size().x * 0.5,
+        screen.center().y - galley.size().y * 0.5,
+    );
+    painter.galley(pos, galley, crate::theme::CYAN);
 }
 
 // ------------------------------- Crosshair --------------------------------
@@ -1038,6 +1073,14 @@ mod tests {
     #[test]
     fn focused_hud_hides_workflow_rail() {
         assert!(workflow_steps_for_profile(HudProfile::Focused).is_empty());
+    }
+
+    #[test]
+    fn generating_overlay_clears_once_near_chunks_exist() {
+        assert!(world_is_still_generating(0, 0.5));
+        assert!(world_is_still_generating(12, 3.0));
+        assert!(!world_is_still_generating(24, 1.0));
+        assert!(!world_is_still_generating(8, 8.5));
     }
 }
 
