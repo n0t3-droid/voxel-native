@@ -2745,12 +2745,12 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
-    /// Inside the look-cone canyon, mid-face, looking level +X at a tall
-    /// banded rock wall. Colony habs sit on the rim as accents; lava
-    /// curtains and the crystal cluster occupy the opening frame.
+    /// Further back in the look-cone canyon, looking +X at a tall
+    /// banded rock wall that fills the right/center. Crystals sit left;
+    /// lava curtains hang on the face; skyway is a crest ribbon only.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let eye = [72.5_f32, 62.0, -80.5];
-        let look = [120.0_f32, 70.0, -84.0];
+        let eye = [54.5_f32, 64.0, -76.5];
+        let look = [130.0_f32, 80.0, -82.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
@@ -2964,7 +2964,12 @@ mod tests {
             "scenic spawn left the frontier disc"
         );
         assert!(
-            pos[1] > 60.0,
+            pos[0] < 62.0,
+            "scenic spawn should stand back from the west face (x={})",
+            pos[0]
+        );
+        assert!(
+            pos[1] > 50.0,
             "scenic spawn should be a canyon-face overlook (y={})",
             pos[1]
         );
@@ -2992,7 +2997,7 @@ mod tests {
         let mut crystal = 0usize;
         let mut air = 0usize;
         let mut first_solid = None;
-        for t in 4..48 {
+        for t in 8..80 {
             let wx = (pos[0] + fx * t as f32).floor() as i32;
             let wy = (pos[1] + fy * t as f32).floor() as i32;
             let wz = (pos[2] + fz * t as f32).floor() as i32;
