@@ -2745,12 +2745,12 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
-    /// West rim of the look-cone canyon at river height, looking +X at
-    /// the carved west face. The drop is in the lower third, the wall
-    /// fills the frame, skyway sits off the north edge as a crossing.
+    /// Inside the look-cone canyon, mid-face, looking +X at the carved
+    /// west wall. Skyway decks no longer fill the near field; the banded
+    /// cliff, lava falls, and river occupy the opening frame.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let eye = [70.5_f32, 84.0, -70.5];
-        let look = [108.0_f32, 64.0, -78.0];
+        let eye = [88.5_f32, 74.0, -78.5];
+        let look = [108.0_f32, 80.0, -82.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
@@ -2964,12 +2964,15 @@ mod tests {
             "scenic spawn left the frontier disc"
         );
         assert!(
-            pos[1] > 70.0,
-            "scenic spawn should be a canyon-rim overlook, not underground (y={})",
+            pos[1] > 60.0,
+            "scenic spawn should be a canyon-face overlook (y={})",
             pos[1]
         );
         assert!(yaw > 0.90, "should look +X at the carved west face");
-        assert!(pitch < -0.10, "should look slightly down the canyon drop");
+        assert!(
+            pitch.abs() < 0.45,
+            "should look nearly level at the west wall (pitch={pitch})"
+        );
         let meta = crate::settings::WorldMeta::new("test_frontier".into(), 12345);
         assert!((meta.time_of_day - 17.0).abs() < 0.01);
         assert!((meta.player_pos[0] - pos[0]).abs() < 0.1);
