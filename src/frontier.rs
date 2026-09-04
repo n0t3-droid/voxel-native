@@ -789,6 +789,9 @@ impl SkywayNetwork {
         if let Some(face) = hero_face_rail(wx, wz, macro_h) {
             return Some(face);
         }
+        if let Some(west) = hero_west_face_rail(wx, wz, macro_h) {
+            return Some(west);
+        }
         let x = wx as f64;
         let z = wz as f64;
         let a = self.route_field(x, z);
@@ -1098,6 +1101,28 @@ fn hero_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     })
 }
 
+/// Camera-facing west rail so terraced habs on the look-cone cliff stay
+/// tied to the mesa-top colony. Postcard AABB only.
+fn hero_west_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+    const RAIL_X: i32 = 32;
+    const HALF: f64 = 2.0;
+    if wz < -112 || wz > -48 {
+        return None;
+    }
+    let dist = (wx - RAIL_X).abs() as f64;
+    if dist > HALF {
+        return None;
+    }
+    let deck_y = (macro_h - 6.0).round() as i32;
+    let pylon = wz.rem_euclid(SKYWAY_PYLON_PITCH) < 2 && dist < HALF - 0.5;
+    Some(SkywayColumn {
+        deck_y,
+        dist,
+        pylon,
+        half: HALF,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Cliff colony (spawn postcard) ---------------------------------------------
 // ---------------------------------------------------------------------------
@@ -1143,13 +1168,14 @@ impl CliffHab {
             Self { cx: 152, cz: -96, floors: 5, width: 6, depth: 4, drop: 0 },
             Self { cx: 90, cz: -80, floors: 3, width: 9, depth: 5, drop: 0 },
             Self { cx: 174, cz: -70, floors: 7, width: 4, depth: 4, drop: 0 },
-            // Terraced down the mesa face, in the postcard look cone.
-            Self { cx: 88, cz: -124, floors: 4, width: 6, depth: 4, drop: 10 },
-            Self { cx: 108, cz: -132, floors: 5, width: 5, depth: 4, drop: 16 },
-            Self { cx: 128, cz: -126, floors: 6, width: 5, depth: 4, drop: 12 },
-            Self { cx: 68, cz: -128, floors: 4, width: 5, depth: 5, drop: 14 },
-            Self { cx: 148, cz: -120, floors: 5, width: 6, depth: 4, drop: 8 },
-            Self { cx: 96, cz: -140, floors: 3, width: 8, depth: 5, drop: 20 },
+            // West face, toward the postcard camera (+X/−Z from origin).
+            // South-face drops sat inside the cap and never read as a cliff city.
+            Self { cx: 24, cz: -72, floors: 5, width: 6, depth: 5, drop: 8 },
+            Self { cx: 36, cz: -86, floors: 6, width: 5, depth: 5, drop: 14 },
+            Self { cx: 18, cz: -64, floors: 4, width: 5, depth: 4, drop: 10 },
+            Self { cx: 44, cz: -98, floors: 5, width: 6, depth: 4, drop: 16 },
+            Self { cx: 32, cz: -54, floors: 4, width: 7, depth: 5, drop: 6 },
+            Self { cx: 28, cz: -108, floors: 3, width: 8, depth: 5, drop: 18 },
         ]
     }
 
@@ -1185,7 +1211,7 @@ impl CliffHab {
                         if !edge && ly > 0 {
                             continue;
                         }
-                        let block = if ly == 1 && edge && !corner && (floor + dx + dz).rem_euclid(4) != 0
+                        let block = if ly == 1 && edge && !corner && (floor + dx + dz).rem_euclid(3) != 0
                         {
                             BlockType::HoloPanel
                         } else if ly == 2 && edge {
@@ -1617,8 +1643,12 @@ mod tests {
             assert!(in_hero_postcard(h.cx, h.cz), "hab {},{} left the postcard", h.cx, h.cz);
         }
         assert!(
-            CliffHab::hero_cluster().iter().any(|h| h.drop >= 10),
-            "no habs terrace down the cliff face"
+            CliffHab::hero_cluster()
+                .iter()
+                .filter(|h| h.cx < 50 && h.drop >= 6)
+                .count()
+                >= 4,
+            "west-face terraces missing from the postcard look cone"
         );
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
         let sky = SkywayNetwork::new(1);
@@ -1631,6 +1661,9 @@ mod tests {
         let face = sky.column(80, -130, 70.0).expect("face rail missing on postcard");
         assert!(face.half < SKYWAY_HALF_WIDTH);
         assert!(face.deck_y < rail.deck_y, "face rail should sit below the mesa rail");
+        let west = sky.column(32, -80, 70.0).expect("west face rail missing on postcard");
+        assert!(west.half < SKYWAY_HALF_WIDTH);
+        assert!(west.deck_y < rail.deck_y, "west rail should sit below the mesa rail");
     }
 
     #[test]
