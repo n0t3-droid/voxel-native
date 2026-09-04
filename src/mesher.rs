@@ -56,6 +56,10 @@ fn neighbor_glow<F: Fn(i32, i32, i32) -> Voxel>(
         (0, -1, 0),
         (0, 0, 1),
         (0, 0, -1),
+        (1, 0, 1),
+        (1, 0, -1),
+        (-1, 0, 1),
+        (-1, 0, -1),
     ] {
         glow |= glow_kind(sample(wx + dx, wy + dy, wz + dz));
         if glow == 3 {
@@ -72,14 +76,14 @@ fn apply_neighbor_glow(color: [f32; 4], glow: u8) -> [f32; 4] {
     }
     let mut c = color;
     if glow & 1 != 0 {
-        c[0] = c[0] * 0.62 + 0.12;
-        c[1] = c[1] * 0.62 + 0.42;
-        c[2] = c[2] * 0.62 + 0.70;
+        c[0] = c[0] * 0.48 + 0.08;
+        c[1] = c[1] * 0.48 + 0.52;
+        c[2] = c[2] * 0.48 + 0.88;
     }
     if glow & 2 != 0 {
-        c[0] = c[0] * 0.62 + 0.55;
-        c[1] = c[1] * 0.62 + 0.22;
-        c[2] = c[2] * 0.62 + 0.05;
+        c[0] = c[0] * 0.55 + 0.58;
+        c[1] = c[1] * 0.55 + 0.24;
+        c[2] = c[2] * 0.55 + 0.04;
     }
     c
 }
@@ -709,6 +713,8 @@ mod tests {
         };
         let cyan = neighbor_glow(&sample, 0, 0, 0, stone);
         assert_eq!(cyan, 3, "crystal + lava should set both bits, got {cyan}");
+        let diag = neighbor_glow(&sample, 2, 0, 1, stone);
+        assert_eq!(diag, 1, "xz-diagonal crystal should still paint cyan, got {diag}");
         let none = neighbor_glow(&sample, 8, 8, 8, stone);
         assert_eq!(none, 0);
         let skip = neighbor_glow(&sample, 0, 0, 0, crystal);
