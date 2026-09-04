@@ -2749,8 +2749,8 @@ impl TerrainGenerator {
     /// banded rock wall that fills the right/center. Crystals sit left;
     /// lava curtains hang on the face; skyway is a crest ribbon only.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let eye = [46.5_f32, 64.0, -76.5];
-        let look = [108.0_f32, 56.0, -82.0];
+        let eye = [58.5_f32, 62.0, -78.0];
+        let look = [108.0_f32, 60.0, -80.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
@@ -2964,8 +2964,8 @@ mod tests {
             "scenic spawn left the frontier disc"
         );
         assert!(
-            pos[0] < 50.0,
-            "scenic spawn should stand back from the west face (x={})",
+            pos[0] > 52.0 && pos[0] < 62.0,
+            "scenic spawn should stand in the canyon, not against the west rim (x={})",
             pos[0]
         );
         assert!(
