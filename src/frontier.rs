@@ -56,6 +56,12 @@ pub fn in_hero_postcard(wx: i32, wz: i32) -> bool {
     wx >= -48 && wx <= 220 && wz >= -180 && wz <= 28
 }
 
+/// Wider disc around origin so a normal New World is still mesa country
+/// with crystals and channels, not a grass plain two chunks off spawn.
+pub fn in_spawn_frontier(wx: i32, wz: i32) -> bool {
+    wx >= -160 && wx <= 320 && wz >= -260 && wz <= 120
+}
+
 /// Altitude band for sky islands.
 ///
 /// Airborne landmarks are only worth generating inside the vertical slab
@@ -230,6 +236,28 @@ impl SkyIsland {
             radius,
             phase: (cell_rand(seed, 0x15_1A_16, ix, iz) * 6.283) as f32,
         })
+    }
+
+    /// Guaranteed islands over the spawn mesa so a New World has floating
+    /// rock in the first look, not only when a lattice cell happens to roll.
+    pub fn hero() -> Self {
+        Self {
+            cx: 92,
+            cz: -28,
+            cy: 118,
+            radius: 16,
+            phase: 1.15,
+        }
+    }
+
+    pub fn hero_b() -> Self {
+        Self {
+            cx: 24,
+            cz: -132,
+            cy: 108,
+            radius: 13,
+            phase: 2.4,
+        }
     }
 
     /// Every island whose bounding box can reach the chunk at `(cx, cz)`.
@@ -457,8 +485,19 @@ impl CrystalCluster {
         }
     }
 
+    pub fn hero_c() -> Self {
+        Self {
+            cx: 44,
+            cz: -40,
+            shards: 6,
+            scale: 20,
+        }
+    }
+
     pub fn for_cell(seed: u32, ix: i32, iz: i32) -> Option<Self> {
-        if cell_rand(seed, 0x0C_10_01, ix, iz) > 0.42 {
+        let near_spawn = ix.abs() <= 3 && iz.abs() <= 3;
+        let keep = if near_spawn { 0.82 } else { 0.42 };
+        if cell_rand(seed, 0x0C_10_01, ix, iz) > keep {
             return None;
         }
         let cx =
@@ -1587,6 +1626,7 @@ impl FrontierPlanner {
         }
         CrystalCluster::hero().stamp(self.seed, chunk, ground);
         CrystalCluster::hero_b().stamp(self.seed, chunk, ground);
+        CrystalCluster::hero_c().stamp(self.seed, chunk, ground);
         for hab in CliffHab::hero_cluster() {
             hab.stamp(chunk, ground);
         }
@@ -1595,6 +1635,8 @@ impl FrontierPlanner {
         }
         // Widest island root reaches ~1.6 radii below the core.
         if top_y >= SKY_ISLAND_MIN_Y - 48 && base_y <= SKY_ISLAND_MAX_Y + 12 {
+            SkyIsland::hero().stamp(self.seed, chunk);
+            SkyIsland::hero_b().stamp(self.seed, chunk);
             for island in SkyIsland::near(self.seed, wx, wz, macro_ground) {
                 island.stamp(self.seed, chunk);
             }
@@ -1957,6 +1999,8 @@ mod tests {
             "carved terrace has no floor"
         );
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
+        assert!(in_hero_postcard(CrystalCluster::hero_c().cx, CrystalCluster::hero_c().cz));
+        assert!(in_spawn_frontier(SkyIsland::hero().cx, SkyIsland::hero().cz));
         let sky = SkywayNetwork::new(1);
         let rail = sky.column(80, -88, 70.0).expect("mesa rail missing on postcard");
         assert!(rail.half < SKYWAY_HALF_WIDTH, "mesa rail should be a thin ribbon");

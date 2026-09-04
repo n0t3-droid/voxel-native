@@ -131,6 +131,9 @@ pub struct WorldSettings {
 }
 
 const NORMAL_TIME_OF_DAY: f32 = 12.25;
+/// Dusk postcard hour for a freshly created world. Existing saves keep
+/// whatever they stored.
+const NEW_WORLD_TIME_OF_DAY: f32 = 17.0;
 
 /// Named teleport target stored in [`WorldSettings::bookmarks`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -716,20 +719,17 @@ pub struct WorldEditManifest {
 impl WorldMeta {
     pub fn new(name: String, seed: u32) -> Self {
         let now = now_epoch();
-        let spawn = crate::terrain::TerrainGenerator::new(seed)
-            .find_natural_spawn(0, 0, 4096)
-            .map(|p| [p.x as f32 + 0.5, p.y as f32, p.z as f32 + 0.5])
-            .unwrap_or([0.0, 140.0, 0.0]);
+        let (spawn, yaw, pitch) = crate::terrain::TerrainGenerator::new(seed).scenic_frontier_spawn();
         Self {
             name,
             seed,
-            time_of_day: NORMAL_TIME_OF_DAY,
+            time_of_day: NEW_WORLD_TIME_OF_DAY,
             time_mode: TimeMode::Fixed,
             cycle_speed: 0.01,
             weather: WeatherSettings::default(),
             player_pos: spawn,
-            player_yaw: 0.0,
-            player_pitch: -0.15,
+            player_yaw: yaw,
+            player_pitch: pitch,
             ships: Vec::new(),
             ship_inventory: crate::ships::ShipInventory::default(),
             player_mining: PlayerMiningSave::default(),
