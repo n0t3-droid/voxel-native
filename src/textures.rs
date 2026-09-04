@@ -493,52 +493,54 @@ fn bake_block_swatch(
                     )
                 }
                 BlockStyle::Grass => {
-                    let blade = detail.get([tx * 18.0, ty * 3.0, tz * 18.0, tw * 3.0]);
-                    let moss_patch = macro_n.max(0.0) * 0.12;
-                    let soil_fleck = if grain_n < -0.55 { 0.14 } else { 0.0 };
+                    let blade = detail.get([tx * 22.0, ty * 2.2, tz * 22.0, tw * 2.2]);
+                    let moss_patch = macro_n.max(0.0) * 0.16;
+                    let soil_fleck = if grain_n < -0.48 { 0.22 } else { 0.0 };
                     let meadow_wave =
-                        (u * two_pi * 1.75 + v * two_pi * 2.35 + broad * 2.2).sin() * 0.16;
+                        (u * two_pi * 1.75 + v * two_pi * 2.35 + broad * 2.2).sin() * 0.22;
                     let meadow_cross =
-                        (u * two_pi * 3.65 - v * two_pi * 1.45 + macro_n * 2.8).sin() * 0.11;
-                    let lush_patch = macro_n.max(0.0) * 0.18;
+                        (u * two_pi * 3.65 - v * two_pi * 1.45 + macro_n * 2.8).sin() * 0.16;
+                    let lush_patch = macro_n.max(0.0) * 0.22;
                     let dry_patch = if vein_wide > 0.50 {
-                        (vein_wide - 0.50) * 0.46
+                        (vein_wide - 0.50) * 0.62
                     } else {
                         0.0
                     };
-                    let b = 0.82
+                    let b = 0.78
                         + macro_shadow
-                        + fbm * 0.16
-                        + blade * 0.20
-                        + micro * 0.08
+                        + fbm * 0.18
+                        + blade * 0.32
+                        + micro * 0.10
                         + moss_patch
                         + meadow_wave
                         + meadow_cross
-                        + lush_patch * 0.45
-                        - soil_fleck * 0.80
-                        - dry_patch * 0.92;
+                        + lush_patch * 0.50
+                        - soil_fleck * 0.90
+                        - dry_patch * 1.05;
                     (
                         b,
-                        (dry_patch as f32) * 0.13 - (soil_fleck as f32) * 0.04,
-                        (blade as f32) * 0.08
-                            + (moss_patch as f32) * 0.10
-                            + (meadow_wave as f32) * 0.10
-                            + (meadow_cross as f32) * 0.075
-                            + (lush_patch as f32) * 0.16
-                            - (dry_patch as f32) * 0.05,
-                        (lush_patch as f32) * 0.045
-                            - (soil_fleck as f32) * 0.03
+                        (dry_patch as f32) * 0.16 - (soil_fleck as f32) * 0.06,
+                        (blade as f32) * 0.12
+                            + (moss_patch as f32) * 0.12
+                            + (meadow_wave as f32) * 0.12
+                            + (meadow_cross as f32) * 0.09
+                            + (lush_patch as f32) * 0.18
                             - (dry_patch as f32) * 0.06,
+                        (lush_patch as f32) * 0.05
+                            - (soil_fleck as f32) * 0.04
+                            - (dry_patch as f32) * 0.07,
                     )
                 }
                 BlockStyle::Sand => {
-                    let ripple = (v * two_pi * 6.0 + broad * 2.4 + fbm * 2.0).sin() * 0.08;
-                    let mineral = (grain_n - 0.52).max(0.0) * 0.08;
+                    let ripple = (v * two_pi * 7.0 + broad * 2.4 + fbm * 2.0).sin() * 0.18;
+                    let dune = (u * two_pi * 2.2 + v * two_pi * 0.8 + macro_n).sin() * 0.10;
+                    let mineral = (grain_n - 0.42).max(0.0) * 0.14;
                     (
-                        0.91 + macro_shadow * 0.75 + fbm * 0.10 + micro * 0.14 + ripple + mineral,
-                        mineral as f32 * 0.05,
-                        0.0,
-                        -(mineral as f32) * 0.02,
+                        0.88 + macro_shadow * 0.85 + fbm * 0.14 + micro * 0.16 + ripple + dune
+                            + mineral,
+                        mineral as f32 * 0.07 + (dune as f32) * 0.04,
+                        -(ripple as f32) * 0.03,
+                        -(mineral as f32) * 0.03,
                     )
                 }
                 BlockStyle::Water => {
@@ -625,89 +627,96 @@ fn bake_block_swatch(
                     )
                 }
                 BlockStyle::Strata => {
-                    let band = ((v * 8.0 + strat * 0.55 + fbm * 0.12).floor() as i32).rem_euclid(4);
+                    // Hard colour bands (not just luma noise) so mesa
+                    // cliffs read as geological strata from a distance.
+                    let band =
+                        ((v * 10.0 + strat * 0.35 + fbm * 0.08).floor() as i32).rem_euclid(6);
                     let (mul, tr, tg, tb) = match band {
-                        0 => (0.62, 0.10, -0.04, 0.14),
-                        1 => (0.88, 0.16, 0.04, -0.08),
-                        2 => (1.12, 0.04, 0.06, 0.00),
-                        _ => (0.74, 0.14, -0.02, -0.10),
+                        0 => (0.48, 0.16, -0.06, 0.10),
+                        1 => (0.78, 0.20, 0.02, -0.10),
+                        2 => (1.18, 0.06, 0.08, -0.02),
+                        3 => (0.62, 0.12, -0.04, 0.16),
+                        4 => (0.96, 0.18, 0.05, -0.08),
+                        _ => (0.70, 0.08, 0.00, -0.12),
                     };
-                    let grit = grain_n.abs() * 0.10;
-                    let crack = cell_n * 0.28;
+                    let grit = grain_n.abs() * 0.14;
+                    let crack = cell_n * 0.36;
                     (
-                        mul + macro_shadow * 0.8 + fbm * 0.16 + micro * 0.10 + grit - crack,
-                        tr + (fbm as f32) * 0.03,
+                        mul + macro_shadow * 0.9 + fbm * 0.14 + micro * 0.10 + grit - crack,
+                        tr + (fbm as f32) * 0.04,
                         tg,
-                        tb - (crack as f32) * 0.04,
+                        tb - (crack as f32) * 0.05,
                     )
                 }
                 BlockStyle::Metal => {
                     let cells = 4.0;
                     let px = (u * cells).fract();
                     let py = (v * cells).fract();
-                    let grout = if px < 0.07 || py < 0.07 || px > 0.93 || py > 0.93 {
-                        0.48
+                    let grout = if px < 0.10 || py < 0.10 || px > 0.90 || py > 0.90 {
+                        0.38
                     } else {
                         1.0
                     };
-                    let rivet_u = (px - 0.14).abs() + (py - 0.14).abs();
-                    let rivet = if rivet_u < 0.07 { 0.35 } else { 0.0 };
-                    let brush = (u * 48.0 + fbm * 2.0).sin() * 0.07;
-                    let b = 0.82 + macro_shadow * 0.4 + brush + micro * 0.04;
+                    let rivet_u = (px - 0.16).abs() + (py - 0.16).abs();
+                    let rivet = if rivet_u < 0.08 { 0.42 } else { 0.0 };
+                    let hatch = if (px * 8.0).fract() < 0.18 { 0.12 } else { 0.0 };
+                    let brush = (u * 48.0 + fbm * 2.0).sin() * 0.09;
+                    let b = 0.86 + macro_shadow * 0.4 + brush + micro * 0.04 - hatch;
                     (
                         b * grout - rivet,
                         (brush as f32) * 0.02,
-                        0.0,
-                        -(grout as f32 - 1.0) * 0.04,
+                        (hatch as f32) * 0.03,
+                        -(grout as f32 - 1.0) * 0.06,
                     )
                 }
                 BlockStyle::Crystal => {
                     let facet = cell_n;
-                    let grout = facet * 0.55;
+                    let grout = facet * 0.72;
                     let sparkle = detail.get([tx * 32.0, ty * 32.0, tz * 32.0, tw * 32.0]);
-                    let sp = if sparkle > 0.72 {
-                        (sparkle - 0.72) * 2.4
+                    let sp = if sparkle > 0.68 {
+                        (sparkle - 0.68) * 2.8
                     } else {
                         0.0
                     };
-                    let face = macro_n * 0.12 + fbm * 0.08;
+                    let face = macro_n * 0.18 + fbm * 0.10;
                     (
-                        0.78 + face + sp - grout,
-                        (sp as f32) * 0.08,
-                        (sp as f32) * 0.10 + (face as f32) * 0.04,
-                        0.10 + (sp as f32) * 0.12 - (grout as f32) * 0.08,
+                        0.72 + face + sp - grout,
+                        (sp as f32) * 0.10 + 0.04,
+                        (sp as f32) * 0.12 + (face as f32) * 0.05,
+                        0.14 + (sp as f32) * 0.14 - (grout as f32) * 0.10,
                     )
                 }
                 BlockStyle::Energy => {
-                    let flow = ((u * 6.0 + v * 0.35 + fbm * 0.8).sin() * 0.5 + 0.5).powf(2.2);
-                    let core = (flow - 0.55).max(0.0) * 1.6;
+                    let flow = ((u * 7.0 + v * 0.40 + fbm * 0.8).sin() * 0.5 + 0.5).powf(1.8);
+                    let core = (flow - 0.50).max(0.0) * 1.8;
+                    let vein_glow = vein * 0.35;
                     (
-                        0.55 + flow * 0.70 + micro * 0.08,
-                        -(core as f32) * 0.05,
-                        (flow as f32) * 0.18,
-                        (core as f32) * 0.22 + 0.08,
+                        0.42 + flow * 0.90 + micro * 0.08 + vein_glow,
+                        -(core as f32) * 0.06,
+                        (flow as f32) * 0.22,
+                        (core as f32) * 0.28 + 0.10,
                     )
                 }
             };
 
-            let bright = bright.clamp(0.38, 1.45) as f32;
+            let bright = bright.clamp(0.32, 1.55) as f32;
             let mut r = (base[0] * bright + tint_r).clamp(0.0, 1.0);
             let mut g = (base[1] * bright + tint_g).clamp(0.0, 1.0);
             let mut bl = (base[2] * bright + tint_b).clamp(0.0, 1.0);
 
             // Per-tile bevel so greedy-merged faces still read as cubes
-            // instead of a stretched wallpaper. ~7% rim, darker 1px lip.
-            let margin = (size as f32 * 0.08).max(3.0);
+            // instead of a stretched wallpaper. ~10% rim, darker 1px lip.
+            let margin = (size as f32 * 0.10).max(3.0);
             let dxe = (x as f32).min((size - 1 - x) as f32);
             let dye = (y as f32).min((size - 1 - y) as f32);
             let edge = dxe.min(dye);
             let mut bevel = if edge < margin {
-                0.52 + 0.48 * (edge / margin)
+                0.42 + 0.58 * (edge / margin)
             } else {
                 1.0
             };
             if edge < 1.6 {
-                bevel *= 0.70;
+                bevel *= 0.62;
             }
             r = (r * bevel).clamp(0.0, 1.0);
             g = (g * bevel).clamp(0.0, 1.0);
@@ -899,17 +908,17 @@ mod tests {
         let crystal = swatch_for(&swatches, BlockType::Crystal);
         let plate = swatch_for(&swatches, BlockType::PlatingWhite);
         assert!(
-            luma_range(red) > 90,
+            luma_range(red) > 110,
             "mesa strata tile is still too flat ({})",
             luma_range(red)
         );
         assert!(
-            luma_range(crystal) > 70,
+            luma_range(crystal) > 80,
             "crystal tile is still too flat ({})",
             luma_range(crystal)
         );
         assert!(
-            luma_range(plate) > 70,
+            luma_range(plate) > 80,
             "metal tile is still too flat ({})",
             luma_range(plate)
         );
