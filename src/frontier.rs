@@ -1066,7 +1066,7 @@ fn hero_skyway_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const RAIL_Z: i32 = -88;
     const HALF: f64 = 2.4;
-    if wx < 16 || wx > 128 {
+    if wx < 16 || wx > 100 {
         return None;
     }
     let dist = (wz - RAIL_Z).abs() as f64;
@@ -1401,26 +1401,29 @@ impl CliffFace {
     pub fn look_cone() -> [Self; 2] {
         [
             Self {
-                face_x: 132,
-                z0: -116,
-                z1: -76,
+                // Rest camera is ~(77, 105, −30) looking +X/−Z; a wall
+                // at x=132 sits behind the hero skyway. Park the butte
+                // on the look ray so it fills the lower half.
+                face_x: 104,
+                z0: -100,
+                z1: -52,
                 levels: 5,
                 depth: 8,
                 drop: 8,
                 rise: 5,
-                apron: 5,
-                crest: 16,
+                apron: 4,
+                crest: 22,
             },
             Self {
-                face_x: 144,
-                z0: -108,
-                z1: -84,
+                face_x: 116,
+                z0: -88,
+                z1: -60,
                 levels: 4,
                 depth: 6,
                 drop: 4,
                 rise: 5,
                 apron: 0,
-                crest: 10,
+                crest: 14,
             },
         ]
     }
@@ -1924,11 +1927,11 @@ mod tests {
                 face.z1
             );
             assert!(face.levels >= 3, "need stacked terraces, got {}", face.levels);
-            assert!(face.face_x >= 120 && face.face_x <= 152, "face_x {} is not in the look cone", face.face_x);
+            assert!(face.face_x >= 96 && face.face_x <= 140, "face_x {} is not in the look cone", face.face_x);
             assert!(face.crest >= 8, "butte crest {} is too short to clear the plateau lip", face.crest);
             assert!(face.apron <= 8, "apron {} would hide the wall behind a quarry", face.apron);
         }
-        let mut terrace = Chunk::new(ChunkPos::new(8, 4, -6));
+        let mut terrace = Chunk::new(ChunkPos::new(6, 5, -5));
         for ly in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
                 for lx in 0..CHUNK_SIZE {

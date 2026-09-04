@@ -2979,15 +2979,15 @@ mod tests {
     #[test]
     fn look_cone_cliff_carves_windows_into_generated_mesa() {
         let generator = TerrainGenerator::new(12345);
-        let rim = generator.surface_height_at(132, -90);
+        let rim = generator.surface_height_at(104, -72);
         assert!(rim > 40, "look-cone mesa is missing ({rim})");
         let holo: Voxel = BlockType::HoloPanel.into();
         let deck: Voxel = BlockType::RoadDeck.into();
         let mut windows = 0usize;
         let mut floors = 0usize;
         for cy in 2..8 {
-            for cx in 8..11 {
-                for cz in -8..-4 {
+            for cx in 6..10 {
+                for cz in -7..-3 {
                     let mut chunk = Chunk::new(ChunkPos::new(cx, cy, cz));
                     generator.generate(&mut chunk);
                     for ly in 0..CHUNK_SIZE {
