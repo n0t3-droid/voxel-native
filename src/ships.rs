@@ -2965,7 +2965,11 @@ fn draw_ship_boarding_hud(
     boarding: Res<ShipBoardingState>,
     pilot: Res<PilotState>,
     mode: Res<ModeContext>,
+    film: Option<Res<crate::film::FilmRuntime>>,
 ) {
+    if film.as_ref().map(|f| f.hide_hud).unwrap_or(false) {
+        return;
+    }
     if pilot.active_ship.is_some() || !matches!(mode.mode, ActiveMode::Combat) {
         return;
     }

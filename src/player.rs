@@ -367,8 +367,13 @@ fn update_look(
     mode: Option<Res<crate::mode::ModeContext>>,
     gesture_lock: Option<Res<crate::mode::BuildGestureLock>>,
     agent: Option<Res<crate::agent_control::AgentControlState>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
     mut query: Query<(&mut Transform, &mut Player)>,
 ) {
+    if film.as_ref().map(|f| f.enabled).unwrap_or(false) {
+        motion_evr.clear();
+        return;
+    }
     let Ok((mut transform, mut player)) = query.get_single_mut() else {
         return;
     };
@@ -430,8 +435,12 @@ fn update_movement(
     world: Res<VoxelWorld>,
     mode: Option<Res<crate::mode::ModeContext>>,
     agent: Option<Res<crate::agent_control::AgentControlState>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
     mut query: Query<(&mut Transform, &mut Player)>,
 ) {
+    if film.as_ref().map(|f| f.enabled).unwrap_or(false) {
+        return;
+    }
     let Ok((mut transform, mut player)) = query.get_single_mut() else {
         return;
     };

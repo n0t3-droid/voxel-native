@@ -1,10 +1,9 @@
 //! HUD-off cinematic film recorder (`--film` / `VOXEL_NATIVE_FILM=1`).
 //!
 //! Drives a deterministic hero-shot camera through Aether Frontier beats
-//! that match the goal painting: island grass close-up, combat pad
-//! silhouettes, ringed-planet framing, tunnel portal + docked fighter,
-//! hero shuttle with cyan plumes, and skyway / pad rail crews. Spawns
-//! film-only fill + rim lights so dark voxels stay readable under ACES.
+//! that match the goal painting. Each beat **holds** a fixed pose long
+//! enough for lavapipe to mesh + blit before the screenshot fires, so
+//! labels match pixels.
 
 use bevy::app::AppExit;
 use bevy::core_pipeline::bloom::BloomSettings;
@@ -47,7 +46,7 @@ impl Plugin for FilmPlugin {
     }
 }
 
-/// Resource other systems (HUD) can read to hide chrome during film.
+/// Resource other systems (HUD / player) can read to hide chrome / lock look.
 #[derive(Resource, Debug, Clone)]
 pub struct FilmRuntime {
     pub enabled: bool,
@@ -55,12 +54,17 @@ pub struct FilmRuntime {
     started: bool,
     finished: bool,
     elapsed: f32,
-    duration: f32,
+    /// Seconds to linger on each beat before capturing.
+    settle_secs: f32,
+    /// Seconds to keep holding after the capture is queued (blit lag).
+    hold_after_secs: f32,
     shot_index: usize,
-    /// Last shot index that already produced a capture (−1 = none).
+    shot_entered_at: f32,
+    capture_queued_at: Option<f32>,
     last_captured_shot: i32,
     lights_spawned: bool,
     shuttle_spawned: bool,
+    ready_to_roll: bool,
     island: Option<IslandSpec>,
     #[cfg(not(target_arch = "wasm32"))]
     out_dir: PathBuf,
@@ -79,10 +83,12 @@ struct FilmShuttleMarker;
 impl FilmRuntime {
     fn from_env() -> Self {
         let enabled = film_enabled();
-        // Long enough for one capture per painting beat after chunks mesh.
-        let duration = env_f32("VOXEL_NATIVE_FILM_SECONDS")
-            .unwrap_or(56.0)
-            .clamp(20.0, 600.0);
+        let settle_secs = env_f32("VOXEL_NATIVE_FILM_SETTLE")
+            .unwrap_or(3.5)
+            .clamp(1.0, 20.0);
+        let hold_after_secs = env_f32("VOXEL_NATIVE_FILM_HOLD")
+            .unwrap_or(2.0)
+            .clamp(0.5, 10.0);
         #[cfg(not(target_arch = "wasm32"))]
         let out_dir = {
             let stamp = std::time::SystemTime::now()
@@ -99,16 +105,25 @@ impl FilmRuntime {
             started: false,
             finished: false,
             elapsed: 0.0,
-            duration,
+            settle_secs,
+            hold_after_secs,
             shot_index: 0,
+            shot_entered_at: 0.0,
+            capture_queued_at: None,
             last_captured_shot: -1,
             lights_spawned: false,
             shuttle_spawned: false,
+            ready_to_roll: false,
             island: None,
             #[cfg(not(target_arch = "wasm32"))]
             out_dir,
             captures: Vec::new(),
         }
+    }
+
+    fn duration_estimate(&self) -> f32 {
+        // Warmup + per-shot settle/hold + small tail.
+        14.0 + SHOTS.len() as f32 * (self.settle_secs + self.hold_after_secs + 0.4) + 2.0
     }
 }
 
@@ -151,8 +166,7 @@ fn film_enter_game(
         .and_then(|v| v.parse().ok())
         .unwrap_or(12345);
     // Mid-afternoon (~15.5 h): high solar elevation for grass / hull
-    // silhouettes without crushing the nebula (CIE daylight D65-ish cool
-    // fill still applied via film lights).
+    // silhouettes (CIE daylight cool fill still applied via film lights).
     let hour = env_f32("VOXEL_NATIVE_FILM_HOUR")
         .unwrap_or(15.5)
         .clamp(0.0, 24.0);
@@ -163,7 +177,6 @@ fn film_enter_game(
     settings.time_mode = meta.time_mode;
     settings.time_of_day = meta.time_of_day;
     settings.companion_ui.show_companion_dock = false;
-    // Combat mode hides the Build Studio egui dock so film frames stay clean.
     mode.set(ActiveMode::Combat, "Film recorder: HUD-off combat framing.");
     toolbelt.live = false;
     toolbelt.palette_open = false;
@@ -172,8 +185,9 @@ fn film_enter_game(
     next.set(GameState::InGame);
     film.started = true;
     info!(
-        "FILM: aether recorder started (duration {:.1}s, seed {seed}, hour {hour})",
-        film.duration
+        "FILM: aether recorder started (seed {seed}, hour {hour}, settle {:.1}s, shots {})",
+        film.settle_secs,
+        SHOTS.len()
     );
 }
 
@@ -188,8 +202,6 @@ fn film_spawn_lights(
     }
     film.lights_spawned = true;
 
-    // Soft fill from camera-right so grass and dark hull voxels lift out
-    // of crushed blacks without bleaching the nebula.
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
@@ -205,7 +217,6 @@ fn film_spawn_lights(
         FilmFillLight,
         Name::new("FilmFillLight"),
     ));
-    // Warm rim opposite the fill — edge-lights soldiers/monsters/ships.
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
@@ -221,7 +232,6 @@ fn film_spawn_lights(
         FilmRimLight,
         Name::new("FilmRimLight"),
     ));
-    // Key fill above the deck — keeps grass readable at 12–18 m.
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
@@ -261,14 +271,13 @@ fn film_spawn_shuttle(
         return;
     };
     film.shuttle_spawned = true;
-    // Park the hero shuttle off the +X pad rim, nose toward −X so cyan
-    // wakes stream toward the camera on the shuttle beat.
     let pos = Vec3::new(
-        island.cx as f32 + 16.0,
-        island.deck_y as f32 + 5.5,
-        island.cz as f32 - 2.0,
+        island.cx as f32 + 14.0,
+        island.deck_y as f32 + 4.5,
+        island.cz as f32 + 1.0,
     );
-    let yaw = std::f32::consts::PI * 0.92;
+    // Nose toward −X so wakes stream past a rear-quarter camera.
+    let yaw = std::f32::consts::FRAC_PI_2;
     let entity = spawn_aether_film_shuttle(
         &mut commands,
         &mut meshes,
@@ -285,42 +294,32 @@ fn film_spawn_shuttle(
 #[derive(Clone, Copy)]
 struct FilmShot {
     name: &'static str,
-    /// Normalised time within the film [0, 1].
-    at: f32,
 }
 
 const SHOTS: &[FilmShot] = &[
     FilmShot {
         name: "island_grass_closeup",
-        at: 0.10,
     },
     FilmShot {
         name: "island_keel_crystals",
-        at: 0.22,
     },
     FilmShot {
         name: "combat_pad_silhouettes",
-        at: 0.34,
     },
     FilmShot {
         name: "pad_rail_crew",
-        at: 0.46,
     },
     FilmShot {
         name: "tunnel_portal_fighter",
-        at: 0.58,
     },
     FilmShot {
         name: "shuttle_cyan_plumes",
-        at: 0.70,
     },
     FilmShot {
         name: "ringed_planet_hero",
-        at: 0.82,
     },
     FilmShot {
         name: "skyway_rail_crew",
-        at: 0.92,
     },
 ];
 
@@ -349,8 +348,6 @@ fn film_drive_camera(
     let dt = time.delta_seconds().min(1.0);
     film.elapsed += dt;
 
-    // Day/night rewrites ambient + sun each frame — reassert film floors
-    // so dark voxels do not crush under ACES / lavapipe.
     ambient.brightness = ambient.brightness.max(1_450.0);
     ambient.color = Color::srgb(0.72, 0.78, 0.88);
     if let Ok(mut sun) = sun_q.get_single_mut() {
@@ -363,7 +360,6 @@ fn film_drive_camera(
     }
 
     if film.island.is_none() {
-        // Prefer a station island so combat / portal / fighter beats land.
         let mut best = None;
         for origin in [(0, 0), (500, 0), (0, 500), (-500, 0), (0, -500), (900, 900)] {
             if let Some(spec) = find_nearest_island(
@@ -383,116 +379,185 @@ fn film_drive_camera(
                 }
             }
         }
-        film.island = best;
+        if let Some(spec) = best {
+            // Jump to the island immediately so chunk streaming targets it.
+            let warm = Vec3::new(
+                spec.cx as f32 + 0.5,
+                spec.deck_y as f32 + 12.0,
+                spec.cz as f32 + 0.5,
+            );
+            transform.translation = warm;
+            player.velocity = Vec3::ZERO;
+            player.flying = true;
+            player.placed_on_surface = true;
+            film.island = Some(spec);
+            film.shot_entered_at = film.elapsed;
+            info!(
+                "FILM: locked station island ({}, {}) deck_y={}",
+                spec.cx, spec.cz, spec.deck_y
+            );
+        }
     }
     let Some(island) = film.island else {
         return;
     };
 
-    let t = (film.elapsed / film.duration).clamp(0.0, 1.0);
-    let (pos, look) = shot_camera(t, island, &world);
-
-    transform.translation = pos;
-    player.velocity = Vec3::ZERO;
-    player.flying = true;
-    player.placed_on_surface = true;
-    let dir = (look - pos).normalize_or_zero();
-    if dir.length_squared() > 0.0 {
-        player.yaw = (-dir.x).atan2(-dir.z);
-        player.pitch = dir.y.asin().clamp(-1.25, 1.05);
-        transform.rotation = Quat::from_axis_angle(Vec3::Y, player.yaw)
-            * Quat::from_axis_angle(Vec3::X, player.pitch);
-    }
-
-    // Parent fill/rim to the camera so every shot stays lit.
-    let right = transform.right();
-    let up = transform.up();
-    let forward = transform.forward();
-    for mut fill_tf in fill_q.iter_mut() {
-        fill_tf.translation = pos + right * 6.0 + up * 10.0 - forward * 1.0;
-    }
-    if let Ok(mut rim_tf) = rim_q.get_single_mut() {
-        rim_tf.translation = pos - right * 8.0 + up * 3.0 + forward * 5.0;
-    }
-
-    // Soft stream gate: give the hero island a few seconds to mesh, but
-    // never starve the whole film on slow software adapters.
-    let pending = streamer.pending_terrain.len() + streamer.pending_meshes.len();
-    let loaded = world.chunks.len();
-    if film.elapsed < 16.0 && film.captures.is_empty() && (pending > 80 || loaded < 20) {
-        // Hold the first shot beat until chunks catch up.
+    // Warmup: wait for chunks around the island before rolling shots.
+    if !film.ready_to_roll {
+        let pending = streamer.pending_terrain.len() + streamer.pending_meshes.len();
+        let loaded = world.chunks.len();
+        let warm_pos = Vec3::new(
+            island.cx as f32 + 0.5,
+            island.deck_y as f32 + 12.0,
+            island.cz as f32 + 0.5,
+        );
+        apply_camera(
+            &mut transform,
+            &mut player,
+            warm_pos,
+            warm_pos + Vec3::new(4.0, -2.0, 6.0),
+        );
+        follow_lights(&mut fill_q, &mut rim_q, transform.translation, &transform);
+        if film.elapsed >= 12.0 || (loaded >= 28 && pending < 60 && film.elapsed >= 6.0) {
+            film.ready_to_roll = true;
+            film.shot_index = 0;
+            film.shot_entered_at = film.elapsed;
+            film.capture_queued_at = None;
+            info!(
+                "FILM: rolling (loaded={loaded}, pending={pending}, t={:.1})",
+                film.elapsed
+            );
+        }
         return;
     }
 
-    let shot_i = SHOTS.iter().rposition(|s| t + 1e-3 >= s.at).unwrap_or(0);
-    film.shot_index = shot_i;
+    // Advance beat after settle + capture + post-hold.
+    if let Some(queued_at) = film.capture_queued_at {
+        if film.elapsed >= queued_at + film.hold_after_secs {
+            if film.shot_index + 1 >= SHOTS.len() {
+                // Stay on last pose until finish timer.
+            } else {
+                film.shot_index += 1;
+                film.shot_entered_at = film.elapsed;
+                film.capture_queued_at = None;
+                info!(
+                    "FILM: advance → {} ({}/{})",
+                    SHOTS[film.shot_index].name,
+                    film.shot_index + 1,
+                    SHOTS.len()
+                );
+            }
+        }
+    }
+
+    let (pos, look) = shot_pose(film.shot_index, island, &world);
+    apply_camera(&mut transform, &mut player, pos, look);
+    follow_lights(&mut fill_q, &mut rim_q, pos, &transform);
 }
 
-fn shot_camera(t: f32, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec3) {
+fn apply_camera(transform: &mut Transform, player: &mut Player, pos: Vec3, look: Vec3) {
+    *transform = Transform::from_translation(pos).looking_at(look, Vec3::Y);
+    player.velocity = Vec3::ZERO;
+    player.flying = true;
+    player.placed_on_surface = true;
+    let forward = *transform.forward();
+    player.yaw = (-forward.x).atan2(-forward.z);
+    player.pitch = forward.y.asin().clamp(-1.25, 1.05);
+}
+
+fn follow_lights(
+    fill_q: &mut Query<
+        &mut Transform,
+        (With<FilmFillLight>, Without<Player>, Without<FilmRimLight>),
+    >,
+    rim_q: &mut Query<
+        &mut Transform,
+        (With<FilmRimLight>, Without<Player>, Without<FilmFillLight>),
+    >,
+    pos: Vec3,
+    cam: &Transform,
+) {
+    let right = cam.right();
+    let up = cam.up();
+    let forward = cam.forward();
+    for mut fill_tf in fill_q.iter_mut() {
+        fill_tf.translation = pos + right * 4.0 + up * 6.0 - forward * 1.0;
+    }
+    if let Ok(mut rim_tf) = rim_q.get_single_mut() {
+        rim_tf.translation = pos - right * 5.0 + up * 2.0 + forward * 3.0;
+    }
+}
+
+fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec3) {
     let deck = Vec3::new(
         island.cx as f32 + 0.5,
         island.deck_y as f32 + 1.0,
         island.cz as f32 + 0.5,
     );
-    let station = deck + Vec3::Y * 1.0;
+    let station = deck;
 
-    if t < 0.18 {
-        // Island grass close-up: ~14 m off the deck looking down at tufts.
-        let dist = ISLAND_CLOSEUP_DISTANCE_M;
-        let pos = deck + Vec3::new(5.0, dist * 0.42, 9.0);
-        let look = deck + Vec3::new(1.0, 1.2, -1.0);
-        return (pos, look);
+    match index {
+        0 => {
+            // Grass close-up: hover over the lawn looking down at tufts.
+            let dist = ISLAND_CLOSEUP_DISTANCE_M;
+            let pos = deck + Vec3::new(3.5, dist * 0.55, 6.5);
+            let look = deck + Vec3::new(0.5, 0.8, -0.5);
+            (pos, look)
+        }
+        1 => {
+            // Under-keel hanging crystals.
+            let pos = deck + Vec3::new(-5.0, -3.5, 5.0);
+            let look = deck + Vec3::new(0.0, -3.0, 0.0);
+            (pos, look)
+        }
+        2 => {
+            // Combat pad — marine (−3,2) vs alien (+2,2), ~6 m.
+            let pos = station + Vec3::new(-5.5, 3.2, 6.0);
+            let look = station + Vec3::new(-0.5, 2.6, 2.2);
+            (pos, look)
+        }
+        3 => {
+            // Pad rail-crew pair at (−4, ·, −2/−3).
+            let pos = station + Vec3::new(-6.5, 2.8, 1.0);
+            let look = station + Vec3::new(-4.0, 2.4, -2.5);
+            (pos, look)
+        }
+        4 => {
+            // Tunnel portal (−Z) + fighter plume (+X).
+            let pos = station + Vec3::new(5.5, 3.0, -3.5);
+            let look = station + Vec3::new(6.0, 2.2, -0.5);
+            (pos, look)
+        }
+        5 => {
+            // Hero shuttle rear-quarter so cyan wakes fill the frame.
+            let shuttle = Vec3::new(
+                island.cx as f32 + 14.0,
+                island.deck_y as f32 + 4.5,
+                island.cz as f32 + 1.0,
+            );
+            let pos = shuttle + Vec3::new(5.5, 2.2, 4.5);
+            let look = shuttle + Vec3::new(-2.0, 0.3, 0.0);
+            (pos, look)
+        }
+        6 => {
+            // Ringed planet — tip camera up into the sky landmark.
+            let pos = deck + Vec3::new(-12.0, 18.0, 20.0);
+            let look = pos + Vec3::new(0.25, 0.65, -0.55).normalize() * 60.0;
+            (pos, look)
+        }
+        _ => {
+            // Skyway rail — rim of the island toward a span.
+            let pos = deck + Vec3::new(island.radius_x as f32 + 6.0, 4.0, 2.0);
+            let surface =
+                world.surface_height_at(island.cx + island.radius_x + 16, island.cz) as f32;
+            let look = Vec3::new(
+                island.cx as f32 + island.radius_x as f32 + 4.0,
+                (island.deck_y as f32 + 2.0).max(surface + 3.0),
+                island.cz as f32,
+            );
+            (pos, look)
+        }
     }
-    if t < 0.30 {
-        // Under-keel crystal pass — close enough that hanging spikes fill frame.
-        let pos = deck + Vec3::new(-8.0, -5.0, 7.0);
-        let look = deck + Vec3::new(0.0, -4.0, 0.0);
-        return (pos, look);
-    }
-    if t < 0.42 {
-        // Combat pad — marine vs multi-leg alien, ~8 m framing.
-        let pos = station + Vec3::new(-6.0, 3.8, 7.5);
-        let look = station + Vec3::new(-0.5, 2.4, 2.0);
-        return (pos, look);
-    }
-    if t < 0.54 {
-        // Pad rail-crew pair on the −X rim.
-        let pos = station + Vec3::new(-7.5, 3.2, -0.5);
-        let look = station + Vec3::new(-4.0, 2.2, -2.4);
-        return (pos, look);
-    }
-    if t < 0.66 {
-        // Tunnel portal + docked fighter with cyan plume.
-        let pos = station + Vec3::new(7.5, 3.5, -4.0);
-        let look = station + Vec3::new(5.5, 2.2, -1.0);
-        return (pos, look);
-    }
-    if t < 0.78 {
-        // Hero shuttle with cyan energy wakes.
-        let shuttle = Vec3::new(
-            island.cx as f32 + 16.0,
-            island.deck_y as f32 + 5.5,
-            island.cz as f32 - 2.0,
-        );
-        let pos = shuttle + Vec3::new(-7.0, 2.5, 6.5);
-        let look = shuttle + Vec3::new(-1.5, 0.2, 0.0);
-        return (pos, look);
-    }
-    if t < 0.90 {
-        // Ringed planet hero: lift and catch the thick ring silhouette.
-        let pos = deck + Vec3::new(-18.0, 22.0, 28.0);
-        let look = pos + Vec3::new(0.35, 0.55, -0.60).normalize() * 50.0;
-        return (pos, look);
-    }
-    // Skyway rail crew — orbit the deck edge toward a span neighbour.
-    let pos = deck + Vec3::new(island.radius_x as f32 + 10.0, 5.0, 3.0);
-    let surface = world.surface_height_at(island.cx + island.radius_x + 20, island.cz) as f32;
-    let look = Vec3::new(
-        island.cx as f32 + island.radius_x as f32 + 6.0,
-        (island.deck_y as f32 + 2.5).max(surface + 4.0),
-        island.cz as f32 + 1.0,
-    );
-    (pos, look)
 }
 
 fn film_capture(
@@ -500,23 +565,22 @@ fn film_capture(
     main_window: Query<Entity, With<PrimaryWindow>>,
     mut screenshots: ResMut<ScreenshotManager>,
 ) {
-    if !film.enabled || film.finished {
+    if !film.enabled || film.finished || !film.ready_to_roll {
         return;
     }
     if film.island.is_none() {
+        return;
+    }
+    if film.capture_queued_at.is_some() {
         return;
     }
     let shot_i = film.shot_index as i32;
     if shot_i <= film.last_captured_shot {
         return;
     }
-    // Require a brief settle on the new beat before grabbing.
-    let t = (film.elapsed / film.duration).clamp(0.0, 1.0);
-    let beat_at = SHOTS.get(film.shot_index).map(|s| s.at).unwrap_or(0.0);
-    if t < beat_at + 0.012 {
+    if film.elapsed < film.shot_entered_at + film.settle_secs {
         return;
     }
-    film.last_captured_shot = shot_i;
     let Ok(window) = main_window.get_single() else {
         return;
     };
@@ -530,19 +594,17 @@ fn film_capture(
             .out_dir
             .join(format!("shot_{:02}_{shot}.png", film.captures.len()));
         if screenshots.save_screenshot_to_disk(window, &path).is_ok() {
-            info!("FILM: captured {}", path.display());
+            info!("FILM: queued capture {}", path.display());
             film.captures.push(path.display().to_string());
-            // Mirror into artifacts for the overnight review pack.
-            let art = PathBuf::from("/opt/cursor/artifacts").join(format!(
-                "aether_film_{:02}_{shot}.png",
-                film.captures.len() - 1
-            ));
-            let _ = std::fs::copy(&path, &art);
+            film.last_captured_shot = shot_i;
+            film.capture_queued_at = Some(film.elapsed);
         }
     }
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (window, &mut screenshots, shot);
+        film.last_captured_shot = shot_i;
+        film.capture_queued_at = Some(film.elapsed);
     }
 }
 
@@ -550,16 +612,35 @@ fn film_finish(mut film: ResMut<FilmRuntime>, mut exit: EventWriter<AppExit>) {
     if !film.enabled || film.finished {
         return;
     }
-    if film.elapsed < film.duration {
+    if !film.ready_to_roll {
         return;
+    }
+    // Done when every shot captured and the last hold finished.
+    let all_captured = film.last_captured_shot + 1 >= SHOTS.len() as i32;
+    let last_hold_done = film
+        .capture_queued_at
+        .map(|t| film.elapsed >= t + film.hold_after_secs)
+        .unwrap_or(false);
+    if !(all_captured && last_hold_done) {
+        // Safety valve so a stuck blit cannot hang forever.
+        if film.elapsed < film.duration_estimate() + 20.0 {
+            return;
+        }
     }
     film.finished = true;
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // Mirror captures into artifacts once files exist on disk.
+        for (i, src) in film.captures.iter().enumerate() {
+            let name = SHOTS.get(i).map(|s| s.name).unwrap_or("aether");
+            let art = PathBuf::from("/opt/cursor/artifacts")
+                .join(format!("aether_hold_{i:02}_{name}.png"));
+            let _ = std::fs::copy(src, &art);
+        }
         let report = film.out_dir.join("film_report.txt");
         let body = format!(
-            "duration={:.2}\nshots={}\ncaptures={}\nisland={:?}\ncloseup_distance_m={}\nstation_headroom={}\nhide_hud={}\nshuttle_spawned={}\nfiles:\n{}\n",
-            film.duration,
+            "duration={:.2}\nshots={}\ncaptures={}\nisland={:?}\ncloseup_distance_m={}\nstation_headroom={}\nhide_hud={}\nshuttle_spawned={}\nsettle_secs={}\nhold_after_secs={}\nfiles:\n{}\n",
+            film.elapsed,
             SHOTS.len(),
             film.captures.len(),
             film.island,
@@ -567,6 +648,8 @@ fn film_finish(mut film: ResMut<FilmRuntime>, mut exit: EventWriter<AppExit>) {
             STATION_HEADROOM,
             film.hide_hud,
             film.shuttle_spawned,
+            film.settle_secs,
+            film.hold_after_secs,
             film.captures.join("\n")
         );
         let _ = std::fs::write(&report, &body);
@@ -595,16 +678,10 @@ mod tests {
             .any(|n| n.contains("portal") || n.contains("fighter")));
         assert!(names.iter().any(|n| n.contains("planet")));
         assert!(names.iter().any(|n| n.contains("rail")));
-        let mut prev = -1.0;
-        for s in SHOTS {
-            assert!(s.at > prev);
-            prev = s.at;
-        }
     }
 
     #[test]
     fn film_enabled_parses_flag_helpers() {
-        // env helpers stay deterministic without requiring process args.
         assert!(!env_flag("VOXEL_NATIVE_FILM_UNSET_SENTINEL_ZZZ"));
     }
 }
