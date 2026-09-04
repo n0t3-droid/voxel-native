@@ -37,6 +37,7 @@ impl Plugin for FilmPlugin {
                 film_enter_game,
                 film_spawn_lights.run_if(in_state(GameState::InGame)),
                 film_spawn_shuttle.run_if(in_state(GameState::InGame)),
+                film_ensure_station_pad.run_if(in_state(GameState::InGame)),
                 film_drive_camera.run_if(in_state(GameState::InGame)),
                 film_capture.run_if(in_state(GameState::InGame)),
                 film_finish.run_if(in_state(GameState::InGame)),
@@ -64,6 +65,7 @@ pub struct FilmRuntime {
     last_captured_shot: i32,
     lights_spawned: bool,
     shuttle_spawned: bool,
+    station_forced: bool,
     ready_to_roll: bool,
     island: Option<IslandSpec>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -113,6 +115,7 @@ impl FilmRuntime {
             last_captured_shot: -1,
             lights_spawned: false,
             shuttle_spawned: false,
+            station_forced: false,
             ready_to_roll: false,
             island: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -254,6 +257,38 @@ fn film_spawn_lights(
         bloom.intensity = 0.08;
         bloom.prefilter_settings.threshold = 0.55;
     }
+}
+
+fn film_ensure_station_pad(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRuntime>) {
+    if !film.enabled || film.finished || film.station_forced {
+        return;
+    }
+    let Some(island) = film.island else {
+        return;
+    };
+    // Wait a couple of seconds for natural streaming, then force-stamp
+    // the pad into resident chunks so marine/crew voxels cannot be Air
+    // just because a neighbouring 16³ column lagged behind.
+    if film.elapsed < 5.0 {
+        return;
+    }
+    if station_pad_streamed(&world, island) {
+        film.station_forced = true;
+        return;
+    }
+    let ox = island.cx;
+    let oy = island.deck_y + 1;
+    let oz = island.cz;
+    let mut written = 0usize;
+    crate::frontier::visit_orbital_station(ox, oy, oz, |x, y, z, block| {
+        if world.edit_set_voxel(x, y, z, block.into()) {
+            written += 1;
+        }
+    });
+    film.station_forced = true;
+    info!(
+        "FILM: force-stamped orbital station at ({ox},{oy},{oz}) wrote={written} voxels"
+    );
 }
 
 fn film_spawn_shuttle(
