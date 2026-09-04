@@ -251,8 +251,10 @@ const POSTCARD_BOUNCE: [(i32, i32, f32, f32, f32, f32, f32, f32); 10] = [
     (90, -78, 4.0, 1.0, 0.42, 0.12, 260_000.0, 22.0),
     (120, -72, 3.0, 0.18, 0.78, 1.0, 280_000.0, 24.0),
     (150, -72, 3.0, 0.18, 0.78, 1.0, 300_000.0, 28.0),
-    (108, -132, 6.0, 1.0, 0.62, 0.32, 180_000.0, 20.0),
-    (96, -140, 5.0, 1.0, 0.55, 0.22, 170_000.0, 20.0),
+    // West-face rock next to the camera-facing terraces — local cyan/warm
+    // bleed onto adjacent cliff, not a skyway glare.
+    (36, -86, 6.0, 0.30, 0.80, 1.0, 280_000.0, 24.0),
+    (28, -72, 5.0, 1.0, 0.55, 0.22, 220_000.0, 20.0),
 ];
 
 fn night_bounce_dir(key_dir: Vec3, night: bool) -> Vec3 {
@@ -317,9 +319,22 @@ fn snap_postcard_bounce_to_ground(
     }
 }
 
-/// Tiny night emissive floor on mesa stone so banding hues survive ACES
-/// without a second directional key. Fast stays at zero. Crystals are
-/// not in this list — they already sit well above the bloom threshold.
+/// Night-only unlit ambient on mesa stone. A uniform 0.18 floor was
+/// eaten by ACES whenever HDR crystals shared the frame; scaling each
+/// block's own albedo keeps strata hues and stays below crystal/river
+/// emissive. Fast writes black. `emissive_exposure_weight` stays 0 so
+/// this is not divided by EV100.
+const NIGHT_STONE_EMISSIVE_SCALE: f32 = 2.45;
+
+fn night_stone_emissive(block: BlockType, night_amt: f32, fast: bool) -> LinearRgba {
+    if fast || night_amt <= 0.001 {
+        return LinearRgba::BLACK;
+    }
+    let lin = block.color().to_linear();
+    let s = night_amt * NIGHT_STONE_EMISSIVE_SCALE;
+    LinearRgba::rgb(lin.red * s, lin.green * s, lin.blue * s)
+}
+
 fn night_terrain_emissive_floor(
     settings: Res<WorldSettings>,
     lib: Option<Res<MaterialLibrary>>,
@@ -333,12 +348,7 @@ fn night_terrain_emissive_floor(
     }
     let sun = sun_direction(settings.time_of_day);
     let night_amt = (1.0 - day_factor(sun)).powf(1.55);
-    let floor = if settings.graphics == GraphicsMode::Fast {
-        0.0
-    } else {
-        night_amt * 0.18
-    };
-    let e = LinearRgba::rgb(floor * 1.25, floor * 0.55, floor * 0.36);
+    let fast = settings.graphics == GraphicsMode::Fast;
     for block in [
         BlockType::RedStone,
         BlockType::MesaClay,
@@ -349,7 +359,11 @@ fn night_terrain_emissive_floor(
     ] {
         if let Some(handle) = lib.handle_for(block as u16) {
             if let Some(mat) = materials.get_mut(&handle) {
-                mat.emissive = e;
+                mat.emissive = night_stone_emissive(block, night_amt, fast);
+                mat.emissive_exposure_weight = 0.0;
+                // A little extra dielectric response so the existing
+                // fill/bounce actually lands on vertical faces.
+                mat.reflectance = if fast { 0.05 } else { 0.05 + night_amt * 0.10 };
             }
         }
     }
@@ -699,5 +713,29 @@ mod tests {
             assert!(range <= 40.0, "bounce range {range} would light the whole mesa");
             assert!(lumens <= 450_000.0, "bounce lumens {lumens} would flatten night");
         }
+        assert!(
+            POSTCARD_BOUNCE.iter().any(|&(wx, _, _, r, g, b, _, _)| wx < 48 && b > r && g > r),
+            "west-face cyan bounce missing from the look cone"
+        );
+        assert!(
+            POSTCARD_BOUNCE.iter().any(|&(wx, _, _, r, g, b, _, _)| wx < 48 && r > b && r > g),
+            "west-face warm bounce missing from the look cone"
+        );
+    }
+
+    #[test]
+    fn night_stone_floor_follows_albedo_and_stays_off_fast() {
+        let red = night_stone_emissive(BlockType::RedStone, 1.0, false);
+        let clay = night_stone_emissive(BlockType::MesaClay, 1.0, false);
+        let violet = night_stone_emissive(BlockType::VioletStone, 1.0, false);
+        let noon = night_stone_emissive(BlockType::RedStone, 0.0, false);
+        let fast = night_stone_emissive(BlockType::RedStone, 1.0, true);
+        assert!(red.red > 1.2, "redstone night floor still ACES-food ({})", red.red);
+        assert!(red.red > red.blue, "redstone floor lost its rust hue");
+        assert!(clay.green > red.green, "mesa clay should read as the bright stripe");
+        assert!(violet.blue > violet.red, "violet band should stay violet");
+        assert_eq!(noon, LinearRgba::BLACK);
+        assert_eq!(fast, LinearRgba::BLACK);
+        assert!(NIGHT_STONE_EMISSIVE_SCALE > 2.0);
     }
 }
