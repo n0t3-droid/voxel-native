@@ -594,6 +594,7 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
 
 fn film_capture(
     mut film: ResMut<FilmRuntime>,
+    world: Res<VoxelWorld>,
     main_window: Query<Entity, With<PrimaryWindow>>,
     mut screenshots: ResMut<ScreenshotManager>,
 ) {
@@ -622,6 +623,11 @@ fn film_capture(
         .unwrap_or("aether");
     #[cfg(not(target_arch = "wasm32"))]
     {
+        if shot.contains("combat") {
+            if let Some(island) = film.island {
+                dump_pad_voxels(&world, island);
+            }
+        }
         let path = film
             .out_dir
             .join(format!("shot_{:02}_{shot}.png", film.captures.len()));
@@ -634,10 +640,43 @@ fn film_capture(
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (window, &mut screenshots, shot);
+        let _ = (window, &mut screenshots, shot, &world);
         film.last_captured_shot = shot_i;
         film.capture_queued_at = Some(film.elapsed);
     }
+}
+
+fn dump_pad_voxels(world: &VoxelWorld, island: IslandSpec) {
+    let ox = island.cx;
+    let oy = island.deck_y + 1;
+    let oz = island.cz;
+    let mut lines = vec![format!(
+        "pad_origin=({ox},{oy},{oz})\nprobe=marine(-3..0,1..5,2..3) alien(0..4,1..6,0..4)\n"
+    )];
+    for (label, dx, dy, dz) in [
+        ("marine_leg", -3, 1, 2),
+        ("marine_chest", -3, 3, 2),
+        ("marine_beacon", -3, 5, 2),
+        ("alien_body", 2, 3, 2),
+        ("alien_crest", 2, 6, 2),
+        ("alien_leg", 4, 1, 4),
+        ("crew_a", -4, 3, -2),
+        ("crew_b", -4, 3, -3),
+        ("fighter_plume", 5, 2, 0),
+    ] {
+        let v = world.voxel_at(ox + dx, oy + dy, oz + dz);
+        lines.push(format!(
+            "{label}=({},{},{}) voxel={:?} block={:?}\n",
+            ox + dx,
+            oy + dy,
+            oz + dz,
+            v,
+            crate::blocks::BlockType::from_voxel(v)
+        ));
+    }
+    let body = lines.concat();
+    let _ = std::fs::write("/opt/cursor/artifacts/film_pad_voxel_probe.txt", &body);
+    info!("FILM: pad voxel probe\n{body}");
 }
 
 fn film_finish(mut film: ResMut<FilmRuntime>, mut exit: EventWriter<AppExit>) {
