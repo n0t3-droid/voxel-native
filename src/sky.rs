@@ -1283,7 +1283,7 @@ fn horizon_scatter_rgba(elevation: f32) -> [u8; 4] {
     };
     let intensity = intensity.clamp(0.0, 1.0);
     let u = elevation.clamp(0.0, 1.0);
-    // Gold through ~12° (u=0.13), peach through ~25° (u=0.28), then
+    // Gold through ~12° (u=0.13), peach through ~34° (u=0.38), then
     // the remaining energy is still warm so the fade does not turn
     // the mid-sky violet before alpha dies.
     let (hr, hg, hb) = if elevation <= 0.0 {
@@ -1291,19 +1291,21 @@ fn horizon_scatter_rgba(elevation: f32) -> [u8; 4] {
     } else if u < 0.14 {
         let t = u / 0.14;
         (255.0, 196.0 + 18.0 * t, 72.0 + 36.0 * t)
-    } else if u < 0.28 {
-        let t = (u - 0.14) / 0.14;
-        (255.0, 214.0 + 22.0 * t, 108.0 + 52.0 * t)
+    } else if u < 0.38 {
+        let t = (u - 0.14) / 0.24;
+        (255.0, 214.0 + 28.0 * t, 108.0 + 70.0 * t)
     } else {
-        let t = ((u - 0.28) / 0.27).clamp(0.0, 1.0);
-        (255.0 - 40.0 * t, 236.0 - 48.0 * t, 160.0 + 20.0 * t)
+        let t = ((u - 0.38) / 0.17).clamp(0.0, 1.0);
+        (255.0 - 50.0 * t, 242.0 - 40.0 * t, 178.0 + 10.0 * t)
     };
     let alpha = if elevation < 0.0 {
         intensity * 0.58
-    } else if u < 0.16 {
+    } else if u < 0.18 {
         intensity * 0.62
+    } else if u < 0.34 {
+        intensity * 0.50
     } else {
-        intensity * 0.38
+        intensity * 0.30
     };
     [
         (hr * intensity) as u8,
@@ -1376,6 +1378,7 @@ mod tests {
         let rim = horizon_scatter_rgba(0.0);
         let gold = horizon_scatter_rgba(0.12);
         let peach = horizon_scatter_rgba(0.22);
+        let mid = horizon_scatter_rgba(0.32);
         let upper = horizon_scatter_rgba(0.40);
         let zenith = horizon_scatter_rgba(0.95);
         assert!(rim[0] > 180, "horizon gold too dim ({})", rim[0]);
@@ -1405,6 +1408,17 @@ mod tests {
             peach[1] as f32 / (peach[0].max(1) as f32) > 0.70,
             "peach band is still orange-red G/R={:.2}",
             peach[1] as f32 / peach[0].max(1) as f32
+        );
+        assert!(
+            mid[1] as f32 / (mid[0].max(1) as f32) > 0.80,
+            "peach did not hold through mid-sky G/R={:.2}",
+            mid[1] as f32 / mid[0].max(1) as f32
+        );
+        assert!(
+            mid[0] as i16 - mid[2] as i16 > 0,
+            "mid-sky lost peach warmth (R={} B={})",
+            mid[0],
+            mid[2]
         );
         assert!(
             upper[3] < rim[3] / 2,
