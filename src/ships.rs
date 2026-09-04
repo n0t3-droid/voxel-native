@@ -469,7 +469,7 @@ impl CockpitTransition {
 }
 
 #[derive(Default, Resource)]
-struct ShipFxCache {
+pub(crate) struct ShipFxCache {
     cube: Option<Handle<Mesh>>,
     real_sphere: Option<Handle<Mesh>>,
     real_cylinder: Option<Handle<Mesh>>,
@@ -1713,6 +1713,43 @@ fn push_real_part(
     });
 }
 
+/// Spawn a Scout Shuttle for Aether film hero frames. Returns the root
+/// entity. Writes a cruise `ShipMotion::speed` so cyan energy wakes pulse
+/// hotter than the unmanned floor intensity.
+pub fn spawn_aether_film_shuttle(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    fx: &mut ShipFxCache,
+    pos: Vec3,
+    yaw: f32,
+) -> Entity {
+    let entity = spawn_ship_entity(
+        commands,
+        meshes,
+        materials,
+        images,
+        fx,
+        ShipKind::ScoutShuttle,
+        pos,
+        yaw,
+        false,
+        None,
+    );
+    // Replace the default parked motion with a cruise so trails bloom.
+    commands.entity(entity).insert(ShipMotion {
+        yaw,
+        pitch: -0.08,
+        roll: 0.0,
+        speed: blueprint(ShipKind::ScoutShuttle).max_speed * 0.55,
+        yaw_rate: 0.0,
+        pitch_rate: 0.0,
+        lateral_speed: 0.0,
+    });
+    entity
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_ship_entity(
     commands: &mut Commands,
@@ -2117,18 +2154,30 @@ fn update_ship_energy_trails(
     time: Res<Time>,
     pilot: Res<PilotState>,
     ship_q: Query<(&ShipInstance, &ShipMotion)>,
-    mut trails: Query<(&ShipEnergyTrail, &mut Transform)>,
+    parents: Query<&Parent>,
+    mut trails: Query<(Entity, &ShipEnergyTrail, &mut Transform)>,
 ) {
-    let intensity = pilot
+    let piloted_intensity = pilot
         .active_ship
         .and_then(|ship| ship_q.get(ship).ok())
         .map(|(ship, motion)| {
             let bp = blueprint(ship.kind);
             (motion.speed / bp.max_speed.max(1.0)).clamp(0.0, 1.0)
-        })
-        .unwrap_or(0.18);
+        });
     let seconds = time.elapsed_seconds_wrapped();
-    for (trail, mut tf) in trails.iter_mut() {
+    for (entity, trail, mut tf) in trails.iter_mut() {
+        // Prefer the parent ship's cruise speed so unpiloted film hero
+        // shuttles still bloom cyan wakes instead of the parked floor.
+        let intensity = parents
+            .get(entity)
+            .ok()
+            .and_then(|parent| ship_q.get(parent.get()).ok())
+            .map(|(ship, motion)| {
+                let bp = blueprint(ship.kind);
+                (motion.speed / bp.max_speed.max(1.0)).clamp(0.0, 1.0)
+            })
+            .or(piloted_intensity)
+            .unwrap_or(0.18);
         let wave = (seconds * 7.4 + trail.phase).sin();
         let pulse = 0.72 + intensity * 0.55 + wave.abs() * 0.22;
         tf.translation = trail.base_translation + Vec3::new(0.0, wave * 0.08, wave * 0.28);
