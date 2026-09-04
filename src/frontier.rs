@@ -459,6 +459,18 @@ pub fn crystal_tint(seed: u32, wx: i32, wz: i32, k: i32) -> BlockType {
     }
 }
 
+/// Hero cluster stays cyan / magenta so it reads against the ochre wall.
+fn hero_crystal_tint(seed: u32, wx: i32, wz: i32, k: i32) -> BlockType {
+    let mix = cell_rand(seed, 0x0C_17_5C, wx, wz + k * 17);
+    if mix < 0.48 {
+        BlockType::Crystal
+    } else if mix < 0.88 {
+        BlockType::CrystalMagenta
+    } else {
+        BlockType::LuminiteCrystal
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Crystal clusters ----------------------------------------------------------
 // ---------------------------------------------------------------------------
@@ -585,6 +597,11 @@ impl CrystalCluster {
                 let radius = (base_radius as f64 * taper).round() as i32;
                 let cx = bx + (lean_x * k as f64).round() as i32;
                 let cz = bz + (lean_z * k as f64).round() as i32;
+                let tint = if self.scale >= 48 {
+                    hero_crystal_tint(seed, bx, bz, k)
+                } else {
+                    crystal_tint(seed, bx, bz, k)
+                };
                 for dz in -radius..=radius {
                     for dx in -radius..=radius {
                         // Diamond cross-section — voxel crystals need
@@ -592,14 +609,7 @@ impl CrystalCluster {
                         if dx.abs() + dz.abs() > radius {
                             continue;
                         }
-                        place(
-                            chunk,
-                            origin,
-                            cx + dx,
-                            wy,
-                            cz + dz,
-                            crystal_tint(seed, bx, bz, k),
-                        );
+                        place(chunk, origin, cx + dx, wy, cz + dz, tint);
                     }
                 }
             }

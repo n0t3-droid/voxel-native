@@ -2980,6 +2980,64 @@ mod tests {
     }
 
     #[test]
+    fn new_world_look_ray_hits_banded_cliff() {
+        let generator = TerrainGenerator::new(12345);
+        let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
+        let fx = yaw.sin();
+        let fy = pitch.sin();
+        let fz = -yaw.cos();
+        let mut stone = 0usize;
+        let mut plating = 0usize;
+        let mut lava = 0usize;
+        let mut crystal = 0usize;
+        let mut air = 0usize;
+        let mut first_solid = None;
+        for t in 4..48 {
+            let wx = (pos[0] + fx * t as f32).floor() as i32;
+            let wy = (pos[1] + fy * t as f32).floor() as i32;
+            let wz = (pos[2] + fz * t as f32).floor() as i32;
+            let (cpos, lx, ly, lz) = crate::chunk::world_to_chunk(wx, wy, wz);
+            let mut chunk = Chunk::new(cpos);
+            generator.generate(&mut chunk);
+            let v = chunk.get(lx, ly, lz);
+            let kind = BlockType::from_voxel(v);
+            if first_solid.is_none() && v != AIR {
+                first_solid = Some((t, wx, wy, wz, kind));
+            }
+            match kind {
+                BlockType::VioletStone
+                | BlockType::RedStone
+                | BlockType::MesaClay
+                | BlockType::AmberStone
+                | BlockType::RedSand => stone += 1,
+                BlockType::PlatingWhite
+                | BlockType::PlatingTeal
+                | BlockType::RoadDeck
+                | BlockType::ShipHullAlloy
+                | BlockType::ShipHullDark => plating += 1,
+                BlockType::Lava | BlockType::PlasmaFlow => lava += 1,
+                BlockType::Crystal
+                | BlockType::CrystalMagenta
+                | BlockType::LuminiteCrystal
+                | BlockType::CrystalGreen => crystal += 1,
+                _ if v == AIR => air += 1,
+                _ => {}
+            }
+        }
+        eprintln!(
+            "look ray pos={pos:?} yaw={yaw:.3} pitch={pitch:.3} first={first_solid:?} stone={stone} plating={plating} lava={lava} crystal={crystal} air={air}"
+        );
+        assert!(
+            stone + lava > plating,
+            "look ray should hit the banded cliff, not colony plating (stone={stone} lava={lava} plating={plating} first={first_solid:?})"
+        );
+        assert!(
+            crystal + stone > 8,
+            "opening look should include the hero crystals and the rock wall"
+        );
+    }
+
+    #[test]
     fn generated_chunks_carry_the_frontier_palette() {
         let generator = TerrainGenerator::new(12345);
         let mut seen = std::collections::BTreeSet::new();
