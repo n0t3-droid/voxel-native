@@ -413,18 +413,17 @@ impl SkyIsland {
 ///
 /// A pure function of Y, so adjacent columns always line up into the
 /// continuous horizontal stripes that define the cliff faces in the key
-/// art: violet at the base, ochre and brick through the middle, buff
-/// cap-rock on top, with a thin luminous vein every cycle.
+/// art. Six-block-thick bands (violet / brick / cream / ochre / rust)
+/// stay legible from the aerial overlook; thinner 4-block stripes
+/// averaged into mud at flying distance.
 pub fn strata_block(wy: i32) -> BlockType {
-    match wy.rem_euclid(34) / 4 {
+    match wy.rem_euclid(36) / 6 {
         0 => BlockType::VioletStone,
         1 => BlockType::RedStone,
-        2 => BlockType::AmberStone,
-        3 => BlockType::MesaClay,
+        2 => BlockType::MesaClay,
+        3 => BlockType::AmberStone,
         4 => BlockType::VioletStone,
-        5 => BlockType::AmberStone,
-        6 => BlockType::RedSand,
-        _ => BlockType::MesaClay,
+        _ => BlockType::RedSand,
     }
 }
 
@@ -509,10 +508,10 @@ impl CrystalCluster {
     /// has crystals in frame, not only behind the camera.
     pub fn hero_d() -> Self {
         Self {
-            cx: 96,
-            cz: -80,
-            shards: 6,
-            scale: 24,
+            cx: 100,
+            cz: -74,
+            shards: 9,
+            scale: 40,
         }
     }
 
@@ -1466,18 +1465,18 @@ impl CliffFace {
     pub fn look_cone() -> [Self; 2] {
         [
             Self {
-                // Rest camera is ~(77, 105, −30) looking +X/−Z; a wall
-                // at x=132 sits behind the hero skyway. Park the butte
-                // on the look ray so it fills the lower half.
+                // West face of the look-cone butte. A wide apron carves
+                // a real canyon so the New World camera looks across a
+                // drop at a tall banded wall, not down at a mesa cap.
                 face_x: 104,
-                z0: -100,
-                z1: -52,
-                levels: 5,
-                depth: 8,
-                drop: 8,
-                rise: 5,
-                apron: 4,
-                crest: 32,
+                z0: -112,
+                z1: -44,
+                levels: 6,
+                depth: 10,
+                drop: 22,
+                rise: 6,
+                apron: 28,
+                crest: 30,
             },
             Self {
                 face_x: 116,
@@ -1602,6 +1601,19 @@ impl CliffFace {
                     }
                 }
             }
+            // Vertical lava / plasma falls on the west lip. Emissive,
+            // so later terrace carves leave them standing.
+            if (z - self.z0).rem_euclid(14) == 3 {
+                let fluid = if ((z - self.z0) / 14).rem_euclid(2) == 0 {
+                    BlockType::Lava
+                } else {
+                    BlockType::PlasmaFlow
+                };
+                for wy in pit..=crest_y {
+                    place_over(chunk, origin, self.face_x, wy, z, fluid);
+                    place_over(chunk, origin, self.face_x + 1, wy, z, fluid);
+                }
+            }
         }
     }
 }
@@ -1705,7 +1717,7 @@ mod tests {
             assert_eq!(strata_block(wy), strata_block(wy));
         }
         let mut seen = std::collections::BTreeSet::new();
-        for wy in 0..34 {
+        for wy in 0..36 {
             seen.insert(strata_block(wy) as u16);
         }
         for expected in [
@@ -1989,7 +2001,7 @@ mod tests {
         }
         for face in CliffFace::look_cone() {
             assert!(
-                in_hero_postcard(face.face_x - face.apron, face.z0)
+                in_hero_postcard(face.face_x - face.apron.max(1), face.z0)
                     && in_hero_postcard(face.face_x + face.depth, face.z1),
                 "cliff face {},{}..{} left the postcard",
                 face.face_x,
@@ -1999,8 +2011,14 @@ mod tests {
             assert!(face.levels >= 3, "need stacked terraces, got {}", face.levels);
             assert!(face.face_x >= 96 && face.face_x <= 140, "face_x {} is not in the look cone", face.face_x);
             assert!(face.crest >= 8, "butte crest {} is too short to clear the plateau lip", face.crest);
-            assert!(face.apron <= 8, "apron {} would hide the wall behind a quarry", face.apron);
         }
+        let canyon = CliffFace::look_cone()[0];
+        assert!(
+            canyon.apron >= 16 && canyon.apron <= 40,
+            "canyon apron {} should drop the mesa cap out of the first look",
+            canyon.apron
+        );
+        assert!(canyon.drop >= 16, "canyon drop {} is too shallow", canyon.drop);
         let mut terrace = Chunk::new(ChunkPos::new(6, 5, -5));
         for ly in 0..CHUNK_SIZE {
             for lz in 0..CHUNK_SIZE {
@@ -2022,6 +2040,8 @@ mod tests {
             count_blocks(&terrace, BlockType::RoadDeck) > 8,
             "carved terrace has no floor"
         );
+        let lava = count_blocks(&terrace, BlockType::Lava) + count_blocks(&terrace, BlockType::PlasmaFlow);
+        assert!(lava > 8, "look-cone west face has no lava/energy fall ({lava})");
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
         assert!(in_hero_postcard(CrystalCluster::hero_c().cx, CrystalCluster::hero_c().cz));
         assert!(in_hero_postcard(CrystalCluster::hero_d().cx, CrystalCluster::hero_d().cz));
