@@ -73,9 +73,10 @@ pub const MOON_C_SEMI_MAJOR: f64 = 1.25;
 ///
 /// Real Saturn rings are only ~10 m thick (NASA Saturn Fact Sheet) against
 /// an equatorial radius of 60 268 km — invisible at sky-dome scale. We
-/// exaggerate to 3.5 % of the disc radius so the annulus reads as a true
-/// 3D volume when viewed off-axis, while radial proportions stay NASA-true.
-pub const SATURN_RING_VISUAL_HALF_HEIGHT_FRAC: f32 = 0.035;
+/// exaggerate to 8 % of the disc radius so the annulus reads as a true
+/// 3D volume when viewed near edge-on, while radial proportions stay
+/// NASA-true (C-inner / A-outer / Cassini).
+pub const SATURN_RING_VISUAL_HALF_HEIGHT_FRAC: f32 = 0.08;
 
 const _: () = assert!(SATURN_C_RING_INNER_KM > SATURN_EQUATORIAL_RADIUS_KM);
 const _: () = assert!(SATURN_A_RING_OUTER_KM > SATURN_CASSINI_DIVISION_KM);
@@ -507,9 +508,9 @@ fn setup_sky(
                 mesh: planet_mesh,
                 material: planet_mat.clone(),
                 transform: Transform::from_translation(planet_pos)
-                    // Fixed tilt — ring plane tipped toward the viewer.
-                    // Never rotates (planets are stationary landmarks).
-                    .with_rotation(Quat::from_rotation_x(0.55) * Quat::from_rotation_z(-0.18)),
+                    // Steeper tilt so film hero frames catch a thick
+                    // ring silhouette instead of a face-on disc.
+                    .with_rotation(Quat::from_rotation_x(0.95) * Quat::from_rotation_z(-0.22)),
                 ..default()
             },
             NotShadowCaster,
@@ -1196,7 +1197,7 @@ mod tests {
             "Cassini Division should be a real density drop"
         );
         let half_h = saturn_ring_half_height(100.0);
-        assert!((half_h - 3.5).abs() < 1e-4);
+        assert!((half_h - 8.0).abs() < 1e-4);
         let mesh = build_ring_mesh(inner, outer, half_h, 48);
         let y_extent = ring_mesh_y_extent(&mesh);
         assert!(

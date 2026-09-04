@@ -33,8 +33,9 @@ pub const STATION_HEADROOM: i32 = 10;
 
 /// Camera distance (metres ≈ blocks) that keeps island grass and keel
 /// crystals readable in film close-ups. Used by the film autopilot and
-/// regression dumps.
-pub const ISLAND_CLOSEUP_DISTANCE_M: f32 = 20.0;
+/// regression dumps. Kept in the 12–18 m band so a 15–25 m painting
+/// framing still reads tufts and hanging spikes without crushing.
+pub const ISLAND_CLOSEUP_DISTANCE_M: f32 = 14.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IslandSpec {
@@ -614,8 +615,10 @@ fn fill_skyway_column(
 }
 
 fn stamp_rail_crew(chunk: &mut Chunk, x: i32, y: i32, z: i32, origin_y: i32) {
+    // Two-block-wide biped so crews stay readable from a 8–12 m film pass.
     // Legs
     set_in_chunk(chunk, x, y, z, origin_y, BlockType::ShipHullDark, false);
+    set_in_chunk(chunk, x, y, z + 1, origin_y, BlockType::ShipHullDark, false);
     // Torso
     set_in_chunk(
         chunk,
@@ -626,9 +629,18 @@ fn stamp_rail_crew(chunk: &mut Chunk, x: i32, y: i32, z: i32, origin_y: i32) {
         BlockType::ShipHullAlloy,
         false,
     );
-    // Helmet / visor
+    set_in_chunk(
+        chunk,
+        x,
+        y + 1,
+        z + 1,
+        origin_y,
+        BlockType::ShipHullAlloy,
+        false,
+    );
+    // Helmet / cyan visor
     set_in_chunk(chunk, x, y + 2, z, origin_y, BlockType::NeonCyan, false);
-    // Tool arm
+    // Tool arm + pack glow
     set_in_chunk(
         chunk,
         x + 1,
@@ -636,6 +648,15 @@ fn stamp_rail_crew(chunk: &mut Chunk, x: i32, y: i32, z: i32, origin_y: i32) {
         z,
         origin_y,
         BlockType::EngineCore,
+        false,
+    );
+    set_in_chunk(
+        chunk,
+        x - 1,
+        y + 1,
+        z,
+        origin_y,
+        BlockType::NeonAmber,
         false,
     );
 }
@@ -650,7 +671,7 @@ pub fn visit_orbital_station(
 ) {
     for dy in 0..=STATION_HEADROOM {
         for dz in -7..=7 {
-            for dx in -7..=7 {
+            for dx in -9..=9 {
                 if let Some(block) = station_block(dx, dy, dz) {
                     visit(origin_x + dx, origin_y + dy, origin_z + dz, block);
                 }
@@ -697,15 +718,29 @@ pub fn station_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
         return Some(BlockType::NeonAmber);
     }
 
-    // Docking arm + docked strike fighter silhouette on the +X side.
+    // Docked strike fighter + cyan plume first so exhaust voxels are not
+    // swallowed by the docking-arm deck plates.
+    if let Some(block) = fighter_block(dx, dy, dz) {
+        return Some(block);
+    }
+    // Docking arm reaching toward the fighter on the +X side.
     if dz == 0 && dy == 2 && (1..=5).contains(&dx) {
         return Some(BlockType::ShipHullAlloy);
     }
     if dy == 2 && dx == 6 && dz == 0 {
         return Some(BlockType::NeonCyan);
     }
-    if fighter_block(dx, dy, dz).is_some() {
-        return fighter_block(dx, dy, dz);
+
+    // Readable combat silhouettes BEFORE corner pylons / holo dome so
+    // splayed alien legs and marine rifles are not swallowed.
+    if let Some(block) = marine_block(dx, dy, dz) {
+        return Some(block);
+    }
+    if let Some(block) = alien_block(dx, dy, dz) {
+        return Some(block);
+    }
+    if let Some(block) = rail_crew_pad_block(dx, dy, dz) {
+        return Some(block);
     }
 
     // Corner engine pylons
@@ -727,16 +762,8 @@ pub fn station_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     }
 
     // Hero tunnel portal on the −Z face: framed cyan arch into a dark bore.
-    if portal_block(dx, dy, dz).is_some() {
-        return portal_block(dx, dy, dz);
-    }
-
-    // Readable combat silhouettes on the pad.
-    if marine_block(dx, dy, dz).is_some() {
-        return marine_block(dx, dy, dz);
-    }
-    if alien_block(dx, dy, dz).is_some() {
-        return alien_block(dx, dy, dz);
+    if let Some(block) = portal_block(dx, dy, dz) {
+        return Some(block);
     }
 
     // Turret on the +Z rim.
@@ -753,44 +780,99 @@ pub fn station_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     None
 }
 
+fn rail_crew_pad_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
+    // Crew A at (−4, ·, −2)
+    let ax = dx + 4;
+    let az = dz + 2;
+    if az == 0 && (0..=1).contains(&ax) {
+        return match (ax, dy) {
+            (0, 1) | (1, 1) => Some(BlockType::ShipHullDark),
+            (0, 2) | (1, 2) => Some(BlockType::ShipHullAlloy),
+            (0, 3) => Some(BlockType::NeonCyan),
+            (1, 3) => Some(BlockType::EngineCore),
+            _ => None,
+        };
+    }
+    // Crew B at (−4, ·, −3)
+    let bx = dx + 4;
+    let bz = dz + 3;
+    if bz == 0 && bx == 0 {
+        return match dy {
+            1 => Some(BlockType::ShipHullDark),
+            2 => Some(BlockType::ShipHullAlloy),
+            3 => Some(BlockType::NeonAmber),
+            _ => None,
+        };
+    }
+    None
+}
+
 /// Biped marine: helmeted torso + rifle arm. Occupies pad west lane.
+/// Sized ~adult-human (WHO/NCD-RisC mean adult height ~1.7 m ≈ 2 blocks
+/// plus helmet) with a lateral rifle so the silhouette reads as biped
+/// vs the multi-leg alien at film distance.
 fn marine_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     // Anchor at (−3, ·, 2)
     let lx = dx + 3;
     let lz = dz - 2;
-    if lz != 0 || lx < 0 || lx > 2 {
+    if lz.abs() > 1 || lx < 0 || lx > 3 {
         return None;
     }
-    match (lx, dy) {
-        (0, 1) => Some(BlockType::ShipHullDark),  // leg
-        (0, 2) => Some(BlockType::ShipHullAlloy), // torso
-        (0, 3) => Some(BlockType::ShipHullAlloy), // helmet
-        (1, 3) => Some(BlockType::NeonCyan),      // visor
-        (1, 2) => Some(BlockType::ShipHullDark),  // rifle stock
-        (2, 2) => Some(BlockType::NeonCyan),      // rifle muzzle glow
-        _ => None,
+    // Dual-leg stance
+    if dy == 1 && lx == 0 && (lz == 0 || lz == 1) {
+        return Some(BlockType::ShipHullDark);
     }
+    // Torso column
+    if lx == 0 && lz == 0 {
+        return match dy {
+            2 => Some(BlockType::ShipHullAlloy),
+            3 => Some(BlockType::ShipHullAlloy),
+            4 => Some(BlockType::ShipHullAlloy), // helmet
+            _ => None,
+        };
+    }
+    // Cyan visor on the face
+    if lx == 0 && lz == 1 && dy == 4 {
+        return Some(BlockType::NeonCyan);
+    }
+    // Rifle arm extending +X (stops short of the mast at x=0).
+    if lz == 0 && dy == 3 && (1..=2).contains(&lx) {
+        return Some(if lx == 2 {
+            BlockType::NeonCyan
+        } else {
+            BlockType::ShipHullDark
+        });
+    }
+    None
 }
 
 /// Multi-leg alien: raised body with four splayed legs. Occupies pad east.
 fn alien_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
-    // Anchor at (+3, ·, 2) — keep legs inside the pad rail (adx/adz < 5).
-    let lx = dx - 3;
+    // Anchor at (+2, ·, 2) so splayed legs stay inside the pad rail (adx < 5).
+    let lx = dx - 2;
     let lz = dz - 2;
-    if lx.abs() > 1 || lz.abs() > 1 {
+    if lx.abs() > 2 || lz.abs() > 2 {
         return None;
     }
-    // Central body
+    // Raised central body (taller than the marine torso)
     if lx == 0 && lz == 0 {
         return match dy {
             2 => Some(BlockType::AlienMoss),
             3 => Some(BlockType::NeonMagenta),
-            4 => Some(BlockType::from_voxel(VOXEL_CRYSTAL_MAGENTA)),
+            4 => Some(BlockType::NeonMagenta),
+            5 => Some(BlockType::from_voxel(VOXEL_CRYSTAL_MAGENTA)),
             _ => None,
         };
     }
-    // Four splayed legs at the cardinal offsets of the body.
-    if dy == 1 && ((lx.abs() == 1 && lz == 0) || (lx == 0 && lz.abs() == 1)) {
+    // Four diagonal splayed legs — the multi-leg silhouette cue.
+    if dy == 1 && lx.abs() == 2 && lz.abs() == 2 {
+        return Some(BlockType::BoneRock);
+    }
+    if dy == 1 && ((lx.abs() == 2 && lz == 0) || (lx == 0 && lz.abs() == 2)) {
+        return Some(BlockType::BoneRock);
+    }
+    // Mid-leg joints
+    if dy == 2 && lx.abs() == 1 && lz.abs() == 1 {
         return Some(BlockType::BoneRock);
     }
     None
@@ -817,19 +899,25 @@ fn portal_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
     None
 }
 
-/// Compact docked strike-fighter hanging off the docking arm.
+/// Compact docked strike-fighter hanging off the docking arm, with a
+/// stretched cyan plume so the exhaust reads in a hero frame.
 fn fighter_block(dx: i32, dy: i32, dz: i32) -> Option<BlockType> {
-    // Nose toward +X around (6..8, 1..3, −1..1)
-    if !(6..=8).contains(&dx) || dz.abs() > 1 {
+    // Nose toward +X; plume stretches −X past the docking-arm tip.
+    if !((3..=9).contains(&dx) || dx == 4) || dz.abs() > 1 {
         return None;
     }
     match (dx, dy, dz) {
         (6, 2, 0) => Some(BlockType::ShipHullDark),
         (7, 2, 0) => Some(BlockType::ShipHullAlloy),
-        (8, 2, 0) => Some(BlockType::CockpitGlass),
-        (7, 2, 1) | (7, 2, -1) => Some(BlockType::ShipHullAlloy), // wings
-        (6, 1, 0) => Some(BlockType::EngineCore),                 // cyan plume source
+        (8, 2, 0) => Some(BlockType::ShipHullAlloy),
+        (9, 2, 0) => Some(BlockType::CockpitGlass),
+        (7, 2, 1) | (7, 2, -1) | (8, 2, 1) | (8, 2, -1) => Some(BlockType::ShipHullAlloy),
+        (6, 1, 0) => Some(BlockType::EngineCore),
         (6, 3, 0) => Some(BlockType::NeonCyan),
+        // Thick cyan plume: three-block-long exhaust + vertical bloom.
+        (5, 2, 0) | (5, 1, 0) | (5, 3, 0) | (5, 2, 1) | (5, 2, -1) => Some(BlockType::NeonCyan),
+        (4, 2, 0) | (4, 1, 0) | (4, 3, 0) => Some(BlockType::NeonCyan),
+        (3, 2, 0) | (3, 2, 1) | (3, 2, -1) => Some(BlockType::NeonCyan),
         _ => None,
     }
 }
@@ -1240,32 +1328,33 @@ mod tests {
                 BlockType::SkywayDeck => pad += 1,
                 BlockType::NeonCyan => {
                     lights += 1;
-                    if x == 6 && y == 82 && z == 0 {
+                    // Docking-arm / plume glow on the +X fighter cluster.
+                    if (3..=6).contains(&x) && (81..=83).contains(&y) && z.abs() <= 1 {
                         arm += 1;
                     }
                 }
                 BlockType::NeonAmber => dish += 1,
-                BlockType::ShipHullAlloy if x == -3 && (y == 82 || y == 83) && z == 2 => {
+                BlockType::ShipHullAlloy if x == -3 && (82..=84).contains(&y) && z == 2 => {
                     marine += 1;
                 }
-                BlockType::NeonMagenta if x == 3 && y == 83 && z == 2 => alien += 1,
-                BlockType::AlienMoss if x == 3 && y == 82 && z == 2 => alien += 1,
+                BlockType::NeonMagenta if x == 2 && (83..=84).contains(&y) && z == 2 => alien += 1,
+                BlockType::AlienMoss if x == 2 && y == 82 && z == 2 => alien += 1,
                 BlockType::ShipHullDark if z == -6 && (81..=83).contains(&y) && x.abs() <= 1 => {
                     portal += 1;
                 }
-                BlockType::ShipHullAlloy if (6..=8).contains(&x) && y == 82 => fighter += 1,
-                BlockType::CockpitGlass if x == 8 && y == 82 && z == 0 => fighter += 1,
+                BlockType::ShipHullAlloy if (6..=9).contains(&x) && y == 82 => fighter += 1,
+                BlockType::CockpitGlass if x == 9 && y == 82 && z == 0 => fighter += 1,
                 BlockType::HoloDome => holo += 1,
                 _ => {}
             }
-            assert!(x.abs() <= 8, "station x out of bounds {x}");
+            assert!(x.abs() <= 9, "station x out of bounds {x}");
             assert!(z.abs() <= 7, "station z out of bounds {z}");
             assert!((80..=90).contains(&y), "station y out of bounds {y}");
         });
         assert!(pad >= 40, "station pad too small ({pad})");
         assert!(lights >= 8);
         assert!(dish >= 5, "antenna dish missing");
-        assert_eq!(arm, 1, "docking-arm tip");
+        assert!(arm >= 3, "fighter cyan plume / arm glow missing ({arm})");
         assert!(marine >= 2, "marine silhouette missing ({marine})");
         assert!(alien >= 2, "alien silhouette missing ({alien})");
         assert!(portal >= 3, "tunnel portal missing ({portal})");
@@ -1279,7 +1368,7 @@ mod tests {
             let _ = std::fs::write(
                 artifact_dir.join("aether_orbital_station.txt"),
                 format!(
-                    "origin=(0, 80, 0)\npad_skyway_deck={pad}\nneon_cyan_lights={lights}\namber_dish={dish}\ndocking_arm_tip={arm}\nmarine={marine}\nalien={alien}\nportal={portal}\nfighter={fighter}\nholo_dome={holo}\nmast_core=EngineCore at (0,80,0)\ndish_tip=NeonAmber at (0,88,0)\nbounds_xz=[-8,8]x[-7,7]\nbounds_y=[80,90]\n"
+                    "origin=(0, 80, 0)\npad_skyway_deck={pad}\nneon_cyan_lights={lights}\namber_dish={dish}\ndocking_arm_tip={arm}\nmarine={marine}\nalien={alien}\nportal={portal}\nfighter={fighter}\nholo_dome={holo}\nmast_core=EngineCore at (0,80,0)\ndish_tip=NeonAmber at (0,88,0)\nbounds_xz=[-9,9]x[-7,7]\nbounds_y=[80,90]\n"
                 ),
             );
         }
@@ -1287,38 +1376,46 @@ mod tests {
 
     #[test]
     fn combat_silhouettes_are_readable_biped_vs_multi_leg() {
-        // Marine: vertical stack of dark/alloy with cyan rifle — biped tall.
+        // Marine: dual-leg biped with cyan rifle extending +X.
         assert_eq!(
             station_block(-3, 1, 2),
             Some(BlockType::ShipHullDark),
             "marine leg"
         );
         assert_eq!(
-            station_block(-3, 3, 2),
+            station_block(-3, 1, 3),
+            Some(BlockType::ShipHullDark),
+            "marine second leg"
+        );
+        assert_eq!(
+            station_block(-3, 4, 2),
             Some(BlockType::ShipHullAlloy),
             "marine helmet"
         );
         assert_eq!(
-            station_block(-2, 3, 2),
+            station_block(-3, 4, 3),
             Some(BlockType::NeonCyan),
             "marine visor"
         );
         assert_eq!(
-            station_block(-1, 2, 2),
+            station_block(-1, 3, 2),
             Some(BlockType::NeonCyan),
             "marine muzzle"
         );
-        // Alien: raised magenta body with splayed bone legs.
-        assert_eq!(station_block(3, 2, 2), Some(BlockType::AlienMoss));
-        assert_eq!(station_block(3, 3, 2), Some(BlockType::NeonMagenta));
+        // Alien: raised magenta body with diagonal multi-leg splay.
+        assert_eq!(station_block(2, 2, 2), Some(BlockType::AlienMoss));
+        assert_eq!(station_block(2, 4, 2), Some(BlockType::NeonMagenta));
+        assert_eq!(station_block(4, 1, 4), Some(BlockType::BoneRock));
+        assert_eq!(station_block(0, 1, 4), Some(BlockType::BoneRock));
         assert_eq!(station_block(4, 1, 2), Some(BlockType::BoneRock));
-        assert_eq!(station_block(2, 1, 2), Some(BlockType::BoneRock));
-        assert_eq!(station_block(3, 1, 3), Some(BlockType::BoneRock));
-        assert_eq!(station_block(3, 1, 1), Some(BlockType::BoneRock));
-        // Portal + fighter.
+        // Portal + fighter with cyan plume.
         assert_eq!(station_block(0, 2, -7), Some(BlockType::NeonMagenta));
-        assert_eq!(station_block(8, 2, 0), Some(BlockType::CockpitGlass));
+        assert_eq!(station_block(9, 2, 0), Some(BlockType::CockpitGlass));
+        assert_eq!(station_block(5, 2, 0), Some(BlockType::NeonCyan));
         assert_eq!(station_block(6, 1, 0), Some(BlockType::EngineCore));
+        // Pad rail crew pair.
+        assert_eq!(station_block(-4, 3, -2), Some(BlockType::NeonCyan));
+        assert_eq!(station_block(-4, 3, -3), Some(BlockType::NeonAmber));
     }
 
     #[test]
