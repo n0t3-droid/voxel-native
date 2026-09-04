@@ -7,7 +7,8 @@ use bevy::core_pipeline::bloom::{BloomCompositeMode, BloomSettings};
 use bevy::input::mouse::MouseMotion;
 use bevy::pbr::{FogFalloff, FogSettings};
 use bevy::prelude::*;
-use bevy::render::camera::Exposure;
+use bevy::render::camera::{CameraOutputMode, Exposure};
+use bevy::render::render_resource::BlendState;
 use bevy::render::view::{ColorGrading, ColorGradingSection};
 use bevy::window::PrimaryWindow;
 
@@ -253,6 +254,11 @@ fn spawn_player(mut commands: Commands) {
             // hides the chunk-streaming edge against the sky gradient.
             camera: bevy::prelude::Camera {
                 hdr: true,
+                // Default composite: sky already blitted, world HDR not
+                // cleared so leftover sky pixels show through. Cinematic
+                // High switches to a transparent-HDR + alpha blit in
+                // `update_cinematic_exposure` so world ColorGrading cannot
+                // milk space.
                 clear_color: bevy::prelude::ClearColorConfig::None,
                 ..default()
             },
@@ -388,14 +394,40 @@ fn update_bloom_by_graphics(
     }
 }
 
-/// Pre-ACES look-pass for the world camera.
+/// Cinematic High renders the world HDR buffer independently of the sky
+/// pass: transparent clear, grade/tonemap only those pixels, alpha-blit
+/// over the already-tonemapped sky. Fast/Balanced keep the legacy
+/// uncleared composite so they stay cheap and unchanged.
+fn world_pass_splits_from_sky(cinematic: bool, fast: bool) -> bool {
+    cinematic && !fast
+}
+
+fn configure_world_camera_composite(camera: &mut Camera, split: bool) {
+    if split {
+        camera.clear_color = ClearColorConfig::Custom(Color::srgba(0.0, 0.0, 0.0, 0.0));
+        camera.output_mode = CameraOutputMode::Write {
+            blend_state: Some(BlendState::ALPHA_BLENDING),
+            clear_color: ClearColorConfig::None,
+        };
+    } else {
+        camera.clear_color = ClearColorConfig::None;
+        camera.output_mode = CameraOutputMode::Write {
+            blend_state: None,
+            clear_color: ClearColorConfig::Default,
+        };
+    }
+}
+
+/// Pre-ACES look-pass for the WORLD camera only.
 ///
-/// Global EV / shadow-lift washed the night sky grey. Night recovery is
-/// midtone gain (terrain, not space) plus a stone emissive floor. Fast
-/// keeps the Blender default. Highlight gain stays 1.0 so crystals win.
+/// Combined-camera EV / shadow-lift washed the night sky grey because
+/// leftover sky HDR sat in the uncleared world buffer and got re-graded.
+/// Cinematic High now clears that buffer to transparent and alpha-blits,
+/// so night lift recovers mesa faces without milking space. Fast stays
+/// at the Blender default on the legacy composite.
 fn update_cinematic_exposure(
     settings: Res<WorldSettings>,
-    mut q: Query<(&mut ColorGrading, &mut Exposure), With<Player>>,
+    mut q: Query<(&mut Camera, &mut ColorGrading, &mut Exposure), With<Player>>,
     mut last: Local<Option<(u8, bool, bool)>>,
 ) {
     let sun = sun_direction(settings.time_of_day);
@@ -415,20 +447,19 @@ fn update_cinematic_exposure(
         return;
     }
     *last = Some(key);
+    let split = world_pass_splits_from_sky(cinematic, fast);
     let grade = look_pass_grade(night_amt, dusk, cinematic, fast);
-    if let Ok((mut grading, mut exposure)) = q.get_single_mut() {
+    if let Ok((mut camera, mut grading, mut exposure)) = q.get_single_mut() {
+        configure_world_camera_composite(&mut camera, split);
         exposure.ev100 = grade.ev100;
         grading.global.exposure = grade.exposure;
         grading.global.temperature = grade.temperature;
-        // Lift stays 0 so space stays black. Gamma < 1 expands dim
-        // mesa values that ACES would otherwise crush, without a grey
-        // sky wall.
         grading.shadows = ColorGradingSection {
             saturation: 1.0,
             contrast: 1.0,
             gamma: grade.shadow_gamma,
             gain: grade.shadow_gain,
-            lift: 0.0,
+            lift: grade.shadow_lift,
         };
         grading.midtones = ColorGradingSection {
             saturation: grade.mid_sat,
@@ -470,16 +501,18 @@ fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> Lo
     }
     let n = night_amt.clamp(0.0, 1.0);
     let mul = if cinematic { 1.0 } else { 0.55 };
+    // Shadow lift + a mild EV drop are world-only. Fast never splits
+    // the composite, so those levers stay at identity there.
+    let split = world_pass_splits_from_sky(cinematic, fast);
+    let night_lift = if split { n * 0.11 * mul } else { 0.0 };
+    let night_ev = if split { n * 1.35 * mul } else { 0.0 };
     LookPassGrade {
-        // Leave EV100 at Blender. Dropping it (or lifting shadows) turns
-        // the night sky into a grey wall. Mesa faces are recovered via
-        // stone emissive + midtone gain, not a global black-point lift.
-        ev100: Exposure::EV100_BLENDER,
+        ev100: Exposure::EV100_BLENDER - night_ev,
         exposure: dusk * 0.08 * mul,
-        shadow_lift: 0.0,
-        shadow_gain: 1.0 + n * 0.18 * mul,
-        shadow_gamma: 1.0 - n * 0.32 * mul,
-        mid_gain: 1.0 + n * 0.16 * mul + dusk * 0.04,
+        shadow_lift: night_lift,
+        shadow_gain: 1.0 + n * 0.16 * mul,
+        shadow_gamma: 1.0 - n * 0.26 * mul,
+        mid_gain: 1.0 + n * 0.12 * mul + dusk * 0.04,
         mid_sat: 1.0 + n * 0.08 + dusk * 0.10,
         temperature: dusk * 0.10,
     }
@@ -1192,10 +1225,14 @@ mod tests {
         let noon = look_pass_grade(0.0, 0.0, true, false);
         let dusk = look_pass_grade(0.18, 0.70, true, false);
         let fast = look_pass_grade(0.92, 0.0, true, true);
-        assert_eq!(night.ev100, Exposure::EV100_BLENDER);
+        assert!(world_pass_splits_from_sky(true, false));
+        assert!(!world_pass_splits_from_sky(true, true));
+        assert!(!world_pass_splits_from_sky(false, false));
+        assert!(night.ev100 < Exposure::EV100_BLENDER - 0.8);
         assert_eq!(noon.ev100, Exposure::EV100_BLENDER);
-        assert_eq!(night.shadow_lift, 0.0);
-        assert!(night.shadow_gamma < 0.80);
+        assert!(night.shadow_lift > 0.08);
+        assert_eq!(noon.shadow_lift, 0.0);
+        assert!(night.shadow_gamma < 0.85);
         assert_eq!(noon.shadow_gamma, 1.0);
         assert!(night.mid_gain > noon.mid_gain);
         assert!(dusk.mid_gain < 1.20);
