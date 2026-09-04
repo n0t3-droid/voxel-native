@@ -1607,7 +1607,8 @@ fn mesh_dirty_chunks(
         let lod_radius = (budget.render_distance / 2).max(4);
         let dx = pos.x - pcx;
         let dz = pos.z - pcz;
-        let use_ao = dx * dx + dz * dz <= lod_radius * lod_radius;
+        let use_ao = settings.graphics != crate::settings::GraphicsMode::Fast
+            && dx * dx + dz * dz <= lod_radius * lod_radius;
 
         #[cfg(target_arch = "wasm32")]
         {
