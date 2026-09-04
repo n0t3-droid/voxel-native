@@ -67,6 +67,15 @@ pub const SYNODIC_MONTH_DAYS: f64 = 29.530_588_853;
 pub const VISUAL_LUNAR_MONTH_DAYS: f64 = 8.0;
 /// Secondary moon semi-major axis as a fraction of the primary moon.
 pub const MOON_B_SEMI_MAJOR: f64 = 0.85;
+/// Outer tertiary moon semi-major axis (fraction of primary). Slower by Kepler.
+pub const MOON_C_SEMI_MAJOR: f64 = 1.25;
+/// Visual ring half-height as a fraction of planet radius.
+///
+/// Real Saturn rings are only ~10 m thick (NASA Saturn Fact Sheet) against
+/// an equatorial radius of 60 268 km — invisible at sky-dome scale. We
+/// exaggerate to 3.5 % of the disc radius so the annulus reads as a true
+/// 3D volume when viewed off-axis, while radial proportions stay NASA-true.
+pub const SATURN_RING_VISUAL_HALF_HEIGHT_FRAC: f32 = 0.035;
 
 const _: () = assert!(SATURN_C_RING_INNER_KM > SATURN_EQUATORIAL_RADIUS_KM);
 const _: () = assert!(SATURN_A_RING_OUTER_KM > SATURN_CASSINI_DIVISION_KM);
@@ -78,6 +87,11 @@ pub fn saturn_ring_radii(planet_radius: f32) -> (f32, f32) {
     let inner = planet_radius * (SATURN_C_RING_INNER_KM / SATURN_EQUATORIAL_RADIUS_KM) as f32;
     let outer = planet_radius * (SATURN_A_RING_OUTER_KM / SATURN_EQUATORIAL_RADIUS_KM) as f32;
     (inner, outer)
+}
+
+/// Visual half-height of the 3D ring volume for a planet of the given radius.
+pub fn saturn_ring_half_height(planet_radius: f32) -> f32 {
+    planet_radius * SATURN_RING_VISUAL_HALF_HEIGHT_FRAC
 }
 
 /// Cassini Division as a 0..1 coordinate across the C-inner → A-outer span.
@@ -170,6 +184,10 @@ struct MoonDisc;
 #[derive(Component)]
 struct MoonDiscB;
 
+/// Outer tertiary moon — slower Kepler companion for the three-moon sky.
+#[derive(Component)]
+struct MoonDiscC;
+
 /// Distant ringed gas giant parked high in the sky for epic framing.
 /// Stays fixed on the celestial dome and rotates slowly for parallax.
 #[derive(Component)]
@@ -195,6 +213,7 @@ struct SkyMaterials {
     sun: Handle<StandardMaterial>,
     moon: Handle<StandardMaterial>,
     moon_b: Handle<StandardMaterial>,
+    moon_c: Handle<StandardMaterial>,
     planet: Handle<StandardMaterial>,
     ring: Handle<StandardMaterial>,
     planet_b: Handle<StandardMaterial>,
@@ -422,11 +441,37 @@ fn setup_sky(
         Name::new("MoonDiscB"),
     ));
 
+    // ----- Third (outer) moon ----------------------------------------
+    let moon_c_mesh = meshes.add(
+        Sphere::new(9.0)
+            .mesh()
+            .ico(3)
+            .expect("subdivision 3 is within ico limits"),
+    );
+    let moon_c_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.78, 0.86, 0.95),
+        emissive: LinearRgba::rgb(2.5, 3.5, 5.5),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        PbrBundle {
+            mesh: moon_c_mesh,
+            material: moon_c_mat.clone(),
+            ..default()
+        },
+        NotShadowCaster,
+        sky_layer.clone(),
+        MoonDiscC,
+        Name::new("MoonDiscC"),
+    ));
+
     // ----- Ringed gas-giant planet ------------------------------------
     // Parked in a fixed sky direction; doesn't track the sun. Serves as
     // a dramatic backdrop feature like in reference image 2.
     let planet_radius = 78.0;
     let (ring_inner, ring_outer) = saturn_ring_radii(planet_radius);
+    let ring_half_h = saturn_ring_half_height(planet_radius);
     let planet_mesh = meshes.add(
         Sphere::new(planet_radius)
             .mesh()
@@ -442,9 +487,8 @@ fn setup_sky(
         unlit: true,
         ..default()
     });
-    // Ring: wide rainbow annulus with strong saturation and per-band
-    // colour variation (painted via vertex colours in build_ring_mesh).
-    let ring_mesh = meshes.add(build_ring_mesh(ring_inner, ring_outer, 192));
+    // Ring: extruded 3D annulus (top + bottom + walls) with Cassini density.
+    let ring_mesh = meshes.add(build_ring_mesh(ring_inner, ring_outer, ring_half_h, 192));
     let ring_mat = materials.add(StandardMaterial {
         base_color: Color::srgba(1.0, 0.9, 0.8, 1.0),
         emissive: LinearRgba::rgb(5.5, 4.5, 6.5),
@@ -478,9 +522,9 @@ fn setup_sky(
                 PbrBundle {
                     mesh: ring_mesh,
                     material: ring_mat.clone(),
-                    transform: Transform::from_rotation(Quat::from_rotation_x(
-                        std::f32::consts::FRAC_PI_2,
-                    )),
+                    // Identity — the extruded mesh already spans ±Y, so a
+                    // 90° X flip would tip the volume on edge incorrectly.
+                    transform: Transform::IDENTITY,
                     ..default()
                 },
                 NotShadowCaster,
@@ -523,6 +567,7 @@ fn setup_sky(
         sun: sun_mat,
         moon: moon_mat,
         moon_b: moon_b_mat,
+        moon_c: moon_c_mat,
         planet: planet_mat,
         ring: ring_mat,
         planet_b: planet_b_mat,
@@ -547,6 +592,7 @@ fn follow_and_animate_sky(
             Without<SkyCamera>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<PlanetB>,
@@ -560,6 +606,7 @@ fn follow_and_animate_sky(
             Without<SkyCamera>,
             Without<SunDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<PlanetB>,
@@ -573,6 +620,21 @@ fn follow_and_animate_sky(
             Without<SkyCamera>,
             Without<SunDisc>,
             Without<MoonDisc>,
+            Without<MoonDiscC>,
+            Without<StarField>,
+            Without<RingedPlanet>,
+            Without<PlanetB>,
+            Without<Nebula>,
+        ),
+    >,
+    mut moon_c_q: Query<
+        &mut Transform,
+        (
+            With<MoonDiscC>,
+            Without<SkyCamera>,
+            Without<SunDisc>,
+            Without<MoonDisc>,
+            Without<MoonDiscB>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<PlanetB>,
@@ -587,6 +649,7 @@ fn follow_and_animate_sky(
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<RingedPlanet>,
             Without<PlanetB>,
             Without<Nebula>,
@@ -600,6 +663,7 @@ fn follow_and_animate_sky(
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<PlanetB>,
             Without<Nebula>,
@@ -613,6 +677,7 @@ fn follow_and_animate_sky(
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<Nebula>,
@@ -626,6 +691,7 @@ fn follow_and_animate_sky(
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<PlanetB>,
@@ -656,6 +722,8 @@ fn follow_and_animate_sky(
     let moon_dir = moon_orbit_dir(sun_dir, phase as f32, 0.09);
     let phase_b = phase * kepler_mean_motion_ratio(MOON_B_SEMI_MAJOR, 1.0);
     let moon_b_dir = moon_orbit_dir(sun_dir, phase_b as f32, 0.22);
+    let phase_c = phase * kepler_mean_motion_ratio(MOON_C_SEMI_MAJOR, 1.0);
+    let moon_c_dir = moon_orbit_dir(sun_dir, phase_c as f32, -0.14);
 
     if let Ok(mut sun_tf) = sun_q.get_single_mut() {
         sun_tf.translation = trans + sun_dir * SKY_DISTANCE;
@@ -665,6 +733,9 @@ fn follow_and_animate_sky(
     }
     if let Ok(mut moon_b_tf) = moon_b_q.get_single_mut() {
         moon_b_tf.translation = trans + moon_b_dir * (SKY_DISTANCE * MOON_B_SEMI_MAJOR as f32);
+    }
+    if let Ok(mut moon_c_tf) = moon_c_q.get_single_mut() {
+        moon_c_tf.translation = trans + moon_c_dir * (SKY_DISTANCE * MOON_C_SEMI_MAJOR as f32);
     }
     if let Ok(mut stars_tf) = stars_q.get_single_mut() {
         stars_tf.translation = trans;
@@ -716,6 +787,14 @@ fn follow_and_animate_sky(
             let illum_b = moon_illuminated_fraction(phase_b) as f32;
             let base = Vec3::new(4.0, 3.0, 8.0);
             let scaled = base * (0.22 + 0.90 * illum_b) * (0.55 + 0.55 * night);
+            mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
+        }
+
+        // Third moon — ice-teal, Kepler-slower outer companion.
+        if let Some(mat) = materials.get_mut(&sky_mats.moon_c) {
+            let illum_c = moon_illuminated_fraction(phase_c) as f32;
+            let base = Vec3::new(2.5, 3.5, 5.5);
+            let scaled = base * (0.20 + 0.85 * illum_c) * (0.50 + 0.55 * night);
             mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
         }
 
@@ -888,21 +967,23 @@ pub fn saturn_ring_density(t: f32) -> f32 {
     (0.55 + 0.45 * (1.0 - (t - 0.35).abs())).clamp(0.22, 1.0) * gap
 }
 
-/// Build a flat annulus (ring) mesh for the gas-giant. Two-sided via
-/// material `cull_mode = None`. `inner`/`outer` are world radii, `segs`
-/// is the number of azimuthal slices. Eight radial rings so the Cassini
-/// Division is a real density dip instead of a vertex-colour lerp.
-fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
+/// Build an extruded Saturn-proportioned ring volume.
+///
+/// Top + bottom discs plus inner/outer cylindrical walls give a readable
+/// 3D silhouette (not a flat billboard). `half_height` is the ±Y extent;
+/// radial samples carry Cassini Division density via vertex colour.
+fn build_ring_mesh(inner: f32, outer: f32, half_height: f32, segs: usize) -> Mesh {
     const RINGS: usize = 8;
-    let verts_per_seg = RINGS + 1;
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(segs * verts_per_seg);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(segs * verts_per_seg);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(segs * verts_per_seg);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(segs * verts_per_seg);
-    let mut indices: Vec<u32> = Vec::with_capacity(segs * RINGS * 6);
+    let verts_per_seg = (RINGS + 1) * 2; // top + bottom per radial sample
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(segs * verts_per_seg + segs * 4);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(segs * verts_per_seg + segs * 4);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(segs * verts_per_seg + segs * 4);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(segs * verts_per_seg + segs * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(segs * RINGS * 12 + segs * 24);
 
     let warm = Vec3::new(0.95, 0.78, 0.58);
     let ice = Vec3::new(0.72, 0.80, 0.95);
+    let h = half_height.max(0.05);
 
     for i in 0..segs {
         let a = (i as f32 / segs as f32) * std::f32::consts::TAU;
@@ -910,24 +991,74 @@ fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
         for r in 0..=RINGS {
             let t = r as f32 / RINGS as f32;
             let rad = inner + (outer - inner) * t;
-            positions.push([ca * rad, 0.0, sa * rad]);
-            normals.push([0.0, 1.0, 0.0]);
-            uvs.push([i as f32 / segs as f32, t]);
             let density = saturn_ring_density(t);
             let c = warm.lerp(ice, t) * density;
-            colors.push([c.x, c.y, c.z, 0.88 * density]);
+            let col = [c.x, c.y, c.z, 0.88 * density];
+            // Top
+            positions.push([ca * rad, h, sa * rad]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([i as f32 / segs as f32, t]);
+            colors.push(col);
+            // Bottom
+            positions.push([ca * rad, -h, sa * rad]);
+            normals.push([0.0, -1.0, 0.0]);
+            uvs.push([i as f32 / segs as f32, t]);
+            colors.push(col);
         }
     }
+
+    let disc_vert_count = (segs * verts_per_seg) as u32;
     for i in 0..segs {
         let i0 = (i * verts_per_seg) as u32;
         let i1 = (((i + 1) % segs) * verts_per_seg) as u32;
         for r in 0..RINGS {
-            let a = i0 + r as u32;
-            let b = a + 1;
-            let c = i1 + r as u32;
-            let d = c + 1;
+            let base = (r * 2) as u32;
+            // Top face (even indices)
+            let a = i0 + base;
+            let b = a + 2;
+            let c = i1 + base;
+            let d = c + 2;
             indices.extend_from_slice(&[a, b, d, a, d, c]);
+            // Bottom face (odd indices) — winding flipped for −Y normals
+            let a = i0 + base + 1;
+            let b = a + 2;
+            let c = i1 + base + 1;
+            let d = c + 2;
+            indices.extend_from_slice(&[a, d, b, a, c, d]);
         }
+    }
+
+    // Outer + inner walls
+    let wall_start = disc_vert_count;
+    for i in 0..segs {
+        let a = (i as f32 / segs as f32) * std::f32::consts::TAU;
+        let (sa, ca) = a.sin_cos();
+        // Outer wall verts
+        positions.push([ca * outer, h, sa * outer]);
+        normals.push([ca, 0.0, sa]);
+        uvs.push([i as f32 / segs as f32, 1.0]);
+        colors.push([0.85, 0.78, 0.70, 0.75]);
+        positions.push([ca * outer, -h, sa * outer]);
+        normals.push([ca, 0.0, sa]);
+        uvs.push([i as f32 / segs as f32, 0.0]);
+        colors.push([0.85, 0.78, 0.70, 0.75]);
+        // Inner wall verts
+        positions.push([ca * inner, h, sa * inner]);
+        normals.push([-ca, 0.0, -sa]);
+        uvs.push([i as f32 / segs as f32, 1.0]);
+        colors.push([0.70, 0.72, 0.85, 0.55]);
+        positions.push([ca * inner, -h, sa * inner]);
+        normals.push([-ca, 0.0, -sa]);
+        uvs.push([i as f32 / segs as f32, 0.0]);
+        colors.push([0.70, 0.72, 0.85, 0.55]);
+    }
+    for i in 0..segs {
+        let i0 = wall_start + (i * 4) as u32;
+        let i1 = wall_start + (((i + 1) % segs) * 4) as u32;
+        // Outer wall
+        indices.extend_from_slice(&[i0, i0 + 1, i1 + 1, i0, i1 + 1, i1]);
+        // Inner wall
+        indices.extend_from_slice(&[i0 + 2, i1 + 2, i1 + 3, i0 + 2, i1 + 3, i0 + 3]);
     }
 
     let mut mesh = Mesh::new(
@@ -940,6 +1071,24 @@ fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+/// Axis-aligned Y extent of a ring mesh built by [`build_ring_mesh`].
+#[cfg(test)]
+fn ring_mesh_y_extent(mesh: &Mesh) -> f32 {
+    let Some(attr) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+        return 0.0;
+    };
+    let Some(positions) = attr.as_float3() else {
+        return 0.0;
+    };
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for p in positions {
+        min_y = min_y.min(p[1]);
+        max_y = max_y.max(p[1]);
+    }
+    max_y - min_y
 }
 
 /// Build a procedural nebula image — multi-octave 3D Perlin on a
@@ -1046,6 +1195,33 @@ mod tests {
             saturn_ring_density(cassini) < saturn_ring_density(0.35) * 0.5,
             "Cassini Division should be a real density drop"
         );
+        let half_h = saturn_ring_half_height(100.0);
+        assert!((half_h - 3.5).abs() < 1e-4);
+        let mesh = build_ring_mesh(inner, outer, half_h, 48);
+        let y_extent = ring_mesh_y_extent(&mesh);
+        assert!(
+            y_extent > half_h * 1.9,
+            "ring mesh must be a 3D volume, got Y extent {y_extent}"
+        );
+    }
+
+    #[test]
+    fn kepler_three_moon_hierarchy_and_opposition() {
+        let inner = kepler_mean_motion_ratio(MOON_B_SEMI_MAJOR, 1.0);
+        let outer = kepler_mean_motion_ratio(MOON_C_SEMI_MAJOR, 1.0);
+        assert!(inner > 1.0, "inner moon should orbit faster than primary");
+        assert!(outer < 1.0, "outer moon should orbit slower than primary");
+        assert!(inner > outer);
+        let period_b = kepler_period_ratio(MOON_B_SEMI_MAJOR, 1.0);
+        let period_c = kepler_period_ratio(MOON_C_SEMI_MAJOR, 1.0);
+        assert!((period_b - MOON_B_SEMI_MAJOR.powf(1.5)).abs() < 1e-9);
+        assert!((period_c - MOON_C_SEMI_MAJOR.powf(1.5)).abs() < 1e-9);
+        assert!((inner * period_b - 1.0).abs() < 1e-12);
+        let sun = Vec3::new(0.0, 1.0, 0.3).normalize();
+        let full = moon_orbit_dir(sun, 0.0, 0.0);
+        let new = moon_orbit_dir(sun, std::f32::consts::PI, 0.0);
+        assert!(full.dot(-sun) > 0.95);
+        assert!(new.dot(sun) > 0.95);
     }
 
     #[test]
@@ -1086,19 +1262,5 @@ mod tests {
                 ),
             );
         }
-    }
-
-    #[test]
-    fn kepler_moons_orbit_faster_when_closer() {
-        let ratio = kepler_period_ratio(MOON_B_SEMI_MAJOR, 1.0);
-        assert!((ratio - MOON_B_SEMI_MAJOR.powf(1.5)).abs() < 1e-12);
-        assert!(ratio < 1.0);
-        let motion = kepler_mean_motion_ratio(MOON_B_SEMI_MAJOR, 1.0);
-        assert!((motion * ratio - 1.0).abs() < 1e-12);
-        let sun = Vec3::new(0.0, 1.0, 0.3).normalize();
-        let full = moon_orbit_dir(sun, 0.0, 0.0);
-        let new = moon_orbit_dir(sun, std::f32::consts::PI, 0.0);
-        assert!(full.dot(-sun) > 0.95);
-        assert!(new.dot(sun) > 0.95);
     }
 }
