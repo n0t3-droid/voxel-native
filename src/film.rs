@@ -423,29 +423,43 @@ fn film_drive_camera(
         return;
     };
 
-    // Warmup: wait for chunks around the island before rolling shots.
+    // Warmup: orbit the station pad so the streamer loads every chunk that
+    // holds combat / crew voxels (±9 of centre spans multiple 16³ chunks).
     if !film.ready_to_roll {
         let pending = streamer.pending_terrain.len() + streamer.pending_meshes.len();
         let loaded = world.chunks.len();
+        let orbit = [
+            Vec3::new(0.0, 12.0, 0.0),
+            Vec3::new(-14.0, 10.0, 10.0),
+            Vec3::new(14.0, 10.0, 10.0),
+            Vec3::new(0.0, 10.0, -14.0),
+            Vec3::new(-10.0, 9.0, -10.0),
+            Vec3::new(10.0, 9.0, -10.0),
+        ];
+        let oi = ((film.elapsed * 0.55) as usize) % orbit.len();
         let warm_pos = Vec3::new(
             island.cx as f32 + 0.5,
-            island.deck_y as f32 + 12.0,
+            island.deck_y as f32 + 1.0,
+            island.cz as f32 + 0.5,
+        ) + orbit[oi];
+        let look = Vec3::new(
+            island.cx as f32 + 0.5,
+            island.deck_y as f32 + 3.0,
             island.cz as f32 + 0.5,
         );
-        apply_camera(
-            &mut transform,
-            &mut player,
-            warm_pos,
-            warm_pos + Vec3::new(4.0, -2.0, 6.0),
-        );
+        apply_camera(&mut transform, &mut player, warm_pos, look);
         follow_lights(&mut fill_q, &mut rim_q, transform.translation, &transform);
-        if film.elapsed >= 12.0 || (loaded >= 28 && pending < 60 && film.elapsed >= 6.0) {
+
+        let pad_ready = station_pad_streamed(&world, island);
+        let time_ok = film.elapsed >= 8.0;
+        let stream_ok = loaded >= 40 && pending < 80;
+        if (pad_ready && time_ok && stream_ok) || film.elapsed >= 22.0 {
             film.ready_to_roll = true;
             film.shot_index = 0;
             film.shot_entered_at = film.elapsed;
             film.capture_queued_at = None;
             info!(
-                "FILM: rolling (loaded={loaded}, pending={pending}, t={:.1})",
+                "FILM: rolling (loaded={loaded}, pending={pending}, pad_ready={pad_ready}, t={:.1})",
                 film.elapsed
             );
         }
@@ -486,6 +500,20 @@ fn film_drive_camera(
     let (pos, look) = shot_pose(film.shot_index, island, &world);
     apply_camera(&mut transform, &mut player, pos, look);
     follow_lights(&mut fill_q, &mut rim_q, pos, &transform);
+}
+
+fn station_pad_streamed(world: &VoxelWorld, island: IslandSpec) -> bool {
+    use crate::blocks::AIR;
+    let ox = island.cx;
+    let oy = island.deck_y + 1;
+    let oz = island.cz;
+    // Mast core + pad figures must be resident (each can land in a
+    // different 16³ chunk once the station spans ±9 of the origin).
+    let mast = world.voxel_at(ox, oy, oz);
+    let marine = world.voxel_at(ox - 3, oy + 1, oz + 2);
+    let alien = world.voxel_at(ox + 2, oy + 2, oz + 2);
+    let crew = world.voxel_at(ox - 4, oy + 1, oz - 2);
+    mast != AIR && marine != AIR && alien != AIR && crew != AIR
 }
 
 fn apply_camera(transform: &mut Transform, player: &mut Player, pos: Vec3, look: Vec3) {
