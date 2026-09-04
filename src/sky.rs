@@ -67,7 +67,10 @@ fn star_night_factor(day: f32) -> f32 {
 /// Noon and true night must sit near zero so the orange texture cannot
 /// paint a 24h red stripe; hour 17 is the golden band.
 fn horizon_band_visibility(sunset: f32, night: f32) -> f32 {
-    (sunset.max(0.0).powf(1.40) * (1.0 - night) * 0.82).clamp(0.0, 1.0)
+    // Pass-5 * 0.82 plus a 1.40 gamma left 17:00 too shy once the
+    // texture stopped being an orange multiply. Sky-only, so this
+    // cannot milk the world pass.
+    (sunset.max(0.0).powf(1.18) * (1.0 - night) * 0.96).clamp(0.0, 1.0)
 }
 
 /// Fixed bearing of the great cratered moon: high and to the left.
@@ -134,10 +137,9 @@ struct StaticSkyBody {
 /// `daynight.rs` drives a single flat `ClearColor` for the whole dome,
 /// which is what keeps the fog and the sky matched — but a flat sky is
 /// the one thing the key art never has. This dome adds a latitude
-/// gradient on top: warm at dusk, violet at night, cool at noon,
-/// fading to nothing well before the zenith. It blends additively, so
-/// it can only brighten the existing gradient and can never introduce a
-/// seam between the sky and the fogged horizon.
+/// gradient on top: gold then peach at dusk, fading before the zenith
+/// so night violet and noon blue stay in ClearColor. Blend (not Add)
+/// so it can cover the flat dome without an HDR bloom wall.
 #[derive(Component)]
 struct HorizonGlow;
 
@@ -829,19 +831,21 @@ fn follow_and_animate_sky(
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
-        // Horizon band: a thin golden rim at 17:00, invisible at noon
-        // and night. Tint stays near-peach so the texture can walk
-        // gold → peach → violet; multiplying by orange was the hard stripe.
+        // Horizon band: 17:00 gold→peach dome, invisible at noon and
+        // night. Near-white tint lets the *texture* walk gold→peach;
+        // multiplying by orange (1.0, 0.50, 0.18) was the hard stripe.
+        // Alpha stays high so the violet ClearColor cannot bleed down
+        // into the low horizon.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
             let noon = Vec3::new(0.004, 0.010, 0.018);
-            let dusk = Vec3::new(0.48, 0.30, 0.22);
+            let dusk = Vec3::new(0.78, 0.48, 0.16);
             let deep = Vec3::new(0.020, 0.018, 0.055);
             let vis = horizon_band_visibility(sunset, night);
             let dusk_gate = sunset * (1.0 - night).powf(1.4);
             let e = noon * day * (1.0 - sunset) * 0.15 + deep * night * vis.max(0.02) * 0.25
                 + dusk * dusk_gate;
             let e = e * intel.profile.sky_saturation.max(0.7);
-            mat.base_color = Color::srgba(vis * 0.92, vis * 0.68, vis * 0.48, vis * 0.42);
+            mat.base_color = Color::srgba(vis * 1.0, vis * 0.90, vis * 0.70, vis * 0.86);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
@@ -1267,34 +1271,45 @@ fn build_horizon_gradient_image(height: u32) -> Image {
     image
 }
 
-/// Soft scattering dome: gold on the horizon, peach through the lower
-/// sky, violet before the zenith. Wide falloff so 17:00 reads as
-/// atmosphere rather than a painted orange stripe.
+/// Soft scattering dome: hold warm gold through the lower ~12–15°
+/// (elevation 0.13–0.17), walk to peach, then fade. Violet zenith is
+/// ClearColor / nebula — painting violet into this texture is what
+/// let it bleed down over the gold postcard.
 fn horizon_scatter_rgba(elevation: f32) -> [u8; 4] {
     let intensity = if elevation < 0.0 {
         (1.0 + elevation * 5.0).max(0.0)
     } else {
-        (1.0 - (elevation / 0.88).min(1.0)).powf(0.55)
+        (1.0 - (elevation / 0.55).min(1.0)).powf(0.85)
     };
     let intensity = intensity.clamp(0.0, 1.0);
     let u = elevation.clamp(0.0, 1.0);
+    // Gold through ~12° (u=0.13), peach through ~25° (u=0.28), then
+    // the remaining energy is still warm so the fade does not turn
+    // the mid-sky violet before alpha dies.
     let (hr, hg, hb) = if elevation <= 0.0 {
-        (255.0, 186.0, 92.0)
-    } else if u < 0.18 {
-        let t = u / 0.18;
-        (255.0, 186.0 + 36.0 * t, 92.0 + 88.0 * t)
-    } else if u < 0.48 {
-        let t = (u - 0.18) / 0.30;
-        (255.0 - 130.0 * t, 222.0 - 120.0 * t, 180.0 + 48.0 * t)
+        (255.0, 196.0, 72.0)
+    } else if u < 0.14 {
+        let t = u / 0.14;
+        (255.0, 196.0 + 18.0 * t, 72.0 + 36.0 * t)
+    } else if u < 0.28 {
+        let t = (u - 0.14) / 0.14;
+        (255.0, 214.0 + 22.0 * t, 108.0 + 52.0 * t)
     } else {
-        let t = ((u - 0.48) / 0.40).clamp(0.0, 1.0);
-        (100.0 - 28.0 * t, 86.0 - 22.0 * t, 232.0 - 12.0 * t)
+        let t = ((u - 0.28) / 0.27).clamp(0.0, 1.0);
+        (255.0 - 40.0 * t, 236.0 - 48.0 * t, 160.0 + 20.0 * t)
+    };
+    let alpha = if elevation < 0.0 {
+        intensity * 0.58
+    } else if u < 0.16 {
+        intensity * 0.62
+    } else {
+        intensity * 0.38
     };
     [
         (hr * intensity) as u8,
         (hg * intensity) as u8,
         (hb * intensity) as u8,
-        (intensity * 0.22 * 255.0) as u8,
+        (alpha * 255.0) as u8,
     ]
 }
 
@@ -1359,26 +1374,43 @@ mod tests {
     #[test]
     fn horizon_scatter_is_a_soft_gradient_not_a_stripe() {
         let rim = horizon_scatter_rgba(0.0);
-        let peach = horizon_scatter_rgba(0.16);
-        let upper = horizon_scatter_rgba(0.34);
+        let gold = horizon_scatter_rgba(0.12);
+        let peach = horizon_scatter_rgba(0.22);
+        let upper = horizon_scatter_rgba(0.40);
         let zenith = horizon_scatter_rgba(0.95);
         assert!(rim[0] > 180, "horizon gold too dim ({})", rim[0]);
+        assert!(
+            rim[0] as i16 - rim[2] as i16 > 90,
+            "horizon is not gold (R={} B={})",
+            rim[0],
+            rim[2]
+        );
+        assert!(
+            rim[3] > 120,
+            "horizon alpha too thin ({}); violet zenith would bleed down",
+            rim[3]
+        );
+        assert!(
+            gold[0] as i16 - gold[2] as i16 > 50,
+            "gold did not hold through ~11° (R={} B={})",
+            gold[0],
+            gold[2]
+        );
         assert!(
             peach[0] > 80,
             "peach elevation died ({}); the band is still a hard stripe",
             peach[0]
         );
         assert!(
-            peach[1] as f32 / (peach[0].max(1) as f32) > 0.55,
+            peach[1] as f32 / (peach[0].max(1) as f32) > 0.70,
             "peach band is still orange-red G/R={:.2}",
             peach[1] as f32 / peach[0].max(1) as f32
         );
-        assert!(upper[0] > 18, "upper scatter vanished at 0.34 ({})", upper[0]);
         assert!(
-            upper[2] as i16 - upper[0] as i16 > 8,
-            "upper sky is not walking toward violet (R={} B={})",
-            upper[0],
-            upper[2]
+            upper[3] < rim[3] / 2,
+            "upper sky is as opaque as the gold rim (rim a={} upper a={})",
+            rim[3],
+            upper[3]
         );
         assert_eq!(zenith[0], 0);
         assert_eq!(zenith[3], 0);
