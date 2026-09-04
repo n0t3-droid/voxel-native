@@ -827,20 +827,18 @@ fn follow_and_animate_sky(
         }
 
         // Horizon band: a thin golden rim at 17:00, invisible at noon
-        // and night. Unlit + WHITE base_color used to draw the orange
-        // carrier 24h a day; vis and the dusk emissive both die with
-        // `night` so hour 21.5 cannot keep a red stripe.
+        // and night. Tint stays near-peach so the texture can walk
+        // gold → peach → violet; multiplying by orange was the hard stripe.
         if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
             let noon = Vec3::new(0.004, 0.010, 0.018);
-            // Under ACES clip so 17:00 stays golden, not a grey wall.
-            let dusk = Vec3::new(0.92, 0.50, 0.14);
+            let dusk = Vec3::new(0.46, 0.32, 0.28);
             let deep = Vec3::new(0.020, 0.018, 0.055);
             let vis = horizon_band_visibility(sunset, night);
             let dusk_gate = sunset * (1.0 - night).powf(1.4);
             let e = noon * day * (1.0 - sunset) * 0.15 + deep * night * vis.max(0.02) * 0.25
                 + dusk * dusk_gate;
             let e = e * intel.profile.sky_saturation.max(0.7);
-            mat.base_color = Color::srgba(vis, vis * 0.50, vis * 0.18, vis);
+            mat.base_color = Color::srgba(vis * 0.90, vis * 0.74, vis * 0.66, vis * 0.52);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
@@ -1266,31 +1264,34 @@ fn build_horizon_gradient_image(height: u32) -> Image {
     image
 }
 
-/// Soft scattering band: gold on the horizon, peach through the lower
-/// sky, dying into violet before the zenith. Wider and gentler than the
-/// pass-3 stripe so 17:00 reads as atmosphere, not a painted line.
+/// Soft scattering dome: gold on the horizon, peach through the lower
+/// sky, violet before the zenith. Wide falloff so 17:00 reads as
+/// atmosphere rather than a painted orange stripe.
 fn horizon_scatter_rgba(elevation: f32) -> [u8; 4] {
     let intensity = if elevation < 0.0 {
         (1.0 + elevation * 5.0).max(0.0)
     } else {
-        (1.0 - (elevation / 0.58).min(1.0)).powf(1.18)
+        (1.0 - (elevation / 0.82).min(1.0)).powf(0.70)
     };
     let intensity = intensity.clamp(0.0, 1.0);
     let u = elevation.clamp(0.0, 1.0);
     let (hr, hg, hb) = if elevation <= 0.0 {
-        (255.0, 168.0, 56.0)
-    } else if u < 0.20 {
-        let t = u / 0.20;
-        (255.0, 168.0 + 22.0 * t, 56.0 + 90.0 * t)
+        (255.0, 176.0, 78.0)
+    } else if u < 0.14 {
+        let t = u / 0.14;
+        (255.0, 176.0 + 44.0 * t, 78.0 + 102.0 * t)
+    } else if u < 0.46 {
+        let t = (u - 0.14) / 0.32;
+        (255.0 - 145.0 * t, 220.0 - 130.0 * t, 180.0 + 36.0 * t)
     } else {
-        let t = ((u - 0.20) / 0.38).clamp(0.0, 1.0);
-        (255.0 - 100.0 * t, 190.0 - 110.0 * t, 146.0 + 10.0 * t)
+        let t = ((u - 0.46) / 0.36).clamp(0.0, 1.0);
+        (110.0 - 30.0 * t, 90.0 - 20.0 * t, 216.0 - 16.0 * t)
     };
     [
         (hr * intensity) as u8,
         (hg * intensity) as u8,
         (hb * intensity) as u8,
-        (intensity * 0.40 * 255.0) as u8,
+        (intensity * 0.30 * 255.0) as u8,
     ]
 }
 
@@ -1370,6 +1371,12 @@ mod tests {
             peach[1] as f32 / peach[0].max(1) as f32
         );
         assert!(upper[0] > 18, "upper scatter vanished at 0.34 ({})", upper[0]);
+        assert!(
+            upper[2] as i16 - upper[0] as i16 > 8,
+            "upper sky is not walking toward violet (R={} B={})",
+            upper[0],
+            upper[2]
+        );
         assert_eq!(zenith[0], 0);
         assert_eq!(zenith[3], 0);
     }
