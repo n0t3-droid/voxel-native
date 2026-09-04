@@ -648,41 +648,42 @@ fn bake_block_swatch(
                     )
                 }
                 BlockStyle::Metal => {
-                    let cells = 4.0;
+                    // Large panels, not a high-contrast waffle. Fine grout
+                    // turned into a checkerboard under flying-distance mips.
+                    let cells = 2.0;
                     let px = (u * cells).fract();
                     let py = (v * cells).fract();
-                    let grout = if px < 0.10 || py < 0.10 || px > 0.90 || py > 0.90 {
-                        0.38
+                    let grout = if px < 0.05 || py < 0.05 || px > 0.95 || py > 0.95 {
+                        0.78
                     } else {
                         1.0
                     };
-                    let rivet_u = (px - 0.16).abs() + (py - 0.16).abs();
-                    let rivet = if rivet_u < 0.08 { 0.42 } else { 0.0 };
-                    let hatch = if (px * 8.0).fract() < 0.18 { 0.12 } else { 0.0 };
-                    let brush = (u * 48.0 + fbm * 2.0).sin() * 0.09;
-                    let b = 0.86 + macro_shadow * 0.4 + brush + micro * 0.04 - hatch;
+                    let rivet_u = (px - 0.14).abs() + (py - 0.14).abs();
+                    let rivet = if rivet_u < 0.05 { 0.18 } else { 0.0 };
+                    let brush = (u * 24.0 + fbm * 2.0).sin() * 0.07;
+                    let b = 0.92 + macro_shadow * 0.35 + brush + micro * 0.04;
                     (
                         b * grout - rivet,
                         (brush as f32) * 0.02,
-                        (hatch as f32) * 0.03,
-                        -(grout as f32 - 1.0) * 0.06,
+                        0.0,
+                        -(grout as f32 - 1.0) * 0.04,
                     )
                 }
                 BlockStyle::Crystal => {
                     let facet = cell_n;
-                    let grout = facet * 0.72;
+                    let grout = facet * 0.62;
                     let sparkle = detail.get([tx * 32.0, ty * 32.0, tz * 32.0, tw * 32.0]);
-                    let sp = if sparkle > 0.68 {
-                        (sparkle - 0.68) * 2.8
+                    let sp = if sparkle > 0.62 {
+                        (sparkle - 0.62) * 3.1
                     } else {
                         0.0
                     };
                     let face = macro_n * 0.18 + fbm * 0.10;
                     (
-                        0.72 + face + sp - grout,
-                        (sp as f32) * 0.10 + 0.04,
-                        (sp as f32) * 0.12 + (face as f32) * 0.05,
-                        0.14 + (sp as f32) * 0.14 - (grout as f32) * 0.10,
+                        0.82 + face + sp - grout,
+                        (sp as f32) * 0.12 + 0.06,
+                        (sp as f32) * 0.16 + (face as f32) * 0.05,
+                        0.18 + (sp as f32) * 0.16 - (grout as f32) * 0.08,
                     )
                 }
                 BlockStyle::Energy => {

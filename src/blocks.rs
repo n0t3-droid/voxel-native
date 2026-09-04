@@ -800,17 +800,18 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 2.15;
         }
         22 => {
-            // Lava — hot orange, lights nearby rock without a white core.
-            c[0] *= 2.6;
-            c[1] *= 1.35;
-            c[2] *= 0.50;
+            // Lava — hot orange curtains; bright enough to read as a
+            // focal sheet without blooming the whole canyon white.
+            c[0] *= 3.4;
+            c[1] *= 1.70;
+            c[2] *= 0.55;
         }
         20 => {
             // Crystal — cyan-violet spires. Bloom-tuned so they glow
             // instead of wiping the surrounding mesa white.
-            c[0] *= 1.45;
-            c[1] *= 2.35;
-            c[2] *= 3.20;
+            c[0] *= 1.55;
+            c[1] *= 2.55;
+            c[2] *= 3.45;
         }
         23 => {
             // AlienMoss — bioluminescent magenta/violet. The multiplier
@@ -882,9 +883,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         }
         39 => {
             // Magenta crystal — hot pink hero shards.
-            c[0] *= 3.35;
-            c[1] *= 0.85;
-            c[2] *= 2.85;
+            c[0] *= 3.85;
+            c[1] *= 0.95;
+            c[2] *= 3.20;
         }
         40 => {
             // Emerald crystal.
