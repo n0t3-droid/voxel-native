@@ -792,6 +792,9 @@ impl SkywayNetwork {
         if let Some(west) = hero_west_face_rail(wx, wz, macro_h) {
             return Some(west);
         }
+        if let Some(look_west) = hero_look_west_face_rail(wx, wz, macro_h) {
+            return Some(look_west);
+        }
         let x = wx as f64;
         let z = wz as f64;
         let a = self.route_field(x, z);
@@ -1123,6 +1126,28 @@ fn hero_west_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     })
 }
 
+/// West-face walk on the mesa the settled camera actually sees
+/// (rest ~x=90 looking +X). Postcard AABB only.
+fn hero_look_west_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
+    const RAIL_X: i32 = 108;
+    const HALF: f64 = 2.2;
+    if wz < -128 || wz > -56 {
+        return None;
+    }
+    let dist = (wx - RAIL_X).abs() as f64;
+    if dist > HALF {
+        return None;
+    }
+    let deck_y = (macro_h - 4.0).round() as i32;
+    let pylon = wz.rem_euclid(SKYWAY_PYLON_PITCH) < 2 && dist < HALF - 0.5;
+    Some(SkywayColumn {
+        deck_y,
+        dist,
+        pylon,
+        half: HALF,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Cliff colony (spawn postcard) ---------------------------------------------
 // ---------------------------------------------------------------------------
@@ -1171,14 +1196,16 @@ impl CliffHab {
             Self { cx: 152, cz: -96, floors: 5, width: 6, depth: 4, drop: 0, ledge: 0 },
             Self { cx: 90, cz: -80, floors: 3, width: 9, depth: 5, drop: 0, ledge: 0 },
             Self { cx: 174, cz: -70, floors: 7, width: 4, depth: 4, drop: 0, ledge: 0 },
-            // Habs on westward ledges: height from the mesa rim (`cx+ledge`),
-            // building parked in front of the west face the postcard sees.
-            Self { cx: 12, cz: -72, floors: 5, width: 5, depth: 5, drop: 10, ledge: 30 },
-            Self { cx: 16, cz: -86, floors: 6, width: 5, depth: 4, drop: 14, ledge: 28 },
-            Self { cx: 10, cz: -64, floors: 4, width: 5, depth: 4, drop: 8, ledge: 26 },
-            Self { cx: 20, cz: -98, floors: 5, width: 6, depth: 4, drop: 16, ledge: 32 },
-            Self { cx: 14, cz: -54, floors: 4, width: 6, depth: 5, drop: 6, ledge: 24 },
-            Self { cx: 12, cz: -108, floors: 3, width: 7, depth: 5, drop: 18, ledge: 28 },
+            // Habs on the WEST FACE of the mesa the settled postcard
+            // actually sees: camera rests at ~(90, 110, -44) looking
+            // +X/−Z, so x=10–20 was behind the frustum. Park the
+            // buildings at x≈100–126 with a deck east to the rim.
+            Self { cx: 104, cz: -72, floors: 5, width: 5, depth: 5, drop: 10, ledge: 28 },
+            Self { cx: 110, cz: -86, floors: 6, width: 5, depth: 4, drop: 14, ledge: 26 },
+            Self { cx: 98, cz: -64, floors: 4, width: 5, depth: 4, drop: 8, ledge: 24 },
+            Self { cx: 118, cz: -98, floors: 5, width: 6, depth: 4, drop: 16, ledge: 30 },
+            Self { cx: 108, cz: -112, floors: 4, width: 6, depth: 5, drop: 12, ledge: 28 },
+            Self { cx: 124, cz: -78, floors: 6, width: 5, depth: 4, drop: 18, ledge: 32 },
         ]
     }
 
@@ -1687,10 +1714,10 @@ mod tests {
         assert!(
             CliffHab::hero_cluster()
                 .iter()
-                .filter(|h| h.cx < 24 && h.ledge >= 24 && h.drop >= 6)
+                .filter(|h| h.cx >= 96 && h.cx <= 132 && h.ledge >= 20 && h.drop >= 6)
                 .count()
                 >= 4,
-            "west-face ledges missing from the postcard look cone"
+            "look-cone west-face ledges missing (need cx 96–132 after the fly-in)"
         );
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
         let sky = SkywayNetwork::new(1);
@@ -1706,6 +1733,14 @@ mod tests {
         let west = sky.column(32, -80, 70.0).expect("west face rail missing on postcard");
         assert!(west.half < SKYWAY_HALF_WIDTH);
         assert!(west.deck_y < rail.deck_y, "west rail should sit below the mesa rail");
+        let look_west = sky
+            .column(108, -100, 70.0)
+            .expect("look-cone west face rail missing on postcard");
+        assert!(look_west.half < SKYWAY_HALF_WIDTH);
+        assert!(
+            look_west.deck_y < rail.deck_y,
+            "look-cone west rail should sit below the mesa rail"
+        );
     }
 
     #[test]
