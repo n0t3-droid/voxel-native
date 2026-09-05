@@ -1317,6 +1317,54 @@ fn film_spawn_silhouettes(
         ));
     }
 
+    // Combat pad mesh figures — biped marine vs multi-leg alien (shot 2).
+    let pad = deck + Vec3::new(0.0, 0.0, 14.0);
+    spawn_film_marine(
+        &mut commands,
+        &cube,
+        &marine_body,
+        &marine_dark,
+        &marine_visor,
+        pad + Vec3::new(-4.5, 0.0, 1.0),
+        2.4,
+    );
+    spawn_film_alien(
+        &mut commands,
+        &cube,
+        &alien_body,
+        &alien_leg,
+        &alien_crest,
+        pad + Vec3::new(5.5, 0.0, 2.0),
+        2.6,
+    );
+    // Painting-scale combat pair on a near-frustum satellite so monsters
+    // read in the wide hero (goal-painting miss after dual rivers).
+    spawn_film_marine(
+        &mut commands,
+        &cube,
+        &marine_body,
+        &marine_dark,
+        &marine_visor,
+        deck + Vec3::new(20.0, 1.0, 30.0),
+        6.5,
+    );
+    spawn_film_alien(
+        &mut commands,
+        &cube,
+        &alien_body,
+        &alien_leg,
+        &alien_crest,
+        deck + Vec3::new(30.0, 1.0, 33.0),
+        7.0,
+    );
+    spawn_film_crew(
+        &mut commands,
+        &cube,
+        &crew_body,
+        &crew_visor,
+        deck + Vec3::new(-6.0, 0.0, -10.0),
+    );
+
     info!(
         "FILM: spawned mesh silhouettes + keel underside plates on combat slab ({}, {})",
         island.cx, island.cz
