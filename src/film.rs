@@ -1283,7 +1283,7 @@ fn film_spawn_silhouettes(
                 transform: Transform::from_translation(
                     deck + Vec3::new(ox + 8.0, river_y + 0.4, oz - 8.0),
                 )
-                .with_scale(Vec3::new(10.0, 5.2, 5.5))
+                .with_scale(Vec3::new(12.0, 6.5, 6.5))
                 .with_rotation(Quat::from_rotation_y(0.32)),
                 ..default()
             },
@@ -1312,7 +1312,7 @@ fn film_spawn_silhouettes(
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox + 10.0, 7.0, 96.0))
-                    .with_scale(Vec3::new(16.0, 4.8, 6.0))
+                    .with_scale(Vec3::new(18.0, 5.5, 7.0))
                     .with_rotation(Quat::from_rotation_y(0.5)),
                 ..default()
             },
@@ -1340,7 +1340,7 @@ fn film_spawn_silhouettes(
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox + 12.0, 9.0, 84.0))
-                    .with_scale(Vec3::new(6.0, 14.0, 18.0)),
+                    .with_scale(Vec3::new(7.5, 16.0, 20.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -2497,14 +2497,14 @@ fn spawn_film_station_mountain(
             Name::new(format!("FilmStationTier{i}")),
         ));
     }
-    // Neon crown spires.
-    for (i, ox) in [-8.0_f32, 0.0, 8.0].into_iter().enumerate() {
+    // Neon crown spires — brighter/taller so dedicated station reads.
+    for (i, ox) in [-10.0_f32, -3.0, 4.0, 11.0].into_iter().enumerate() {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: neon.clone(),
-                transform: Transform::from_translation(base + Vec3::new(ox, 74.0, 0.0))
-                    .with_scale(Vec3::new(5.0, 18.0, 5.0)),
+                transform: Transform::from_translation(base + Vec3::new(ox, 78.0, 0.0))
+                    .with_scale(Vec3::new(6.0, 24.0, 6.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -2517,13 +2517,26 @@ fn spawn_film_station_mountain(
         PbrBundle {
             mesh: cube.clone(),
             material: alloy.clone(),
-            transform: Transform::from_translation(base + Vec3::new(-18.0, 20.0, 22.0))
-                .with_scale(Vec3::new(14.0, 40.0, 12.0)),
+            transform: Transform::from_translation(base + Vec3::new(-22.0, 24.0, 24.0))
+                .with_scale(Vec3::new(18.0, 48.0, 14.0)),
             ..default()
         },
         FilmSilhouette,
         FilmStationFx,
         Name::new("FilmStationButtress"),
+    ));
+    // Second buttress for mountain silhouette width.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: dark.clone(),
+            transform: Transform::from_translation(base + Vec3::new(20.0, 18.0, 18.0))
+                .with_scale(Vec3::new(16.0, 36.0, 14.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmStationFx,
+        Name::new("FilmStationButtressB"),
     ));
 }
 
@@ -3546,9 +3559,9 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         _ => {
-            // Station mountain — three-quarter of the mesh mass + voxel pyramid.
-            let station = deck + Vec3::new(38.0, 40.0, 58.0);
-            let pos = deck + Vec3::new(-20.0, 55.0, 120.0);
+            // Station mountain — stand off so full stepped mass + neon crown read.
+            let station = deck + Vec3::new(38.0, 42.0, 58.0);
+            let pos = deck + Vec3::new(-55.0, 70.0, 155.0);
             let look = station;
             (pos, look)
         }
