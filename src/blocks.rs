@@ -85,12 +85,11 @@ pub enum BlockType {
     /// Light grey limestone — bright karst columns.
     Limestone = 19,
     /// Cyan-violet alien crystal — towering Pandora-style spires.
-    /// Translucent, non-opaque so light bleeds through the spires.
     Crystal = 20,
     /// Near-black volcanic basalt — Io / Mars cap rock.
     Basalt = 21,
-    /// Glowing lava — non-solid, non-opaque (treated like water for
-    /// face culling so it pools in flat sheets in lava channels).
+    /// Glowing lava — non-solid for collision, opaque so curtains read
+    /// as sheets instead of stained glass over the banded wall.
     Lava = 22,
     /// Magenta bioluminescent ground cover — alien reef floors.
     AlienMoss = 23,
@@ -167,8 +166,6 @@ impl BlockType {
                 | BlockType::JungleLeaves
                 | BlockType::Ice
                 | BlockType::CockpitGlass
-                | BlockType::PlasmaFlow
-                | BlockType::CrystalMagenta
                 | BlockType::CrystalGreen
                 | BlockType::HoloPanel
         )
@@ -235,15 +232,16 @@ impl BlockType {
             BlockType::MossStone => Color::srgb(0.33, 0.56, 0.37),
             // Bright pale limestone — sun-lit karst sides.
             BlockType::Limestone => Color::srgb(0.86, 0.84, 0.76),
-            // Alien crystal — saturated cyan-violet, slightly translucent.
-            BlockType::Crystal => Color::srgba(0.08, 0.78, 1.00, 0.72),
+            // Alien crystal — saturated cyan. Fully opaque so the mass
+            // reads as a gem, not stained glass over the banded wall.
+            BlockType::Crystal => Color::srgb(0.08, 0.78, 1.00),
             // Volcanic basalt — dark, but not unreadable black. Keeping
             // it above pure black makes ledges and jump targets visible
             // under strong bloom from nearby lava.
             BlockType::Basalt => Color::srgb(0.34, 0.31, 0.38),
             // Lava — saturated orange-red. Read as glowing thanks to
             // the player camera's HDR + tonemapping.
-            BlockType::Lava => Color::srgba(1.00, 0.36, 0.04, 0.90),
+            BlockType::Lava => Color::srgb(1.00, 0.36, 0.04),
             // Bioluminescent magenta moss for alien reef floors.
             BlockType::AlienMoss => Color::srgb(0.40, 0.11, 0.62),
             // Bone-white organic pillar rock.
@@ -257,7 +255,7 @@ impl BlockType {
             BlockType::NeonMagenta => Color::srgb(1.00, 0.04, 0.82),
             BlockType::NeonAmber => Color::srgb(1.00, 0.52, 0.06),
             BlockType::EngineCore => Color::srgb(0.06, 0.76, 1.00),
-            BlockType::LuminiteCrystal => Color::srgba(0.12, 0.82, 1.00, 0.68),
+            BlockType::LuminiteCrystal => Color::srgb(0.12, 0.82, 1.00),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
             // Violet sedimentary band — saturated enough to read as an
@@ -266,8 +264,8 @@ impl BlockType {
             // Ochre band that separates the violet from the buff cap.
             BlockType::AmberStone => Color::srgb(0.98, 0.46, 0.08),
             // Coolant-blue energy current in the canyon floors.
-            BlockType::PlasmaFlow => Color::srgba(0.06, 0.88, 1.00, 0.82),
-            BlockType::CrystalMagenta => Color::srgba(1.00, 0.10, 0.78, 0.72),
+            BlockType::PlasmaFlow => Color::srgb(0.06, 0.88, 1.00),
+            BlockType::CrystalMagenta => Color::srgb(1.00, 0.10, 0.78),
             BlockType::CrystalGreen => Color::srgba(0.30, 1.00, 0.56, 0.70),
             // Holo pane — mostly transparent, tinted cyan.
             BlockType::HoloPanel => Color::srgba(0.32, 0.90, 1.00, 0.36),
@@ -757,15 +755,13 @@ pub fn voxel_is_weapon_target(v: Voxel) -> bool {
 
 /// Fast voxel → opaque? (used for face-culling).
 /// Air (0), water (5), leaves (7), ice (9), jungle leaves (11),
-/// crystal (20), lava (22), cockpit (28), luminite/iridium glass,
-/// plasma (38), coloured crystal (39/40) and holo panes (41) are
-/// non-opaque.
+/// cockpit (28), iridium glass (35), emerald crystal (40) and holo
+/// panes (41) stay see-through. Hero cyan/magenta crystal, lava and
+/// plasma must occlude so they read as masses, not as stained glass
+/// over the banded wall.
 #[inline]
 pub fn voxel_is_opaque(v: Voxel) -> bool {
-    !matches!(
-        v,
-        0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35 | 38 | 39 | 40 | 41
-    )
+    !matches!(v, 0 | 5 | 7 | 9 | 11 | 28 | 35 | 40 | 41)
 }
 
 /// Fast voxel → is this block bioluminescent? Emissive blocks get
@@ -800,18 +796,18 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 2.15;
         }
         22 => {
-            // Lava — hot orange curtains; bright enough to read as a
-            // focal sheet without blooming the whole canyon white.
-            c[0] *= 3.4;
-            c[1] *= 1.70;
-            c[2] *= 0.55;
+            // Lava — hot orange curtains. Keep blue near-zero so ACES
+            // cannot wash the sheet into cream.
+            c[0] *= 4.2;
+            c[1] *= 1.85;
+            c[2] *= 0.28;
         }
         20 => {
-            // Crystal — cyan-violet spires. Bloom-tuned so they glow
-            // instead of wiping the surrounding mesa white.
-            c[0] *= 1.55;
-            c[1] *= 2.55;
-            c[2] *= 3.45;
+            // Crystal — saturated cyan. Red stays low so dusk lighting
+            // cannot turn the shard into a brown pylon.
+            c[0] *= 0.85;
+            c[1] *= 3.35;
+            c[2] *= 4.60;
         }
         23 => {
             // AlienMoss — bioluminescent magenta/violet. The multiplier
@@ -829,9 +825,12 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 1.7;
         }
         29 => {
-            c[0] *= 0.65;
-            c[1] *= 2.15;
-            c[2] *= 2.55;
+            // Neon cyan rim — chromatic, below crystal so shards stay
+            // the left-third hero. Soft enough that river banks don't
+            // clip to white next to plasma.
+            c[0] *= 0.30;
+            c[1] *= 1.70;
+            c[2] *= 2.05;
         }
         30 => {
             c[0] *= 2.6;
@@ -857,10 +856,10 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 1.25;
         }
         33 => {
-            // Luminite — brilliant aquamarine (concept cavern key light).
-            c[0] *= 1.45;
-            c[1] *= 4.4;
-            c[2] *= 5.8;
+            // Luminite — brilliant aquamarine shard core.
+            c[0] *= 0.90;
+            c[1] *= 4.8;
+            c[2] *= 6.4;
         }
         34 => {
             // Magnetite — hot ember orange, reads as ore against cyan crystal.
@@ -875,17 +874,17 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 4.6;
         }
         38 => {
-            // Plasma river — brightest thing on the canyon floor, but
-            // not a white sheet.
-            c[0] *= 1.15;
-            c[1] *= 3.15;
-            c[2] *= 4.10;
+            // Plasma river — glowing cyan ribbon. Keep all channels
+            // below the ACES clip so it does not bloom to white.
+            c[0] *= 0.35;
+            c[1] *= 1.55;
+            c[2] *= 1.90;
         }
         39 => {
             // Magenta crystal — hot pink hero shards.
-            c[0] *= 3.85;
-            c[1] *= 0.95;
-            c[2] *= 3.20;
+            c[0] *= 4.40;
+            c[1] *= 0.55;
+            c[2] *= 3.55;
         }
         40 => {
             // Emerald crystal.
@@ -935,9 +934,33 @@ mod tests {
         assert_eq!(BlockType::from_voxel(35), BlockType::IridiumVein);
         assert!(voxel_is_emissive(BlockType::NeonCyan.into()));
         assert!(!voxel_is_opaque(BlockType::CockpitGlass.into()));
-        assert!(!voxel_is_opaque(BlockType::LuminiteCrystal.into()));
+        assert!(
+            voxel_is_opaque(BlockType::LuminiteCrystal.into()),
+            "hero luminite must occlude the wall behind it"
+        );
+        assert!(voxel_is_opaque(BlockType::Crystal.into()));
+        assert!(voxel_is_opaque(BlockType::CrystalMagenta.into()));
+        assert!(voxel_is_opaque(BlockType::Lava.into()));
+        assert!(voxel_is_opaque(BlockType::PlasmaFlow.into()));
         assert!(voxel_is_opaque(BlockType::MagnetiteOre.into()));
         assert!(ore_units_for_mined_voxel(VOXEL_LUMINITE) > 0);
+        let cyan = voxel_color(BlockType::Crystal.into());
+        assert!(
+            cyan[2] > cyan[0] * 8.0 && cyan[1] > cyan[0] * 4.0,
+            "hero crystal vertex colour must stay cyan, got {cyan:?}"
+        );
+        let magenta = voxel_color(BlockType::CrystalMagenta.into());
+        assert!(
+            magenta[0] > magenta[1] * 8.0 && magenta[2] > magenta[1] * 4.0,
+            "hero magenta vertex colour must stay magenta, got {magenta:?}"
+        );
+        let plasma = voxel_color(BlockType::PlasmaFlow.into());
+        let plasma_peak = plasma[0].max(plasma[1]).max(plasma[2]);
+        assert!(
+            plasma_peak < 2.2,
+            "plasma vertex peak {plasma_peak:.3} will bloom to white"
+        );
+        assert!(plasma[2] > plasma[0] * 8.0);
     }
 
     #[test]

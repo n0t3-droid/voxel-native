@@ -76,16 +76,7 @@ impl MaterialLibrary {
                 swatch.rgba.clone(),
             ));
             let alpha = swatch.block.color().to_srgba().alpha;
-            let emissive = if swatch.block.is_emissive() {
-                let lin = swatch.block.color().to_linear();
-                LinearRgba::rgb(
-                    lin.red * 3.2 + 0.35,
-                    lin.green * 3.2 + 0.35,
-                    lin.blue * 3.2 + 0.35,
-                )
-            } else {
-                LinearRgba::BLACK
-            };
+            let emissive = emissive_for_block(swatch.block);
             let handle = materials.add(StandardMaterial {
                 base_color: Color::WHITE.with_alpha(alpha),
                 base_color_texture: Some(image),
@@ -742,6 +733,39 @@ fn bake_block_swatch(
 // Helpers -------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
+/// Per-block HDR emissive. Fast has bloom intensity 0, so this is the
+/// only glow those voxels get; Cinematic adds bloom on top, so plasma
+/// stays chromatic and below the ACES clip while crystals stay saturated.
+fn emissive_for_block(block: BlockType) -> LinearRgba {
+    if !block.is_emissive() {
+        return LinearRgba::BLACK;
+    }
+    let lin = block.color().to_linear();
+    match block {
+        BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(
+            lin.red * 0.70,
+            lin.green * 7.40,
+            lin.blue * 8.60,
+        ),
+        BlockType::CrystalMagenta => LinearRgba::rgb(
+            lin.red * 7.80,
+            lin.green * 0.55,
+            lin.blue * 6.60,
+        ),
+        BlockType::PlasmaFlow | BlockType::NeonCyan => LinearRgba::rgb(
+            lin.red * 1.05 + 0.02,
+            lin.green * 1.45 + 0.06,
+            lin.blue * 1.65 + 0.08,
+        ),
+        BlockType::Lava => LinearRgba::rgb(lin.red * 5.80, lin.green * 2.05, lin.blue * 0.06),
+        _ => LinearRgba::rgb(
+            lin.red * 3.2 + 0.35,
+            lin.green * 3.2 + 0.35,
+            lin.blue * 3.2 + 0.35,
+        ),
+    }
+}
+
 fn roughness_for_block(block: BlockType) -> f32 {
     if matches!(
         block,
@@ -997,13 +1021,8 @@ mod tests {
         for block in [
             BlockType::Water,
             BlockType::Ice,
-            BlockType::Crystal,
-            BlockType::Lava,
             BlockType::CockpitGlass,
-            BlockType::LuminiteCrystal,
             BlockType::IridiumVein,
-            BlockType::PlasmaFlow,
-            BlockType::CrystalMagenta,
             BlockType::CrystalGreen,
             BlockType::HoloPanel,
         ] {
@@ -1013,5 +1032,41 @@ mod tests {
                 "{block:?} should stay out of Bevy's sorted alpha-blend terrain path"
             );
         }
+        for block in [
+            BlockType::Crystal,
+            BlockType::CrystalMagenta,
+            BlockType::LuminiteCrystal,
+            BlockType::Lava,
+            BlockType::PlasmaFlow,
+        ] {
+            assert_eq!(
+                terrain_alpha_mode_for_block(block),
+                AlphaMode::Opaque,
+                "{block:?} must occlude so the hero emissive reads as a mass"
+            );
+        }
+    }
+
+    #[test]
+    fn hero_emissive_materials_stay_chromatic() {
+        let crystal = emissive_for_block(BlockType::Crystal);
+        assert!(
+            crystal.blue > crystal.red * 4.0 && crystal.green > crystal.red * 3.0,
+            "crystal emissive lost cyan ({crystal:?})"
+        );
+        let magenta = emissive_for_block(BlockType::CrystalMagenta);
+        assert!(
+            magenta.red > magenta.green * 4.0 && magenta.blue > magenta.green * 3.0,
+            "magenta emissive lost chroma ({magenta:?})"
+        );
+        let plasma = emissive_for_block(BlockType::PlasmaFlow);
+        let peak = plasma.red.max(plasma.green).max(plasma.blue);
+        assert!(
+            peak < 2.4,
+            "plasma emissive peak {peak:.3} will ACES-clip to white"
+        );
+        assert!(plasma.blue > plasma.red * 3.0);
+        let lava = emissive_for_block(BlockType::Lava);
+        assert!(lava.red > lava.blue * 8.0, "lava emissive went cream ({lava:?})");
     }
 }
