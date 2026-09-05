@@ -203,7 +203,10 @@ pub fn build_mesh_ex<F: Fn(i32, i32, i32) -> Voxel>(
                         // boundaries, cutting distant triangle counts by
                         // ~40% on typical terrain.
                         let mut ao = [3u8; 4];
-                        if compute_ao {
+                        // Corner AO on walls is the flying waffle: every
+                        // voxel on a cliff gets a dark grout line. Keep AO
+                        // on top/bottom so ground still reads as cubes.
+                        if compute_ao && axis == 1 {
                             for (ci, (du, dv)) in
                                 [(0, 0), (1, 0), (1, 1), (0, 1)].iter().enumerate()
                             {
@@ -442,7 +445,10 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
                         };
                         let ao_side = if positive { d } else { d - 1 };
                         let mut ao = [3u8; 4];
-                        if compute_ao {
+                        // Corner AO on walls is the flying waffle: every
+                        // voxel on a cliff gets a dark grout line. Keep AO
+                        // on top/bottom so ground still reads as cubes.
+                        if compute_ao && axis == 1 {
                             for (ci, (du, dv)) in
                                 [(0, 0), (1, 0), (1, 1), (0, 1)].iter().enumerate()
                             {
@@ -754,6 +760,42 @@ mod tests {
         assert!(c[2] > c[0], "cyan bleed should raise blue over red");
         let o = apply_neighbor_glow([0.4, 0.2, 0.15, 1.0], 2);
         assert!(o[0] > o[2], "orange bleed should raise red over blue");
+    }
+
+    #[test]
+    fn vertical_cliff_faces_do_not_carry_ao_grout() {
+        let stone: Voxel = BlockType::RedStone.into();
+        let sample = |wx: i32, wy: i32, wz: i32| -> Voxel {
+            if wx == 0 && (0..8).contains(&wy) && (0..8).contains(&wz) {
+                stone
+            } else {
+                AIR
+            }
+        };
+        let mesh = build_mesh(ChunkPos::new(0, 0, 0), sample);
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x4(colors)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("mesh missing vertex colors");
+        };
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(normals)) =
+            mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+        else {
+            panic!("mesh missing normals");
+        };
+        let mut lumas = Vec::new();
+        for (c, n) in colors.iter().zip(normals.iter()) {
+            if n[0] > 0.9 {
+                lumas.push(c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11);
+            }
+        }
+        assert!(!lumas.is_empty(), "expected +X cliff faces");
+        let min = lumas.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = lumas.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max - min < 0.04,
+            "cliff wall still has AO grout, luma range {min}..{max}"
+        );
     }
 
     #[test]
