@@ -1935,7 +1935,7 @@ fn spawn_film_tunnel_rails(
 ) {
     // Axis-aligned dual cyan rails (no looking_at) so lavapipe always shows
     // long Z-runs into the −Z tunnel mouth. Raised above deck grass lip.
-    let y = 3.2_f32;
+    let y = 5.5_f32;
     let z0 = 18.0_f32;
     let z1 = -14.0_f32;
     let mid_z = (z0 + z1) * 0.5;
@@ -2689,9 +2689,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         5 => {
-            // High stand-off looking down the cyan rail approach into mouth.
-            let pos = station + Vec3::new(0.0, 14.0, 22.0);
-            let look = station + Vec3::new(0.0, 3.5, -8.0);
+            // Slight side offset just above rail height — dual cyan tracks
+            // run into the mouth (not a top-down pillar forest).
+            let pos = station + Vec3::new(7.5, 7.0, 24.0);
+            let look = station + Vec3::new(0.0, 5.8, -10.0);
             (pos, look)
         }
         6 => {
