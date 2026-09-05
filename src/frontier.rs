@@ -40,8 +40,8 @@ pub const CRYSTAL_CELL: i32 = 96;
 /// (camera forward is −Z at yaw 0). Kept within ~200 blocks of origin
 /// so the first 10 seconds of a new world match the key art instead of
 /// an empty mesa.
-pub const HERO_CRYSTAL_X: i32 = 72;
-pub const HERO_CRYSTAL_Z: i32 = -96;
+pub const HERO_CRYSTAL_X: i32 = 92;
+pub const HERO_CRYSTAL_Z: i32 = -98;
 pub const HERO_RIVER_X0: i32 = 36;
 pub const HERO_RIVER_X1: i32 = 200;
 pub const HERO_RIVER_Z: i32 = -74;
@@ -244,32 +244,32 @@ impl SkyIsland {
     /// the illustration's hovering landmasses.
     pub fn hero() -> Self {
         Self {
-            cx: 94,
-            cz: -120,
-            cy: 104,
-            radius: 11,
+            cx: 108,
+            cz: -128,
+            cy: 110,
+            radius: 8,
             phase: 1.15,
         }
     }
 
     pub fn hero_b() -> Self {
         Self {
-            cx: 108,
-            cz: -134,
-            cy: 108,
-            radius: 9,
+            cx: 124,
+            cz: -146,
+            cy: 110,
+            radius: 7,
             phase: 2.4,
         }
     }
 
-    /// Mid-sky silhouette — far enough left that it does not read as a
-    /// deck in the opening look, close enough to hold up while flying.
+    /// Small left-sky silhouette above the crystal mass — high and
+    /// modest so it reads as a hovering island, not a close deck.
     pub fn hero_c() -> Self {
         Self {
-            cx: 82,
-            cz: -112,
-            cy: 98,
-            radius: 9,
+            cx: 98,
+            cz: -108,
+            cy: 112,
+            radius: 6,
             phase: 0.55,
         }
     }
@@ -514,8 +514,8 @@ impl CrystalCluster {
         Self {
             cx: HERO_CRYSTAL_X,
             cz: HERO_CRYSTAL_Z,
-            shards: 7,
-            scale: 28,
+            shards: 8,
+            scale: 32,
         }
     }
 
@@ -540,13 +540,14 @@ impl CrystalCluster {
     }
 
     /// Hero shard cluster in the look-cone canyon, left of the +X look
-    /// (camera left = −Z) so it owns a real slice of the opening frame.
+    /// (camera left = −Z). Parked ~30 blocks out so it reads as shards
+    /// against the mesa, not a face-hugging pylon.
     pub fn hero_d() -> Self {
         Self {
-            cx: 80,
-            cz: -86,
-            shards: 16,
-            scale: 56,
+            cx: 92,
+            cz: -98,
+            shards: 14,
+            scale: 52,
         }
     }
 
@@ -554,10 +555,10 @@ impl CrystalCluster {
     /// flies forward from spawn, not only in the frozen overlook.
     pub fn hero_e() -> Self {
         Self {
-            cx: 96,
-            cz: -90,
-            shards: 12,
-            scale: 48,
+            cx: 110,
+            cz: -102,
+            shards: 11,
+            scale: 44,
         }
     }
 
@@ -611,7 +612,7 @@ impl CrystalCluster {
         // Hero masses stay tight so they occupy the left third instead of
         // spraying shards into the mesa or out of the frustum.
         let spread = if self.scale >= 48 {
-            5.0 + self.scale as f64 * 0.10
+            7.0 + self.scale as f64 * 0.14
         } else {
             10.0 + self.scale as f64 * 0.22
         };
@@ -1707,8 +1708,8 @@ impl CliffFace {
             return;
         }
         let origin = chunk.pos.origin();
-        const SITES: [i32; 3] = [-90, -80, -70];
-        let half = 6i32;
+        const SITES: [i32; 4] = [-92, -84, -76, -68];
+        let half = 8i32;
         for &cz in &SITES {
             if cz < self.z0 + 4 || cz > self.z1 - 4 {
                 continue;
@@ -1721,18 +1722,20 @@ impl CliffFace {
                 let edge = (z - cz).unsigned_abs() as i32;
                 // Mid-height sheet on the visible wall — not a floor pool
                 // and not a stain that climbs the crest out of the FOV.
-                let lo = pit + 12;
-                let hi = rim + 18;
-                for wy in lo..=hi.min(rim + extra + 8) {
-                    let taper = if wy > hi - 8 { 2 } else { 0 };
+                let lo = pit + 8;
+                let hi = rim + 26;
+                for wy in lo..=hi.min(rim + extra + 10) {
+                    let taper = if wy > hi - 10 { 3 } else { 0 };
                     if edge > half - taper {
                         continue;
                     }
+                    place_over(chunk, origin, face - 6, wy, z, BlockType::Lava);
+                    place_over(chunk, origin, face - 5, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 4, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 3, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 2, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 1, wy, z, BlockType::Lava);
-                    if edge <= 2 {
+                    if edge <= 3 {
                         place_over(chunk, origin, face, wy, z, BlockType::PlasmaFlow);
                     }
                 }
@@ -1761,10 +1764,15 @@ impl CliffFace {
                 let rim = ground(self.face_x + self.depth, z);
                 let pit = rim - self.drop;
                 let dist = (z - cz).abs();
+                let fluid = if dist <= 2 {
+                    BlockType::NeonCyan
+                } else {
+                    BlockType::PlasmaFlow
+                };
                 place_over(chunk, origin, wx, pit, z, BlockType::PlasmaFlow);
-                place_over(chunk, origin, wx, pit + 1, z, BlockType::PlasmaFlow);
+                place_over(chunk, origin, wx, pit + 1, z, fluid);
                 if dist <= 1 {
-                    place_over(chunk, origin, wx, pit + 2, z, BlockType::PlasmaFlow);
+                    place_over(chunk, origin, wx, pit + 2, z, BlockType::NeonCyan);
                 }
             }
         }
@@ -1783,9 +1791,9 @@ pub struct CombatPad {
 impl CombatPad {
     pub fn hero() -> Self {
         Self {
-            cx: 86,
-            cz: -56,
-            half: 6,
+            cx: 80,
+            cz: -62,
+            half: 7,
         }
     }
 
@@ -2218,8 +2226,8 @@ mod tests {
         let hero_d = CrystalCluster::hero_d();
         assert!(hero_d.shards >= 14, "hero crystal cluster is still a sprinkle ({})", hero_d.shards);
         assert!(hero_d.scale >= 48, "hero crystal cluster is still too short ({})", hero_d.scale);
-        assert!(hero_d.cx >= 74 && hero_d.cx <= 88, "hero crystals should sit in the left third (cx={})", hero_d.cx);
-        assert!(hero_d.cz <= -82 && hero_d.cz >= -96, "hero crystals should sit in the left third of the +X look");
+        assert!(hero_d.cx >= 86 && hero_d.cx <= 100, "hero crystals should sit in the left third (cx={})", hero_d.cx);
+        assert!(hero_d.cz <= -90 && hero_d.cz >= -108, "hero crystals should sit in the left third of the +X look");
         assert!(in_hero_postcard(CrystalCluster::hero_e().cx, CrystalCluster::hero_e().cz));
     }
 
@@ -2459,7 +2467,7 @@ mod tests {
         let pad = CombatPad::hero();
         assert!(pad.half >= 5 && pad.half <= 8);
         assert!(pad.cx >= 72 && pad.cx <= 100);
-        assert!(pad.cz >= -70 && pad.cz <= -48);
+        assert!(pad.cz >= -72 && pad.cz <= -52);
         let mut chunk = Chunk::new(ChunkPos::new(
             pad.cx.div_euclid(CHUNK_SIZE_I),
             4,

@@ -2157,10 +2157,10 @@ fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     // the white/orange shuttle is in frame from spawn through the first
     // ~10s of streaming — large enough to read as the illustration's
     // hero ship, west of the mesa face.
-    let x = origin.x + 10.0 + u * 26.0;
-    let z = origin.z - 10.0 + u * 22.0;
-    let y = origin.y + 14.0 + (u * std::f32::consts::TAU).sin() * 4.0;
-    let yaw = 26.0_f32.atan2(-22.0);
+    let x = origin.x + 16.0 + u * 24.0;
+    let z = origin.z + 2.0 + u * 14.0;
+    let y = origin.y + 20.0 + (u * std::f32::consts::TAU).sin() * 3.0;
+    let yaw = 24.0_f32.atan2(-14.0);
     let roll = -0.42 + (u * std::f32::consts::TAU).sin() * 0.30;
     (Vec3::new(x, y, z), yaw, roll)
 }
@@ -2179,7 +2179,7 @@ fn update_hero_flyby(
         let (pos, yaw, roll) = hero_flyby_pose(fly.origin, fly.t);
         tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(5.5);
+        tf.scale = Vec3::splat(6.2);
         motion.yaw = yaw;
         motion.pitch = -0.10;
         motion.roll = roll;
@@ -4708,22 +4708,22 @@ mod tests {
         for u in [0.10, 0.20, 0.32, 0.48] {
             let (pos, yaw, roll) = super::hero_flyby_pose(origin, u);
             assert!(
-                pos.x > origin.x + 8.0,
+                pos.x > origin.x + 14.0,
                 "flyby at u={u} is not ahead of the camera (x={})",
                 pos.x
             );
             assert!(
-                pos.x < 104.0,
+                pos.x < 110.0,
                 "flyby at u={u} clips the west mesa (x={})",
                 pos.x
             );
             assert!(
-                pos.y > origin.y + 8.0,
+                pos.y > origin.y + 16.0,
                 "flyby at u={u} is not in the sky (y={})",
                 pos.y
             );
             assert!(
-                pos.y < origin.y + 28.0,
+                pos.y < origin.y + 32.0,
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );

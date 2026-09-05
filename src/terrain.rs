@@ -3043,16 +3043,126 @@ mod tests {
     }
 
     #[test]
+    fn dump_opening_look_grid() {
+        let generator = TerrainGenerator::new(12345);
+        let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
+        eprintln!("spawn pos={pos:?} yaw={yaw:.3} pitch={pitch:.3}");
+        for (label, dyaw, dpitch) in [
+            ("L-up", -0.42, 0.18),
+            ("L", -0.32, 0.04),
+            ("L-dn", -0.32, -0.12),
+            ("C-up", 0.00, 0.18),
+            ("C", 0.00, 0.00),
+            ("C-dn", 0.00, -0.12),
+            ("R-up", 0.28, 0.18),
+            ("R", 0.28, 0.04),
+            ("R-dn", 0.28, -0.12),
+        ] {
+            let y = yaw + dyaw;
+            let p = pitch + dpitch;
+            let fx = y.sin() * p.cos();
+            let fy = p.sin();
+            let fz = -y.cos() * p.cos();
+            let mut first = None;
+            let mut kinds = [0usize; 6];
+            for t in 4..70 {
+                let wx = (pos[0] + fx * t as f32).floor() as i32;
+                let wy = (pos[1] + fy * t as f32).floor() as i32;
+                let wz = (pos[2] + fz * t as f32).floor() as i32;
+                let (cpos, lx, ly, lz) = crate::chunk::world_to_chunk(wx, wy, wz);
+                let mut chunk = Chunk::new(cpos);
+                generator.generate(&mut chunk);
+                let v = chunk.get(lx, ly, lz);
+                if v == AIR {
+                    continue;
+                }
+                let kind = BlockType::from_voxel(v);
+                if first.is_none() {
+                    first = Some((t, wx, wy, wz, kind));
+                }
+                match kind {
+                    BlockType::PlatingWhite
+                    | BlockType::PlatingTeal
+                    | BlockType::RoadDeck
+                    | BlockType::ShipHullAlloy
+                    | BlockType::ShipHullDark => kinds[0] += 1,
+                    BlockType::Crystal
+                    | BlockType::CrystalMagenta
+                    | BlockType::LuminiteCrystal
+                    | BlockType::CrystalGreen => kinds[1] += 1,
+                    BlockType::Lava => kinds[2] += 1,
+                    BlockType::PlasmaFlow => kinds[3] += 1,
+                    BlockType::VioletStone
+                    | BlockType::RedStone
+                    | BlockType::MesaClay
+                    | BlockType::AmberStone
+                    | BlockType::RedSand => kinds[4] += 1,
+                    _ => kinds[5] += 1,
+                }
+            }
+            eprintln!(
+                "{label:5} first={first:?} deck={} xtal={} lava={} plasma={} stone={} other={}",
+                kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], kinds[5]
+            );
+            match label {
+                "L" | "L-up" | "L-dn" => {
+                    let (t, _, _, _, kind) = first.expect("left look hit nothing");
+                    assert!(
+                        t >= 20,
+                        "{label} still face-hugs the camera (t={t} {kind:?})"
+                    );
+                    assert!(
+                        kinds[1] > 0,
+                        "{label} has no crystals (first={first:?})"
+                    );
+                    assert_eq!(kinds[0], 0, "{label} still hits a deck (first={first:?})");
+                }
+                "C" | "C-dn" => {
+                    let (t, _, _, _, kind) = first.expect("center look hit nothing");
+                    assert!(
+                        matches!(
+                            kind,
+                            BlockType::Lava
+                                | BlockType::PlasmaFlow
+                                | BlockType::RedStone
+                                | BlockType::RedSand
+                                | BlockType::VioletStone
+                                | BlockType::MesaClay
+                                | BlockType::AmberStone
+                        ),
+                        "{label} should hit the lava curtain or banded wall first, got {kind:?} at t={t}"
+                    );
+                }
+                "R" | "R-up" => {
+                    let (_, _, _, _, kind) = first.expect("right look hit nothing");
+                    assert!(
+                        matches!(
+                            kind,
+                            BlockType::VioletStone
+                                | BlockType::RedStone
+                                | BlockType::MesaClay
+                                | BlockType::AmberStone
+                                | BlockType::RedSand
+                        ),
+                        "{label} should hit the banded mesa, got {kind:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
     fn opening_left_third_hits_hero_crystals_not_a_deck() {
         let generator = TerrainGenerator::new(12345);
         let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
-        let left_yaw = yaw - 0.30;
+        let left_yaw = yaw - 0.40;
         let fx = left_yaw.sin() * pitch.cos();
         let fy = pitch.sin();
         let fz = -left_yaw.cos() * pitch.cos();
         let mut crystal = 0usize;
         let mut deck = 0usize;
-        for t in 6..40 {
+        for t in 16..60 {
             let wx = (pos[0] + fx * t as f32).floor() as i32;
             let wy = (pos[1] + fy * t as f32).floor() as i32;
             let wz = (pos[2] + fz * t as f32).floor() as i32;
