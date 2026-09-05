@@ -2504,6 +2504,9 @@ const SHOTS: &[FilmShot] = &[
         name: "fighter_swarm",
     },
     FilmShot {
+        name: "crystal_towers",
+    },
+    FilmShot {
         name: "skyway_rail_crew",
     },
 ];
@@ -2678,7 +2681,8 @@ fn film_drive_camera(
             8 => 56.0,  // painting: station + dominant planet
             9 => 52.0,  // dual plasma + lava rivers
             10 => 48.0, // cyan waterfall cascade
-            11 => 42.0, // fighter swarm — tighter on formation
+            11 => 40.0, // fighter swarm — tighter on formation
+            12 => 46.0, // crystal tower cluster
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -2693,6 +2697,7 @@ fn film_drive_camera(
             9 => 0.14,  // dual rivers emissives
             10 => 0.16, // waterfall cyan emissives
             11 => 0.10, // fighter plumes
+            12 => 0.14, // crystal emissives
             _ => 0.05,
         };
         bloom.prefilter_settings.threshold = match film.shot_index {
@@ -3062,12 +3067,12 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         8 => {
-            // Painting: station lower half, sky/proxy planet dominates upper third.
+            // Painting: planet upper third + crystal/waterfall mid; station lower.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-32.0, 16.0, 88.0);
-            let station = deck + Vec3::new(36.0, 2.0, 52.0);
-            let planet = pos + planet_dir * 140.0;
-            let look = station.lerp(planet, 0.62);
+            let pos = deck + Vec3::new(-30.0, 18.0, 90.0);
+            let station = deck + Vec3::new(32.0, 6.0, 48.0);
+            let planet = pos + planet_dir * 130.0;
+            let look = station.lerp(planet, 0.50);
             (pos, look)
         }
         9 => {
@@ -3085,10 +3090,17 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         11 => {
-            // Fighter swarm: sky-only V — no deck/magenta clutter in frame.
-            let form = deck + Vec3::new(30.0, 32.0, 44.0);
-            let pos = deck + Vec3::new(48.0, 40.0, 70.0);
-            let look = form + Vec3::new(-2.0, 1.0, -1.0);
+            // Fighter swarm: above formation looking down the V of plumes.
+            let form = deck + Vec3::new(28.0, 33.0, 44.0);
+            let pos = form + Vec3::new(22.0, 8.0, 18.0);
+            let look = form + Vec3::new(-8.0, -1.0, -4.0);
+            (pos, look)
+        }
+        12 => {
+            // Crystal towers cluster on +X deck — cyan spires fill frame.
+            let cluster = deck + Vec3::new(28.0, 22.0, 30.0);
+            let pos = deck + Vec3::new(55.0, 18.0, 55.0);
+            let look = cluster + Vec3::new(-2.0, 8.0, -2.0);
             (pos, look)
         }
         _ => {
@@ -3284,6 +3296,7 @@ mod tests {
             .iter()
             .any(|n| n.contains("dual") || n.contains("river") || n.contains("plasma")));
         assert!(names.iter().any(|n| n.contains("waterfall")));
+        assert!(names.iter().any(|n| n.contains("crystal")));
         assert!(names.iter().any(|n| n.contains("rail")));
     }
 
