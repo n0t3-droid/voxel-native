@@ -3097,10 +3097,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         12 => {
-            // Crystal towers: stand off SW so cyan spires read as a grove.
-            let cluster = deck + Vec3::new(28.0, 18.0, 30.0);
-            let pos = deck + Vec3::new(72.0, 14.0, 72.0);
-            let look = cluster + Vec3::new(-4.0, 12.0, -4.0);
+            // Crystal towers: high stand-off looking at spire tips (avoid keel).
+            let cluster = deck + Vec3::new(30.0, 32.0, 30.0);
+            let pos = deck + Vec3::new(78.0, 30.0, 78.0);
+            let look = cluster;
             (pos, look)
         }
         _ => {
