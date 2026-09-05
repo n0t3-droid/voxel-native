@@ -1469,6 +1469,17 @@ fn film_spawn_silhouettes(
     ));
     spawn_film_crystal_towers(&mut commands, &cube, &tower_crystal, &tower_verdant, deck);
 
+    // Bright grass caps in the painting frustum — cliff tops must read green.
+    let grass_mat = materials.add(sil_mat(
+        Color::srgb(0.22, 0.78, 0.28),
+        LinearRgba::rgb(0.6, 3.5, 0.7),
+    ));
+    let grass_dark = materials.add(sil_mat(
+        Color::srgb(0.12, 0.45, 0.18),
+        LinearRgba::rgb(0.2, 1.2, 0.3),
+    ));
+    spawn_film_grass_caps(&mut commands, &cube, &grass_mat, &grass_dark, deck);
+
     // Glowing cyan waterfall off +X rim into the plasma shelf.
     let fall_cyan = materials.add(sil_mat(
         Color::srgb(0.20, 0.95, 1.0),
@@ -1489,6 +1500,7 @@ fn film_spawn_silhouettes(
         &fall_deep,
         &fall_mist,
         &plasma_mat,
+        &grass_mat,
         deck,
     );
 
@@ -2290,6 +2302,7 @@ fn spawn_film_waterfall(
     deep: &Handle<StandardMaterial>,
     mist: &Handle<StandardMaterial>,
     pool: &Handle<StandardMaterial>,
+    grass: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
     // OPEN-AIR hero fall on far +X/+Z — clear of sat keels so dedicated cam
@@ -2312,18 +2325,18 @@ fn spawn_film_waterfall(
         FilmWaterfallFx,
         Name::new("FilmWaterfallCliff"),
     ));
-    // Grass lip on cliff top.
+    // Verdant grass lip on cliff top.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
-            material: mist.clone(),
+            material: grass.clone(),
             transform: Transform::from_translation(lip + Vec3::new(-2.0, 0.5, -1.0))
-                .with_scale(Vec3::new(12.0, 2.0, 8.0)),
+                .with_scale(Vec3::new(14.0, 2.4, 9.0)),
             ..default()
         },
         FilmSilhouette,
         FilmWaterfallFx,
-        Name::new("FilmWaterfallLip"),
+        Name::new("FilmWaterfallGrassLip"),
     ));
     // Main vertical cyan sheet — fills dedicated frame.
     commands.spawn((
@@ -2408,14 +2421,86 @@ fn spawn_film_waterfall(
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
-            material: mist.clone(),
-            transform: Transform::from_translation(lip2).with_scale(Vec3::new(10.0, 2.0, 4.5)),
+            material: grass.clone(),
+            transform: Transform::from_translation(lip2).with_scale(Vec3::new(11.0, 2.2, 5.0)),
             ..default()
         },
         FilmSilhouette,
         FilmWaterfallFx,
-        Name::new("FilmWaterfallLipB"),
+        Name::new("FilmWaterfallGrassLipB"),
     ));
+}
+
+fn spawn_film_grass_caps(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    grass: &Handle<StandardMaterial>,
+    soil: &Handle<StandardMaterial>,
+    deck: Vec3,
+) {
+    // Unlit green lids on near-frustum islands so painting + grass beats read lawn.
+    for (i, (ox, oz, w, d)) in [
+        (8.0_f32, 36.0, 18.0, 14.0),
+        (-14.0, 44.0, 16.0, 12.0),
+        (24.0, 52.0, 15.0, 12.0),
+        (40.0, 40.0, 14.0, 11.0),
+        (-6.0, 58.0, 13.0, 11.0),
+        (32.0, 64.0, 12.0, 10.0),
+        (16.0, 28.0, 14.0, 12.0),
+        (-22.0, 32.0, 13.0, 11.0),
+        (48.0, 56.0, 11.0, 10.0),
+        (2.0, 48.0, 12.0, 10.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Soil rim under the lawn.
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: soil.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, 0.2, oz))
+                    .with_scale(Vec3::new(w + 1.5, 2.2, d + 1.5)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmGrassSoil{i}")),
+        ));
+        // Bright grass lid.
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: grass.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, 1.6, oz))
+                    .with_scale(Vec3::new(w, 1.8, d)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmGrassCap{i}")),
+        ));
+        // Tuft spikes along the rim.
+        for (j, (tx, tz)) in [
+            (w * 0.35, d * 0.3),
+            (-w * 0.3, d * 0.25),
+            (w * 0.15, -d * 0.35),
+            (-w * 0.25, -d * 0.2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: grass.clone(),
+                    transform: Transform::from_translation(deck + Vec3::new(ox + tx, 3.2, oz + tz))
+                        .with_scale(Vec3::new(2.2, 3.5, 2.2)),
+                    ..default()
+                },
+                FilmSilhouette,
+                Name::new(format!("FilmGrassTuft{i}_{j}")),
+            ));
+        }
+    }
 }
 
 fn spawn_film_crystal_towers(
@@ -2805,6 +2890,7 @@ fn film_drive_camera(
     // Tighter hero FOV so pad figures and grass fill the frame.
     if let Projection::Perspective(ref mut persp) = *projection {
         let target: f32 = match film.shot_index {
+            0 => 50.0,  // grass lawn stand-off
             1 => 54.0,  // deck + keel profile
             2 => 48.0,  // full-body combat two-shot
             3 => 46.0,  // along-axis turret beams + yellow muzzles
@@ -3137,10 +3223,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
 
     match index {
         0 => {
-            // Grass + deck rim: mid-distance so tufts read as a lawn, not blobs.
-            let lawn = deck + Vec3::new(10.0, 0.0, 2.0);
-            let pos = lawn + Vec3::new(6.0, 9.0, 12.0);
-            let look = lawn + Vec3::new(-1.0, 1.0, -2.0);
+            // Grass lawn: stand off across the deck so tufts read as a green cliff top.
+            let lawn = deck + Vec3::new(2.0, 0.5, 4.0);
+            let pos = lawn + Vec3::new(-22.0, 10.0, 28.0);
+            let look = lawn + Vec3::new(10.0, -0.5, -6.0);
             (pos, look)
         }
         1 => {
