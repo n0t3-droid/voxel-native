@@ -318,6 +318,10 @@ const OUTPOST_POOL: usize = 8;
 const OUTPOST_CELL: f32 = 144.0;
 const OUTPOST_SEARCH: i32 = 3;
 const OUTPOST_OCCUPANCY: f32 = 0.40;
+/// Mast + head must read at ~100–150 m: a 0.55 m lamp is a speck;
+/// a 2.8 m unlit cyan cube is ~1° of FOV at 150 m.
+const BEACON_MAST_H: f32 = 16.0;
+const BEACON_HEAD: f32 = 2.8;
 
 fn colony_figure_count(graphics: GraphicsMode, cinematic: bool) -> usize {
     match graphics {
@@ -798,6 +802,21 @@ fn spawn_frontier_outposts(
         perceptual_roughness: 0.16,
         ..default()
     });
+    let beacon = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.95, 1.0),
+        emissive: LinearRgba::rgb(0.55, 6.40, 8.60),
+        unlit: true,
+        perceptual_roughness: 0.14,
+        ..default()
+    });
+    let shaft = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.10, 0.85, 1.0, 0.55),
+        emissive: LinearRgba::rgb(0.18, 2.40, 3.20),
+        unlit: true,
+        alpha_mode: AlphaMode::Add,
+        perceptual_roughness: 0.20,
+        ..default()
+    });
     for i in 0..pads {
         let root = commands
             .spawn((
@@ -837,15 +856,22 @@ fn spawn_frontier_outposts(
             p.spawn(PbrBundle {
                 mesh: cube.clone(),
                 material: deck.clone(),
-                transform: Transform::from_xyz(-2.4, 2.4, -2.4)
-                    .with_scale(Vec3::new(0.28, 4.8, 0.28)),
+                transform: Transform::from_xyz(-2.4, BEACON_MAST_H * 0.5, -2.4)
+                    .with_scale(Vec3::new(0.38, BEACON_MAST_H, 0.38)),
                 ..default()
             });
             p.spawn(PbrBundle {
                 mesh: cube.clone(),
-                material: rim.clone(),
-                transform: Transform::from_xyz(-2.4, 4.95, -2.4)
-                    .with_scale(Vec3::new(0.55, 0.40, 0.55)),
+                material: beacon.clone(),
+                transform: Transform::from_xyz(-2.4, BEACON_MAST_H + BEACON_HEAD * 0.5, -2.4)
+                    .with_scale(Vec3::splat(BEACON_HEAD)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: shaft.clone(),
+                transform: Transform::from_xyz(-2.4, BEACON_MAST_H * 0.55, -2.4)
+                    .with_scale(Vec3::new(0.55, BEACON_MAST_H * 1.15, 0.55)),
                 ..default()
             });
             for f in 0..figures {
@@ -1241,6 +1267,12 @@ mod tests {
         let wx = a.x.round() as i32;
         let wz = a.y.round() as i32;
         assert!(!crate::frontier::in_hero_postcard(wx, wz));
+        assert!(
+            BEACON_MAST_H >= 14.0 && BEACON_HEAD >= 2.4,
+            "beacon must resolve at 100–150 m, mast={} head={}",
+            BEACON_MAST_H,
+            BEACON_HEAD
+        );
         let elsewhere = Vec3::new(900.0, 40.0, 700.0);
         let far = nearest_outpost_cells(elsewhere, 4);
         assert!(!far.is_empty());
