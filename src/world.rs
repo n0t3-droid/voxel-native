@@ -993,6 +993,13 @@ fn chunk_wants_far_lod(graphics: crate::settings::GraphicsMode, render_distance:
     }
 }
 
+/// Fast far columns keep the surface slab, one below for cliff faces,
+/// and the +2 safety slabs for trees / low islands. Deep underground
+/// is skipped until the player flies closer.
+fn skip_fast_deep_far(fast: bool, far_lod: bool, cy: i32, col_top: i32) -> bool {
+    fast && far_lod && cy + 3 < col_top
+}
+
 fn rebuild_load_offsets(streamer: &mut ChunkStreamer, rd: i32) {
     streamer.load_offsets.clear();
     let rd2 = rd * rd;
@@ -1342,6 +1349,14 @@ fn stream_chunks(
                 if cy > col_top {
                     continue;
                 }
+                if skip_fast_deep_far(
+                    fast,
+                    chunk_wants_far_lod(settings.graphics, rd, dx, dz),
+                    cy,
+                    col_top,
+                ) {
+                    continue;
+                }
                 if streamer.pending_terrain.len() >= max_in_flight || spawned >= spawn_budget {
                     column_complete = false;
                     break;
@@ -1657,21 +1672,16 @@ fn mesh_dirty_chunks(
             ChunkPos::new(pos.x, pos.y + 1, pos.z),
             ChunkPos::new(pos.x, pos.y - 1, pos.z),
         ];
-        // Fast far LOD samples missing voxels as air. Waiting on the
-        // load-horizon rim (neighbours that are never generated) left a
-        // permanent dirty queue. Near-field still waits for in-disc
-        // neighbours so spawn seams stay clean.
-        let all_neighbours_ready = far_collapse
-            || neighbours_needed.into_iter().all(|n| {
-                chunk_slot_mesh_neighbour_ready(
-                    &mut world,
-                    n,
-                    vertical_chunks,
-                    pcx,
-                    pcz,
-                    load_r2,
-                )
-            });
+        let all_neighbours_ready = neighbours_needed.into_iter().all(|n| {
+            chunk_slot_mesh_neighbour_ready(
+                &mut world,
+                n,
+                vertical_chunks,
+                pcx,
+                pcz,
+                load_r2,
+            )
+        });
         if !all_neighbours_ready {
             // Neighbours haven't streamed in yet; try again next frame.
             streamer.dirty_queue.insert(pos);
@@ -2204,6 +2214,10 @@ mod tests {
             20,
             0
         ));
+        assert!(skip_fast_deep_far(true, true, 0, 6));
+        assert!(!skip_fast_deep_far(true, true, 4, 6));
+        assert!(!skip_fast_deep_far(true, false, 0, 6));
+        assert!(!skip_fast_deep_far(false, true, 0, 6));
     }
 
     #[test]
