@@ -2638,15 +2638,15 @@ fn spawn_film_station_mountain(
     neon: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Wide mountain installation mid-right — finish14 scale, darkrock-dominant.
-    let base = deck + Vec3::new(34.0, 0.0, 70.0);
+    // Wide mountain mid-right — slightly closer so darkrock owns mid-right without walling.
+    let base = deck + Vec3::new(28.0, 0.0, 74.0);
     for (i, (y, sx, sz, h)) in [
-        (6.0_f32, 72.0, 58.0, 14.0),
-        (18.0, 62.0, 50.0, 14.0),
-        (30.0, 50.0, 40.0, 12.0),
-        (42.0, 38.0, 30.0, 12.0),
+        (6.0_f32, 78.0, 62.0, 14.0),
+        (18.0, 66.0, 52.0, 14.0),
+        (30.0, 54.0, 42.0, 12.0),
+        (42.0, 40.0, 32.0, 12.0),
         (52.0, 26.0, 22.0, 10.0),
-        (60.0, 16.0, 14.0, 8.0),
+        (60.0, 14.0, 12.0, 6.0),
     ]
     .into_iter()
     .enumerate()
@@ -3907,7 +3907,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             // Coherent hero: planet upper; mountain mid-right; grass+skyway+rivers stacked.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
             let pos = deck + Vec3::new(-60.0, 38.0, 140.0);
-            let station_mid = deck + Vec3::new(34.0, 28.0, 70.0);
+            let station_mid = deck + Vec3::new(28.0, 28.0, 74.0);
             let green_crown = deck + Vec3::new(-16.0, 5.0, 108.0);
             let skyway_mid = deck + Vec3::new(-18.0, 26.0, 96.0);
             let rivers = deck + Vec3::new(-22.0, 8.0, 100.0);
@@ -3949,7 +3949,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         13 => {
             // Station mountain — stand off so full stepped mass + neon crown read.
-            let station = deck + Vec3::new(34.0, 36.0, 70.0);
+            let station = deck + Vec3::new(28.0, 36.0, 74.0);
             let pos = deck + Vec3::new(-55.0, 78.0, 155.0);
             let look = station;
             (pos, look)
