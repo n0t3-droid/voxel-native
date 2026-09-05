@@ -1387,6 +1387,19 @@ fn film_spawn_silhouettes(
         &tunnel_glow,
         deck,
     );
+    // Cyan monorail into the tunnel mouth — next painting gap after towers.
+    let rail_metal = materials.add(sil_mat(
+        Color::srgb(0.62, 0.66, 0.72),
+        LinearRgba::rgb(0.25, 0.28, 0.35),
+    ));
+    spawn_film_tunnel_rails(
+        &mut commands,
+        &cube,
+        &tunnel_cyan,
+        &rail_metal,
+        &tunnel_glow,
+        deck,
+    );
 
     // Pad turrets with muzzle flashes + tracers aimed at the alien.
     let alien_world = pad + Vec3::new(6.0, 4.0, 2.5);
@@ -1398,10 +1411,14 @@ fn film_spawn_silhouettes(
         Color::srgb(1.0, 0.95, 0.20),
         LinearRgba::rgb(10.0, 8.0, 0.6),
     ));
-    // Deep red beam — pure R channel, moderate emissive (ACES-safe).
+    // Pure-R + deep-orange beams — orange G channel keeps warm body under ACES.
     let turret_tracer = materials.add(sil_mat(
         Color::srgb(1.0, 0.0, 0.0),
-        LinearRgba::rgb(6.0, 0.0, 0.0),
+        LinearRgba::rgb(7.5, 0.05, 0.0),
+    ));
+    let turret_orange = materials.add(sil_mat(
+        Color::srgb(1.0, 0.22, 0.0),
+        LinearRgba::rgb(9.0, 1.6, 0.0),
     ));
     spawn_film_turrets_firing(
         &mut commands,
@@ -1409,6 +1426,7 @@ fn film_spawn_silhouettes(
         &turret_hull,
         &turret_muzzle,
         &turret_tracer,
+        &turret_orange,
         pad,
         alien_world,
     );
@@ -1783,6 +1801,7 @@ fn spawn_film_turrets_firing(
     hull: &Handle<StandardMaterial>,
     muzzle: &Handle<StandardMaterial>,
     tracer: &Handle<StandardMaterial>,
+    orange: &Handle<StandardMaterial>,
     pad: Vec3,
     alien: Vec3,
 ) {
@@ -1825,57 +1844,165 @@ fn spawn_film_turrets_firing(
             PbrBundle {
                 mesh: cube.clone(),
                 material: muzzle.clone(),
-                transform: Transform::from_translation(flash).with_scale(Vec3::new(5.0, 5.0, 5.0)),
+                transform: Transform::from_translation(flash).with_scale(Vec3::new(5.5, 5.5, 5.5)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTurretMuzzle{i}")),
         ));
-        // Fat red beam body — primary orange/red read under ACES.
+        // Fat red core + orange sheath so warm body survives ACES wash.
         let beam_mid = flash.lerp(aim, 0.55);
-        let beam_len = flash.distance(aim).max(8.0);
+        let beam_len = flash.distance(aim).max(10.0);
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: tracer.clone(),
                 transform: Transform::from_translation(beam_mid)
                     .looking_at(aim, Vec3::Y)
-                    .with_scale(Vec3::new(3.6, 3.6, beam_len)),
+                    .with_scale(Vec3::new(4.2, 4.2, beam_len)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTurretBeam{i}")),
         ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: orange.clone(),
+                transform: Transform::from_translation(beam_mid)
+                    .looking_at(aim, Vec3::Y)
+                    .with_scale(Vec3::new(6.4, 6.4, beam_len * 0.92)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmTurretBeamOrange{i}")),
+        ));
         // Hero beam slab parked in the fire lane for the turrets shot —
         // guaranteed red/orange body even if thin tracers crush under ACES.
         if i == 0 {
-            let hero_mid = flash.lerp(aim, 0.5);
+            let hero_mid = flash.lerp(aim, 0.48);
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: orange.clone(),
+                    transform: Transform::from_translation(hero_mid)
+                        .looking_at(aim, Vec3::Y)
+                        .with_scale(Vec3::new(7.5, 7.5, beam_len * 1.05)),
+                    ..default()
+                },
+                FilmSilhouette,
+                Name::new("FilmTurretHeroBeam"),
+            ));
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
                     material: tracer.clone(),
                     transform: Transform::from_translation(hero_mid)
                         .looking_at(aim, Vec3::Y)
-                        .with_scale(Vec3::new(5.5, 5.5, beam_len * 0.95)),
+                        .with_scale(Vec3::new(4.0, 4.0, beam_len * 1.05)),
                     ..default()
                 },
                 FilmSilhouette,
-                Name::new("FilmTurretHeroBeam"),
+                Name::new("FilmTurretHeroBeamCore"),
             ));
         }
-        for s in 1..7 {
-            let t = s as f32 / 7.0;
+        for s in 1..8 {
+            let t = s as f32 / 8.0;
             let p = flash.lerp(aim, t);
+            let mat = if s % 2 == 0 { orange } else { tracer };
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
-                    material: tracer.clone(),
+                    material: mat.clone(),
                     transform: Transform::from_translation(p)
-                        .with_scale(Vec3::splat(2.6 - t * 1.0)),
+                        .with_scale(Vec3::splat(3.2 - t * 1.2)),
                     ..default()
                 },
                 FilmSilhouette,
                 Name::new(format!("FilmTurretSpark{i}_{s}")),
+            ));
+        }
+    }
+}
+
+fn spawn_film_tunnel_rails(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    cyan: &Handle<StandardMaterial>,
+    metal: &Handle<StandardMaterial>,
+    glow: &Handle<StandardMaterial>,
+    deck: Vec3,
+) {
+    // Dual cyan rails + deck plates from pad into the −Z tunnel mouth.
+    let mouth = deck + Vec3::new(0.0, 0.6, -18.0);
+    let start = deck + Vec3::new(0.0, 0.6, 10.0);
+    let mid = start.lerp(mouth, 0.5);
+    let len = start.distance(mouth).max(12.0);
+    for (ox, name) in [(-2.4_f32, "L"), (2.4, "R")] {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: cyan.clone(),
+                transform: Transform::from_translation(mid + Vec3::new(ox, 0.35, 0.0))
+                    .looking_at(mouth + Vec3::new(ox, 0.35, 0.0), Vec3::Y)
+                    .with_scale(Vec3::new(0.85, 0.55, len)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmTunnelRail{name}")),
+        ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: metal.clone(),
+                transform: Transform::from_translation(mid + Vec3::new(ox, 0.05, 0.0))
+                    .looking_at(mouth + Vec3::new(ox, 0.05, 0.0), Vec3::Y)
+                    .with_scale(Vec3::new(1.3, 0.35, len * 1.02)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmTunnelRailBed{name}")),
+        ));
+    }
+    // Center glow strip so rails read in painting + tunnel shots.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: glow.clone(),
+            transform: Transform::from_translation(mid + Vec3::new(0.0, 0.2, 0.0))
+                .looking_at(mouth, Vec3::Y)
+                .with_scale(Vec3::new(1.8, 0.25, len * 0.95)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmTunnelRailGlow"),
+    ));
+    // Approach pylons marching into the mouth.
+    for i in 0..6 {
+        let t = i as f32 / 5.0;
+        let p = start.lerp(mouth, t);
+        for ox in [-3.6_f32, 3.6] {
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: metal.clone(),
+                    transform: Transform::from_translation(p + Vec3::new(ox, 2.2, 0.0))
+                        .with_scale(Vec3::new(0.7, 4.4, 0.7)),
+                    ..default()
+                },
+                FilmSilhouette,
+                Name::new(format!("FilmTunnelRailPylon{i}")),
+            ));
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: cyan.clone(),
+                    transform: Transform::from_translation(p + Vec3::new(ox, 4.6, 0.0))
+                        .with_scale(Vec3::new(1.1, 0.7, 1.1)),
+                    ..default()
+                },
+                FilmSilhouette,
+                Name::new(format!("FilmTunnelRailCap{i}")),
             ));
         }
     }
@@ -1888,26 +2015,33 @@ fn spawn_film_fighter_swarm(
     cyan: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // High open-sky V-formation — clear of sat keels so plumes read.
-    for (i, (ox, oy, oz, yaw)) in [
-        (16.0_f32, 28.0, 40.0, -0.55),
-        (24.0, 30.0, 44.0, -0.45),
-        (32.0, 29.0, 42.0, -0.50),
-        (40.0, 32.0, 46.0, -0.40),
-        (20.0, 27.0, 50.0, -0.60),
-        (36.0, 33.0, 52.0, -0.35),
-        (28.0, 35.0, 38.0, -0.48),
+    // Open-sky V + painting-frustum wing — craft must read in painting_hero.
+    for (i, (ox, oy, oz, yaw, scale)) in [
+        // Dedicated-shot core (high +X / +Z)
+        (16.0_f32, 28.0, 40.0, -0.55, 1.0),
+        (24.0, 30.0, 44.0, -0.45, 1.05),
+        (32.0, 29.0, 42.0, -0.50, 1.0),
+        (40.0, 32.0, 46.0, -0.40, 1.1),
+        (20.0, 27.0, 50.0, -0.60, 1.0),
+        (36.0, 33.0, 52.0, -0.35, 1.05),
+        (28.0, 35.0, 38.0, -0.48, 1.15),
+        // Painting-hero wing — closer to look target (z≈52, mid deck)
+        (8.0, 22.0, 56.0, -0.70, 1.35),
+        (14.0, 24.0, 62.0, -0.65, 1.4),
+        (22.0, 26.0, 58.0, -0.55, 1.3),
+        (4.0, 20.0, 48.0, -0.75, 1.25),
     ]
     .into_iter()
     .enumerate()
     {
         let p = deck + Vec3::new(ox, oy, oz);
+        let s = scale;
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: hull.clone(),
                 transform: Transform::from_translation(p)
-                    .with_scale(Vec3::new(8.0, 2.4, 3.5))
+                    .with_scale(Vec3::new(8.0 * s, 2.4 * s, 3.5 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 ..default()
             },
@@ -1919,8 +2053,8 @@ fn spawn_film_fighter_swarm(
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(p + plume_dir * 8.0)
-                    .with_scale(Vec3::new(14.0, 2.2, 2.0))
+                transform: Transform::from_translation(p + plume_dir * (9.0 * s))
+                    .with_scale(Vec3::new(18.0 * s, 2.6 * s, 2.4 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 ..default()
             },
@@ -1932,7 +2066,7 @@ fn spawn_film_fighter_swarm(
                 mesh: cube.clone(),
                 material: hull.clone(),
                 transform: Transform::from_translation(p)
-                    .with_scale(Vec3::new(3.0, 0.6, 7.0))
+                    .with_scale(Vec3::new(3.2 * s, 0.7 * s, 8.0 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 ..default()
             },
@@ -1944,9 +2078,9 @@ fn spawn_film_fighter_swarm(
                 mesh: cube.clone(),
                 material: cyan.clone(),
                 transform: Transform::from_translation(
-                    p - plume_dir * 4.5 + Vec3::new(0.0, 0.8, 0.0),
+                    p - plume_dir * (5.0 * s) + Vec3::new(0.0, 0.8 * s, 0.0),
                 )
-                .with_scale(Vec3::new(1.6, 1.2, 1.6)),
+                .with_scale(Vec3::new(1.8 * s, 1.4 * s, 1.8 * s)),
                 ..default()
             },
             FilmSilhouette,
@@ -2156,7 +2290,7 @@ fn film_drive_camera(
         let target: f32 = match film.shot_index {
             1 => 54.0,  // deck + keel profile
             2 => 48.0,  // full-body combat two-shot
-            3 => 42.0,  // along-axis turret beams
+            3 => 46.0,  // along-axis turret beams + yellow muzzles
             4 => 48.0,  // crew pair
             5 => 50.0,  // tunnel portal mouth
             6 => 46.0,  // shuttle rear-quarter
@@ -2503,10 +2637,15 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         3 => {
-            // High stand-off along the fire lane: yellow muzzles + fat red
-            // beams into the alien (avoid crystal-tower occlusion on −X).
-            let pos = station + Vec3::new(-24.0, 10.0, 34.0);
-            let look = station + Vec3::new(5.0, 4.5, 16.0);
+            // Just behind turret0 muzzle, looking along fire lane into alien —
+            // yellow flash in near field, fat orange/red body down the axis.
+            // Turret0 ≈ pad+(-9,3,8) → deck+(-9,3,22); alien ≈ deck+(6,5,16.5).
+            let flash = station + Vec3::new(-7.0, 6.5, 26.0);
+            let aim = station + Vec3::new(6.0, 5.0, 16.5);
+            let axis = (aim - flash).normalize_or_zero();
+            let side = axis.cross(Vec3::Y).normalize_or_zero();
+            let pos = flash - axis * 5.5 + side * 2.2 + Vec3::Y * 1.4;
+            let look = aim + Vec3::Y * 0.4;
             (pos, look)
         }
         4 => {
@@ -2516,10 +2655,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         5 => {
-            // Face-on to the oversized film tunnel portal (clear of grass lip).
-            let mouth = station + Vec3::new(0.0, 8.0, -16.0);
-            let pos = mouth + Vec3::new(0.0, 2.0, 22.0);
-            let look = mouth + Vec3::new(0.0, 1.0, -2.0);
+            // Face-on to tunnel mouth with cyan rails leading in.
+            let mouth = station + Vec3::new(0.0, 6.0, -16.0);
+            let pos = mouth + Vec3::new(0.0, 5.0, 28.0);
+            let look = mouth + Vec3::new(0.0, 0.5, -1.0);
             (pos, look)
         }
         6 => {
@@ -2542,11 +2681,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         8 => {
-            // Painting-scale: archipelago + nebula, with dual-river shelf
-            // (z≈60 relative) filling the lower third clear of keel volumes.
+            // Painting-scale: archipelago + nebula + fighter wing near skyway.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-42.0, 28.0, 88.0);
-            let look = deck + Vec3::new(16.0, 4.0, 52.0) + planet_dir * 4.0;
+            let pos = deck + Vec3::new(-38.0, 26.0, 92.0);
+            let look = deck + Vec3::new(14.0, 10.0, 54.0) + planet_dir * 3.0;
             (pos, look)
         }
         9 => {
@@ -2557,10 +2695,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         10 => {
-            // Fighter swarm: look up into open-sky formation + cyan plumes.
-            let form = deck + Vec3::new(28.0, 30.0, 44.0);
-            let pos = deck + Vec3::new(55.0, 28.0, 58.0);
-            let look = form + Vec3::new(-6.0, 1.0, -2.0);
+            // Fighter swarm: three-quarter of V + long cyan plumes.
+            let form = deck + Vec3::new(24.0, 28.0, 48.0);
+            let pos = deck + Vec3::new(58.0, 22.0, 72.0);
+            let look = form + Vec3::new(-4.0, 2.0, -4.0);
             (pos, look)
         }
         _ => {
