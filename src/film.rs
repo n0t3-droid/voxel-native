@@ -876,7 +876,7 @@ fn film_drive_camera(
     if let Projection::Perspective(ref mut persp) = *projection {
         let target: f32 = match film.shot_index {
             1 => 50.0, // deck + keel profile
-            2 => 58.0, // wide enough for biped + multi-leg pair
+            2 => 48.0, // tight side-on biped + multi-leg pair
             3 => 48.0, // crew pair
             5 => 46.0, // shuttle rear-quarter
             6 => 40.0, // planet
@@ -1167,9 +1167,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // Tight side-on two-shot: oversized biped vs multi-leg, equal distance.
-            let look = station + Vec3::new(0.0, 3.6, 12.0);
-            let pos = look + Vec3::new(-14.0, 2.8, 0.8);
+            // Side-on two-shot from pure west; stand-off so neither figure clips.
+            let look = station + Vec3::new(0.0, 4.0, 12.0);
+            let pos = look + Vec3::new(-18.0, 2.2, 0.0);
             (pos, look)
         }
         3 => {
