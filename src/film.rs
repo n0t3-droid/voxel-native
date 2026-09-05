@@ -37,6 +37,7 @@ impl Plugin for FilmPlugin {
                 film_enter_game,
                 film_spawn_lights.run_if(in_state(GameState::InGame)),
                 film_spawn_shuttle.run_if(in_state(GameState::InGame)),
+                film_spawn_silhouettes.run_if(in_state(GameState::InGame)),
                 film_ensure_station_pad.run_if(in_state(GameState::InGame)),
                 film_drive_camera.run_if(in_state(GameState::InGame)),
                 film_capture.run_if(in_state(GameState::InGame)),
@@ -65,6 +66,7 @@ pub struct FilmRuntime {
     last_captured_shot: i32,
     lights_spawned: bool,
     shuttle_spawned: bool,
+    silhouettes_spawned: bool,
     station_forced: bool,
     ready_to_roll: bool,
     island: Option<IslandSpec>,
@@ -78,6 +80,15 @@ struct FilmFillLight;
 
 #[derive(Component)]
 struct FilmRimLight;
+
+#[derive(Component)]
+struct FilmUnderKeelLight;
+
+#[derive(Component)]
+struct FilmFigureKeyLight;
+
+#[derive(Component)]
+struct FilmSilhouette;
 
 #[derive(Component)]
 struct FilmShuttleMarker;
@@ -115,6 +126,7 @@ impl FilmRuntime {
             last_captured_shot: -1,
             lights_spawned: false,
             shuttle_spawned: false,
+            silhouettes_spawned: false,
             station_forced: false,
             ready_to_roll: false,
             island: None,
@@ -250,6 +262,38 @@ fn film_spawn_lights(
         FilmFillLight,
         Name::new("FilmKeyLight"),
     ));
+    // Under-island fill so crystal keels and grass deck share one hero frame.
+    commands.spawn((
+        PointLightBundle {
+            point_light: PointLight {
+                color: Color::srgb(0.55, 0.92, 1.0),
+                intensity: 920_000.0,
+                range: 90.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            transform: Transform::from_xyz(0.0, -20.0, 0.0),
+            ..default()
+        },
+        FilmUnderKeelLight,
+        Name::new("FilmUnderKeelLight"),
+    ));
+    // Hard side key so mesh silhouettes cast readable limb edges on lavapipe.
+    commands.spawn((
+        PointLightBundle {
+            point_light: PointLight {
+                color: Color::srgb(1.0, 0.96, 0.88),
+                intensity: 1_100_000.0,
+                range: 48.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            transform: Transform::from_xyz(0.0, 8.0, 0.0),
+            ..default()
+        },
+        FilmFigureKeyLight,
+        Name::new("FilmFigureKeyLight"),
+    ));
 
     ambient.brightness = ambient.brightness.max(2_050.0);
     ambient.color = Color::srgb(0.82, 0.88, 0.78);
@@ -286,9 +330,7 @@ fn film_ensure_station_pad(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmR
         }
     });
     film.station_forced = true;
-    info!(
-        "FILM: force-stamped orbital station at ({ox},{oy},{oz}) wrote={written} voxels"
-    );
+    info!("FILM: force-stamped orbital station at ({ox},{oy},{oz}) wrote={written} voxels");
 }
 
 fn film_spawn_shuttle(
@@ -326,6 +368,351 @@ fn film_spawn_shuttle(
     info!("FILM: spawned hero shuttle at {pos:?}");
 }
 
+/// Film-only oversized box silhouettes so biped vs multi-leg reads on lavapipe
+/// even when voxel figures crush into grass/station clutter.
+fn film_spawn_silhouettes(
+    mut commands: Commands,
+    mut film: ResMut<FilmRuntime>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !film.enabled || film.finished || film.silhouettes_spawned {
+        return;
+    }
+    let Some(island) = film.island else {
+        return;
+    };
+    film.silhouettes_spawned = true;
+
+    let deck = Vec3::new(
+        island.cx as f32 + 0.5,
+        island.deck_y as f32 + 1.0,
+        island.cz as f32 + 0.5,
+    );
+    let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let marine_body = materials.add(sil_mat(
+        Color::srgb(0.72, 0.78, 0.84),
+        LinearRgba::rgb(0.04, 0.05, 0.06),
+    ));
+    let marine_dark = materials.add(sil_mat(Color::srgb(0.12, 0.14, 0.18), LinearRgba::BLACK));
+    let marine_visor = materials.add(sil_mat(
+        Color::srgb(0.15, 0.95, 1.0),
+        LinearRgba::rgb(0.4, 3.2, 4.0),
+    ));
+    let alien_body = materials.add(sil_mat(
+        Color::srgb(0.86, 0.78, 0.62),
+        LinearRgba::rgb(0.05, 0.04, 0.02),
+    ));
+    let alien_leg = materials.add(sil_mat(Color::srgb(0.55, 0.48, 0.36), LinearRgba::BLACK));
+    let alien_crest = materials.add(sil_mat(
+        Color::srgb(1.0, 0.18, 0.72),
+        LinearRgba::rgb(3.2, 0.2, 2.4),
+    ));
+    let crew_body = materials.add(sil_mat(
+        Color::srgb(0.42, 0.48, 0.54),
+        LinearRgba::rgb(0.03, 0.04, 0.05),
+    ));
+    let crew_visor = materials.add(sil_mat(
+        Color::srgb(0.2, 0.95, 1.0),
+        LinearRgba::rgb(0.3, 2.8, 3.6),
+    ));
+
+    // Marine west of pad centre — biped + rifle (matches voxel anchor −3,·,2).
+    spawn_film_marine(
+        &mut commands,
+        &cube,
+        &marine_body,
+        &marine_dark,
+        &marine_visor,
+        deck + Vec3::new(-3.0, 0.0, 2.0),
+    );
+    // Multi-leg alien east — six splayed limbs (voxel anchor +2,·,2).
+    spawn_film_alien(
+        &mut commands,
+        &cube,
+        &alien_body,
+        &alien_leg,
+        &alien_crest,
+        deck + Vec3::new(2.2, 0.0, 2.0),
+    );
+    // Rail crew pair on −Z pad rail.
+    spawn_film_crew(
+        &mut commands,
+        &cube,
+        &crew_body,
+        &crew_visor,
+        deck + Vec3::new(-4.0, 0.0, -2.2),
+    );
+    spawn_film_crew(
+        &mut commands,
+        &cube,
+        &crew_body,
+        &crew_visor,
+        deck + Vec3::new(-4.0, 0.0, -3.4),
+    );
+
+    // Park under-keel + figure lights on the locked island.
+    info!(
+        "FILM: spawned mesh silhouettes (marine/alien/crew) on pad ({}, {})",
+        island.cx, island.cz
+    );
+}
+
+fn sil_mat(base: Color, emissive: LinearRgba) -> StandardMaterial {
+    StandardMaterial {
+        base_color: base,
+        emissive,
+        metallic: 0.35,
+        perceptual_roughness: 0.55,
+        reflectance: 0.4,
+        ..default()
+    }
+}
+
+fn spawn_film_marine(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    body: &Handle<StandardMaterial>,
+    dark: &Handle<StandardMaterial>,
+    visor: &Handle<StandardMaterial>,
+    origin: Vec3,
+) {
+    // Oversized (~2.4× human) so limbs survive 10–14 m lavapipe framing.
+    let root = commands
+        .spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(origin),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new("FilmMarineSilhouette"),
+        ))
+        .id();
+    commands.entity(root).with_children(|p| {
+        // Legs
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: dark.clone(),
+                transform: Transform::from_translation(Vec3::new(-0.38, 0.75, 0.0))
+                    .with_scale(Vec3::new(0.42, 1.5, 0.48)),
+                ..default()
+            },
+            Name::new("MarineLegL"),
+        ));
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: dark.clone(),
+                transform: Transform::from_translation(Vec3::new(0.38, 0.75, 0.0))
+                    .with_scale(Vec3::new(0.42, 1.5, 0.48)),
+                ..default()
+            },
+            Name::new("MarineLegR"),
+        ));
+        // Torso
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: body.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 2.05, 0.0))
+                    .with_scale(Vec3::new(0.95, 1.55, 0.55)),
+                ..default()
+            },
+            Name::new("MarineTorso"),
+        ));
+        // Head
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: body.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 3.15, 0.05))
+                    .with_scale(Vec3::new(0.55, 0.55, 0.55)),
+                ..default()
+            },
+            Name::new("MarineHead"),
+        ));
+        // Visor strip
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: visor.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 3.15, 0.32))
+                    .with_scale(Vec3::new(0.42, 0.16, 0.08)),
+                ..default()
+            },
+            Name::new("MarineVisor"),
+        ));
+        // Rifle along +X
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: dark.clone(),
+                transform: Transform::from_translation(Vec3::new(1.15, 2.15, 0.15))
+                    .with_scale(Vec3::new(1.85, 0.16, 0.16)),
+                ..default()
+            },
+            Name::new("MarineRifle"),
+        ));
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: visor.clone(),
+                transform: Transform::from_translation(Vec3::new(2.05, 2.15, 0.15))
+                    .with_scale(Vec3::new(0.22, 0.14, 0.14)),
+                ..default()
+            },
+            Name::new("MarineMuzzle"),
+        ));
+    });
+}
+
+fn spawn_film_alien(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    body: &Handle<StandardMaterial>,
+    leg: &Handle<StandardMaterial>,
+    crest: &Handle<StandardMaterial>,
+    origin: Vec3,
+) {
+    let root = commands
+        .spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(origin),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new("FilmAlienSilhouette"),
+        ))
+        .id();
+    commands.entity(root).with_children(|p| {
+        // Raised central body (wider than marine torso)
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: body.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 1.85, 0.0))
+                    .with_scale(Vec3::new(1.55, 1.35, 1.35)),
+                ..default()
+            },
+            Name::new("AlienBody"),
+        ));
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: crest.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 2.85, 0.0))
+                    .with_scale(Vec3::new(0.55, 0.45, 0.4)),
+                ..default()
+            },
+            Name::new("AlienCrest"),
+        ));
+        // Six splayed legs — unmistakable multi-leg vs biped marine.
+        let legs = [
+            Vec3::new(-1.55, 0.7, -1.35),
+            Vec3::new(1.55, 0.7, -1.35),
+            Vec3::new(-1.75, 0.7, 0.15),
+            Vec3::new(1.75, 0.7, 0.15),
+            Vec3::new(-1.35, 0.7, 1.45),
+            Vec3::new(1.35, 0.7, 1.45),
+        ];
+        for (i, offset) in legs.iter().enumerate() {
+            let mid = Vec3::new(offset.x * 0.55, 1.25, offset.z * 0.55);
+            p.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: leg.clone(),
+                    transform: Transform::from_translation(*offset)
+                        .with_scale(Vec3::new(0.32, 1.4, 0.32)),
+                    ..default()
+                },
+                Name::new(format!("AlienLeg{i}")),
+            ));
+            p.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: leg.clone(),
+                    transform: Transform::from_translation(mid)
+                        .with_scale(Vec3::new(0.38, 0.55, 0.38)),
+                    ..default()
+                },
+                Name::new(format!("AlienJoint{i}")),
+            ));
+        }
+    });
+}
+
+fn spawn_film_crew(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    body: &Handle<StandardMaterial>,
+    visor: &Handle<StandardMaterial>,
+    origin: Vec3,
+) {
+    let root = commands
+        .spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(origin),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new("FilmCrewSilhouette"),
+        ))
+        .id();
+    commands.entity(root).with_children(|p| {
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: body.clone(),
+                transform: Transform::from_translation(Vec3::new(-0.28, 0.65, 0.0))
+                    .with_scale(Vec3::new(0.32, 1.3, 0.36)),
+                ..default()
+            },
+            Name::new("CrewLegL"),
+        ));
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: body.clone(),
+                transform: Transform::from_translation(Vec3::new(0.28, 0.65, 0.0))
+                    .with_scale(Vec3::new(0.32, 1.3, 0.36)),
+                ..default()
+            },
+            Name::new("CrewLegR"),
+        ));
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: body.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 1.75, 0.0))
+                    .with_scale(Vec3::new(0.72, 1.25, 0.42)),
+                ..default()
+            },
+            Name::new("CrewTorso"),
+        ));
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: body.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 2.65, 0.0))
+                    .with_scale(Vec3::new(0.42, 0.42, 0.42)),
+                ..default()
+            },
+            Name::new("CrewHead"),
+        ));
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: visor.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 2.65, 0.24))
+                    .with_scale(Vec3::new(0.32, 0.12, 0.06)),
+                ..default()
+            },
+            Name::new("CrewVisor"),
+        ));
+    });
+}
+
 #[derive(Clone, Copy)]
 struct FilmShot {
     name: &'static str,
@@ -336,7 +723,7 @@ const SHOTS: &[FilmShot] = &[
         name: "island_grass_closeup",
     },
     FilmShot {
-        name: "island_keel_crystals",
+        name: "island_deck_keel",
     },
     FilmShot {
         name: "combat_pad_silhouettes",
@@ -371,9 +758,44 @@ fn film_drive_camera(
     mut bloom_q: Query<&mut BloomSettings, With<Player>>,
     mut fill_q: Query<
         &mut Transform,
-        (With<FilmFillLight>, Without<Player>, Without<FilmRimLight>),
+        (
+            With<FilmFillLight>,
+            Without<Player>,
+            Without<FilmRimLight>,
+            Without<FilmUnderKeelLight>,
+            Without<FilmFigureKeyLight>,
+        ),
     >,
-    mut rim_q: Query<&mut Transform, (With<FilmRimLight>, Without<Player>, Without<FilmFillLight>)>,
+    mut rim_q: Query<
+        &mut Transform,
+        (
+            With<FilmRimLight>,
+            Without<Player>,
+            Without<FilmFillLight>,
+            Without<FilmUnderKeelLight>,
+            Without<FilmFigureKeyLight>,
+        ),
+    >,
+    mut under_q: Query<
+        &mut Transform,
+        (
+            With<FilmUnderKeelLight>,
+            Without<Player>,
+            Without<FilmFillLight>,
+            Without<FilmRimLight>,
+            Without<FilmFigureKeyLight>,
+        ),
+    >,
+    mut figure_q: Query<
+        &mut Transform,
+        (
+            With<FilmFigureKeyLight>,
+            Without<Player>,
+            Without<FilmFillLight>,
+            Without<FilmRimLight>,
+            Without<FilmUnderKeelLight>,
+        ),
+    >,
 ) {
     if !film.enabled || film.finished {
         return;
@@ -387,7 +809,8 @@ fn film_drive_camera(
     // Tighter hero FOV so pad figures and grass fill the frame.
     if let Projection::Perspective(ref mut persp) = *projection {
         let target: f32 = match film.shot_index {
-            2 | 3 => 48.0, // mid-distance full-body combat / crew
+            1 => 50.0,     // deck + keel profile
+            2 | 3 => 42.0, // closer full-body combat / crew silhouettes
             5 => 46.0,     // shuttle rear-quarter
             6 => 40.0,     // planet
             _ => 52.0,
@@ -484,6 +907,7 @@ fn film_drive_camera(
         );
         apply_camera(&mut transform, &mut player, warm_pos, look);
         follow_lights(&mut fill_q, &mut rim_q, transform.translation, &transform);
+        park_island_lights(&mut under_q, &mut figure_q, island);
 
         let pad_ready = station_pad_streamed(&world, island);
         let time_ok = film.elapsed >= 8.0;
@@ -535,6 +959,7 @@ fn film_drive_camera(
     let (pos, look) = shot_pose(film.shot_index, island, &world);
     apply_camera(&mut transform, &mut player, pos, look);
     follow_lights(&mut fill_q, &mut rim_q, pos, &transform);
+    park_island_lights(&mut under_q, &mut figure_q, island);
 }
 
 fn station_pad_streamed(world: &VoxelWorld, island: IslandSpec) -> bool {
@@ -564,11 +989,23 @@ fn apply_camera(transform: &mut Transform, player: &mut Player, pos: Vec3, look:
 fn follow_lights(
     fill_q: &mut Query<
         &mut Transform,
-        (With<FilmFillLight>, Without<Player>, Without<FilmRimLight>),
+        (
+            With<FilmFillLight>,
+            Without<Player>,
+            Without<FilmRimLight>,
+            Without<FilmUnderKeelLight>,
+            Without<FilmFigureKeyLight>,
+        ),
     >,
     rim_q: &mut Query<
         &mut Transform,
-        (With<FilmRimLight>, Without<Player>, Without<FilmFillLight>),
+        (
+            With<FilmRimLight>,
+            Without<Player>,
+            Without<FilmFillLight>,
+            Without<FilmUnderKeelLight>,
+            Without<FilmFigureKeyLight>,
+        ),
     >,
     pos: Vec3,
     cam: &Transform,
@@ -581,6 +1018,43 @@ fn follow_lights(
     }
     if let Ok(mut rim_tf) = rim_q.get_single_mut() {
         rim_tf.translation = pos - right * 5.0 + up * 2.0 + forward * 3.0;
+    }
+}
+
+fn park_island_lights(
+    under_q: &mut Query<
+        &mut Transform,
+        (
+            With<FilmUnderKeelLight>,
+            Without<Player>,
+            Without<FilmFillLight>,
+            Without<FilmRimLight>,
+            Without<FilmFigureKeyLight>,
+        ),
+    >,
+    figure_q: &mut Query<
+        &mut Transform,
+        (
+            With<FilmFigureKeyLight>,
+            Without<Player>,
+            Without<FilmFillLight>,
+            Without<FilmRimLight>,
+            Without<FilmUnderKeelLight>,
+        ),
+    >,
+    island: IslandSpec,
+) {
+    let deck = Vec3::new(
+        island.cx as f32 + 0.5,
+        island.deck_y as f32 + 1.0,
+        island.cz as f32 + 0.5,
+    );
+    if let Ok(mut under) = under_q.get_single_mut() {
+        under.translation = deck + Vec3::new(2.0, -(island.keel_depth as f32 * 0.72).max(5.0), 4.0);
+    }
+    if let Ok(mut figure) = figure_q.get_single_mut() {
+        // Side-lit combat pad so mesh limbs cast crisp edges.
+        figure.translation = deck + Vec3::new(-9.0, 5.5, 6.0);
     }
 }
 
@@ -601,22 +1075,27 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Deck-to-keel profile: see grass rim AND hanging crystals.
-            let pos = deck + Vec3::new(-14.0, 2.0, 16.0);
-            let look = deck + Vec3::new(0.0, -2.0, 0.0);
+            // Single hero: grass deck rim AND crystal keel undersides.
+            let keel_mid = island.keel_depth as f32 * 0.42;
+            let pos = deck
+                + Vec3::new(
+                    island.radius_x as f32 * 0.35 + 16.0,
+                    3.0 - keel_mid * 0.15,
+                    island.radius_z as f32 * 0.25 + 20.0,
+                );
+            let look = deck + Vec3::new(0.0, -keel_mid * 0.35, 0.0);
             (pos, look)
         }
         2 => {
-            // Combat pad — side-on ~15 m so legs + torso read as biped vs
-            // multi-leg (not a top-down emissive blob).
-            let pos = station + Vec3::new(-14.0, 4.5, 4.0);
-            let look = station + Vec3::new(-0.5, 2.5, 2.2);
+            // Combat pad — side-on ~11 m on mesh silhouettes (biped vs multi-leg).
+            let look = station + Vec3::new(-0.4, 2.4, 2.0);
+            let pos = look + Vec3::new(-9.5, 2.2, 5.5);
             (pos, look)
         }
         3 => {
-            // Pad rail-crew pair — ~14 m side-on.
-            let pos = station + Vec3::new(-14.0, 4.0, -1.0);
-            let look = station + Vec3::new(-4.0, 2.2, -2.5);
+            // Pad rail-crew pair — close side-on on mesh crew.
+            let look = station + Vec3::new(-4.0, 2.0, -2.8);
+            let pos = look + Vec3::new(-7.5, 1.8, 4.0);
             (pos, look)
         }
         4 => {
@@ -821,6 +1300,9 @@ mod tests {
         assert!(names
             .iter()
             .any(|n| n.contains("island") && n.contains("grass")));
+        assert!(names
+            .iter()
+            .any(|n| n.contains("deck_keel") || n.contains("keel")));
         assert!(names.iter().any(|n| n.contains("combat")));
         assert!(names.iter().any(|n| n.contains("shuttle")));
         assert!(names

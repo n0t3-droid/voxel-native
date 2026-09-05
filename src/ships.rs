@@ -1737,6 +1737,7 @@ pub fn spawn_aether_film_shuttle(
         false,
         None,
         true, // cyan wakes only — amber bloom washes the painting cue
+        true, // remaps stern AmberHeat → CyanEmission for film nozzles
     );
     // Replace the default parked motion with a cruise so trails bloom.
     commands.entity(entity).insert(ShipMotion {
@@ -1764,6 +1765,7 @@ fn spawn_ship_entity(
     preview: bool,
     shield_override: Option<f32>,
     cyan_trails_only: bool,
+    film_cyan_nozzles: bool,
 ) -> Entity {
     let bp = blueprint(kind);
     let root = commands
@@ -1806,7 +1808,7 @@ fn spawn_ship_entity(
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
     commands.entity(root).with_children(|p| {
-        spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview);
+        spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview, film_cyan_nozzles);
         if !preview {
             spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp);
             spawn_ship_energy_trails(p, materials, fx, &cube, kind, cyan_trails_only);
@@ -1846,8 +1848,13 @@ fn spawn_realistic_ship_exterior(
     fx: &mut ShipFxCache,
     kind: ShipKind,
     preview: bool,
+    film_cyan_nozzles: bool,
 ) {
-    for part in realistic_ship_exterior_specs(kind) {
+    for mut part in realistic_ship_exterior_specs(kind) {
+        if film_cyan_nozzles && matches!(part.tone, RealShipTone::AmberHeat) {
+            // Film hero shuttle: stern heat bloom must read cyan, not amber.
+            part.tone = RealShipTone::CyanEmission;
+        }
         spawn_real_ship_part(
             parent,
             meshes,
@@ -2605,6 +2612,7 @@ fn spawn_saved_ships_once(
             false,
             Some(saved.shield),
             false,
+            false,
         );
     }
 
@@ -2627,6 +2635,7 @@ fn spawn_saved_ships_once(
             player_yaw + std::f32::consts::PI,
             false,
             None,
+            false,
             false,
         );
     }
@@ -2740,6 +2749,7 @@ fn ship_placement_input(
                 true,
                 None,
                 false,
+                false,
             );
             placement.preview = Some(e);
             e
@@ -2779,6 +2789,7 @@ fn ship_placement_input(
             placement.yaw,
             false,
             None,
+            false,
             false,
         );
         placement.active = false;
