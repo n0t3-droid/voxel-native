@@ -1071,19 +1071,39 @@ fn film_spawn_silhouettes(
         Name::new("FilmKeelCyanLip"),
     ));
 
-    // Satellite continuous underside decks (painting_hero) — flush under each
-    // stamped vista island so wide cams don't read ink-black keels.
+    // Satellite continuous underside volumes — every vista island offset so
+    // painting_hero high cams don't leave ink-black neighbor keels.
     for (si, (sx, sz, srx, srz, lift)) in [
         (28.0_f32, 18.0, 16.0, 13.0, -1.0),
         (-22.0, 28.0, 15.0, 12.0, 1.0),
         (42.0, 22.0, 14.0, 11.0, -1.0),
         (-38.0, 36.0, 14.0, 11.0, 2.0),
+        (58.0, -12.0, 13.0, 12.0, -3.0),
+        (-24.0, -48.0, 15.0, 11.0, 1.0),
+        (32.0, 58.0, 13.0, 11.0, 0.0),
+        (78.0, 34.0, 12.0, 10.0, -2.0),
+        (-62.0, 12.0, 13.0, 10.0, 1.0),
+        (18.0, 78.0, 12.0, 9.0, -1.0),
+        (-52.0, -28.0, 11.0, 11.0, -2.0),
+        (88.0, -35.0, 10.0, 12.0, 0.0),
+        (-78.0, 48.0, 11.0, 9.0, -3.0),
+        (48.0, 88.0, 11.0, 10.0, 2.0),
+        (-15.0, 62.0, 13.0, 10.0, -1.0),
+        (65.0, 55.0, 10.0, 9.0, 1.0),
+        (-40.0, 75.0, 11.0, 11.0, 0.0),
+        (12.0, 42.0, 12.0, 10.0, -2.0),
+        (-8.0, 48.0, 11.0, 9.0, 1.0),
+        (55.0, 12.0, 10.0, 9.0, 0.0),
+        (72.0, 68.0, 9.0, 9.0, -1.0),
+        (-55.0, 58.0, 10.0, 8.0, 2.0),
+        (38.0, 72.0, 10.0, 9.0, -2.0),
+        (-30.0, 18.0, 11.0, 9.0, 0.0),
+        (95.0, 18.0, 9.0, 10.0, 1.0),
         (22.0, 32.0, 14.0, 11.0, 0.0),
         (-18.0, 40.0, 12.0, 10.0, -1.0),
         (36.0, 48.0, 11.0, 10.0, 1.0),
         (8.0, 55.0, 10.0, 9.0, -2.0),
         (50.0, 38.0, 9.0, 9.0, 0.0),
-        (65.0, 55.0, 10.0, 9.0, 1.0),
         (28.0, 44.0, 12.0, 10.0, -1.0),
         (-12.0, 52.0, 11.0, 9.0, 1.0),
     ]
@@ -1108,18 +1128,25 @@ fn film_spawn_silhouettes(
             FilmKeelHelper,
             Name::new(format!("FilmSatKeelDeck{si}")),
         ));
-        commands.spawn((
-            PbrBundle {
-                mesh: cube.clone(),
-                material: crystal_plate.clone(),
-                transform: Transform::from_translation(sat_deck + Vec3::new(0.0, -4.0, srz * 0.95))
-                    .with_scale(Vec3::new(srx * 1.9, 6.5, 0.8)),
-                ..default()
-            },
-            FilmSilhouette,
-            FilmKeelHelper,
-            Name::new(format!("FilmSatKeelSkirt{si}")),
-        ));
+        for (ox, oz, sxv, szv) in [
+            (0.0_f32, srz * 0.98, srx * 1.9, 0.75),
+            (0.0, -srz * 0.98, srx * 1.9, 0.75),
+            (srx * 0.98, 0.0, 0.75, srz * 1.9),
+            (-srx * 0.98, 0.0, 0.75, srz * 1.9),
+        ] {
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: crystal_plate.clone(),
+                    transform: Transform::from_translation(sat_deck + Vec3::new(ox, -4.5, oz))
+                        .with_scale(Vec3::new(sxv, 8.0, szv)),
+                    ..default()
+                },
+                FilmSilhouette,
+                FilmKeelHelper,
+                Name::new(format!("FilmSatKeelSkirt{si}")),
+            ));
+        }
     }
 
     // Film-only hanging crystal spikes (cyan/verdant only — no magenta/pink).
