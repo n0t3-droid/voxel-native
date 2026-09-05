@@ -2690,7 +2690,6 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
         }
         5 => {
             // High stand-off looking down the cyan rail approach into mouth.
-            let mouth = station + Vec3::new(0.0, 4.0, -14.0);
             let pos = station + Vec3::new(0.0, 14.0, 22.0);
             let look = station + Vec3::new(0.0, 3.5, -8.0);
             (pos, look)
