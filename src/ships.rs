@@ -440,6 +440,7 @@ enum RealShipTone {
     CeramicWhite,
     ShuttleWhite,
     ShuttleOrange,
+    ShuttleGlass,
     CarbonBlack,
     SmokedGlass,
     CyanEmission,
@@ -1310,114 +1311,147 @@ fn push_box(out: &mut Vec<ShipVoxel>, min: IVec3, max: IVec3, block: BlockType) 
 }
 
 fn scout_shuttle_exterior_specs() -> Vec<RealShipPartSpec> {
-    let mut parts = Vec::with_capacity(18);
+    let mut parts = Vec::with_capacity(28);
     let identity = Quat::IDENTITY;
-    // Blocky orbiter: pointed nose, rectangular fuselage, swept wings,
-    // vertical tail, cyan glass strip, orange livery, twin rear glow.
+    let half_pi = std::f32::consts::FRAC_PI_2;
+    // Ceramic-white orbiter: long delta wings, side orange stripe,
+    // cyan glass strip, three nozzles with cyan core + amber ring.
     push_real_part(
         &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::ShuttleWhite,
-        Vec3::new(0.0, 0.28, 0.15),
-        Vec3::new(1.35, 0.78, 7.2),
+        Vec3::new(0.0, 0.30, 0.10),
+        Vec3::new(1.22, 0.72, 7.4),
         identity,
     );
     push_real_part(
         &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::ShuttleWhite,
-        Vec3::new(0.0, 0.22, -4.05),
-        Vec3::new(0.92, 0.52, 1.85),
+        Vec3::new(0.0, 0.24, -4.15),
+        Vec3::new(0.82, 0.48, 1.70),
         identity,
     );
     push_real_part(
         &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::ShuttleWhite,
-        Vec3::new(0.0, 0.16, -5.35),
-        Vec3::new(0.42, 0.28, 0.95),
+        Vec3::new(0.0, 0.18, -5.45),
+        Vec3::new(0.38, 0.26, 0.95),
         identity,
     );
     push_real_part(
         &mut parts,
         RealShipMeshKind::AeroPlate,
-        RealShipTone::CyanEmission,
-        Vec3::new(0.0, 0.72, -3.15),
-        Vec3::new(1.05, 0.18, 1.85),
+        RealShipTone::CarbonBlack,
+        Vec3::new(0.0, 0.74, -3.55),
+        Vec3::new(1.08, 0.08, 2.35),
+        identity,
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::AeroPlate,
+        RealShipTone::ShuttleGlass,
+        Vec3::new(0.0, 0.82, -3.55),
+        Vec3::new(0.92, 0.10, 2.15),
         identity,
     );
     push_real_part(
         &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::ShuttleOrange,
-        Vec3::new(0.0, 0.72, 0.55),
-        Vec3::new(0.28, 0.14, 5.6),
+        Vec3::new(0.0, 0.70, 0.45),
+        Vec3::new(0.22, 0.12, 5.4),
         identity,
     );
     push_real_part(
         &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::ShuttleOrange,
-        Vec3::new(0.0, -0.18, 0.20),
-        Vec3::new(1.12, 0.12, 6.4),
+        Vec3::new(0.0, -0.14, 0.15),
+        Vec3::new(1.05, 0.10, 6.2),
         identity,
     );
     for sx in [-1.0, 1.0] {
         push_real_part(
             &mut parts,
             RealShipMeshKind::AeroPlate,
+            RealShipTone::ShuttleOrange,
+            Vec3::new(sx * 0.64, 0.32, 0.20),
+            Vec3::new(0.08, 0.18, 5.6),
+            identity,
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
             RealShipTone::ShuttleWhite,
-            Vec3::new(sx * 2.85, 0.08, 0.55),
-            Vec3::new(4.35, 0.14, 2.15),
-            Quat::from_rotation_y(-sx * 0.16),
+            Vec3::new(sx * 3.55, 0.06, 0.95),
+            Vec3::new(5.85, 0.11, 3.95),
+            Quat::from_rotation_y(-sx * 0.32),
         );
         push_real_part(
             &mut parts,
             RealShipMeshKind::AeroPlate,
             RealShipTone::ShuttleOrange,
-            Vec3::new(sx * 3.15, 0.12, -0.55),
-            Vec3::new(3.85, 0.10, 0.42),
-            Quat::from_rotation_y(-sx * 0.16),
+            Vec3::new(sx * 3.70, 0.10, -0.85),
+            Vec3::new(5.40, 0.08, 0.55),
+            Quat::from_rotation_y(-sx * 0.32),
         );
         push_real_part(
             &mut parts,
             RealShipMeshKind::RoundNozzle,
             RealShipTone::CarbonBlack,
-            Vec3::new(sx * 0.52, 0.18, 3.95),
-            Vec3::new(0.38, 0.72, 0.38),
-            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            Vec3::new(sx * 0.58, 0.18, 4.05),
+            Vec3::new(0.34, 0.68, 0.34),
+            Quat::from_rotation_x(half_pi),
         );
         push_real_part(
             &mut parts,
             RealShipMeshKind::RoundNozzle,
             RealShipTone::CyanEmission,
-            Vec3::new(sx * 0.52, 0.18, 4.38),
-            Vec3::new(0.26, 0.22, 0.26),
-            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            Vec3::new(sx * 0.58, 0.18, 4.48),
+            Vec3::new(0.22, 0.20, 0.22),
+            Quat::from_rotation_x(half_pi),
         );
         push_real_part(
             &mut parts,
             RealShipMeshKind::RoundNozzle,
             RealShipTone::AmberHeat,
-            Vec3::new(sx * 0.52, 0.18, 4.22),
-            Vec3::new(0.16, 0.14, 0.16),
-            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            Vec3::new(sx * 0.58, 0.18, 4.30),
+            Vec3::new(0.28, 0.12, 0.28),
+            Quat::from_rotation_x(half_pi),
         );
     }
     push_real_part(
         &mut parts,
+        RealShipMeshKind::RoundNozzle,
+        RealShipTone::CarbonBlack,
+        Vec3::new(0.0, 0.18, 4.12),
+        Vec3::new(0.32, 0.62, 0.32),
+        Quat::from_rotation_x(half_pi),
+    );
+    push_real_part(
+        &mut parts,
+        RealShipMeshKind::RoundNozzle,
+        RealShipTone::CyanEmission,
+        Vec3::new(0.0, 0.18, 4.52),
+        Vec3::new(0.20, 0.18, 0.20),
+        Quat::from_rotation_x(half_pi),
+    );
+    push_real_part(
+        &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::ShuttleWhite,
-        Vec3::new(0.0, 1.45, 2.55),
-        Vec3::new(0.14, 1.85, 1.35),
+        Vec3::new(0.0, 1.55, 2.65),
+        Vec3::new(0.12, 2.05, 1.45),
         identity,
     );
     push_real_part(
         &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::ShuttleOrange,
-        Vec3::new(0.0, 2.28, 2.52),
-        Vec3::new(0.16, 0.32, 1.12),
+        Vec3::new(0.0, 2.45, 2.35),
+        Vec3::new(0.14, 0.28, 1.55),
         identity,
     );
     parts
@@ -1879,31 +1913,40 @@ fn real_ship_material(
             0.16,
         ),
         RealShipTone::ShuttleWhite => (
-            // Readable orbiter white. Brighter than CeramicWhite so the
-            // cuboid hull reads as a craft, still under OLD_SCHOOL bloom.
-            Color::srgba(0.78, 0.72, 0.64, preview_alpha),
-            LinearRgba::rgb(0.04, 0.035, 0.028),
+            // Cool near-white ceramic. Extra blue so the dusk temperature
+            // grade cannot peach the hull; modest self-lit so it stays
+            // readable against orange canyon bounce.
+            Color::srgba(0.76, 0.81, 0.88, preview_alpha),
+            LinearRgba::rgb(0.20, 0.24, 0.32),
             if preview {
                 AlphaMode::Blend
             } else {
                 AlphaMode::Opaque
             },
-            0.04,
-            0.58,
-            0.18,
+            0.03,
+            0.70,
+            0.22,
         ),
         RealShipTone::ShuttleOrange => (
             // Opaque RCC/leading-edge paint, not additive heat bloom.
-            Color::srgba(0.74, 0.32, 0.07, preview_alpha),
-            LinearRgba::rgb(0.22, 0.06, 0.01),
+            Color::srgba(0.78, 0.34, 0.06, preview_alpha),
+            LinearRgba::rgb(0.28, 0.08, 0.01),
             if preview {
                 AlphaMode::Blend
             } else {
                 AlphaMode::Opaque
             },
             0.08,
-            0.52,
+            0.50,
             0.20,
+        ),
+        RealShipTone::ShuttleGlass => (
+            Color::srgba(0.04, 0.62, 0.82, if preview { 0.50 } else { 0.90 }),
+            LinearRgba::rgb(0.12, 1.6, 2.2),
+            AlphaMode::Blend,
+            0.08,
+            0.06,
+            0.88,
         ),
         RealShipTone::CarbonBlack => (
             Color::srgba(0.006, 0.010, 0.014, preview_alpha),
@@ -2020,13 +2063,13 @@ fn ship_trail_specs(kind: ShipKind) -> Vec<ShipTrailSpec> {
         ShipKind::ScoutShuttle => {
             specs[0].base_translation = Vec3::new(-0.52, 0.18, 6.4);
             specs[1].base_translation = Vec3::new(0.52, 0.18, 6.4);
-            specs[0].base_scale = Vec3::new(0.22, 0.16, 8.8);
-            specs[1].base_scale = Vec3::new(0.22, 0.16, 8.8);
-            specs[2].base_translation = Vec3::new(0.0, 0.22, 5.2);
-            specs[2].base_scale = Vec3::new(1.15, 0.28, 1.6);
+            specs[0].base_scale = Vec3::new(0.20, 0.14, 12.5);
+            specs[1].base_scale = Vec3::new(0.20, 0.14, 12.5);
+            specs[2].base_translation = Vec3::new(0.0, 0.18, 5.4);
+            specs[2].base_scale = Vec3::new(0.95, 0.22, 1.4);
             specs.push(ShipTrailSpec {
-                base_translation: Vec3::new(0.0, 0.18, 9.6),
-                base_scale: Vec3::new(0.55, 0.22, 10.5),
+                base_translation: Vec3::new(0.0, 0.18, 11.2),
+                base_scale: Vec3::new(0.42, 0.16, 14.8),
                 phase: 2.8,
                 tone: ShipTrailTone::Cyan,
             });
@@ -2111,7 +2154,7 @@ fn ship_trail_material(
     }
 }
 
-fn new_world_look_basis() -> (Vec3, Vec3, Vec3) {
+pub(crate) fn new_world_look_basis() -> (Vec3, Vec3, Vec3) {
     // Matches `TerrainGenerator::scenic_frontier_spawn` (eye 64,-79 → look 110,-80).
     let yaw = 46.0_f32.atan2(1.0);
     let pitch = 6.0_f32.atan2(46.0);
@@ -2192,54 +2235,78 @@ fn sky_traffic_pose(origin: Vec3, span: Vec3, t: f32) -> (Vec3, f32) {
 }
 
 fn ambient_traffic_specs(variant: u8, detailed: bool) -> Vec<RealShipPartSpec> {
-    let mut parts = Vec::with_capacity(6);
+    let mut parts = Vec::with_capacity(8);
     let white = RealShipTone::ShuttleWhite;
-    let body = if variant == 0 {
-        (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.55, 0.28, 2.4))
+    let identity = Quat::IDENTITY;
+    if variant == 0 {
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            white,
+            Vec3::new(0.0, 0.0, 0.05),
+            Vec3::new(0.42, 0.22, 2.85),
+            identity,
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            white,
+            Vec3::new(0.0, 0.38, 0.55),
+            Vec3::new(0.08, 0.55, 0.72),
+            identity,
+        );
     } else {
-        (Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.15, 0.22, 1.8))
-    };
-    push_real_part(
-        &mut parts,
-        RealShipMeshKind::AeroPlate,
-        white,
-        body.0,
-        body.1,
-        Quat::IDENTITY,
-    );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            white,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.35, 0.20, 2.15),
+            identity,
+        );
+        push_real_part(
+            &mut parts,
+            RealShipMeshKind::AeroPlate,
+            white,
+            Vec3::new(0.0, 0.28, 0.15),
+            Vec3::new(0.55, 0.18, 1.35),
+            identity,
+        );
+    }
     for sx in [-1.0, 1.0] {
         push_real_part(
             &mut parts,
             RealShipMeshKind::AeroPlate,
             white,
-            Vec3::new(sx * 0.95, 0.0, 0.25),
-            Vec3::new(1.35, 0.08, 0.55),
-            Quat::IDENTITY,
+            Vec3::new(sx * 1.15, 0.0, 0.35),
+            Vec3::new(1.85, 0.07, 0.85),
+            Quat::from_rotation_y(-sx * 0.18),
         );
     }
+    let trail_len = if detailed { 14.5 } else { 9.2 };
     push_real_part(
         &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::CyanEmission,
-        Vec3::new(0.0, 0.0, 3.4),
-        Vec3::new(0.16, 0.10, 5.8),
-        Quat::IDENTITY,
+        Vec3::new(0.0, 0.0, 2.4 + trail_len * 0.28),
+        Vec3::new(0.14, 0.08, trail_len),
+        identity,
     );
     if detailed {
         push_real_part(
             &mut parts,
             RealShipMeshKind::AeroPlate,
             RealShipTone::ShuttleOrange,
-            Vec3::new(0.0, 0.16, -0.4),
-            Vec3::new(0.12, 0.08, 1.6),
-            Quat::IDENTITY,
+            Vec3::new(0.0, 0.14, -0.55),
+            Vec3::new(0.10, 0.06, 1.4),
+            identity,
         );
         push_real_part(
             &mut parts,
             RealShipMeshKind::RoundNozzle,
             RealShipTone::CyanEmission,
-            Vec3::new(0.0, 0.0, 1.35),
-            Vec3::new(0.16, 0.18, 0.16),
+            Vec3::new(0.0, 0.0, 1.45),
+            Vec3::new(0.14, 0.16, 0.14),
             Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
         );
     }
@@ -4727,8 +4794,18 @@ mod tests {
         assert!(
             shell
                 .iter()
-                .any(|part| part.tone == RealShipTone::CyanEmission && part.offset.z < 0.0),
-            "scout needs a cyan cockpit strip on the nose"
+                .any(|part| part.tone == RealShipTone::ShuttleGlass && part.offset.z < 0.0),
+            "scout needs a cyan cockpit-glass strip on the nose"
+        );
+        assert!(
+            shell
+                .iter()
+                .filter(|part| part.mesh == RealShipMeshKind::AeroPlate
+                    && part.tone == RealShipTone::ShuttleWhite
+                    && part.scale.x >= 5.0)
+                .count()
+                >= 2,
+            "scout needs long swept delta wings"
         );
         assert!(
             shell
@@ -4966,23 +5043,32 @@ mod tests {
         assert!(a.distance(c) < 0.05);
         let simple = super::ambient_traffic_specs(0, false);
         let detailed = super::ambient_traffic_specs(0, true);
-        assert!(simple.len() <= 5, "Fast traffic must stay cheap, got {}", simple.len());
+        assert!(simple.len() <= 6, "Fast traffic must stay cheap, got {}", simple.len());
         assert!(detailed.len() > simple.len());
-        assert!(simple.iter().any(|part| part.tone == RealShipTone::CyanEmission));
+        assert!(
+            simple
+                .iter()
+                .any(|part| part.tone == RealShipTone::CyanEmission && part.scale.z >= 8.0),
+            "traffic trails should be long enough to read against the sky"
+        );
     }
 
     #[test]
     fn shuttle_paint_stays_opaque_and_readable() {
-        let white = Color::srgb(0.78, 0.72, 0.64).to_linear();
-        let orange = Color::srgb(0.74, 0.32, 0.07).to_linear();
+        let white = Color::srgb(0.76, 0.81, 0.88).to_linear();
+        let orange = Color::srgb(0.78, 0.34, 0.06).to_linear();
         let white_peak = white.red.max(white.green).max(white.blue);
         let orange_peak = orange.red.max(orange.green).max(orange.blue);
         assert!(
-            white_peak > 0.45,
+            white.blue > white.red,
+            "shuttle white must be cool so dusk temperature cannot peach it"
+        );
+        assert!(
+            white_peak > 0.50,
             "shuttle white {white_peak:.3} will read as grey ceramic"
         );
         assert!(
-            white_peak < 0.72,
+            white_peak < 0.78,
             "shuttle white {white_peak:.3} will bloom into a blob"
         );
         assert!(
