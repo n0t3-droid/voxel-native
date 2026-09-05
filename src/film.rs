@@ -946,7 +946,7 @@ fn film_spawn_silhouettes(
             mesh: cube.clone(),
             material: crystal_plate.clone(),
             transform: Transform::from_translation(deck + Vec3::new(0.0, underside_y - 0.4, 2.0))
-                .with_scale(Vec3::new(rx * 2.35, 2.2, rz * 2.35)),
+                .with_scale(Vec3::new(rx * 2.05, 1.6, rz * 2.05)),
             ..default()
         },
         FilmSilhouette,
@@ -1618,7 +1618,7 @@ fn film_drive_camera(
     // Tighter hero FOV so pad figures and grass fill the frame.
     if let Projection::Perspective(ref mut persp) = *projection {
         let target: f32 = match film.shot_index {
-            1 => 50.0, // deck + keel profile
+            1 => 54.0, // deck + keel profile
             2 => 50.0, // full-body combat two-shot
             3 => 48.0, // crew pair
             5 => 46.0, // shuttle rear-quarter
@@ -1946,10 +1946,16 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Very tight on the plated main island underside + grass rim.
+            // Rim profile: grass deck on the upper lip + continuous unlit
+            // crystal underside below (hollowed keel — no black slab).
             let keel = island.keel_depth as f32;
-            let pos = deck + Vec3::new(14.0, -(keel * 0.55).max(5.0), 16.0);
-            let look = deck + Vec3::new(0.0, -0.5, 3.0);
+            let pos = deck
+                + Vec3::new(
+                    island.radius_x as f32 * 0.55 + 22.0,
+                    -(keel * 0.65).max(5.5),
+                    island.radius_z as f32 * 0.55 + 24.0,
+                );
+            let look = deck + Vec3::new(-1.0, 1.2, 3.0);
             (pos, look)
         }
         2 => {
