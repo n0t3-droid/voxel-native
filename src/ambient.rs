@@ -1,8 +1,10 @@
 use bevy::prelude::*;
 
-use crate::neurocore::RuntimeBudget;
+use crate::menu::{GameState, PendingWorldLoad};
+use crate::neurocore::{RuntimeBudget, RuntimeProfile};
 use crate::player::Player;
-use crate::settings::{GraphicsMode, WorldSettings};
+use crate::settings::{ActiveWorld, GraphicsMode, WorldSettings};
+use crate::ships::new_world_look_basis;
 use crate::terrain::{Biome, WATER_LEVEL};
 use crate::world::VoxelWorld;
 
@@ -62,7 +64,18 @@ pub struct AmbientPlugin;
 impl Plugin for AmbientPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_butterflies)
-            .add_systems(Update, (update_butterfly_bodies, update_butterfly_wings));
+            .add_systems(OnEnter(GameState::MainMenu), cleanup_colony_life)
+            .add_systems(OnEnter(GameState::InGame), spawn_colony_life_once)
+            .add_systems(
+                Update,
+                (
+                    update_butterfly_bodies,
+                    update_butterfly_wings,
+                    update_colony_walkers,
+                    update_skyway_trams,
+                )
+                    .run_if(in_state(GameState::InGame)),
+            );
     }
 }
 
@@ -253,6 +266,312 @@ fn update_butterfly_wings(
     }
 }
 
+#[derive(Component)]
+struct ColonyWalker {
+    t: f32,
+    speed: f32,
+    origin: Vec3,
+    span: Vec3,
+}
+
+#[derive(Component)]
+struct SkywayTram {
+    t: f32,
+    speed: f32,
+    origin: Vec3,
+    span: Vec3,
+}
+
+fn colony_figure_count(graphics: GraphicsMode, cinematic: bool) -> usize {
+    match graphics {
+        GraphicsMode::Fast => 0,
+        GraphicsMode::Balanced => 3,
+        GraphicsMode::High if cinematic => 5,
+        GraphicsMode::High => 4,
+    }
+}
+
+fn skyway_tram_count(graphics: GraphicsMode, cinematic: bool) -> usize {
+    match graphics {
+        GraphicsMode::Fast => 1,
+        GraphicsMode::Balanced => 1,
+        GraphicsMode::High if cinematic => 2,
+        GraphicsMode::High => 1,
+    }
+}
+
+fn ping_pong(t: f32) -> f32 {
+    let u = t.rem_euclid(1.0);
+    if u < 0.5 {
+        u * 2.0
+    } else {
+        2.0 - u * 2.0
+    }
+}
+
+fn spawn_colony_life_once(
+    pending: Res<PendingWorldLoad>,
+    active: Option<Res<ActiveWorld>>,
+    settings: Res<WorldSettings>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    existing: Query<Entity, Or<(With<ColonyWalker>, With<SkywayTram>)>>,
+) {
+    if !pending.0 {
+        return;
+    }
+    for e in existing.iter() {
+        if let Some(entity_commands) = commands.get_entity(e) {
+            entity_commands.despawn_recursive();
+        }
+    }
+    let Some(active) = active else {
+        return;
+    };
+    let cinematic = settings.runtime_profile == RuntimeProfile::Cinematic;
+    let generator = crate::terrain::TerrainGenerator::new(active.meta.seed);
+    let mut anchor = Vec3::new(
+        active.meta.player_pos[0],
+        active.meta.player_pos[1],
+        active.meta.player_pos[2],
+    );
+    if anchor.x.abs() < 280.0 && anchor.z.abs() < 280.0 {
+        let (eye, _, _) = generator.scenic_frontier_spawn();
+        anchor = Vec3::from(eye);
+    }
+    let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    spawn_colony_figures(
+        &mut commands,
+        &mut materials,
+        &cube,
+        &generator,
+        anchor,
+        settings.graphics,
+        cinematic,
+    );
+    spawn_skyway_trams(
+        &mut commands,
+        &mut materials,
+        &cube,
+        anchor,
+        settings.graphics,
+        cinematic,
+    );
+}
+
+fn spawn_colony_figures(
+    commands: &mut Commands,
+    materials: &mut Assets<StandardMaterial>,
+    cube: &Handle<Mesh>,
+    generator: &crate::terrain::TerrainGenerator,
+    origin: Vec3,
+    graphics: GraphicsMode,
+    cinematic: bool,
+) {
+    let count = colony_figure_count(graphics, cinematic);
+    if count == 0 {
+        return;
+    }
+    let (_fwd, fwd_h, right_h) = new_world_look_basis();
+    let spots: [(f32, f32, f32, f32); 5] = [
+        (22.0, 6.0, 7.0, 0.018),
+        (28.0, -4.0, 5.5, 0.022),
+        (18.0, 12.0, 6.0, 0.016),
+        (32.0, 2.0, 8.0, 0.020),
+        (24.0, -10.0, 5.0, 0.024),
+    ];
+    let suits = [
+        Color::srgb(0.18, 0.42, 0.62),
+        Color::srgb(0.22, 0.48, 0.28),
+        Color::srgb(0.62, 0.32, 0.12),
+        Color::srgb(0.72, 0.74, 0.78),
+        Color::srgb(0.48, 0.22, 0.55),
+    ];
+    for (i, &(ahead, lat, walk, speed)) in spots.iter().take(count).enumerate() {
+        let xz = origin + fwd_h * ahead + right_h * lat;
+        let ground = generator.surface_height_at(xz.x.round() as i32, xz.z.round() as i32) as f32
+            + 1.15;
+        let desired = origin.y - 6.0;
+        let y = if (ground - desired).abs() < 10.0 {
+            ground
+        } else {
+            desired
+        };
+        let pos = Vec3::new(xz.x, y, xz.z);
+        let span = right_h * walk;
+        let suit = materials.add(StandardMaterial {
+            base_color: suits[i],
+            perceptual_roughness: 0.62,
+            metallic: 0.12,
+            emissive: LinearRgba::rgb(0.04, 0.05, 0.06),
+            ..default()
+        });
+        let visor = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.08, 0.72, 0.92),
+            emissive: LinearRgba::rgb(0.15, 1.4, 1.9),
+            perceptual_roughness: 0.12,
+            ..default()
+        });
+        let root = commands
+            .spawn((
+                SpatialBundle {
+                    transform: Transform::from_translation(pos),
+                    ..default()
+                },
+                ColonyWalker {
+                    t: i as f32 * 0.17,
+                    speed,
+                    origin: pos,
+                    span,
+                },
+                Name::new("ColonyWalker"),
+            ))
+            .id();
+        commands.entity(root).with_children(|p| {
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: suit.clone(),
+                transform: Transform::from_xyz(0.0, 0.10, 0.0).with_scale(Vec3::new(0.32, 0.48, 0.22)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: suit.clone(),
+                transform: Transform::from_xyz(0.0, 0.48, 0.0).with_scale(Vec3::new(0.26, 0.24, 0.26)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: visor,
+                transform: Transform::from_xyz(0.0, 0.50, -0.12).with_scale(Vec3::new(0.22, 0.10, 0.08)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: suit,
+                transform: Transform::from_xyz(0.0, -0.28, 0.0).with_scale(Vec3::new(0.28, 0.22, 0.20)),
+                ..default()
+            });
+        });
+    }
+}
+
+fn spawn_skyway_trams(
+    commands: &mut Commands,
+    materials: &mut Assets<StandardMaterial>,
+    cube: &Handle<Mesh>,
+    origin: Vec3,
+    graphics: GraphicsMode,
+    cinematic: bool,
+) {
+    let count = skyway_tram_count(graphics, cinematic);
+    let (_fwd, fwd_h, right_h) = new_world_look_basis();
+    let hull = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.62, 0.66, 0.72),
+        perceptual_roughness: 0.45,
+        metallic: 0.22,
+        emissive: LinearRgba::rgb(0.08, 0.10, 0.14),
+        ..default()
+    });
+    let glow = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.05, 0.78, 1.0),
+        emissive: LinearRgba::rgb(0.2, 4.5, 6.0),
+        alpha_mode: AlphaMode::Add,
+        ..default()
+    });
+    let lanes: [(f32, f32, f32, f32, f32, f32, f32, f32); 2] = [
+        (36.0, 14.0, -32.0, 10.0, 48.0, 2.0, 0.030, 0.08),
+        (52.0, 18.0, 18.0, -8.0, -40.0, 3.0, 0.022, 0.55),
+    ];
+    for (i, &(ahead, height, lat, da, dl, du, speed, t0)) in lanes.iter().take(count).enumerate() {
+        let lane_origin = origin + fwd_h * ahead + Vec3::Y * height + right_h * lat;
+        let span = fwd_h * da + right_h * dl + Vec3::Y * du;
+        let u = t0.rem_euclid(1.0);
+        let pos = lane_origin + span * u;
+        let yaw = (-span.x).atan2(-span.z);
+        let root = commands
+            .spawn((
+                SpatialBundle {
+                    transform: Transform::from_translation(pos)
+                        .with_rotation(Quat::from_rotation_y(yaw)),
+                    ..default()
+                },
+                SkywayTram {
+                    t: t0,
+                    speed,
+                    origin: lane_origin,
+                    span,
+                },
+                Name::new("SkywayTram"),
+            ))
+            .id();
+        let scale = if i == 0 { 1.0 } else { 0.82 };
+        commands.entity(root).with_children(|p| {
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: hull.clone(),
+                transform: Transform::from_scale(Vec3::new(1.15 * scale, 0.55 * scale, 2.4 * scale)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: glow.clone(),
+                transform: Transform::from_xyz(0.0, 0.18 * scale, 0.0)
+                    .with_scale(Vec3::new(0.95 * scale, 0.18 * scale, 1.8 * scale)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: glow.clone(),
+                transform: Transform::from_xyz(0.0, -0.12 * scale, -1.35 * scale)
+                    .with_scale(Vec3::new(0.22 * scale, 0.10 * scale, 0.55 * scale)),
+                ..default()
+            });
+        });
+    }
+}
+
+fn update_colony_walkers(time: Res<Time>, mut q: Query<(&mut Transform, &mut ColonyWalker)>) {
+    let dt = time.delta_seconds();
+    for (mut tf, mut walker) in q.iter_mut() {
+        walker.t = (walker.t + dt * walker.speed).rem_euclid(1.0);
+        let u = ping_pong(walker.t);
+        let pos = walker.origin + walker.span * (u - 0.5);
+        let dir = if walker.t.rem_euclid(1.0) < 0.5 {
+            walker.span
+        } else {
+            -walker.span
+        };
+        tf.translation = pos;
+        if dir.length_squared() > 0.01 {
+            tf.rotation = Quat::from_rotation_y((-dir.x).atan2(-dir.z));
+        }
+        tf.translation.y = walker.origin.y + (walker.t * std::f32::consts::TAU * 2.0).sin().abs() * 0.06;
+    }
+}
+
+fn update_skyway_trams(time: Res<Time>, mut q: Query<(&mut Transform, &mut SkywayTram)>) {
+    let dt = time.delta_seconds();
+    for (mut tf, mut tram) in q.iter_mut() {
+        tram.t = (tram.t + dt * tram.speed).rem_euclid(1.0);
+        let pos = tram.origin + tram.span * tram.t;
+        tf.translation = pos;
+        tf.rotation = Quat::from_rotation_y((-tram.span.x).atan2(-tram.span.z));
+    }
+}
+
+fn cleanup_colony_life(
+    mut commands: Commands,
+    entities: Query<Entity, Or<(With<ColonyWalker>, With<SkywayTram>)>>,
+) {
+    for entity in entities.iter() {
+        if let Some(entity_commands) = commands.get_entity(entity) {
+            entity_commands.despawn_recursive();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +624,17 @@ mod tests {
     #[test]
     fn butterflies_are_visual_only_and_do_not_interfere() {
         assert_eq!(butterfly_interaction_radius(), 0.0);
+    }
+
+    #[test]
+    fn colony_life_is_bounded_and_fast_skips_figures() {
+        assert_eq!(colony_figure_count(GraphicsMode::Fast, false), 0);
+        assert_eq!(colony_figure_count(GraphicsMode::Balanced, false), 3);
+        assert_eq!(colony_figure_count(GraphicsMode::High, true), 5);
+        assert_eq!(skyway_tram_count(GraphicsMode::Fast, false), 1);
+        assert_eq!(skyway_tram_count(GraphicsMode::High, true), 2);
+        assert!((ping_pong(0.0) - ping_pong(1.0)).abs() < 1e-5);
+        assert!((ping_pong(0.25) - 0.5).abs() < 1e-5);
+        assert!(ping_pong(0.0) >= 0.0 && ping_pong(0.0) <= 1.0);
     }
 }
