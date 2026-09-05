@@ -1284,9 +1284,9 @@ fn film_spawn_silhouettes(
         LinearRgba::rgb(1.5, 9.0, 12.0),
     ));
     let lava_mat = materials.add(sil_mat(
-        // Hot molten orange — high R, mid G, near-zero B so it stays orange under ACES.
-        Color::srgb(1.0, 0.42, 0.02),
-        LinearRgba::rgb(18.0, 4.5, 0.05),
+        // Hot molten orange — keep G channel so ACES doesn't crush to brown/black.
+        Color::srgb(1.0, 0.55, 0.04),
+        LinearRgba::rgb(22.0, 7.0, 0.08),
     ));
     // Clear shelf for dedicated dual_rivers — parallel cyan + orange lanes.
     let river_y = 2.0_f32;
@@ -2589,15 +2589,15 @@ fn spawn_film_station_mountain(
     neon: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Wide mountain installation mid-right — darkrock mass >> light alloy.
-    let base = deck + Vec3::new(34.0, 0.0, 70.0);
+    // Wide mountain installation — closer to crown so mid-frame darkrock owns the hero.
+    let base = deck + Vec3::new(22.0, 0.0, 82.0);
     for (i, (y, sx, sz, h)) in [
-        (4.0_f32, 80.0, 64.0, 12.0),
-        (14.0, 70.0, 56.0, 12.0),
-        (26.0, 58.0, 46.0, 12.0),
-        (38.0, 44.0, 34.0, 12.0),
-        (48.0, 30.0, 24.0, 10.0),
-        (56.0, 18.0, 16.0, 8.0),
+        (4.0_f32, 88.0, 70.0, 14.0),
+        (16.0, 76.0, 60.0, 14.0),
+        (30.0, 62.0, 48.0, 14.0),
+        (44.0, 46.0, 36.0, 12.0),
+        (54.0, 30.0, 24.0, 10.0),
+        (62.0, 16.0, 14.0, 8.0),
     ]
     .into_iter()
     .enumerate()
@@ -3856,7 +3856,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             // Coherent hero: planet upper; mountain mid-right; grass+rivers+skyway+portal left/lower.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
             let pos = deck + Vec3::new(-60.0, 42.0, 140.0);
-            let station_mid = deck + Vec3::new(34.0, 28.0, 70.0);
+            let station_mid = deck + Vec3::new(22.0, 30.0, 82.0);
             let green_crown = deck + Vec3::new(-14.0, 4.0, 108.0);
             let skyway_mid = deck + Vec3::new(-20.0, 26.0, 98.0);
             let rivers = deck + Vec3::new(-8.0, 6.0, 100.0);
@@ -3897,7 +3897,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         13 => {
             // Station mountain — stand off so full stepped mass + neon crown read.
-            let station = deck + Vec3::new(34.0, 40.0, 70.0);
+            let station = deck + Vec3::new(22.0, 36.0, 82.0);
             let pos = deck + Vec3::new(-55.0, 78.0, 155.0);
             let look = station;
             (pos, look)
