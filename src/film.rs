@@ -2398,15 +2398,13 @@ fn spawn_film_fighter_swarm(
         (45.0, 57.0, 30.0, -0.35, 1.2, true),
         (35.0, 58.0, 16.0, -0.48, 1.3, true),
         (55.0, 55.0, 26.0, -0.42, 1.15, true),
-        // Painting-hero wing — left-mid above crown / skyway (larger / lower).
-        (-18.0_f32, 28.0, 112.0, -0.70, 1.9, false),
-        (-6.0, 32.0, 118.0, -0.65, 2.0, false),
-        (8.0, 30.0, 114.0, -0.55, 1.85, false),
-        (-26.0, 26.0, 106.0, -0.75, 1.8, false),
-        (18.0, 34.0, 108.0, -0.50, 1.85, false),
-        (30.0, 36.0, 100.0, -0.45, 1.7, false),
-        (-12.0, 24.0, 120.0, -0.68, 1.75, false),
-        (4.0, 27.0, 122.0, -0.58, 1.8, false),
+        // Painting-hero wing — left of mountain, above verdant lip.
+        (-28.0_f32, 26.0, 114.0, -0.70, 1.7, false),
+        (-18.0, 30.0, 120.0, -0.65, 1.75, false),
+        (-8.0, 28.0, 116.0, -0.55, 1.65, false),
+        (-34.0, 24.0, 108.0, -0.75, 1.6, false),
+        (2.0, 32.0, 112.0, -0.50, 1.55, false),
+        (-22.0, 22.0, 122.0, -0.68, 1.5, false),
     ]
     .into_iter()
     .enumerate()
@@ -2793,14 +2791,14 @@ fn spawn_film_skyway_and_shuttle_proxy(
     hull: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Fat left-mid skyway spans — stop short of mountain so darkrock silhouette stays.
+    // Fat left-mid skyway spans — keep left of mountain; thinner so darkrock reads.
     for (i, (ax, az, bx, bz, y)) in [
-        (-36.0_f32, 108.0, 4.0, 92.0, 22.0),
-        (-28.0, 118.0, 8.0, 98.0, 28.0),
-        (-20.0, 100.0, 2.0, 86.0, 34.0),
-        (-40.0, 96.0, -4.0, 104.0, 18.0),
-        (-12.0, 112.0, 10.0, 90.0, 40.0),
-        (-32.0, 90.0, 0.0, 78.0, 30.0),
+        (-36.0_f32, 108.0, -2.0, 94.0, 22.0),
+        (-28.0, 118.0, 2.0, 100.0, 28.0),
+        (-20.0, 100.0, -4.0, 88.0, 34.0),
+        (-40.0, 96.0, -8.0, 106.0, 18.0),
+        (-12.0, 112.0, 4.0, 92.0, 40.0),
+        (-32.0, 90.0, -6.0, 80.0, 30.0),
     ]
     .into_iter()
     .enumerate()
@@ -2816,7 +2814,7 @@ fn spawn_film_skyway_and_shuttle_proxy(
                 material: deck_mat.clone(),
                 transform: Transform::from_translation(mid)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(9.0, 3.5, len)),
+                    .with_scale(Vec3::new(6.0, 2.6, len)),
                 ..default()
             },
             FilmSilhouette,
@@ -2827,9 +2825,9 @@ fn spawn_film_skyway_and_shuttle_proxy(
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mid + Vec3::Y * 2.4)
+                transform: Transform::from_translation(mid + Vec3::Y * 2.0)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(3.2, 4.5, len * 0.98)),
+                    .with_scale(Vec3::new(2.4, 3.2, len * 0.98)),
                 ..default()
             },
             FilmSilhouette,
@@ -2837,8 +2835,8 @@ fn spawn_film_skyway_and_shuttle_proxy(
             Name::new(format!("FilmSkywayRail{i}")),
         ));
     }
-    // Oversized shuttle + fat cyan plumes in left-mid painting frustum.
-    let shuttle = deck + Vec3::new(-8.0, 30.0, 92.0);
+    // Oversized shuttle + cyan plumes — left of mountain face.
+    let shuttle = deck + Vec3::new(-18.0, 28.0, 98.0);
     let yaw = -0.55_f32;
     commands.spawn((
         PbrBundle {
@@ -3956,7 +3954,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         6 => {
             // Hero shuttle REAR-QUARTER on elevated left-mid painting perch.
-            let shuttle = deck + Vec3::new(-8.0, 30.0, 92.0);
+            let shuttle = deck + Vec3::new(-18.0, 28.0, 98.0);
             let pos = shuttle + Vec3::new(18.0, 6.0, 16.0);
             let look = shuttle + Vec3::new(-8.0, 1.0, -2.0);
             (pos, look)
@@ -4021,7 +4019,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         _ => {
             // Skyway + shuttle — rear-quarter of cyan-plume craft over spans.
-            let shuttle = deck + Vec3::new(-8.0, 30.0, 92.0);
+            let shuttle = deck + Vec3::new(-18.0, 28.0, 98.0);
             let pos = shuttle + Vec3::new(32.0, 14.0, 34.0);
             let look = shuttle + Vec3::new(-6.0, 2.0, -8.0);
             (pos, look)
