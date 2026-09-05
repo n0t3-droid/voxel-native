@@ -2922,6 +2922,8 @@ fn spawn_film_grass_caps(
         // Extra lower-right verdant pad so green survives cyan skyway.
         (24.0, 118.0, 34.0, 26.0, 5.5),
         (-6.0, 120.0, 32.0, 24.0, 6.0),
+        (12.0, 124.0, 36.0, 28.0, 5.0),
+        (-28.0, 122.0, 30.0, 22.0, 5.5),
     ]
     .into_iter()
     .enumerate()
@@ -3979,10 +3981,10 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             let planet = pos + planet_dir * 155.0;
             // Favor verdant lip a touch more; station stays mid-right darkrock.
             let ground = green_crown
-                .lerp(skyway_mid, 0.18)
-                .lerp(rivers, 0.16)
-                .lerp(station_mid, 0.28);
-            let look = ground.lerp(planet, 0.17);
+                .lerp(skyway_mid, 0.15)
+                .lerp(rivers, 0.14)
+                .lerp(station_mid, 0.26);
+            let look = ground.lerp(planet, 0.16);
             (pos, look)
         }
         9 => {
