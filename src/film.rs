@@ -1933,61 +1933,77 @@ fn spawn_film_tunnel_rails(
     glow: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Dual cyan rails + deck plates from pad into the −Z tunnel mouth.
-    let mouth = deck + Vec3::new(0.0, 0.6, -18.0);
-    let start = deck + Vec3::new(0.0, 0.6, 10.0);
+    // Dual cyan rails raised ON the approach deck into the −Z tunnel mouth —
+    // must clear combat-slab lip so the tunnel hero shot reads them.
+    let y = 2.4_f32;
+    let mouth = deck + Vec3::new(0.0, y, -15.0);
+    let start = deck + Vec3::new(0.0, y, 16.0);
     let mid = start.lerp(mouth, 0.5);
-    let len = start.distance(mouth).max(12.0);
-    for (ox, name) in [(-2.4_f32, "L"), (2.4, "R")] {
+    let len = start.distance(mouth).max(16.0);
+    // Wide approach deck plate under the rails.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: metal.clone(),
+            transform: Transform::from_translation(mid + Vec3::new(0.0, -0.6, 0.0))
+                .looking_at(mouth + Vec3::new(0.0, -0.6, 0.0), Vec3::Y)
+                .with_scale(Vec3::new(9.0, 0.5, len + 2.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmTunnelRailDeck"),
+    ));
+    for (ox, name) in [(-2.8_f32, "L"), (2.8, "R")] {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mid + Vec3::new(ox, 0.35, 0.0))
-                    .looking_at(mouth + Vec3::new(ox, 0.35, 0.0), Vec3::Y)
-                    .with_scale(Vec3::new(0.85, 0.55, len)),
+                transform: Transform::from_translation(mid + Vec3::new(ox, 0.55, 0.0))
+                    .looking_at(mouth + Vec3::new(ox, 0.55, 0.0), Vec3::Y)
+                    .with_scale(Vec3::new(1.35, 0.85, len)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTunnelRail{name}")),
         ));
+        // Extra emissive crown so rails punch lavapipe bloom.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
-                material: metal.clone(),
-                transform: Transform::from_translation(mid + Vec3::new(ox, 0.05, 0.0))
-                    .looking_at(mouth + Vec3::new(ox, 0.05, 0.0), Vec3::Y)
-                    .with_scale(Vec3::new(1.3, 0.35, len * 1.02)),
+                material: glow.clone(),
+                transform: Transform::from_translation(mid + Vec3::new(ox, 1.15, 0.0))
+                    .looking_at(mouth + Vec3::new(ox, 1.15, 0.0), Vec3::Y)
+                    .with_scale(Vec3::new(0.7, 0.45, len * 0.98)),
                 ..default()
             },
             FilmSilhouette,
-            Name::new(format!("FilmTunnelRailBed{name}")),
+            Name::new(format!("FilmTunnelRailGlow{name}")),
         ));
     }
-    // Center glow strip so rails read in painting + tunnel shots.
+    // Center glow strip.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: glow.clone(),
-            transform: Transform::from_translation(mid + Vec3::new(0.0, 0.2, 0.0))
+            transform: Transform::from_translation(mid + Vec3::new(0.0, 0.35, 0.0))
                 .looking_at(mouth, Vec3::Y)
-                .with_scale(Vec3::new(1.8, 0.25, len * 0.95)),
+                .with_scale(Vec3::new(2.4, 0.35, len * 0.95)),
             ..default()
         },
         FilmSilhouette,
-        Name::new("FilmTunnelRailGlow"),
+        Name::new("FilmTunnelRailCenter"),
     ));
     // Approach pylons marching into the mouth.
-    for i in 0..6 {
-        let t = i as f32 / 5.0;
+    for i in 0..7 {
+        let t = i as f32 / 6.0;
         let p = start.lerp(mouth, t);
-        for ox in [-3.6_f32, 3.6] {
+        for ox in [-4.2_f32, 4.2] {
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
                     material: metal.clone(),
-                    transform: Transform::from_translation(p + Vec3::new(ox, 2.2, 0.0))
-                        .with_scale(Vec3::new(0.7, 4.4, 0.7)),
+                    transform: Transform::from_translation(p + Vec3::new(ox, 2.8, 0.0))
+                        .with_scale(Vec3::new(0.85, 5.6, 0.85)),
                     ..default()
                 },
                 FilmSilhouette,
@@ -1997,8 +2013,8 @@ fn spawn_film_tunnel_rails(
                 PbrBundle {
                     mesh: cube.clone(),
                     material: cyan.clone(),
-                    transform: Transform::from_translation(p + Vec3::new(ox, 4.6, 0.0))
-                        .with_scale(Vec3::new(1.1, 0.7, 1.1)),
+                    transform: Transform::from_translation(p + Vec3::new(ox, 5.8, 0.0))
+                        .with_scale(Vec3::new(1.4, 0.9, 1.4)),
                     ..default()
                 },
                 FilmSilhouette,
@@ -2006,6 +2022,18 @@ fn spawn_film_tunnel_rails(
             ));
         }
     }
+    // Mouth threshold bar — cyan lip where rails enter the bore.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: cyan.clone(),
+            transform: Transform::from_translation(mouth + Vec3::new(0.0, 0.4, 3.5))
+                .with_scale(Vec3::new(10.0, 1.2, 2.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmTunnelRailThreshold"),
+    ));
 }
 
 fn spawn_film_fighter_swarm(
@@ -2637,15 +2665,14 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         3 => {
-            // Just behind turret0 muzzle, looking along fire lane into alien —
-            // yellow flash in near field, fat orange/red body down the axis.
-            // Turret0 ≈ pad+(-9,3,8) → deck+(-9,3,22); alien ≈ deck+(6,5,16.5).
+            // Pull back along fire lane: clear deck clutter, yellow muzzles
+            // near, fat orange/red beam body stretching to alien.
             let flash = station + Vec3::new(-7.0, 6.5, 26.0);
             let aim = station + Vec3::new(6.0, 5.0, 16.5);
             let axis = (aim - flash).normalize_or_zero();
             let side = axis.cross(Vec3::Y).normalize_or_zero();
-            let pos = flash - axis * 5.5 + side * 2.2 + Vec3::Y * 1.4;
-            let look = aim + Vec3::Y * 0.4;
+            let pos = flash - axis * 14.0 + side * 5.5 + Vec3::Y * 5.0;
+            let look = flash.lerp(aim, 0.55) + Vec3::Y * 0.5;
             (pos, look)
         }
         4 => {
@@ -2655,10 +2682,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         5 => {
-            // Face-on to tunnel mouth with cyan rails leading in.
-            let mouth = station + Vec3::new(0.0, 6.0, -16.0);
-            let pos = mouth + Vec3::new(0.0, 5.0, 28.0);
-            let look = mouth + Vec3::new(0.0, 0.5, -1.0);
+            // Elevated face-on: cyan rails on approach deck into tunnel mouth.
+            let mouth = station + Vec3::new(0.0, 5.0, -15.0);
+            let pos = mouth + Vec3::new(0.0, 8.0, 32.0);
+            let look = mouth + Vec3::new(0.0, -1.0, 2.0);
             (pos, look)
         }
         6 => {
@@ -2695,10 +2722,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         10 => {
-            // Fighter swarm: three-quarter of V + long cyan plumes.
-            let form = deck + Vec3::new(24.0, 28.0, 48.0);
-            let pos = deck + Vec3::new(58.0, 22.0, 72.0);
-            let look = form + Vec3::new(-4.0, 2.0, -4.0);
+            // Three-quarter under the V so cyan plumes stream toward cam.
+            let form = deck + Vec3::new(24.0, 29.0, 46.0);
+            let pos = deck + Vec3::new(52.0, 16.0, 78.0);
+            let look = form + Vec3::new(-2.0, 4.0, -6.0);
             (pos, look)
         }
         _ => {
