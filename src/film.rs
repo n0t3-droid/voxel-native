@@ -1454,6 +1454,29 @@ fn film_spawn_silhouettes(
     ));
     spawn_film_crystal_towers(&mut commands, &cube, &tower_crystal, &tower_verdant, deck);
 
+    // Glowing cyan waterfall off +X rim into the plasma shelf.
+    let fall_cyan = materials.add(sil_mat(
+        Color::srgb(0.20, 0.95, 1.0),
+        LinearRgba::rgb(2.0, 8.5, 10.0),
+    ));
+    let fall_deep = materials.add(sil_mat(
+        Color::srgb(0.10, 0.55, 1.0),
+        LinearRgba::rgb(0.8, 4.0, 9.0),
+    ));
+    let fall_mist = materials.add(sil_mat(
+        Color::srgb(0.70, 0.98, 1.0),
+        LinearRgba::rgb(3.5, 7.0, 8.0),
+    ));
+    spawn_film_waterfall(
+        &mut commands,
+        &cube,
+        &fall_cyan,
+        &fall_deep,
+        &fall_mist,
+        &plasma_mat,
+        deck,
+    );
+
     info!(
         "FILM: spawned mesh silhouettes + keel underside plates on combat slab ({}, {})",
         island.cx, island.cz
@@ -1948,7 +1971,7 @@ fn spawn_film_tunnel_rails(
 ) {
     // Axis-aligned dual cyan rails (no looking_at) so lavapipe always shows
     // long Z-runs into the −Z tunnel mouth. Raised above deck grass lip.
-    let y = 5.5_f32;
+    let y = 5.8_f32;
     let z0 = 18.0_f32;
     let z1 = -14.0_f32;
     let mid_z = (z0 + z1) * 0.5;
@@ -1971,7 +1994,7 @@ fn spawn_film_tunnel_rails(
                 mesh: cube.clone(),
                 material: cyan.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox, y, mid_z))
-                    .with_scale(Vec3::new(1.8, 1.2, len)),
+                    .with_scale(Vec3::new(2.2, 1.5, len)),
                 ..default()
             },
             FilmSilhouette,
@@ -2137,6 +2160,123 @@ fn spawn_film_fighter_swarm(
     }
 }
 
+fn spawn_film_waterfall(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    cyan: &Handle<StandardMaterial>,
+    deep: &Handle<StandardMaterial>,
+    mist: &Handle<StandardMaterial>,
+    pool: &Handle<StandardMaterial>,
+    deck: Vec3,
+) {
+    // Lip on +X / +Z rim — falls into the dual-river shelf so painting +
+    // dedicated waterfall beats both catch the cascade.
+    let lip = deck + Vec3::new(46.0, 1.2, 52.0);
+    let pool_y = -17.0_f32;
+    let fall_h = (lip.y - (deck.y + pool_y)).abs().max(16.0);
+    let mid = lip + Vec3::new(2.0, -fall_h * 0.45, 4.0);
+    // Main sheet.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: cyan.clone(),
+            transform: Transform::from_translation(mid).with_scale(Vec3::new(6.5, fall_h, 2.8)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmWaterfallSheet"),
+    ));
+    // Deep-blue core for thickness under ACES.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: deep.clone(),
+            transform: Transform::from_translation(mid + Vec3::new(0.0, 0.0, 0.6))
+                .with_scale(Vec3::new(3.8, fall_h * 0.98, 1.6)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmWaterfallCore"),
+    ));
+    // Side ribbons / braided falls.
+    for (i, ox) in [(-3.5_f32), (3.5)].into_iter().enumerate() {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: cyan.clone(),
+                transform: Transform::from_translation(mid + Vec3::new(ox, -1.0, 1.2))
+                    .with_scale(Vec3::new(2.4, fall_h * 0.85, 1.8)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmWaterfallRibbon{i}")),
+        ));
+    }
+    // Lip / brink on the island rim.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: mist.clone(),
+            transform: Transform::from_translation(lip + Vec3::new(0.0, 0.6, 0.0))
+                .with_scale(Vec3::new(10.0, 1.4, 4.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmWaterfallLip"),
+    ));
+    // Splash pool feeding the plasma shelf.
+    let splash = deck + Vec3::new(48.0, pool_y + 1.5, 58.0);
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: pool.clone(),
+            transform: Transform::from_translation(splash).with_scale(Vec3::new(14.0, 3.5, 10.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmRiverRibbon,
+        Name::new("FilmWaterfallPool"),
+    ));
+    // Mist / spray voxels cascading mid-fall.
+    for i in 0..10 {
+        let t = i as f32 / 9.0;
+        let p = lip.lerp(splash, t) + Vec3::new((i as f32 * 0.7).sin() * 1.8, 0.0, 0.5);
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: mist.clone(),
+                transform: Transform::from_translation(p).with_scale(Vec3::splat(2.2 - t * 0.6)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmWaterfallMist{i}")),
+        ));
+    }
+    // Second shorter fall for painting density (nearer cam look).
+    let lip2 = deck + Vec3::new(34.0, 0.8, 44.0);
+    let mid2 = lip2 + Vec3::new(1.5, -10.0, 3.0);
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: cyan.clone(),
+            transform: Transform::from_translation(mid2).with_scale(Vec3::new(4.5, 18.0, 2.2)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmWaterfallSheetB"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: mist.clone(),
+            transform: Transform::from_translation(lip2).with_scale(Vec3::new(7.0, 1.2, 3.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmWaterfallLipB"),
+    ));
+}
+
 fn spawn_film_crystal_towers(
     commands: &mut Commands,
     cube: &Handle<Mesh>,
@@ -2146,11 +2286,13 @@ fn spawn_film_crystal_towers(
 ) {
     // Tall crystal towers — next most visible painting gap after fighters.
     for (i, (ox, oz, h)) in [
-        (18.0_f32, 18.0, 28.0),
-        (28.0, 24.0, 34.0),
-        (22.0, 32.0, 24.0),
-        (36.0, 28.0, 40.0),
-        (14.0, 40.0, 30.0),
+        (18.0_f32, 18.0, 34.0),
+        (28.0, 24.0, 42.0),
+        (22.0, 32.0, 30.0),
+        (36.0, 28.0, 48.0),
+        (14.0, 40.0, 36.0),
+        (42.0, 36.0, 40.0),
+        (10.0, 28.0, 32.0),
     ]
     .into_iter()
     .enumerate()
@@ -2161,7 +2303,7 @@ fn spawn_film_crystal_towers(
                 mesh: cube.clone(),
                 material: mat.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.45, oz))
-                    .with_scale(Vec3::new(3.2, h, 3.2))
+                    .with_scale(Vec3::new(4.4, h, 4.4))
                     .with_rotation(Quat::from_rotation_z(
                         0.08 * if i % 2 == 0 { 1.0 } else { -1.0 },
                     )),
@@ -2175,8 +2317,8 @@ fn spawn_film_crystal_towers(
             PbrBundle {
                 mesh: cube.clone(),
                 material: crystal.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, h + 1.5, oz))
-                    .with_scale(Vec3::new(4.0, 3.0, 4.0)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, h + 2.0, oz))
+                    .with_scale(Vec3::new(5.5, 4.0, 5.5)),
                 ..default()
             },
             FilmSilhouette,
@@ -2220,6 +2362,9 @@ const SHOTS: &[FilmShot] = &[
     },
     FilmShot {
         name: "dual_rivers",
+    },
+    FilmShot {
+        name: "waterfall_cyan",
     },
     FilmShot {
         name: "fighter_swarm",
@@ -2267,7 +2412,7 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    let show_rivers = matches!(film.shot_index, 8 | 9);
+    let show_rivers = matches!(film.shot_index, 8 | 9 | 10);
     for mut vis in river_ribbons.iter_mut() {
         *vis = if show_rivers {
             Visibility::Visible
@@ -2296,7 +2441,7 @@ fn film_override_sky_clear(film: Res<FilmRuntime>, mut clear_color: ResMut<Clear
         7 | 8 => {
             clear_color.0 = Color::srgb(0.10, 0.06, 0.18);
         }
-        9 => {
+        9 | 10 => {
             clear_color.0 = Color::srgb(0.22, 0.20, 0.28);
         }
         _ => {}
@@ -2377,7 +2522,8 @@ fn film_drive_camera(
             7 => 40.0,  // planet close
             8 => 58.0,  // painting-scale wide hero
             9 => 52.0,  // dual plasma + lava rivers
-            10 => 48.0, // fighter swarm plumes
+            10 => 48.0, // cyan waterfall cascade
+            11 => 42.0, // fighter swarm — tighter on formation
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -2388,8 +2534,10 @@ fn film_drive_camera(
             3 => 0.16, // muzzle flashes / tracers
             6 => 0.10, // shuttle wakes — cyan, not washed
             7 => 0.12,
-            8 => 0.08, // painting: tame skyway white-out so grass/rivers read
-            9 => 0.14, // dual rivers emissives
+            8 => 0.08,  // painting: tame skyway white-out so grass/rivers read
+            9 => 0.14,  // dual rivers emissives
+            10 => 0.16, // waterfall cyan emissives
+            11 => 0.10, // fighter plumes
             _ => 0.05,
         };
         bloom.prefilter_settings.threshold = match film.shot_index {
@@ -2410,7 +2558,7 @@ fn film_drive_camera(
         if let Ok(mut sun) = sun_q.get_single_mut() {
             sun.illuminance = 4_500.0; // tame noon wash so nebula chroma survives
         }
-    } else if film.shot_index == 9 {
+    } else if matches!(film.shot_index, 9 | 10) {
         clear_color.0 = Color::srgb(0.22, 0.20, 0.28);
     }
 
@@ -2418,7 +2566,7 @@ fn film_drive_camera(
     ambient.brightness = match film.shot_index {
         1 => ambient.brightness.max(6_800.0),
         2 | 3 => ambient.brightness.max(3_800.0),
-        9 => ambient.brightness.max(4_800.0),
+        9 | 10 => ambient.brightness.max(4_800.0),
         8 => ambient.brightness.max(2_200.0),
         _ => ambient.brightness.max(2_050.0),
     };
@@ -2759,10 +2907,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         8 => {
-            // Painting-scale: archipelago + nebula + fighter wing near skyway.
+            // Painting-scale: waterfall on +X rim + fighters + planet tip-up.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-38.0, 26.0, 92.0);
-            let look = deck + Vec3::new(14.0, 10.0, 54.0) + planet_dir * 3.0;
+            let pos = deck + Vec3::new(-36.0, 24.0, 90.0);
+            let look = deck + Vec3::new(28.0, 6.0, 52.0) + planet_dir * 8.0;
             (pos, look)
         }
         9 => {
@@ -2773,10 +2921,17 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         10 => {
-            // Three-quarter under the V so cyan plumes stream toward cam.
-            let form = deck + Vec3::new(24.0, 29.0, 46.0);
-            let pos = deck + Vec3::new(52.0, 16.0, 78.0);
-            let look = form + Vec3::new(-2.0, 4.0, -6.0);
+            // Dedicated waterfall: three-quarter of cyan cascade into pool.
+            let lip = deck + Vec3::new(46.0, 1.0, 52.0);
+            let pos = deck + Vec3::new(68.0, 6.0, 72.0);
+            let look = lip + Vec3::new(-2.0, -8.0, 2.0);
+            (pos, look)
+        }
+        11 => {
+            // Fighter swarm: high open-sky three-quarter — avoid deck clutter.
+            let form = deck + Vec3::new(28.0, 31.0, 44.0);
+            let pos = deck + Vec3::new(50.0, 36.0, 68.0);
+            let look = form + Vec3::new(-4.0, 0.0, -2.0);
             (pos, look)
         }
         _ => {
@@ -2971,6 +3126,7 @@ mod tests {
         assert!(names
             .iter()
             .any(|n| n.contains("dual") || n.contains("river") || n.contains("plasma")));
+        assert!(names.iter().any(|n| n.contains("waterfall")));
         assert!(names.iter().any(|n| n.contains("rail")));
     }
 
