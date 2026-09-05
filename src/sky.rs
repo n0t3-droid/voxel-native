@@ -860,8 +860,19 @@ fn follow_and_animate_sky(
         // without changing the daytime pad lighting path.
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
             let film_on = film.as_ref().map(|f| f.enabled).unwrap_or(false);
-            let (base_day, base_night, base_sunset) = if film_on {
-                // Punchy but not ACES-white; filaments need headroom.
+            let film_hero = film
+                .as_ref()
+                .filter(|f| f.enabled && f.ready_to_roll)
+                .map(|f| matches!(f.shot_index, 7 | 8 | 9))
+                .unwrap_or(false);
+            let (base_day, base_night, base_sunset) = if film_hero {
+                // Painting/planet/rivers: richer magenta–violet filaments.
+                (
+                    Vec3::new(14.0, 4.0, 20.0),
+                    Vec3::new(15.0, 5.0, 22.0),
+                    Vec3::new(16.0, 5.0, 6.0),
+                )
+            } else if film_on {
                 (
                     Vec3::new(9.0, 3.5, 14.0),
                     Vec3::new(10.0, 4.5, 15.0),
