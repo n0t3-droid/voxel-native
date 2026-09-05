@@ -1029,6 +1029,26 @@ fn chunk_slot_loaded_or_known_air(
     world.chunks.contains_key(&pos) || chunk_slot_known_air(world, pos, vertical_chunks)
 }
 
+/// Neighbours past the load disc are never generated, so waiting on them
+/// leaves a permanent dirty rim (~300 chunks at Fast RD 12) that the
+/// mesher rescans every frame. Treat those slots as air; the snapshot
+/// already samples missing voxels as AIR. Inside the disc we still wait.
+fn chunk_slot_mesh_neighbour_ready(
+    world: &mut VoxelWorld,
+    pos: ChunkPos,
+    vertical_chunks: i32,
+    pcx: i32,
+    pcz: i32,
+    load_r2: i32,
+) -> bool {
+    if chunk_slot_loaded_or_known_air(world, pos, vertical_chunks) {
+        return true;
+    }
+    let dx = pos.x - pcx;
+    let dz = pos.z - pcz;
+    dx * dx + dz * dz > load_r2
+}
+
 #[inline]
 fn uniform_chunk_slot_matches(
     world: &mut VoxelWorld,
@@ -1213,10 +1233,10 @@ fn stream_chunks(
     // Cap installs too: terrain generation finishes on worker threads in
     // waves, and installing every completed chunk in one frame causes the
     // one-second hitch the player sees while flying at max distance.
-    let terrain_apply_cap = if warmup_boost {
+    let terrain_apply_cap = if warmup_boost || budget.startup_fill {
         (budget.chunks_per_frame.max(1) as usize)
-            .saturating_mul(3)
-            .max(if fast { 24 } else { 16 })
+            .saturating_mul(if warmup_boost { 3 } else { 2 })
+            .max(if fast { 20 } else { 16 })
             .min(if fast { 40 } else { 32 })
     } else {
         (budget.chunks_per_frame.max(1) as usize).min(12)
@@ -1258,6 +1278,20 @@ fn stream_chunks(
             (0, 0, -1),
         ] {
             let n = ChunkPos::new(cp.x + dx, cp.y + dy, cp.z + dz);
+            // Fast far meshes skip seam remesh later; don't keep those
+            // neighbours in the dirty queue or the governor never settles.
+            if fast {
+                let already_far = streamer
+                    .entities
+                    .get(&n)
+                    .and_then(|group| group.first())
+                    .is_some_and(|entry| entry.far_lod);
+                if already_far
+                    && chunk_wants_far_lod(settings.graphics, rd, n.x - pcx, n.z - pcz)
+                {
+                    continue;
+                }
+            }
             if let Some(c) = world.chunks.get_mut(&n) {
                 c.dirty = true;
                 streamer.dirty_queue.insert(n);
@@ -1382,7 +1416,7 @@ fn mesh_dirty_chunks(
     // 1. Poll finished meshing tasks. Cap how many we actually *apply*
     //    (spawn entities for) per frame so a flood of finished tasks
     //    can't spike the frame budget with mesh.add() + commands.spawn().
-    let spawn_cap = if streamer.stream_elapsed < 2.4 {
+    let spawn_cap = if budget.startup_fill || streamer.stream_elapsed < 2.4 {
         (budget.mesh_applies_per_frame as usize)
             .saturating_mul(3)
             .max(24)
@@ -1614,6 +1648,7 @@ fn mesh_dirty_chunks(
         // Terrain slots above the cached column ceiling are treated as
         // implicit AIR, so the streamer does not need placeholder chunks.
         let vertical_chunks = settings.vertical_chunks as i32;
+        let load_r2 = budget.render_distance.max(2) * budget.render_distance.max(2);
         let neighbours_needed = [
             ChunkPos::new(pos.x + 1, pos.y, pos.z),
             ChunkPos::new(pos.x - 1, pos.y, pos.z),
@@ -1622,9 +1657,9 @@ fn mesh_dirty_chunks(
             ChunkPos::new(pos.x, pos.y + 1, pos.z),
             ChunkPos::new(pos.x, pos.y - 1, pos.z),
         ];
-        let all_neighbours_ready = neighbours_needed
-            .into_iter()
-            .all(|n| chunk_slot_loaded_or_known_air(&mut world, n, vertical_chunks));
+        let all_neighbours_ready = neighbours_needed.into_iter().all(|n| {
+            chunk_slot_mesh_neighbour_ready(&mut world, n, vertical_chunks, pcx, pcz, load_r2)
+        });
         if !all_neighbours_ready {
             // Neighbours haven't streamed in yet; try again next frame.
             streamer.dirty_queue.insert(pos);
@@ -2156,6 +2191,39 @@ mod tests {
             40,
             20,
             0
+        ));
+    }
+
+    #[test]
+    fn mesh_neighbours_outside_the_load_disc_count_as_ready() {
+        let mut world = VoxelWorld::new();
+        let load_r2 = 12 * 12;
+        world.column_top_cy.insert((5, 0), 2);
+        world.column_top_cy.insert((13, 0), 2);
+        assert!(chunk_slot_mesh_neighbour_ready(
+            &mut world,
+            ChunkPos::new(13, 0, 0),
+            7,
+            0,
+            0,
+            load_r2
+        ));
+        assert!(!chunk_slot_mesh_neighbour_ready(
+            &mut world,
+            ChunkPos::new(5, 0, 0),
+            7,
+            0,
+            0,
+            load_r2
+        ));
+        world.insert_chunk(ChunkPos::new(5, 0, 0), Chunk::new(ChunkPos::new(5, 0, 0)));
+        assert!(chunk_slot_mesh_neighbour_ready(
+            &mut world,
+            ChunkPos::new(5, 0, 0),
+            7,
+            0,
+            0,
+            load_r2
         ));
     }
 }
