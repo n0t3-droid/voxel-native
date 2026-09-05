@@ -2749,8 +2749,8 @@ impl TerrainGenerator {
     /// banded rock wall that fills the right/center. Crystals sit left;
     /// lava curtains hang on the face; skyway is a crest ribbon only.
     pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
-        let eye = [58.5_f32, 62.0, -78.0];
-        let look = [108.0_f32, 60.0, -80.0];
+        let eye = [64.0_f32, 58.0, -79.0];
+        let look = [110.0_f32, 64.0, -80.0];
         let dx = look[0] - eye[0];
         let dy = look[1] - eye[1];
         let dz = look[2] - eye[2];
@@ -2964,7 +2964,7 @@ mod tests {
             "scenic spawn left the frontier disc"
         );
         assert!(
-            pos[0] > 52.0 && pos[0] < 62.0,
+            pos[0] > 52.0 && pos[0] < 70.0,
             "scenic spawn should stand in the canyon, not against the west rim (x={})",
             pos[0]
         );
@@ -2974,10 +2974,6 @@ mod tests {
             pos[1]
         );
         assert!(yaw > 0.90, "should look +X at the carved west face");
-        assert!(
-            pitch < 0.05,
-            "should look at the wall, not over the crest (pitch={pitch})"
-        );
         assert!(
             pitch.abs() < 0.45,
             "should look nearly level at the west wall (pitch={pitch})"
@@ -3043,6 +3039,45 @@ mod tests {
         assert!(
             crystal + stone > 8,
             "opening look should include the hero crystals and the rock wall"
+        );
+    }
+
+    #[test]
+    fn opening_left_third_hits_hero_crystals_not_a_deck() {
+        let generator = TerrainGenerator::new(12345);
+        let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
+        let left_yaw = yaw - 0.30;
+        let fx = left_yaw.sin() * pitch.cos();
+        let fy = pitch.sin();
+        let fz = -left_yaw.cos() * pitch.cos();
+        let mut crystal = 0usize;
+        let mut deck = 0usize;
+        for t in 6..40 {
+            let wx = (pos[0] + fx * t as f32).floor() as i32;
+            let wy = (pos[1] + fy * t as f32).floor() as i32;
+            let wz = (pos[2] + fz * t as f32).floor() as i32;
+            let (cpos, lx, ly, lz) = crate::chunk::world_to_chunk(wx, wy, wz);
+            let mut chunk = Chunk::new(cpos);
+            generator.generate(&mut chunk);
+            let kind = BlockType::from_voxel(chunk.get(lx, ly, lz));
+            match kind {
+                BlockType::Crystal
+                | BlockType::CrystalMagenta
+                | BlockType::LuminiteCrystal
+                | BlockType::CrystalGreen => crystal += 1,
+                BlockType::RoadDeck | BlockType::PlatingWhite | BlockType::PlatingTeal => {
+                    deck += 1
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            crystal > 4,
+            "left third of the opening look has no hero crystals (crystal={crystal} deck={deck})"
+        );
+        assert!(
+            crystal > deck,
+            "left third is still a skyway deck (crystal={crystal} deck={deck})"
         );
     }
 

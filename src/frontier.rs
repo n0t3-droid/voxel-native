@@ -44,7 +44,7 @@ pub const HERO_CRYSTAL_X: i32 = 72;
 pub const HERO_CRYSTAL_Z: i32 = -96;
 pub const HERO_RIVER_X0: i32 = 36;
 pub const HERO_RIVER_X1: i32 = 200;
-pub const HERO_RIVER_Z: i32 = -72;
+pub const HERO_RIVER_Z: i32 = -74;
 pub const HERO_SKYWAY_X0: i32 = -36;
 pub const HERO_SKYWAY_X1: i32 = 188;
 pub const HERO_SKYWAY_Z: i32 = -48;
@@ -244,31 +244,32 @@ impl SkyIsland {
     /// the illustration's hovering landmasses.
     pub fn hero() -> Self {
         Self {
-            cx: 86,
-            cz: -104,
-            cy: 94,
-            radius: 13,
+            cx: 94,
+            cz: -120,
+            cy: 104,
+            radius: 11,
             phase: 1.15,
         }
     }
 
     pub fn hero_b() -> Self {
         Self {
-            cx: 98,
-            cz: -118,
-            cy: 100,
-            radius: 10,
+            cx: 108,
+            cz: -134,
+            cy: 108,
+            radius: 9,
             phase: 2.4,
         }
     }
 
-    /// Closer left-mid island so the opening look has more than one slab.
+    /// Mid-sky silhouette — far enough left that it does not read as a
+    /// deck in the opening look, close enough to hold up while flying.
     pub fn hero_c() -> Self {
         Self {
-            cx: 76,
-            cz: -92,
-            cy: 90,
-            radius: 11,
+            cx: 82,
+            cz: -112,
+            cy: 98,
+            radius: 9,
             phase: 0.55,
         }
     }
@@ -542,10 +543,21 @@ impl CrystalCluster {
     /// (camera left = −Z) so it owns a real slice of the opening frame.
     pub fn hero_d() -> Self {
         Self {
-            cx: 72,
-            cz: -88,
-            shards: 20,
-            scale: 80,
+            cx: 80,
+            cz: -86,
+            shards: 16,
+            scale: 56,
+        }
+    }
+
+    /// Second mass further +X so crystals still read after the player
+    /// flies forward from spawn, not only in the frozen overlook.
+    pub fn hero_e() -> Self {
+        Self {
+            cx: 96,
+            cz: -90,
+            shards: 12,
+            scale: 48,
         }
     }
 
@@ -596,7 +608,14 @@ impl CrystalCluster {
             return;
         }
 
-        let spread = 10.0 + self.scale as f64 * 0.22;
+        // Hero masses stay tight so they occupy the left third instead of
+        // spraying shards into the mesa or out of the frustum.
+        let spread = if self.scale >= 48 {
+            5.0 + self.scale as f64 * 0.10
+        } else {
+            10.0 + self.scale as f64 * 0.22
+        };
+        let punch = self.scale >= 48;
         for s in 0..self.shards {
             let salt = 0x0C_20_00 + s * 7919;
             let bx = self.cx + ((cell_rand(seed, salt, self.cx, self.cz) - 0.5) * spread) as i32;
@@ -609,8 +628,8 @@ impl CrystalCluster {
             let thick = if self.scale >= 40 { 5 } else { 3 };
             let base_radius = 1 + (height / 8).min(thick);
             // Lean, expressed as horizontal drift per block of height.
-            let lean_x = (cell_rand(seed, salt + 3, bx, bz) - 0.5) * 0.5;
-            let lean_z = (cell_rand(seed, salt + 4, bx, bz) - 0.5) * 0.5;
+            let lean_x = (cell_rand(seed, salt + 3, bx, bz) - 0.5) * if punch { 0.22 } else { 0.5 };
+            let lean_z = (cell_rand(seed, salt + 4, bx, bz) - 0.5) * if punch { 0.22 } else { 0.5 };
             let base_y = ground(bx, bz);
 
             for k in 0..height {
@@ -631,19 +650,32 @@ impl CrystalCluster {
                         if dx.abs() + dz.abs() > radius {
                             continue;
                         }
-                        place(chunk, origin, cx + dx, wy, cz + dz, tint);
+                        if punch {
+                            place_over(chunk, origin, cx + dx, wy, cz + dz, tint);
+                        } else {
+                            place(chunk, origin, cx + dx, wy, cz + dz, tint);
+                        }
                     }
                 }
             }
             // Bright tip so every shard ends in a highlight.
-            place(
-                chunk,
-                origin,
+            let tip = (
                 bx + (lean_x * height as f64).round() as i32,
                 base_y + height,
                 bz + (lean_z * height as f64).round() as i32,
-                BlockType::LuminiteCrystal,
             );
+            if punch {
+                place_over(chunk, origin, tip.0, tip.1, tip.2, BlockType::LuminiteCrystal);
+            } else {
+                place(
+                    chunk,
+                    origin,
+                    tip.0,
+                    tip.1,
+                    tip.2,
+                    BlockType::LuminiteCrystal,
+                );
+            }
         }
     }
 }
@@ -1107,18 +1139,16 @@ fn hero_river_column(wx: i32, wz: i32) -> Option<RiverColumn> {
     if cut <= 0 {
         return None;
     }
-    let fluid = if wx.rem_euclid(42) < 18 {
-        BlockType::Lava
-    } else {
-        BlockType::PlasmaFlow
-    };
+    let fluid = BlockType::PlasmaFlow;
     Some(RiverColumn { cut, dist, fluid })
 }
 
 /// Columns inside the New World opening frustum. Skyway decks here steal
-/// the mesa; keep them out except a thin crest ribbon.
+/// the mesa; keep them out except a thin crest ribbon. Slightly wider than
+/// the spawn look so leftover rails just off-frame cannot sneak into the
+/// left third once the player banks.
 fn in_opening_look(wx: i32, wz: i32) -> bool {
-    wx >= 44 && wx <= 136 && wz >= -124 && wz <= -44
+    wx >= 40 && wx <= 140 && wz >= -140 && wz <= -40
 }
 
 /// Forced skyway span for the spawn postcard: a straight carriageway
@@ -1257,8 +1287,11 @@ fn hero_terrace_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 /// Lower face rail stepping down the mesa wall so habs hanging on the
 /// cliff stay connected to the mesa-top colony.
 fn hero_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
-    const RAIL_Z: i32 = -130;
+    const RAIL_Z: i32 = -152;
     const HALF: f64 = 2.0;
+    if in_opening_look(wx, wz) {
+        return None;
+    }
     if wx < 48 || wx > 160 {
         return None;
     }
@@ -1674,7 +1707,7 @@ impl CliffFace {
             return;
         }
         let origin = chunk.pos.origin();
-        const SITES: [i32; 3] = [-100, -82, -64];
+        const SITES: [i32; 3] = [-90, -80, -70];
         let half = 6i32;
         for &cz in &SITES {
             if cz < self.z0 + 4 || cz > self.z1 - 4 {
@@ -1685,25 +1718,127 @@ impl CliffFace {
                 let rim = ground(self.face_x + self.depth, z);
                 let extra = self.extra_crest(z);
                 let pit = rim - self.drop;
-                let crest_y = rim + self.crest + extra;
                 let edge = (z - cz).unsigned_abs() as i32;
-                // Leave the canyon floor dark — the curtain hangs off the
-                // lip and falls as a sheet, it does not pool.
-                for wy in (pit + 6)..=crest_y {
-                    let taper = if wy > crest_y - 10 { 2 } else { 0 };
+                // Mid-height sheet on the visible wall — not a floor pool
+                // and not a stain that climbs the crest out of the FOV.
+                let lo = pit + 12;
+                let hi = rim + 18;
+                for wy in lo..=hi.min(rim + extra + 8) {
+                    let taper = if wy > hi - 8 { 2 } else { 0 };
                     if edge > half - taper {
                         continue;
                     }
+                    place_over(chunk, origin, face - 4, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 3, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 2, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 1, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face, wy, z, BlockType::Lava);
                     if edge <= 2 {
-                        place_over(chunk, origin, face + 1, wy, z, BlockType::PlasmaFlow);
+                        place_over(chunk, origin, face, wy, z, BlockType::PlasmaFlow);
                     }
                 }
             }
         }
+        self.stamp_canyon_plasma(chunk, ground);
+    }
+
+    /// Cyan energy river on the carved pit floor so it survives the west
+    /// apron and reads from spawn and from a forward fly.
+    fn stamp_canyon_plasma(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
+        if self.apron < 8 {
+            return;
+        }
+        let origin = chunk.pos.origin();
+        for wx in (self.face_x - self.apron + 6)..=(self.face_x - 8) {
+            let cz = -74 + ((wx as f64 * 0.11).sin() * 5.0) as i32;
+            for z in (cz - 4)..=(cz + 4) {
+                if z < self.z0 + 2 || z > self.z1 - 2 {
+                    continue;
+                }
+                let face = self.face_at(z);
+                if wx >= face - 5 {
+                    continue;
+                }
+                let rim = ground(self.face_x + self.depth, z);
+                let pit = rim - self.drop;
+                let dist = (z - cz).abs();
+                place_over(chunk, origin, wx, pit, z, BlockType::PlasmaFlow);
+                place_over(chunk, origin, wx, pit + 1, z, BlockType::PlasmaFlow);
+                if dist <= 1 {
+                    place_over(chunk, origin, wx, pit + 2, z, BlockType::PlasmaFlow);
+                }
+            }
+        }
+    }
+}
+
+/// Small fortified landing pad in the canyon — a right-foreground accent
+/// matching the key-art combat deck, AABB-bounded to the postcard.
+#[derive(Debug, Clone, Copy)]
+pub struct CombatPad {
+    pub cx: i32,
+    pub cz: i32,
+    pub half: i32,
+}
+
+impl CombatPad {
+    pub fn hero() -> Self {
+        Self {
+            cx: 86,
+            cz: -56,
+            half: 6,
+        }
+    }
+
+    pub fn stamp(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
+        let origin = chunk.pos.origin();
+        let (ox, oy, oz) = origin;
+        let h = self.half;
+        if (ox + CHUNK_SIZE_I <= self.cx - h - 2)
+            || (ox > self.cx + h + 2)
+            || (oz + CHUNK_SIZE_I <= self.cz - h - 2)
+            || (oz > self.cz + h + 2)
+        {
+            return;
+        }
+        let base = ground(self.cx, self.cz);
+        if oy > base + 6 || oy + CHUNK_SIZE_I <= base {
+            return;
+        }
+        for dz in -h..=h {
+            for dx in -h..=h {
+                let wx = self.cx + dx;
+                let wz = self.cz + dz;
+                let edge = dx.abs() == h || dz.abs() == h;
+                let floor = if edge {
+                    BlockType::PlatingWhite
+                } else if dx.abs() <= 1 && dz.abs() <= 1 {
+                    BlockType::PlasmaFlow
+                } else {
+                    BlockType::RoadDeck
+                };
+                place_over(chunk, origin, wx, base, wz, floor);
+                if edge && (dx + dz).rem_euclid(2) == 0 {
+                    place_over(chunk, origin, wx, base + 1, wz, BlockType::NeonCyan);
+                }
+            }
+        }
+        // Corner turrets: short plated barrels with cyan glow.
+        for &(tx, tz) in &[(-h + 1, -h + 1), (h - 1, -h + 1), (-h + 1, h - 1), (h - 1, h - 1)] {
+            let wx = self.cx + tx;
+            let wz = self.cz + tz;
+            place_over(chunk, origin, wx, base + 1, wz, BlockType::PlatingTeal);
+            place_over(chunk, origin, wx, base + 2, wz, BlockType::PlatingWhite);
+            place_over(chunk, origin, wx, base + 3, wz, BlockType::NeonCyan);
+            place_over(chunk, origin, wx, base + 4, wz, BlockType::LuminiteCrystal);
+        }
+        place_over(
+            chunk,
+            origin,
+            self.cx,
+            base + 1,
+            self.cz,
+            BlockType::LuminiteCrystal,
+        );
     }
 }
 
@@ -1769,6 +1904,8 @@ impl FrontierPlanner {
         CrystalCluster::hero_b().stamp(self.seed, chunk, ground);
         CrystalCluster::hero_c().stamp(self.seed, chunk, canyon_floor);
         CrystalCluster::hero_d().stamp(self.seed, chunk, canyon_floor);
+        CrystalCluster::hero_e().stamp(self.seed, chunk, canyon_floor);
+        CombatPad::hero().stamp(chunk, canyon_floor);
         // Widest island root reaches ~1.6 radii below the core.
         if top_y >= SKY_ISLAND_MIN_Y - 48 && base_y <= SKY_ISLAND_MAX_Y + 12 {
             SkyIsland::hero().stamp(self.seed, chunk);
@@ -1786,6 +1923,9 @@ impl FrontierPlanner {
         }
         if top_y >= STATION_MIN_Y - 6 && base_y <= STATION_MAX_Y + 28 {
             for station in SkyStation::near(self.seed, wx, wz, macro_ground) {
+                if in_opening_look(station.cx, station.cz) {
+                    continue;
+                }
                 station.stamp(chunk);
             }
         }
@@ -2076,9 +2216,11 @@ mod tests {
         assert_eq!(hero.cz, HERO_CRYSTAL_Z);
         assert!(hero.shards >= 5);
         let hero_d = CrystalCluster::hero_d();
-        assert!(hero_d.shards >= 16, "hero crystal cluster is still a sprinkle ({})", hero_d.shards);
-        assert!(hero_d.scale >= 60, "hero crystal cluster is still too short ({})", hero_d.scale);
-        assert!(hero_d.cz <= -84, "hero crystals should sit in the left third of the +X look");
+        assert!(hero_d.shards >= 14, "hero crystal cluster is still a sprinkle ({})", hero_d.shards);
+        assert!(hero_d.scale >= 48, "hero crystal cluster is still too short ({})", hero_d.scale);
+        assert!(hero_d.cx >= 74 && hero_d.cx <= 88, "hero crystals should sit in the left third (cx={})", hero_d.cx);
+        assert!(hero_d.cz <= -82 && hero_d.cz >= -96, "hero crystals should sit in the left third of the +X look");
+        assert!(in_hero_postcard(CrystalCluster::hero_e().cx, CrystalCluster::hero_e().cz));
     }
 
     #[test]
@@ -2174,6 +2316,8 @@ mod tests {
         assert!(in_hero_postcard(CrystalCluster::hero_b().cx, CrystalCluster::hero_b().cz));
         assert!(in_hero_postcard(CrystalCluster::hero_c().cx, CrystalCluster::hero_c().cz));
         assert!(in_hero_postcard(CrystalCluster::hero_d().cx, CrystalCluster::hero_d().cz));
+        assert!(in_hero_postcard(CrystalCluster::hero_e().cx, CrystalCluster::hero_e().cz));
+        assert!(in_hero_postcard(CombatPad::hero().cx, CombatPad::hero().cz));
         assert!(in_hero_postcard(SkyIsland::hero().cx, SkyIsland::hero().cz));
         assert!(in_hero_postcard(SkyIsland::hero_b().cx, SkyIsland::hero_b().cz));
         assert!(in_hero_postcard(SkyIsland::hero_c().cx, SkyIsland::hero_c().cz));
@@ -2187,16 +2331,16 @@ mod tests {
             sky.column(80, -80, 70.0).is_none(),
             "opening look should not be crossed by a skyway deck"
         );
-        let rail = sky.column(40, -88, 70.0).expect("mesa rail missing west of the canyon");
+        let rail = sky.column(32, -88, 70.0).expect("mesa rail missing west of the canyon");
         assert!(rail.half < SKYWAY_HALF_WIDTH, "mesa rail should be a thin ribbon");
-        let walk = sky.column(40, -112, 70.0).expect("cliff walk missing west of the canyon");
+        let walk = sky.column(32, -112, 70.0).expect("cliff walk missing west of the canyon");
         assert!(walk.half < SKYWAY_HALF_WIDTH);
         let terrace = sky
             .column(118, -36, 70.0)
             .expect("terrace spur missing south of the opening look");
         assert!(terrace.half < SKYWAY_HALF_WIDTH);
-        for wx in (48..=132).step_by(4) {
-            for wz in (-120..=-48).step_by(4) {
+        for wx in (44..=136).step_by(4) {
+            for wz in (-136..=-44).step_by(4) {
                 if let Some(col) = sky.column(wx, wz, 70.0) {
                     assert!(
                         (wx - 134).abs() as f64 <= col.half + 0.5,
@@ -2205,7 +2349,7 @@ mod tests {
                 }
             }
         }
-        let face = sky.column(80, -130, 70.0).expect("face rail missing on postcard");
+        let face = sky.column(80, -152, 70.0).expect("face rail missing south of the opening look");
         assert!(face.half < SKYWAY_HALF_WIDTH);
         assert!(face.deck_y < rail.deck_y, "face rail should sit below the mesa rail");
         let west = sky.column(32, -80, 70.0).expect("west face rail missing on postcard");
@@ -2308,5 +2452,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn combat_pad_stamps_a_cyan_core_and_corner_turrets() {
+        let pad = CombatPad::hero();
+        assert!(pad.half >= 5 && pad.half <= 8);
+        assert!(pad.cx >= 72 && pad.cx <= 100);
+        assert!(pad.cz >= -70 && pad.cz <= -48);
+        let mut chunk = Chunk::new(ChunkPos::new(
+            pad.cx.div_euclid(CHUNK_SIZE_I),
+            4,
+            pad.cz.div_euclid(CHUNK_SIZE_I),
+        ));
+        pad.stamp(&mut chunk, |_, _| 64);
+        assert!(
+            count_blocks(&chunk, BlockType::PlasmaFlow) > 0,
+            "combat pad has no cyan energy core"
+        );
+        assert!(
+            count_blocks(&chunk, BlockType::RoadDeck) > 8,
+            "combat pad has no plated deck"
+        );
+        assert!(
+            count_blocks(&chunk, BlockType::NeonCyan) > 0,
+            "combat pad has no turret glow"
+        );
+    }
+
+    #[test]
+    fn canyon_energy_river_is_cyan_plasma_not_lava() {
+        let net = RiverNetwork::new(12345);
+        let col = net
+            .column(80, HERO_RIVER_Z)
+            .expect("hero energy river missing on the canyon floor");
+        assert_eq!(col.fluid, BlockType::PlasmaFlow);
+        assert!(col.cut > 0);
     }
 }
