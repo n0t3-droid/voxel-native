@@ -1113,7 +1113,7 @@ fn film_spawn_silhouettes(
         // Skip keel volumes that overlap the dual-river shelf corridor so
         // plasma/lava ribbons aren't buried inside opaque sat boxes.
         // Shelf ≈ x∈[-8,50], z∈[52,72] relative to deck.
-        let in_river_corridor = sx > -10.0 && sx < 52.0 && sz > 50.0 && sz < 74.0;
+        let in_river_corridor = sx > -35.0 && sx < 55.0 && sz > 50.0 && sz < 85.0;
         if in_river_corridor {
             continue;
         }
@@ -1209,9 +1209,9 @@ fn film_spawn_silhouettes(
         LinearRgba::rgb(1.0, 6.5, 9.0),
     ));
     let lava_mat = materials.add(sil_mat(
-        // Keep green channel moderate so lavapipe doesn't blow lava to yellow.
-        Color::srgb(1.0, 0.32, 0.04),
-        LinearRgba::rgb(11.0, 2.2, 0.12),
+        // Deep molten orange — low green so ACES cannot wash it to khaki.
+        Color::srgb(1.0, 0.16, 0.0),
+        LinearRgba::rgb(6.5, 0.55, 0.02),
     ));
     // Clear shelf: z∈[56,70] (near cam), x∈[-5,45], y≈-16 (below keel bottoms).
     let river_y = -16.0_f32;
@@ -1283,6 +1283,37 @@ fn film_spawn_silhouettes(
             FilmSilhouette,
             FilmRiverRibbon,
             Name::new(format!("FilmLavaHero{i}")),
+        ));
+    }
+    // Painting-cam nose cards: sit just under the painting eye so cyan+orange
+    // own the lower third even if shelf ribbons are partly occluded.
+    // Painting pos ≈ deck+(-42,26,82); place ribbons at z≈76, y≈8.
+    for (i, ox) in [-28.0_f32, -16.0, -4.0, 8.0, 20.0].into_iter().enumerate() {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: plasma_mat.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, 6.0, 76.0))
+                    .with_scale(Vec3::new(11.0, 2.4, 3.5))
+                    .with_rotation(Quat::from_rotation_y(0.55)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmRiverRibbon,
+            Name::new(format!("FilmPlasmaNose{i}")),
+        ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: lava_mat.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox + 7.0, 5.2, 72.0))
+                    .with_scale(Vec3::new(11.0, 2.6, 3.5))
+                    .with_rotation(Quat::from_rotation_y(0.55)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmRiverRibbon,
+            Name::new(format!("FilmLavaNose{i}")),
         ));
     }
 
@@ -2088,14 +2119,15 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             // Painting-scale: archipelago + nebula, with dual-river shelf
             // (z≈60 relative) filling the lower third clear of keel volumes.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-42.0, 26.0, 82.0);
-            let look = deck + Vec3::new(16.0, -14.0, 58.0) + planet_dir * 6.0;
+            let pos = deck + Vec3::new(-42.0, 24.0, 88.0);
+            let look = deck + Vec3::new(10.0, -6.0, 64.0) + planet_dir * 5.0;
             (pos, look)
         }
         8 => {
-            // Dual plasma (cyan) + lava (orange) on the clear near-cam shelf.
-            let look = deck + Vec3::new(18.0, -14.0, 60.0);
-            let pos = look + Vec3::new(-18.0, 12.0, 14.0);
+            // Dual plasma + lava shelf — stand off so both filaments read
+            // (too-close cam was filling the frame with two solid slabs).
+            let look = deck + Vec3::new(20.0, -16.0, 60.0);
+            let pos = deck + Vec3::new(-28.0, 20.0, 98.0);
             (pos, look)
         }
         _ => {
