@@ -470,9 +470,10 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             for y in bottom..=(island.deck_y - 1).max(bottom) {
                 let near_bottom = y <= bottom + 2;
                 let near_rim = edge > 0.42;
-                // Carve the absolute bottom 3 layers to Air — unlit mesh plates
-                // replace those downward faces so screenshots never show ink.
-                if y <= bottom + 2 {
+                // Carve lower half of keel to Air — unlit mesh plates become
+                // the entire underside silhouette (no ink voxel bottoms).
+                let carve_to = bottom + ((island.deck_y - bottom).max(4) / 2);
+                if y <= carve_to {
                     if world.edit_set_voxel(x, y, z, AIR) {
                         keel_lit += 1;
                     }
