@@ -315,9 +315,9 @@ struct SkyTraffic {
     scale: f32,
 }
 
-/// World-unit scale for the New-World hero pass. Sized so a ~10-unit
-/// shuttle reads at 90–120 blocks without filling the frame.
-const HERO_FLYBY_SCALE: f32 = 4.6;
+/// World-unit scale for the New-World hero pass. Sized so a ~8-unit
+/// shuttle reads above the scenic look target without filling the frame.
+const HERO_FLYBY_SCALE: f32 = 2.85;
 
 const SHIP_MOUSE_YAW_SENS: f32 = 0.00016;
 const SHIP_MOUSE_PITCH_SENS: f32 = 0.00048;
@@ -2113,13 +2113,14 @@ fn ship_trail_material(
 
 fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     let u = u.clamp(0.0, 1.0);
-    // Open dusk sky, ~90–120 blocks ahead of the New-World +X look.
-    // Banks left→right so wings/fuselage read as a shuttle, not a blob.
-    let x = origin.x + 78.0 + u * 36.0;
-    let z = origin.z - 32.0 + u * 68.0;
-    let y = origin.y + 34.0 + (u * std::f32::consts::PI).sin() * 4.0;
-    let yaw = 36.0_f32.atan2(68.0);
-    let roll = -0.38 + (u * std::f32::consts::TAU).sin() * 0.28;
+    // Scenic look aims at (origin.x+46, origin.y+6). Bank the orbiter
+    // through the open sky above that target — not down the canyon
+    // throat (hull wall) and not past the mesa (invisible).
+    let x = origin.x + 38.0 + u * 20.0;
+    let z = origin.z - 24.0 + u * 52.0;
+    let y = origin.y + 24.0 + (u * std::f32::consts::PI).sin() * 3.0;
+    let yaw = 20.0_f32.atan2(52.0);
+    let roll = -0.40 + (u * std::f32::consts::TAU).sin() * 0.28;
     (Vec3::new(x, y, z), yaw, roll)
 }
 
@@ -2133,7 +2134,7 @@ fn update_hero_flyby(
         if pilot.active_ship == Some(entity) {
             continue;
         }
-        fly.t = (fly.t + dt * 0.006).rem_euclid(1.0);
+        fly.t = (fly.t + dt * 0.018).rem_euclid(1.0);
         let (pos, yaw, roll) = hero_flyby_pose(fly.origin, fly.t);
         tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
@@ -2158,51 +2159,51 @@ fn sky_traffic_lanes() -> [(Vec3, Vec3, f32, f32, f32, u8); 6] {
     // origin offset, travel span, scale, speed (loops/s), t0, variant
     [
         (
-            Vec3::new(150.0, 52.0, -110.0),
-            Vec3::new(28.0, 4.0, 210.0),
-            1.7,
-            0.022,
-            0.08,
+            Vec3::new(58.0, 46.0, -70.0),
+            Vec3::new(24.0, 5.0, 110.0),
+            1.55,
+            0.028,
+            0.12,
             0,
         ),
         (
-            Vec3::new(210.0, 68.0, 95.0),
-            Vec3::new(-36.0, -6.0, -190.0),
+            Vec3::new(92.0, 54.0, 35.0),
+            Vec3::new(18.0, -4.0, -130.0),
+            1.85,
+            0.022,
+            0.40,
+            1,
+        ),
+        (
+            Vec3::new(74.0, 40.0, 55.0),
+            Vec3::new(48.0, 6.0, -40.0),
+            1.25,
+            0.032,
+            0.68,
+            0,
+        ),
+        (
+            Vec3::new(140.0, 66.0, -30.0),
+            Vec3::new(-16.0, 3.0, 120.0),
             2.1,
             0.016,
-            0.42,
+            0.22,
             1,
         ),
         (
-            Vec3::new(120.0, 44.0, 130.0),
-            Vec3::new(90.0, 8.0, -55.0),
+            Vec3::new(110.0, 50.0, 20.0),
+            Vec3::new(40.0, 4.0, 70.0),
+            1.4,
+            0.024,
+            0.55,
+            0,
+        ),
+        (
+            Vec3::new(160.0, 42.0, -95.0),
+            Vec3::new(8.0, 8.0, 140.0),
             1.35,
-            0.026,
-            0.66,
-            0,
-        ),
-        (
-            Vec3::new(260.0, 74.0, -50.0),
-            Vec3::new(-24.0, 2.0, 160.0),
-            2.4,
-            0.012,
-            0.18,
-            1,
-        ),
-        (
-            Vec3::new(175.0, 58.0, 40.0),
-            Vec3::new(55.0, 5.0, 100.0),
-            1.55,
-            0.019,
-            0.54,
-            0,
-        ),
-        (
-            Vec3::new(230.0, 46.0, -140.0),
-            Vec3::new(12.0, 10.0, 170.0),
-            1.45,
-            0.018,
-            0.82,
+            0.020,
+            0.80,
             1,
         ),
     ]
@@ -2244,8 +2245,8 @@ fn ambient_traffic_specs(variant: u8, detailed: bool) -> Vec<RealShipPartSpec> {
         &mut parts,
         RealShipMeshKind::AeroPlate,
         RealShipTone::CyanEmission,
-        Vec3::new(0.0, 0.0, 2.2),
-        Vec3::new(0.18, 0.12, 2.8),
+        Vec3::new(0.0, 0.0, 3.4),
+        Vec3::new(0.16, 0.10, 5.8),
         Quat::IDENTITY,
     );
     if detailed {
@@ -4928,30 +4929,30 @@ mod tests {
             let ahead = pos.x - origin.x;
             let dist = pos.distance(origin);
             assert!(
-                ahead > 70.0,
+                ahead > 36.0,
                 "flyby at u={u} is not ahead of the camera (x={})",
                 pos.x
             );
             assert!(
-                ahead < 130.0,
+                ahead < 72.0,
                 "flyby at u={u} leaves the opening sky (x={})",
                 pos.x
             );
             assert!(
-                dist > 80.0 && dist < 160.0,
-                "flyby at u={u} should read at ~100-200 blocks, dist={dist}"
+                dist > 40.0 && dist < 95.0,
+                "flyby at u={u} should sit in the open sky above the look, dist={dist}"
             );
             assert!(
-                pos.y > origin.y + 28.0,
+                pos.y > origin.y + 22.0,
                 "flyby at u={u} is not in the open sky (y={})",
                 pos.y
             );
             assert!(
-                pos.y < origin.y + 44.0,
+                pos.y < origin.y + 32.0,
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );
-            assert!(yaw.abs() > 0.35, "flyby should bank across +X, yaw={yaw}");
+            assert!(yaw.abs() > 0.30, "flyby should bank across +X, yaw={yaw}");
             assert!(roll.abs() < 1.2);
         }
         assert!(
