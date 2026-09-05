@@ -1933,77 +1933,84 @@ fn spawn_film_tunnel_rails(
     glow: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Dual cyan rails raised ON the approach deck into the −Z tunnel mouth —
-    // must clear combat-slab lip so the tunnel hero shot reads them.
-    let y = 2.4_f32;
-    let mouth = deck + Vec3::new(0.0, y, -15.0);
-    let start = deck + Vec3::new(0.0, y, 16.0);
-    let mid = start.lerp(mouth, 0.5);
-    let len = start.distance(mouth).max(16.0);
-    // Wide approach deck plate under the rails.
+    // Axis-aligned dual cyan rails (no looking_at) so lavapipe always shows
+    // long Z-runs into the −Z tunnel mouth. Raised above deck grass lip.
+    let y = 3.2_f32;
+    let z0 = 18.0_f32;
+    let z1 = -14.0_f32;
+    let mid_z = (z0 + z1) * 0.5;
+    let len = (z0 - z1).abs();
+    // Approach plate.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: metal.clone(),
-            transform: Transform::from_translation(mid + Vec3::new(0.0, -0.6, 0.0))
-                .looking_at(mouth + Vec3::new(0.0, -0.6, 0.0), Vec3::Y)
-                .with_scale(Vec3::new(9.0, 0.5, len + 2.0)),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, y - 0.9, mid_z))
+                .with_scale(Vec3::new(11.0, 0.6, len + 2.0)),
             ..default()
         },
         FilmSilhouette,
         Name::new("FilmTunnelRailDeck"),
     ));
-    for (ox, name) in [(-2.8_f32, "L"), (2.8, "R")] {
+    for (ox, name) in [(-3.2_f32, "L"), (3.2, "R")] {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mid + Vec3::new(ox, 0.55, 0.0))
-                    .looking_at(mouth + Vec3::new(ox, 0.55, 0.0), Vec3::Y)
-                    .with_scale(Vec3::new(1.35, 0.85, len)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, y, mid_z))
+                    .with_scale(Vec3::new(1.8, 1.2, len)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTunnelRail{name}")),
         ));
-        // Extra emissive crown so rails punch lavapipe bloom.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: glow.clone(),
-                transform: Transform::from_translation(mid + Vec3::new(ox, 1.15, 0.0))
-                    .looking_at(mouth + Vec3::new(ox, 1.15, 0.0), Vec3::Y)
-                    .with_scale(Vec3::new(0.7, 0.45, len * 0.98)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, y + 0.85, mid_z))
+                    .with_scale(Vec3::new(1.0, 0.55, len * 0.98)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTunnelRailGlow{name}")),
         ));
     }
-    // Center glow strip.
+    // Center strip.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: glow.clone(),
-            transform: Transform::from_translation(mid + Vec3::new(0.0, 0.35, 0.0))
-                .looking_at(mouth, Vec3::Y)
-                .with_scale(Vec3::new(2.4, 0.35, len * 0.95)),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, y - 0.2, mid_z))
+                .with_scale(Vec3::new(3.0, 0.4, len * 0.96)),
             ..default()
         },
         FilmSilhouette,
         Name::new("FilmTunnelRailCenter"),
     ));
-    // Approach pylons marching into the mouth.
-    for i in 0..7 {
-        let t = i as f32 / 6.0;
-        let p = start.lerp(mouth, t);
-        for ox in [-4.2_f32, 4.2] {
+    // Discrete cyan sleepers — unmistakable track rhythm into the bore.
+    let steps = 10;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let z = z0 + (z1 - z0) * t;
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: cyan.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(0.0, y + 0.3, z))
+                    .with_scale(Vec3::new(8.5, 0.7, 1.4)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmTunnelRailSleeper{i}")),
+        ));
+        for ox in [-5.0_f32, 5.0] {
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
                     material: metal.clone(),
-                    transform: Transform::from_translation(p + Vec3::new(ox, 2.8, 0.0))
-                        .with_scale(Vec3::new(0.85, 5.6, 0.85)),
+                    transform: Transform::from_translation(deck + Vec3::new(ox, y + 2.6, z))
+                        .with_scale(Vec3::new(0.9, 5.2, 0.9)),
                     ..default()
                 },
                 FilmSilhouette,
@@ -2013,8 +2020,8 @@ fn spawn_film_tunnel_rails(
                 PbrBundle {
                     mesh: cube.clone(),
                     material: cyan.clone(),
-                    transform: Transform::from_translation(p + Vec3::new(ox, 5.8, 0.0))
-                        .with_scale(Vec3::new(1.4, 0.9, 1.4)),
+                    transform: Transform::from_translation(deck + Vec3::new(ox, y + 5.4, z))
+                        .with_scale(Vec3::new(1.5, 1.0, 1.5)),
                     ..default()
                 },
                 FilmSilhouette,
@@ -2022,13 +2029,13 @@ fn spawn_film_tunnel_rails(
             ));
         }
     }
-    // Mouth threshold bar — cyan lip where rails enter the bore.
+    // Mouth threshold — fat cyan lip into the bore.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: cyan.clone(),
-            transform: Transform::from_translation(mouth + Vec3::new(0.0, 0.4, 3.5))
-                .with_scale(Vec3::new(10.0, 1.2, 2.0)),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, y + 0.5, z1 + 4.0))
+                .with_scale(Vec3::new(12.0, 1.6, 2.8)),
             ..default()
         },
         FilmSilhouette,
@@ -2320,7 +2327,7 @@ fn film_drive_camera(
             2 => 48.0,  // full-body combat two-shot
             3 => 46.0,  // along-axis turret beams + yellow muzzles
             4 => 48.0,  // crew pair
-            5 => 50.0,  // tunnel portal mouth
+            5 => 55.0,  // tunnel portal + cyan rails
             6 => 46.0,  // shuttle rear-quarter
             7 => 40.0,  // planet close
             8 => 58.0,  // painting-scale wide hero
@@ -2682,10 +2689,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         5 => {
-            // Elevated face-on: cyan rails on approach deck into tunnel mouth.
-            let mouth = station + Vec3::new(0.0, 5.0, -15.0);
-            let pos = mouth + Vec3::new(0.0, 8.0, 32.0);
-            let look = mouth + Vec3::new(0.0, -1.0, 2.0);
+            // High stand-off looking down the cyan rail approach into mouth.
+            let mouth = station + Vec3::new(0.0, 4.0, -14.0);
+            let pos = station + Vec3::new(0.0, 14.0, 22.0);
+            let look = station + Vec3::new(0.0, 3.5, -8.0);
             (pos, look)
         }
         6 => {
