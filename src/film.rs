@@ -3792,9 +3792,9 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         2 => {
-            // Floating sky arena — pure figure two-shot, no island lattice.
+            // Floating sky arena — look outward (+Z) so island lattice stays behind cam.
             let look = deck + Vec3::new(8.5, 52.0, 132.0);
-            let pos = look + Vec3::new(-18.0, 5.0, 16.0);
+            let pos = look + Vec3::new(-16.0, 4.5, -20.0);
             (pos, look)
         }
         3 => {
