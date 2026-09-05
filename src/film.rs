@@ -1110,6 +1110,13 @@ fn film_spawn_silhouettes(
     .into_iter()
     .enumerate()
     {
+        // Skip keel volumes that overlap the dual-river shelf corridor so
+        // plasma/lava ribbons aren't buried inside opaque sat boxes.
+        // Shelf ≈ x∈[-8,50], z∈[52,72] relative to deck.
+        let in_river_corridor = sx > -10.0 && sx < 52.0 && sz > 50.0 && sz < 74.0;
+        if in_river_corridor {
+            continue;
+        }
         let sat_deck = deck + Vec3::new(sx, lift, sz);
         let mat = if si % 2 == 0 {
             luminite_plate.clone()
@@ -1139,7 +1146,7 @@ fn film_spawn_silhouettes(
                     mesh: cube.clone(),
                     material: crystal_plate.clone(),
                     transform: Transform::from_translation(sat_deck + Vec3::new(ox, -4.5, oz))
-                        .with_scale(Vec3::new(sxv, 8.0, szv)),
+                        .with_scale(Vec3::new(sxv, 9.5, szv)),
                     ..default()
                 },
                 FilmSilhouette,
@@ -1192,30 +1199,33 @@ fn film_spawn_silhouettes(
         ));
     }
 
-    // Unlit dual-river ribbons for painting_hero / dual_rivers — survive
-    // terrain occlusion and lavapipe remesh lag that bury voxel filaments.
+    // Unlit dual-river ribbons for painting_hero / dual_rivers.
+    // CRITICAL: keep them OUTSIDE keel-volume AABBs. Prior ribbons at
+    // (ox≈16..90, oz≈30, y=-8) sat inside sat keel boxes and orange→0.
+    // Painting cam ≈ deck+(-38,22,72) → look+(22,-10,36): place a clear
+    // shelf band between cam and archipelago at high-Z / mid-X, below decks.
     let plasma_mat = materials.add(sil_mat(
-        Color::srgb(0.15, 0.75, 1.0),
-        LinearRgba::rgb(0.8, 5.5, 8.0),
+        Color::srgb(0.12, 0.82, 1.0),
+        LinearRgba::rgb(1.0, 6.5, 9.0),
     ));
     let lava_mat = materials.add(sil_mat(
-        Color::srgb(1.0, 0.55, 0.10),
-        LinearRgba::rgb(14.0, 5.5, 0.35),
+        // Keep green channel moderate so lavapipe doesn't blow lava to yellow.
+        Color::srgb(1.0, 0.32, 0.04),
+        LinearRgba::rgb(11.0, 2.2, 0.12),
     ));
-    // Raised into painting_hero look (deck+(22,-10,36)) so orange survives
-    // keel-volume occlusion in the wide lower third.
-    let river_y = -8.0_f32;
-    for i in 0..16 {
+    // Clear shelf: z∈[56,70] (near cam), x∈[-5,45], y≈-16 (below keel bottoms).
+    let river_y = -16.0_f32;
+    for i in 0..18 {
         let t = i as f32;
-        let ox = 16.0 + t * 4.8;
-        let oz = 30.0 + (t * 0.7).sin() * 6.0;
+        let ox = -4.0 + t * 2.8;
+        let oz = 58.0 + (t * 0.55).sin() * 4.5 + t * 0.35;
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: plasma_mat.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox, river_y, oz))
-                    .with_scale(Vec3::new(6.5, 2.8, 2.8))
-                    .with_rotation(Quat::from_rotation_y(0.35)),
+                    .with_scale(Vec3::new(7.5, 3.2, 3.4))
+                    .with_rotation(Quat::from_rotation_y(0.42)),
                 ..default()
             },
             FilmSilhouette,
@@ -1227,15 +1237,52 @@ fn film_spawn_silhouettes(
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
                 transform: Transform::from_translation(
-                    deck + Vec3::new(ox + 7.0, river_y + 0.4, oz - 5.0),
+                    deck + Vec3::new(ox + 6.5, river_y + 0.5, oz - 5.5),
                 )
-                .with_scale(Vec3::new(6.2, 3.0, 3.0))
-                .with_rotation(Quat::from_rotation_y(0.28)),
+                .with_scale(Vec3::new(7.2, 3.4, 3.6))
+                .with_rotation(Quat::from_rotation_y(0.38)),
                 ..default()
             },
             FilmSilhouette,
             FilmRiverRibbon,
             Name::new(format!("FilmLavaRibbon{i}")),
+        ));
+    }
+    // Extra hero slabs aimed straight at painting lower-third / dual_rivers look.
+    for (i, (ox, oz, dy)) in [
+        (8.0_f32, 62.0, 0.0),
+        (18.0, 64.0, 0.3),
+        (28.0, 61.0, -0.2),
+        (38.0, 66.0, 0.1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: plasma_mat.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, river_y + dy, oz))
+                    .with_scale(Vec3::new(10.0, 4.0, 4.5)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmRiverRibbon,
+            Name::new(format!("FilmPlasmaHero{i}")),
+        ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: lava_mat.clone(),
+                transform: Transform::from_translation(
+                    deck + Vec3::new(ox + 8.0, river_y + dy + 0.4, oz - 6.0),
+                )
+                .with_scale(Vec3::new(10.0, 4.2, 4.5)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmRiverRibbon,
+            Name::new(format!("FilmLavaHero{i}")),
         ));
     }
 
@@ -2038,22 +2085,17 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         7 => {
-            // Painting-scale: denser archipelago fills lower 2/3, planet/nebula upper.
-            // Aim so dual rivers under the near rim sit in the lower third.
+            // Painting-scale: archipelago + nebula, with dual-river shelf
+            // (z≈60 relative) filling the lower third clear of keel volumes.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-38.0, 22.0, 72.0);
-            let look = deck + Vec3::new(22.0, -10.0, 36.0) + planet_dir * 12.0;
+            let pos = deck + Vec3::new(-42.0, 26.0, 82.0);
+            let look = deck + Vec3::new(16.0, -14.0, 58.0) + planet_dir * 6.0;
             (pos, look)
         }
         8 => {
-            // Dual plasma (cyan) + lava (orange) filaments on the shelf below.
-            let base_y = (island.deck_y - 22).max(crate::terrain::WATER_LEVEL + 4) as f32;
-            let look = Vec3::new(
-                island.cx as f32 + 10.0,
-                base_y + 4.0,
-                island.cz as f32 + 48.0,
-            );
-            let pos = look + Vec3::new(-14.0, 11.0, 16.0);
+            // Dual plasma (cyan) + lava (orange) on the clear near-cam shelf.
+            let look = deck + Vec3::new(18.0, -14.0, 60.0);
+            let pos = look + Vec3::new(-18.0, 12.0, 14.0);
             (pos, look)
         }
         _ => {
