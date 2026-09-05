@@ -3727,9 +3727,9 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         2 => {
-            // Side-on two-shot above cleared pad — biped vs multi-leg, no rail cage.
-            let look = deck + Vec3::new(0.8, 7.5, 16.5);
-            let pos = look + Vec3::new(-21.0, 5.0, 9.0);
+            // Elevated side-on two-shot — look over residual pad lattice at figures.
+            let look = deck + Vec3::new(0.8, 8.5, 16.5);
+            let pos = look + Vec3::new(-19.0, 7.5, 11.0);
             (pos, look)
         }
         3 => {
