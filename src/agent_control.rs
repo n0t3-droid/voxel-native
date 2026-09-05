@@ -31,6 +31,7 @@ impl Plugin for AgentControlPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(AgentControlState::from_env())
             .insert_resource(AgentControlRuntime::from_env())
+            .add_systems(PreStartup, apply_agent_world_card_before_init)
             .add_systems(Startup, agent_control_startup_marker)
             .add_systems(
                 PreUpdate,
@@ -581,18 +582,7 @@ fn agent_control_enter_game(
         settings
             .weather
             .apply_preset(crate::settings::WeatherPreset::Clear);
-        if env_flag("VOXEL_NATIVE_AGENT_CINEMATIC") {
-            settings.apply_world_mode_card(crate::settings::WorldModeCard::Cinematic);
-            settings.visual_preset = crate::settings::VisualPreset::NaturalWorld;
-            settings
-                .weather
-                .apply_preset(crate::settings::WeatherPreset::Clear);
-            // Software Vulkan fills a 56-chunk disc too slowly for a
-            // 20s still; 40 chunks still covers the spawn postcard.
-            settings.render_distance = env_u32("VOXEL_NATIVE_AGENT_RD")
-                .unwrap_or(40)
-                .clamp(8, 64);
-        }
+        apply_agent_mode_card(&mut settings);
         info!(
             "agent control: entering world '{}' seed={} hour={:.2} preset={:?} graphics={:?} rd={}",
             meta.name,
@@ -606,6 +596,42 @@ fn agent_control_enter_game(
         pending.0 = true;
     }
     next.set(GameState::InGame);
+}
+
+/// Apply Fast/Cinematic agent cards before `init_world` bakes swatches,
+/// so a Fast iGPU session does not wait on Balanced 128² textures.
+fn apply_agent_world_card_before_init(settings: Option<ResMut<WorldSettings>>) {
+    if !agent_runtime_enabled() {
+        return;
+    }
+    let Some(mut settings) = settings else {
+        return;
+    };
+    apply_agent_mode_card(&mut settings);
+}
+
+fn apply_agent_mode_card(settings: &mut WorldSettings) {
+    if env_flag("VOXEL_NATIVE_AGENT_CINEMATIC") {
+        settings.apply_world_mode_card(crate::settings::WorldModeCard::Cinematic);
+        settings.visual_preset = crate::settings::VisualPreset::NaturalWorld;
+        settings
+            .weather
+            .apply_preset(crate::settings::WeatherPreset::Clear);
+        // Software Vulkan fills a 56-chunk disc too slowly for a
+        // 20s still; 40 chunks still covers the spawn postcard.
+        settings.render_distance = env_u32("VOXEL_NATIVE_AGENT_RD")
+            .unwrap_or(40)
+            .clamp(8, 64);
+    } else if env_flag("VOXEL_NATIVE_AGENT_FAST") {
+        settings.apply_world_mode_card(crate::settings::WorldModeCard::FastLaptop);
+        settings.visual_preset = crate::settings::VisualPreset::NaturalWorld;
+        settings
+            .weather
+            .apply_preset(crate::settings::WeatherPreset::Clear);
+        if let Some(rd) = env_u32("VOXEL_NATIVE_AGENT_RD") {
+            settings.render_distance = rd.clamp(8, 48);
+        }
+    }
 }
 
 fn agent_control_startup_marker(runtime: Res<AgentControlRuntime>, state: Res<AgentControlState>) {

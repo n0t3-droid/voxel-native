@@ -121,6 +121,7 @@ pub struct RuntimeTelemetry {
     pub intent: RuntimeIntent,
     pub queue_pressure: f32,
     pub frame_pressure: f32,
+    pub stream_elapsed: f32,
 }
 
 impl Default for RuntimeTelemetry {
@@ -137,6 +138,7 @@ impl Default for RuntimeTelemetry {
             intent: RuntimeIntent::Explore,
             queue_pressure: 0.0,
             frame_pressure: 0.0,
+            stream_elapsed: 0.0,
         }
     }
 }
@@ -173,13 +175,22 @@ pub struct RuntimeBudget {
     pub queue_pressure: f32,
     pub frame_pressure: f32,
     pub status: String,
+    /// First ~2s of a session: fill the spawn disc at the card's full
+    /// job budget instead of the LowSpec / smoothness throttle.
+    pub startup_fill: bool,
 }
 
 const SMOOTH_MAX_CHUNKS_PER_FRAME: u32 = 10;
 const SMOOTH_MAX_MESHES_PER_FRAME: u32 = 10;
 const SMOOTH_MAX_MESH_APPLIES_PER_FRAME: u32 = 8;
+const STARTUP_MAX_CHUNKS_PER_FRAME: u32 = 18;
+const STARTUP_MAX_MESHES_PER_FRAME: u32 = 16;
+const STARTUP_MAX_MESH_APPLIES_PER_FRAME: u32 = 16;
 const SMOOTH_MAX_IN_FLIGHT_TERRAIN: u32 = 96;
 const SMOOTH_MAX_IN_FLIGHT_MESHES: u32 = 80;
+/// First seconds of a session fill the spawn disc at the card budget
+/// instead of the LowSpec / smoothness throttle.
+const STARTUP_FILL_SECONDS: f32 = 2.2;
 
 impl Default for RuntimeBudget {
     fn default() -> Self {
@@ -204,6 +215,7 @@ impl Default for RuntimeBudget {
             queue_pressure: 0.0,
             frame_pressure: 0.0,
             status: "warming up".into(),
+            startup_fill: false,
         }
     }
 }
@@ -233,26 +245,32 @@ impl RuntimeBudget {
         let target = (settings.render_distance as i32).max(2);
         self.target_render_distance = target;
         self.render_distance = self.render_distance.clamp(2, target);
+        let max_chunks = if self.startup_fill {
+            STARTUP_MAX_CHUNKS_PER_FRAME
+        } else {
+            SMOOTH_MAX_CHUNKS_PER_FRAME
+        };
+        let max_meshes = if self.startup_fill {
+            STARTUP_MAX_MESHES_PER_FRAME
+        } else {
+            SMOOTH_MAX_MESHES_PER_FRAME
+        };
+        let max_applies = if self.startup_fill {
+            STARTUP_MAX_MESH_APPLIES_PER_FRAME
+        } else {
+            SMOOTH_MAX_MESH_APPLIES_PER_FRAME
+        };
         self.chunks_per_frame = self.chunks_per_frame.clamp(
             1,
-            settings
-                .chunks_per_frame
-                .max(1)
-                .min(SMOOTH_MAX_CHUNKS_PER_FRAME),
+            settings.chunks_per_frame.max(1).min(max_chunks),
         );
         self.meshes_per_frame = self.meshes_per_frame.clamp(
             1,
-            settings
-                .meshes_per_frame
-                .max(1)
-                .min(SMOOTH_MAX_MESHES_PER_FRAME),
+            settings.meshes_per_frame.max(1).min(max_meshes),
         );
         self.mesh_applies_per_frame = self.mesh_applies_per_frame.clamp(
             1,
-            settings
-                .mesh_applies_per_frame
-                .max(1)
-                .min(SMOOTH_MAX_MESH_APPLIES_PER_FRAME),
+            settings.mesh_applies_per_frame.max(1).min(max_applies),
         );
         self.max_in_flight_terrain = self.max_in_flight_terrain.clamp(
             1,
@@ -356,6 +374,8 @@ impl NeuroCore {
 
     fn profile_budget(&mut self, settings: &WorldSettings, dt: f32) -> RuntimeBudget {
         let target = (settings.render_distance as i32).max(2);
+        let startup_fill = self.telemetry.stream_elapsed > 0.05
+            && self.telemetry.stream_elapsed < STARTUP_FILL_SECONDS;
         let (
             rd,
             mut job_scale,
@@ -366,13 +386,23 @@ impl NeuroCore {
             status,
         ) = match self.profile {
             RuntimeProfile::LowSpec => (
-                target.min(14).max(4),
-                0.35,
-                0.45,
+                // Honor FastLaptop's 24-chunk horizon. The streamer ramps
+                // the live disc from a spawn ring; this only sets the cap.
+                target.min(24).max(6),
+                if startup_fill { 1.0 } else { 0.52 },
+                if startup_fill { 1.0 } else { 0.55 },
                 0.25,
                 0.65,
-                QualityState::Throttled,
-                String::from("low-spec fixed budget"),
+                if startup_fill {
+                    QualityState::Expanding
+                } else {
+                    QualityState::Throttled
+                },
+                String::from(if startup_fill {
+                    "low-spec spawn fill"
+                } else {
+                    "low-spec fixed budget"
+                }),
             ),
             RuntimeProfile::Balanced => (
                 target.min(32).max(6),
@@ -490,6 +520,7 @@ impl NeuroCore {
             queue_pressure: self.telemetry.queue_pressure,
             frame_pressure: self.telemetry.frame_pressure,
             status,
+            startup_fill,
         };
         budget.clamp_to_settings(settings);
         budget
@@ -497,18 +528,29 @@ impl NeuroCore {
 
     fn auto_render_distance(&mut self, settings: &WorldSettings, dt: f32) -> i32 {
         let target = (settings.render_distance as i32).max(2);
+        let explore_floor = if self.telemetry.stream_elapsed > 0.05
+            && self.telemetry.stream_elapsed < 1.2
+        {
+            4
+        } else if self.telemetry.stream_elapsed > 0.05
+            && self.telemetry.stream_elapsed < 2.5
+        {
+            8
+        } else {
+            (target / 3).clamp(8, 18).min(target)
+        };
         let floor = match self.intent {
             RuntimeIntent::Combat => target.min(12).max(6),
             RuntimeIntent::Build => (target / 4).clamp(8, 16).min(target),
             RuntimeIntent::Editor => (target / 5).clamp(6, 12).min(target),
             RuntimeIntent::Menu => target.min(6).max(3),
-            RuntimeIntent::Explore => (target / 3).clamp(8, 18).min(target),
+            RuntimeIntent::Explore => explore_floor,
         };
 
         if self.effective_render_distance <= 0 {
-            // Start with a small disc so the first seconds fill ground
-            // around the player instead of queuing a 32-chunk empty sky.
-            self.effective_render_distance = target.min(8).max(6);
+            // Start with a spawn ring so the first frames fill ground
+            // under the player instead of a 32-chunk empty sky.
+            self.effective_render_distance = target.min(5).max(4);
         }
         if self.effective_render_distance > target {
             self.effective_render_distance = target;
@@ -639,6 +681,7 @@ fn update_neurocore(
         intent,
         queue_pressure,
         frame_pressure,
+        stream_elapsed: streamer.stream_elapsed,
     };
     *budget = core.update_budget(&settings, telemetry, time.delta_seconds());
 }
@@ -835,5 +878,38 @@ mod tests {
             settings.mesh_applies_per_frame
         );
         assert_eq!(budget.quality, QualityState::Benchmark);
+    }
+
+    #[test]
+    fn lowspec_startup_fill_uses_the_card_job_budget() {
+        let mut settings = WorldSettings::default();
+        settings.apply_world_mode_card(crate::settings::WorldModeCard::FastLaptop);
+        let mut core = NeuroCore::default();
+        let mut tel = telemetry(30.0, 0.2, RuntimeIntent::Explore);
+        tel.stream_elapsed = 0.4;
+        let fill = core.update_budget(&settings, tel, 0.16);
+        assert!(fill.startup_fill);
+        assert!(
+            fill.chunks_per_frame >= 12,
+            "spawn fill starved: {} chunks/frame",
+            fill.chunks_per_frame
+        );
+        assert!(fill.render_distance >= 6);
+    }
+
+    #[test]
+    fn lowspec_after_warmup_throttles_jobs_again() {
+        let mut settings = WorldSettings::default();
+        settings.apply_world_mode_card(crate::settings::WorldModeCard::FastLaptop);
+        let mut core = NeuroCore::default();
+        let mut tel = telemetry(30.0, 0.2, RuntimeIntent::Explore);
+        tel.stream_elapsed = 8.0;
+        let steady = core.update_budget(&settings, tel, 0.16);
+        assert!(!steady.startup_fill);
+        assert!(
+            steady.chunks_per_frame < settings.chunks_per_frame,
+            "steady LowSpec should stay below the Fast card ceiling"
+        );
+        assert!(steady.render_distance <= 24);
     }
 }

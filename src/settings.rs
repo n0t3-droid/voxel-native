@@ -519,7 +519,7 @@ impl WorldSettings {
                 self.vertical_chunks = 7;
                 self.chunks_per_frame = 18;
                 self.meshes_per_frame = 16;
-                self.mesh_applies_per_frame = 8;
+                self.mesh_applies_per_frame = 10;
                 self.max_in_flight_terrain = 96;
                 self.max_in_flight_meshes = 80;
                 self.target_fps = 60.0;

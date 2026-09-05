@@ -919,8 +919,10 @@ fn init_world(
     world.generator = TerrainGenerator::new(settings.seed);
     let swatch_size = match settings.graphics {
         crate::settings::GraphicsMode::Fast => 64,
-        crate::settings::GraphicsMode::Balanced => 128,
-        crate::settings::GraphicsMode::High => 256,
+        // High used to bake 256² swatches on the first Startup frame,
+        // which delayed the window on iGPUs. 128 already survives mips;
+        // Cinematic stills stay readable and Fast actually appears.
+        crate::settings::GraphicsMode::Balanced | crate::settings::GraphicsMode::High => 128,
     };
     material_library.rebuild(&mut materials, &mut images, swatch_size);
 
@@ -1104,12 +1106,23 @@ fn stream_chunks(
     let pcz = pz.div_euclid(CHUNK_SIZE_I);
 
     streamer.stream_elapsed += time.delta_seconds();
-    let warmup = streamer.stream_elapsed < 4.0;
-
+    // Staged startup: fill a spawn ring first, then open the horizon.
+    // Holding RD=8 for a full 4s made Fast/iGPU worlds feel like they
+    // "take super long till it shows up" — the disc was ready but the
+    // streamer refused to apply it.
+    let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
+    let elapsed = streamer.stream_elapsed;
     let mut rd = sync_streaming_governor(&mut governor, &budget, &streamer);
-    if warmup {
-        rd = rd.min(8);
-    }
+    let (rd_cap, warmup_boost) = if elapsed < 0.90 {
+        (if fast { 5 } else { 6 }, true)
+    } else if elapsed < 2.20 {
+        (if fast { 8 } else { 10 }, true)
+    } else if elapsed < 4.0 {
+        (rd.min(if fast { 16 } else { 18 }), elapsed < 3.0)
+    } else {
+        (rd, false)
+    };
+    rd = rd.min(rd_cap).max(2);
     let retain = rd + 2;
     let retain2 = retain * retain;
     let vertical = settings.vertical_chunks as i32;
@@ -1182,11 +1195,11 @@ fn stream_chunks(
     // Cap installs too: terrain generation finishes on worker threads in
     // waves, and installing every completed chunk in one frame causes the
     // one-second hitch the player sees while flying at max distance.
-    let terrain_apply_cap = if warmup {
+    let terrain_apply_cap = if warmup_boost {
         (budget.chunks_per_frame.max(1) as usize)
             .saturating_mul(3)
-            .max(16)
-            .min(32)
+            .max(if fast { 24 } else { 16 })
+            .min(if fast { 40 } else { 32 })
     } else {
         (budget.chunks_per_frame.max(1) as usize).min(12)
     };
@@ -1248,7 +1261,11 @@ fn stream_chunks(
         #[cfg(not(target_arch = "wasm32"))]
         let pool = AsyncComputeTaskPool::get();
         let gen_seed = world.generator.seed;
-        let spawn_budget = budget.chunks_per_frame.max(1) as usize;
+        let spawn_budget = if warmup_boost {
+            (budget.chunks_per_frame.max(1) as usize).max(if fast { 16 } else { 12 })
+        } else {
+            budget.chunks_per_frame.max(1) as usize
+        };
         let scan_budget = (spawn_budget * 192).min(streamer.load_offsets.len()).max(1);
         let mut spawned = 0usize;
         let mut scanned = 0usize;
@@ -1347,9 +1364,14 @@ fn mesh_dirty_chunks(
     // 1. Poll finished meshing tasks. Cap how many we actually *apply*
     //    (spawn entities for) per frame so a flood of finished tasks
     //    can't spike the frame budget with mesh.add() + commands.spawn().
-    let spawn_cap = if streamer.stream_elapsed < 4.0 {
+    let spawn_cap = if streamer.stream_elapsed < 2.4 {
         (budget.mesh_applies_per_frame as usize)
             .saturating_mul(3)
+            .max(24)
+            .min(56)
+    } else if streamer.stream_elapsed < 4.0 {
+        (budget.mesh_applies_per_frame as usize)
+            .saturating_mul(2)
             .max(16)
             .min(48)
     } else {
