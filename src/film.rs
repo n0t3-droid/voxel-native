@@ -2689,10 +2689,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         5 => {
-            // Slight side offset just above rail height — dual cyan tracks
-            // run into the mouth (not a top-down pillar forest).
-            let pos = station + Vec3::new(7.5, 7.0, 24.0);
-            let look = station + Vec3::new(0.0, 5.8, -10.0);
+            // Centerline above rails — avoid pad turrets (±X) that were
+            // flooding this frame with red beam slabs.
+            let pos = station + Vec3::new(0.0, 7.2, 26.0);
+            let look = station + Vec3::new(0.0, 5.6, -10.0);
             (pos, look)
         }
         6 => {
