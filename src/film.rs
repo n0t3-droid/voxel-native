@@ -923,8 +923,8 @@ fn film_spawn_silhouettes(
     let keel = island.keel_depth as f32;
     let underside_y = -(keel.max(6.0) + 0.05);
     let crystal_plate = materials.add(sil_mat(
-        Color::srgb(0.45, 0.95, 1.0),
-        LinearRgba::rgb(1.8, 5.5, 6.5),
+        Color::srgb(0.55, 0.98, 1.0),
+        LinearRgba::rgb(3.5, 8.5, 9.5),
     ));
     let verdant_plate = materials.add(sil_mat(
         Color::srgb(0.35, 0.92, 0.55),
@@ -1946,16 +1946,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Tight on the plated main island: grass rim + continuous
-            // crystal underside (avoid distant black satellite keels).
+            // Very tight on the plated main island underside + grass rim.
             let keel = island.keel_depth as f32;
-            let pos = deck
-                + Vec3::new(
-                    island.radius_x as f32 * 0.85 + 16.0,
-                    -(keel * 0.85).max(7.0),
-                    island.radius_z as f32 * 0.85 + 18.0,
-                );
-            let look = deck + Vec3::new(-2.0, -keel * 0.1, 2.0);
+            let pos = deck + Vec3::new(14.0, -(keel * 0.55).max(5.0), 16.0);
+            let look = deck + Vec3::new(0.0, -0.5, 3.0);
             (pos, look)
         }
         2 => {
