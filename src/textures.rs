@@ -743,21 +743,21 @@ fn emissive_for_block(block: BlockType) -> LinearRgba {
     let lin = block.color().to_linear();
     match block {
         BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(
-            lin.red * 0.70,
-            lin.green * 7.40,
-            lin.blue * 8.60,
+            lin.red * 0.55,
+            lin.green * 3.40,
+            lin.blue * 4.10,
         ),
         BlockType::CrystalMagenta => LinearRgba::rgb(
-            lin.red * 7.80,
-            lin.green * 0.55,
-            lin.blue * 6.60,
+            lin.red * 3.60,
+            lin.green * 0.45,
+            lin.blue * 3.10,
         ),
         BlockType::PlasmaFlow | BlockType::NeonCyan => LinearRgba::rgb(
-            lin.red * 1.05 + 0.02,
-            lin.green * 1.45 + 0.06,
-            lin.blue * 1.65 + 0.08,
+            lin.red * 0.70 + 0.01,
+            lin.green * 1.05 + 0.04,
+            lin.blue * 1.20 + 0.05,
         ),
-        BlockType::Lava => LinearRgba::rgb(lin.red * 5.80, lin.green * 2.05, lin.blue * 0.06),
+        BlockType::Lava => LinearRgba::rgb(lin.red * 3.80, lin.green * 1.55, lin.blue * 0.05),
         _ => LinearRgba::rgb(
             lin.red * 3.2 + 0.35,
             lin.green * 3.2 + 0.35,
@@ -1062,7 +1062,7 @@ mod tests {
         let plasma = emissive_for_block(BlockType::PlasmaFlow);
         let peak = plasma.red.max(plasma.green).max(plasma.blue);
         assert!(
-            peak < 2.4,
+            peak < 1.6,
             "plasma emissive peak {peak:.3} will ACES-clip to white"
         );
         assert!(plasma.blue > plasma.red * 3.0);
