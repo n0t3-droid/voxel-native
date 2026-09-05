@@ -1493,6 +1493,65 @@ fn film_spawn_silhouettes(
         &tunnel_glow,
         deck,
     );
+    // Painting portal/holo — darkrock aperture with cream holo (NOT cyan skyway color).
+    // Sits on mountain mid-right face so it reads as a distinct mouth.
+    let portal_holo = materials.add(sil_mat(
+        Color::srgb(0.95, 0.92, 0.78),
+        LinearRgba::rgb(6.0, 5.0, 2.5),
+    ));
+    let portal_rim = materials.add(sil_mat(
+        Color::srgb(0.85, 0.78, 0.55),
+        LinearRgba::rgb(3.5, 2.8, 1.2),
+    ));
+    let paint_mouth = deck + Vec3::new(14.0, 26.0, 88.0);
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: tunnel_rock.clone(),
+            transform: Transform::from_translation(paint_mouth)
+                .with_scale(Vec3::new(24.0, 20.0, 8.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmTunnelFx,
+        Name::new("FilmPaintPortalRock"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: tunnel_dark.clone(),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 3.5))
+                .with_scale(Vec3::new(14.0, 12.0, 4.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmTunnelFx,
+        Name::new("FilmPaintPortalBore"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: portal_rim.clone(),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 6.0))
+                .with_scale(Vec3::new(12.0, 10.0, 1.4)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmTunnelFx,
+        Name::new("FilmPaintPortalArch"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: portal_holo.clone(),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 7.2))
+                .with_scale(Vec3::new(9.0, 8.0, 1.2)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmTunnelFx,
+        Name::new("FilmPaintPortalGlow"),
+    ));
     // Cyan monorail into the tunnel mouth — next painting gap after towers.
     let rail_metal = materials.add(sil_mat(
         Color::srgb(0.62, 0.66, 0.72),
@@ -1536,63 +1595,101 @@ fn film_spawn_silhouettes(
         pad,
         alien_world,
     );
-    // Painting-lip turrets — low on verdant crown so shot 8 reads muzzles without clutter.
+    // Painting-lip turrets — LOWER-RIGHT grass, fat amber beams across mid (away from skyway).
     for (i, origin) in [
-        deck + Vec3::new(-34.0, 6.0, 110.0),
-        deck + Vec3::new(-24.0, 6.5, 116.0),
+        deck + Vec3::new(22.0, 7.0, 118.0),
+        deck + Vec3::new(32.0, 7.5, 112.0),
     ]
     .into_iter()
     .enumerate()
     {
-        let aim = deck + Vec3::new(-8.0, 10.0, 106.0);
+        let aim = deck + Vec3::new(-8.0, 14.0, 100.0);
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: turret_hull.clone(),
-                transform: Transform::from_translation(origin + Vec3::new(0.0, 1.2, 0.0))
-                    .with_scale(Vec3::new(3.2, 3.2, 3.2)),
+                transform: Transform::from_translation(origin + Vec3::new(0.0, 1.6, 0.0))
+                    .with_scale(Vec3::new(4.0, 4.0, 4.0)),
                 ..default()
             },
             FilmSilhouette,
             FilmTurretFx,
             Name::new(format!("FilmPaintTurretBase{i}")),
         ));
-        let to = (aim - (origin + Vec3::Y * 3.0)).normalize_or_zero();
-        let flash = origin + Vec3::Y * 3.0 + to * 5.0;
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: turret_hull.clone(),
+                transform: Transform::from_translation(origin + Vec3::new(0.0, 3.8, 0.0))
+                    .looking_at(aim, Vec3::Y)
+                    .with_scale(Vec3::new(1.4, 1.4, 6.0)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmTurretFx,
+            Name::new(format!("FilmPaintTurretBarrel{i}")),
+        ));
+        let to = (aim - (origin + Vec3::Y * 4.0)).normalize_or_zero();
+        let flash = origin + Vec3::Y * 4.0 + to * 7.0;
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: turret_muzzle.clone(),
-                transform: Transform::from_translation(flash).with_scale(Vec3::new(4.0, 4.0, 4.0)),
+                transform: Transform::from_translation(flash).with_scale(Vec3::new(5.5, 5.5, 5.5)),
                 ..default()
             },
             FilmSilhouette,
             FilmTurretFx,
             Name::new(format!("FilmPaintTurretMuzzle{i}")),
         ));
-        let beam_mid = flash.lerp(aim, 0.5);
-        let beam_len = flash.distance(aim).max(8.0);
+        let beam_mid = flash.lerp(aim, 0.55);
+        let beam_len = flash.distance(aim).max(14.0);
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: turret_orange.clone(),
                 transform: Transform::from_translation(beam_mid)
                     .looking_at(aim, Vec3::Y)
-                    .with_scale(Vec3::new(1.8, 1.8, beam_len)),
+                    .with_scale(Vec3::new(2.8, 2.8, beam_len)),
                 ..default()
             },
             FilmSilhouette,
             FilmTurretFx,
             Name::new(format!("FilmPaintTurretBeam{i}")),
         ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: turret_tracer.clone(),
+                transform: Transform::from_translation(beam_mid)
+                    .looking_at(aim, Vec3::Y)
+                    .with_scale(Vec3::new(1.2, 1.2, beam_len * 0.98)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmTurretFx,
+            Name::new(format!("FilmPaintTurretCore{i}")),
+        ));
     }
 
-    // Cheap docked-fighter swarm (+X / painting frustum) with cyan plumes.
+    // Fighter swarm — dedicated high V; painting wing uses alloy hull + cream plumes.
     let fighter_hull = materials.add(sil_mat(
-        Color::srgb(0.78, 0.82, 0.88),
-        LinearRgba::rgb(0.35, 0.40, 0.55),
+        Color::srgb(0.88, 0.90, 0.94),
+        LinearRgba::rgb(0.8, 0.85, 1.0),
     ));
-    spawn_film_fighter_swarm(&mut commands, &cube, &fighter_hull, &tunnel_cyan, deck);
+    let fighter_plume = materials.add(sil_mat(
+        // Cream plume — readable against cyan skyway soup.
+        Color::srgb(1.0, 0.92, 0.70),
+        LinearRgba::rgb(5.0, 3.5, 1.2),
+    ));
+    spawn_film_fighter_swarm(
+        &mut commands,
+        &cube,
+        &fighter_hull,
+        &tunnel_cyan,
+        &fighter_plume,
+        deck,
+    );
 
     // Crystal towers — next painting gap after fighter swarm readability.
     let tower_crystal = materials.add(sil_mat(
@@ -2063,57 +2160,6 @@ fn spawn_film_tunnel_portal(
         FilmTunnelFx,
         Name::new("FilmTunnelGlow"),
     ));
-
-    // Painting-facing portal/holo arch — left-mid frustum, cyan mouth toward cam.
-    let paint_mouth = deck + Vec3::new(-30.0, 16.0, 96.0);
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: rock.clone(),
-            transform: Transform::from_translation(paint_mouth)
-                .with_scale(Vec3::new(28.0, 22.0, 10.0)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmTunnelFx,
-        Name::new("FilmPaintPortalRock"),
-    ));
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: dark.clone(),
-            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 4.0))
-                .with_scale(Vec3::new(16.0, 14.0, 5.0)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmTunnelFx,
-        Name::new("FilmPaintPortalBore"),
-    ));
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: cyan.clone(),
-            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 7.0))
-                .with_scale(Vec3::new(14.0, 12.0, 1.6)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmTunnelFx,
-        Name::new("FilmPaintPortalArch"),
-    ));
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: glow.clone(),
-            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 8.2))
-                .with_scale(Vec3::new(10.0, 10.0, 1.2)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmTunnelFx,
-        Name::new("FilmPaintPortalGlow"),
-    ));
 }
 
 fn spawn_film_turrets_firing(
@@ -2385,9 +2431,10 @@ fn spawn_film_fighter_swarm(
     cube: &Handle<Mesh>,
     hull: &Handle<StandardMaterial>,
     cyan: &Handle<StandardMaterial>,
+    cream_plume: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // High open-sky V for dedicated; painting wing stays lower in frustum.
+    // High open-sky V for dedicated; painting wing upper mid-right (clear of skyway).
     for (i, (ox, oy, oz, yaw, scale, sky)) in [
         // Dedicated core — high altitude, clear of islands/tunnel
         (20.0_f32, 52.0, 18.0, -0.55, 1.15, true),
@@ -2398,13 +2445,13 @@ fn spawn_film_fighter_swarm(
         (45.0, 57.0, 30.0, -0.35, 1.2, true),
         (35.0, 58.0, 16.0, -0.48, 1.3, true),
         (55.0, 55.0, 26.0, -0.42, 1.15, true),
-        // Painting-hero wing — left of mountain, above verdant lip.
-        (-28.0_f32, 26.0, 114.0, -0.70, 1.7, false),
-        (-18.0, 30.0, 120.0, -0.65, 1.75, false),
-        (-8.0, 28.0, 116.0, -0.55, 1.65, false),
-        (-34.0, 24.0, 108.0, -0.75, 1.6, false),
-        (2.0, 32.0, 112.0, -0.50, 1.55, false),
-        (-22.0, 22.0, 122.0, -0.68, 1.5, false),
+        // Painting wing — upper mid-right sky above mountain shoulder (not left cyan).
+        (18.0_f32, 52.0, 78.0, -0.55, 1.85, false),
+        (28.0, 56.0, 72.0, -0.45, 1.9, false),
+        (38.0, 54.0, 82.0, -0.50, 1.8, false),
+        (12.0, 50.0, 68.0, -0.60, 1.75, false),
+        (46.0, 58.0, 76.0, -0.40, 1.85, false),
+        (22.0, 48.0, 88.0, -0.52, 1.7, false),
     ]
     .into_iter()
     .enumerate()
@@ -2412,34 +2459,40 @@ fn spawn_film_fighter_swarm(
         let p = deck + Vec3::new(ox, oy, oz);
         let s = scale;
         let plume_dir = Quat::from_rotation_y(yaw) * Vec3::new(-1.0, 0.0, 0.0);
+        let plume_mat = if sky {
+            cyan.clone()
+        } else {
+            cream_plume.clone()
+        };
         let parts = [
             (
                 hull.clone(),
                 Transform::from_translation(p)
-                    .with_scale(Vec3::new(8.0 * s, 2.4 * s, 3.5 * s))
+                    .with_scale(Vec3::new(9.0 * s, 2.8 * s, 4.0 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 format!("FilmFighter{i}"),
             ),
             (
-                cyan.clone(),
-                Transform::from_translation(p + plume_dir * (9.0 * s))
-                    .with_scale(Vec3::new(18.0 * s, 2.6 * s, 2.4 * s))
+                plume_mat.clone(),
+                Transform::from_translation(p + plume_dir * (10.0 * s))
+                    .with_scale(Vec3::new(14.0 * s, 2.2 * s, 2.0 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 format!("FilmFighterPlume{i}"),
             ),
             (
                 hull.clone(),
                 Transform::from_translation(p)
-                    .with_scale(Vec3::new(3.2 * s, 0.7 * s, 8.0 * s))
+                    .with_scale(Vec3::new(3.6 * s, 0.8 * s, 9.0 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 format!("FilmFighterWing{i}"),
             ),
             (
-                cyan.clone(),
+                // Nose matches hull — never cyan blob in painting.
+                hull.clone(),
                 Transform::from_translation(
-                    p - plume_dir * (5.0 * s) + Vec3::new(0.0, 0.8 * s, 0.0),
+                    p - plume_dir * (5.5 * s) + Vec3::new(0.0, 0.8 * s, 0.0),
                 )
-                .with_scale(Vec3::new(1.8 * s, 1.4 * s, 1.8 * s)),
+                .with_scale(Vec3::new(2.0 * s, 1.5 * s, 2.0 * s)),
                 format!("FilmFighterNose{i}"),
             ),
         ];
@@ -2653,14 +2706,14 @@ fn spawn_film_waterfall(
             Name::new(format!("FilmWaterfallMist{i}")),
         ));
     }
-    // Painting-frustum secondary fall — mid-right of verdant lip toward cam.
-    let lip2 = deck + Vec3::new(22.0, 8.0, 100.0);
-    let mid2 = lip2 + Vec3::new(2.0, -14.0, 4.0);
+    // Painting-frustum fall — RIGHT of mountain, white mist + deep blue (not skyway cyan).
+    let lip2 = deck + Vec3::new(48.0, 14.0, 92.0);
+    let mid2 = lip2 + Vec3::new(3.0, -18.0, 5.0);
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
-            material: cyan.clone(),
-            transform: Transform::from_translation(mid2).with_scale(Vec3::new(10.0, 28.0, 4.5)),
+            material: deep.clone(),
+            transform: Transform::from_translation(mid2).with_scale(Vec3::new(8.0, 32.0, 4.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2670,26 +2723,38 @@ fn spawn_film_waterfall(
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
+            material: mist.clone(),
+            transform: Transform::from_translation(mid2 + Vec3::new(0.0, 0.0, 2.5))
+                .with_scale(Vec3::new(12.0, 34.0, 5.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmWaterfallFx,
+        Name::new("FilmWaterfallMistColumnB"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
             material: grass.clone(),
-            transform: Transform::from_translation(lip2).with_scale(Vec3::new(14.0, 2.4, 6.0)),
+            transform: Transform::from_translation(lip2).with_scale(Vec3::new(16.0, 2.6, 8.0)),
             ..default()
         },
         FilmSilhouette,
         FilmWaterfallFx,
         Name::new("FilmWaterfallGrassLipB"),
     ));
-    // Mist column so the fall reads even under upward planet look.
+    // White splash curtain at base — vertical read vs horizontal skyway.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: mist.clone(),
-            transform: Transform::from_translation(mid2 + Vec3::new(0.0, 2.0, 3.0))
-                .with_scale(Vec3::new(6.0, 20.0, 6.0)),
+            transform: Transform::from_translation(mid2 + Vec3::new(0.0, -12.0, 4.0))
+                .with_scale(Vec3::new(16.0, 8.0, 10.0)),
             ..default()
         },
         FilmSilhouette,
         FilmWaterfallFx,
-        Name::new("FilmWaterfallMistB"),
+        Name::new("FilmWaterfallSplashB"),
     ));
 }
 
@@ -3971,19 +4036,25 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         8 => {
-            // Coherent hero: planet upper; mountain mid-right; grass+skyway+rivers stacked.
+            // Coherent hero: planet upper; mountain+portal mid-right; grass+skyway left;
+            // waterfall right; fighters upper mid-right; turrets lower-right amber.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-60.0, 38.0, 140.0);
+            let pos = deck + Vec3::new(-58.0, 40.0, 142.0);
             let station_mid = deck + Vec3::new(28.0, 28.0, 74.0);
             let green_crown = deck + Vec3::new(-16.0, 5.0, 108.0);
-            let skyway_mid = deck + Vec3::new(-18.0, 26.0, 96.0);
+            let skyway_mid = deck + Vec3::new(-22.0, 26.0, 96.0);
             let rivers = deck + Vec3::new(-22.0, 8.0, 100.0);
+            let portal = deck + Vec3::new(14.0, 26.0, 88.0);
+            let fall = deck + Vec3::new(48.0, 8.0, 92.0);
+            let fighters = deck + Vec3::new(28.0, 54.0, 76.0);
             let planet = pos + planet_dir * 155.0;
-            // Favor verdant lip a touch more; station stays mid-right darkrock.
             let ground = green_crown
-                .lerp(skyway_mid, 0.15)
-                .lerp(rivers, 0.14)
-                .lerp(station_mid, 0.26);
+                .lerp(skyway_mid, 0.12)
+                .lerp(rivers, 0.12)
+                .lerp(station_mid, 0.22)
+                .lerp(portal, 0.12)
+                .lerp(fall, 0.10)
+                .lerp(fighters, 0.08);
             let look = ground.lerp(planet, 0.16);
             (pos, look)
         }
