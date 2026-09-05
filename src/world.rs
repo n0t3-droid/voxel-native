@@ -1657,9 +1657,21 @@ fn mesh_dirty_chunks(
             ChunkPos::new(pos.x, pos.y + 1, pos.z),
             ChunkPos::new(pos.x, pos.y - 1, pos.z),
         ];
-        let all_neighbours_ready = neighbours_needed.into_iter().all(|n| {
-            chunk_slot_mesh_neighbour_ready(&mut world, n, vertical_chunks, pcx, pcz, load_r2)
-        });
+        // Fast far LOD samples missing voxels as air. Waiting on the
+        // load-horizon rim (neighbours that are never generated) left a
+        // permanent dirty queue. Near-field still waits for in-disc
+        // neighbours so spawn seams stay clean.
+        let all_neighbours_ready = far_collapse
+            || neighbours_needed.into_iter().all(|n| {
+                chunk_slot_mesh_neighbour_ready(
+                    &mut world,
+                    n,
+                    vertical_chunks,
+                    pcx,
+                    pcz,
+                    load_r2,
+                )
+            });
         if !all_neighbours_ready {
             // Neighbours haven't streamed in yet; try again next frame.
             streamer.dirty_queue.insert(pos);
