@@ -282,21 +282,33 @@ struct SkywayTram {
     span: Vec3,
 }
 
+#[derive(Component)]
+struct ColonyPad;
+
+/// Postcard-readable suit: ~2.6 m tall, ~0.9 m at the shoulders.
+/// NASA EMU standing height is ~1.88 m (ISS EVA); these are staged larger
+/// so 2–3 figures still read at 12 m in a 117° spawn look instead of
+/// collapsing to specks.
+const FIGURE_TORSO: Vec3 = Vec3::new(0.92, 1.48, 0.58);
+const FIGURE_HEAD: Vec3 = Vec3::new(0.70, 0.64, 0.70);
+const FIGURE_LEG: Vec3 = Vec3::new(0.78, 0.62, 0.50);
+const FIGURE_VISOR: Vec3 = Vec3::new(0.56, 0.28, 0.16);
+const TRAM_HULL: Vec3 = Vec3::new(1.85, 1.42, 4.60);
+
 fn colony_figure_count(graphics: GraphicsMode, cinematic: bool) -> usize {
     match graphics {
         GraphicsMode::Fast => 0,
-        GraphicsMode::Balanced => 3,
-        GraphicsMode::High if cinematic => 5,
-        GraphicsMode::High => 4,
+        GraphicsMode::Balanced => 2,
+        GraphicsMode::High if cinematic => 3,
+        GraphicsMode::High => 3,
     }
 }
 
-fn skyway_tram_count(graphics: GraphicsMode, cinematic: bool) -> usize {
+fn skyway_tram_count(graphics: GraphicsMode, _cinematic: bool) -> usize {
+    // One readable car on the left skyway. A second distant tram just
+    // reads as noise at postcard scale; Fast still keeps the single car.
     match graphics {
-        GraphicsMode::Fast => 1,
-        GraphicsMode::Balanced => 1,
-        GraphicsMode::High if cinematic => 2,
-        GraphicsMode::High => 1,
+        GraphicsMode::Fast | GraphicsMode::Balanced | GraphicsMode::High => 1,
     }
 }
 
@@ -316,7 +328,7 @@ fn spawn_colony_life_once(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, Or<(With<ColonyWalker>, With<SkywayTram>)>>,
+    existing: Query<Entity, Or<(With<ColonyWalker>, With<SkywayTram>, With<ColonyPad>)>>,
 ) {
     if !pending.0 {
         return;
@@ -354,10 +366,34 @@ fn spawn_colony_life_once(
         &mut commands,
         &mut materials,
         &cube,
+        &generator,
         anchor,
         settings.graphics,
         cinematic,
     );
+}
+
+/// Near pad in the lower third of the authored spawn look. Right of
+/// centre so the left skyway stays clear for the tram.
+fn postcard_pad_anchor(origin: Vec3) -> (Vec3, Vec3, Vec3) {
+    let (_fwd, fwd_h, right_h) = new_world_look_basis();
+    let pos = origin + fwd_h * 11.5 + right_h * 4.5 + Vec3::Y * -10.5;
+    (pos, fwd_h, right_h)
+}
+
+/// Visible left skyway stretch: hero deck at z = -48, x just west of the
+/// opening-look gap, so the car rides the dark T instead of empty air.
+fn postcard_tram_lane(generator: &crate::terrain::TerrainGenerator) -> (Vec3, Vec3) {
+    let z = crate::frontier::HERO_SKYWAY_Z as f32;
+    let x0 = 34.0;
+    let x1 = 8.0;
+    let mid_x = (x0 + x1) * 0.5;
+    let macro_h = generator.macro_height(mid_x as f64, z as f64);
+    let deck_y = (macro_h + 24.0).round() as f32 + TRAM_HULL.y * 0.52;
+    (
+        Vec3::new(x0, deck_y, z),
+        Vec3::new(x1 - x0, 0.0, 0.0),
+    )
 }
 
 fn spawn_colony_figures(
@@ -373,44 +409,100 @@ fn spawn_colony_figures(
     if count == 0 {
         return;
     }
-    let (_fwd, fwd_h, right_h) = new_world_look_basis();
-    let spots: [(f32, f32, f32, f32); 5] = [
-        (22.0, 6.0, 7.0, 0.018),
-        (28.0, -4.0, 5.5, 0.022),
-        (18.0, 12.0, 6.0, 0.016),
-        (32.0, 2.0, 8.0, 0.020),
-        (24.0, -10.0, 5.0, 0.024),
+    let (mut pad, fwd_h, right_h) = postcard_pad_anchor(origin);
+    let desired_y = pad.y;
+    let mut best_score = f32::INFINITY;
+    for lat in [4.5, 2.5, 0.5, -1.5, -3.5] {
+        let xz = origin + fwd_h * 11.5 + right_h * lat;
+        let ground =
+            generator.surface_height_at(xz.x.round() as i32, xz.z.round() as i32) as f32;
+        // Prefer a column whose surface is in the lower third, not a
+        // mesa that would bury the pad inside solid rock.
+        let score = if ground > origin.y - 3.0 {
+            80.0 + (ground - desired_y).abs()
+        } else {
+            (ground - desired_y).abs()
+        };
+        if score < best_score {
+            best_score = score;
+            pad = Vec3::new(xz.x, desired_y, xz.z);
+        }
+    }
+    let ground = generator.surface_height_at(pad.x.round() as i32, pad.z.round() as i32) as f32;
+    if ground < origin.y - 3.0 && (ground - desired_y).abs() < 12.0 {
+        pad.y = ground + 0.22;
+    }
+    let deck = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.10, 0.12, 0.16),
+        perceptual_roughness: 0.55,
+        metallic: 0.18,
+        emissive: LinearRgba::rgb(0.03, 0.04, 0.05),
+        ..default()
+    });
+    let rim = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.05, 0.78, 1.0),
+        emissive: LinearRgba::rgb(0.08, 1.35, 1.85),
+        perceptual_roughness: 0.22,
+        ..default()
+    });
+    let pad_root = commands
+        .spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(pad),
+                ..default()
+            },
+            ColonyPad,
+            Name::new("ColonyPad"),
+        ))
+        .id();
+    commands.entity(pad_root).with_children(|p| {
+        p.spawn(PbrBundle {
+            mesh: cube.clone(),
+            material: deck,
+            transform: Transform::from_scale(Vec3::new(5.4, 0.38, 7.2)),
+            ..default()
+        });
+        p.spawn(PbrBundle {
+            mesh: cube.clone(),
+            material: rim.clone(),
+            transform: Transform::from_xyz(0.0, 0.22, 3.45).with_scale(Vec3::new(5.4, 0.10, 0.16)),
+            ..default()
+        });
+        p.spawn(PbrBundle {
+            mesh: cube.clone(),
+            material: rim,
+            transform: Transform::from_xyz(0.0, 0.22, -3.45).with_scale(Vec3::new(5.4, 0.10, 0.16)),
+            ..default()
+        });
+    });
+
+    // Local offsets on the pad (ahead, lat, walk, speed). Keep the
+    // patrol inside the 7×5 deck so figures never walk off into air.
+    let spots: [(f32, f32, f32, f32); 3] = [
+        (0.8, -1.7, 1.6, 0.020),
+        (-0.4, 1.5, 1.4, 0.024),
+        (1.2, 0.2, 1.2, 0.018),
     ];
     let suits = [
-        Color::srgb(0.18, 0.42, 0.62),
-        Color::srgb(0.22, 0.48, 0.28),
-        Color::srgb(0.62, 0.32, 0.12),
-        Color::srgb(0.72, 0.74, 0.78),
-        Color::srgb(0.48, 0.22, 0.55),
+        Color::srgb(0.16, 0.46, 0.72),
+        Color::srgb(0.18, 0.52, 0.24),
+        Color::srgb(0.78, 0.78, 0.82),
     ];
+    let stand_y = pad.y + 0.19;
     for (i, &(ahead, lat, walk, speed)) in spots.iter().take(count).enumerate() {
-        let xz = origin + fwd_h * ahead + right_h * lat;
-        let ground = generator.surface_height_at(xz.x.round() as i32, xz.z.round() as i32) as f32
-            + 1.15;
-        let desired = origin.y - 6.0;
-        let y = if (ground - desired).abs() < 10.0 {
-            ground
-        } else {
-            desired
-        };
-        let pos = Vec3::new(xz.x, y, xz.z);
+        let pos = Vec3::new(pad.x, stand_y, pad.z) + fwd_h * ahead + right_h * lat;
         let span = right_h * walk;
         let suit = materials.add(StandardMaterial {
             base_color: suits[i],
-            perceptual_roughness: 0.62,
-            metallic: 0.12,
-            emissive: LinearRgba::rgb(0.04, 0.05, 0.06),
+            perceptual_roughness: 0.55,
+            metallic: 0.16,
+            emissive: LinearRgba::rgb(0.06, 0.07, 0.08),
             ..default()
         });
         let visor = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.08, 0.72, 0.92),
-            emissive: LinearRgba::rgb(0.15, 1.4, 1.9),
-            perceptual_roughness: 0.12,
+            base_color: Color::srgb(0.08, 0.78, 0.96),
+            emissive: LinearRgba::rgb(0.18, 1.55, 2.05),
+            perceptual_roughness: 0.10,
             ..default()
         });
         let root = commands
@@ -420,7 +512,7 @@ fn spawn_colony_figures(
                     ..default()
                 },
                 ColonyWalker {
-                    t: i as f32 * 0.17,
+                    t: i as f32 * 0.21,
                     speed,
                     origin: pos,
                     span,
@@ -432,25 +524,37 @@ fn spawn_colony_figures(
             p.spawn(PbrBundle {
                 mesh: cube.clone(),
                 material: suit.clone(),
-                transform: Transform::from_xyz(0.0, 0.10, 0.0).with_scale(Vec3::new(0.32, 0.48, 0.22)),
+                transform: Transform::from_xyz(0.0, FIGURE_LEG.y * 0.5, 0.0)
+                    .with_scale(FIGURE_LEG),
                 ..default()
             });
             p.spawn(PbrBundle {
                 mesh: cube.clone(),
                 material: suit.clone(),
-                transform: Transform::from_xyz(0.0, 0.48, 0.0).with_scale(Vec3::new(0.26, 0.24, 0.26)),
+                transform: Transform::from_xyz(0.0, FIGURE_LEG.y + FIGURE_TORSO.y * 0.5, 0.0)
+                    .with_scale(FIGURE_TORSO),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: suit.clone(),
+                transform: Transform::from_xyz(
+                    0.0,
+                    FIGURE_LEG.y + FIGURE_TORSO.y + FIGURE_HEAD.y * 0.5,
+                    0.0,
+                )
+                .with_scale(FIGURE_HEAD),
                 ..default()
             });
             p.spawn(PbrBundle {
                 mesh: cube.clone(),
                 material: visor,
-                transform: Transform::from_xyz(0.0, 0.50, -0.12).with_scale(Vec3::new(0.22, 0.10, 0.08)),
-                ..default()
-            });
-            p.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: suit,
-                transform: Transform::from_xyz(0.0, -0.28, 0.0).with_scale(Vec3::new(0.28, 0.22, 0.20)),
+                transform: Transform::from_xyz(
+                    0.0,
+                    FIGURE_LEG.y + FIGURE_TORSO.y + FIGURE_HEAD.y * 0.52,
+                    -FIGURE_HEAD.z * 0.42,
+                )
+                .with_scale(FIGURE_VISOR),
                 ..default()
             });
         });
@@ -461,75 +565,70 @@ fn spawn_skyway_trams(
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
     cube: &Handle<Mesh>,
-    origin: Vec3,
+    generator: &crate::terrain::TerrainGenerator,
+    _origin: Vec3,
     graphics: GraphicsMode,
     cinematic: bool,
 ) {
     let count = skyway_tram_count(graphics, cinematic);
-    let (_fwd, fwd_h, right_h) = new_world_look_basis();
+    if count == 0 {
+        return;
+    }
     let hull = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.62, 0.66, 0.72),
-        perceptual_roughness: 0.45,
-        metallic: 0.22,
-        emissive: LinearRgba::rgb(0.08, 0.10, 0.14),
+        base_color: Color::srgb(0.22, 0.24, 0.28),
+        perceptual_roughness: 0.42,
+        metallic: 0.28,
+        emissive: LinearRgba::rgb(0.05, 0.06, 0.08),
         ..default()
     });
     let glow = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.05, 0.78, 1.0),
-        emissive: LinearRgba::rgb(0.2, 4.5, 6.0),
-        alpha_mode: AlphaMode::Add,
+        base_color: Color::srgb(0.06, 0.82, 1.0),
+        emissive: LinearRgba::rgb(0.10, 1.65, 2.20),
+        perceptual_roughness: 0.16,
         ..default()
     });
-    let lanes: [(f32, f32, f32, f32, f32, f32, f32, f32); 2] = [
-        (36.0, 14.0, -32.0, 10.0, 48.0, 2.0, 0.030, 0.08),
-        (52.0, 18.0, 18.0, -8.0, -40.0, 3.0, 0.022, 0.55),
-    ];
-    for (i, &(ahead, height, lat, da, dl, du, speed, t0)) in lanes.iter().take(count).enumerate() {
-        let lane_origin = origin + fwd_h * ahead + Vec3::Y * height + right_h * lat;
-        let span = fwd_h * da + right_h * dl + Vec3::Y * du;
-        let u = t0.rem_euclid(1.0);
-        let pos = lane_origin + span * u;
-        let yaw = (-span.x).atan2(-span.z);
-        let root = commands
-            .spawn((
-                SpatialBundle {
-                    transform: Transform::from_translation(pos)
-                        .with_rotation(Quat::from_rotation_y(yaw)),
-                    ..default()
-                },
-                SkywayTram {
-                    t: t0,
-                    speed,
-                    origin: lane_origin,
-                    span,
-                },
-                Name::new("SkywayTram"),
-            ))
-            .id();
-        let scale = if i == 0 { 1.0 } else { 0.82 };
-        commands.entity(root).with_children(|p| {
-            p.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: hull.clone(),
-                transform: Transform::from_scale(Vec3::new(1.15 * scale, 0.55 * scale, 2.4 * scale)),
+    let (lane_origin, span) = postcard_tram_lane(generator);
+    let t0 = 0.18;
+    let pos = lane_origin + span * ping_pong(t0);
+    let yaw = (-span.x).atan2(-span.z);
+    let root = commands
+        .spawn((
+            SpatialBundle {
+                transform: Transform::from_translation(pos)
+                    .with_rotation(Quat::from_rotation_y(yaw)),
                 ..default()
-            });
-            p.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: glow.clone(),
-                transform: Transform::from_xyz(0.0, 0.18 * scale, 0.0)
-                    .with_scale(Vec3::new(0.95 * scale, 0.18 * scale, 1.8 * scale)),
-                ..default()
-            });
-            p.spawn(PbrBundle {
-                mesh: cube.clone(),
-                material: glow.clone(),
-                transform: Transform::from_xyz(0.0, -0.12 * scale, -1.35 * scale)
-                    .with_scale(Vec3::new(0.22 * scale, 0.10 * scale, 0.55 * scale)),
-                ..default()
-            });
+            },
+            SkywayTram {
+                t: t0,
+                speed: 0.038,
+                origin: lane_origin,
+                span,
+            },
+            Name::new("SkywayTram"),
+        ))
+        .id();
+    commands.entity(root).with_children(|p| {
+        p.spawn(PbrBundle {
+            mesh: cube.clone(),
+            material: hull.clone(),
+            transform: Transform::from_scale(TRAM_HULL),
+            ..default()
         });
-    }
+        p.spawn(PbrBundle {
+            mesh: cube.clone(),
+            material: glow.clone(),
+            transform: Transform::from_xyz(0.0, 0.22, 0.0)
+                .with_scale(Vec3::new(1.55, 0.42, 3.4)),
+            ..default()
+        });
+        p.spawn(PbrBundle {
+            mesh: cube.clone(),
+            material: glow,
+            transform: Transform::from_xyz(0.0, -0.18, -2.45)
+                .with_scale(Vec3::new(0.55, 0.18, 0.70)),
+            ..default()
+        });
+    });
 }
 
 fn update_colony_walkers(time: Res<Time>, mut q: Query<(&mut Transform, &mut ColonyWalker)>) {
@@ -547,7 +646,8 @@ fn update_colony_walkers(time: Res<Time>, mut q: Query<(&mut Transform, &mut Col
         if dir.length_squared() > 0.01 {
             tf.rotation = Quat::from_rotation_y((-dir.x).atan2(-dir.z));
         }
-        tf.translation.y = walker.origin.y + (walker.t * std::f32::consts::TAU * 2.0).sin().abs() * 0.06;
+        tf.translation.y =
+            walker.origin.y + (walker.t * std::f32::consts::TAU * 2.0).sin().abs() * 0.08;
     }
 }
 
@@ -555,15 +655,22 @@ fn update_skyway_trams(time: Res<Time>, mut q: Query<(&mut Transform, &mut Skywa
     let dt = time.delta_seconds();
     for (mut tf, mut tram) in q.iter_mut() {
         tram.t = (tram.t + dt * tram.speed).rem_euclid(1.0);
-        let pos = tram.origin + tram.span * tram.t;
-        tf.translation = pos;
-        tf.rotation = Quat::from_rotation_y((-tram.span.x).atan2(-tram.span.z));
+        let u = ping_pong(tram.t);
+        tf.translation = tram.origin + tram.span * u;
+        let dir = if tram.t.rem_euclid(1.0) < 0.5 {
+            tram.span
+        } else {
+            -tram.span
+        };
+        if dir.length_squared() > 0.01 {
+            tf.rotation = Quat::from_rotation_y((-dir.x).atan2(-dir.z));
+        }
     }
 }
 
 fn cleanup_colony_life(
     mut commands: Commands,
-    entities: Query<Entity, Or<(With<ColonyWalker>, With<SkywayTram>)>>,
+    entities: Query<Entity, Or<(With<ColonyWalker>, With<SkywayTram>, With<ColonyPad>)>>,
 ) {
     for entity in entities.iter() {
         if let Some(entity_commands) = commands.get_entity(entity) {
@@ -629,12 +736,51 @@ mod tests {
     #[test]
     fn colony_life_is_bounded_and_fast_skips_figures() {
         assert_eq!(colony_figure_count(GraphicsMode::Fast, false), 0);
-        assert_eq!(colony_figure_count(GraphicsMode::Balanced, false), 3);
-        assert_eq!(colony_figure_count(GraphicsMode::High, true), 5);
+        assert_eq!(colony_figure_count(GraphicsMode::Balanced, false), 2);
+        assert_eq!(colony_figure_count(GraphicsMode::High, true), 3);
         assert_eq!(skyway_tram_count(GraphicsMode::Fast, false), 1);
-        assert_eq!(skyway_tram_count(GraphicsMode::High, true), 2);
+        assert_eq!(skyway_tram_count(GraphicsMode::High, true), 1);
         assert!((ping_pong(0.0) - ping_pong(1.0)).abs() < 1e-5);
         assert!((ping_pong(0.25) - 0.5).abs() < 1e-5);
         assert!(ping_pong(0.0) >= 0.0 && ping_pong(0.0) <= 1.0);
+    }
+
+    #[test]
+    fn colony_life_reads_at_postcard_scale() {
+        let origin = Vec3::new(64.0, 58.0, -79.0);
+        let (pad, fwd_h, right_h) = postcard_pad_anchor(origin);
+        let ahead = (pad - origin).dot(fwd_h);
+        let right = (pad - origin).dot(right_h);
+        assert!(
+            ahead > 8.0 && ahead < 16.0,
+            "pad should sit in the near field, ahead={ahead}"
+        );
+        assert!(
+            pad.y < origin.y - 6.0,
+            "pad should sit in the lower third, pad.y={} origin.y={}",
+            pad.y,
+            origin.y
+        );
+        assert!(right > 2.0, "pad should sit right of centre so the left skyway stays clear");
+
+        let figure_h = FIGURE_LEG.y + FIGURE_TORSO.y + FIGURE_HEAD.y;
+        assert!(
+            figure_h > 2.2,
+            "suited figures must be larger than a speck, height={figure_h}"
+        );
+        assert!(FIGURE_TORSO.x > 0.7, "shoulder width must read at 12 m");
+        assert!(TRAM_HULL.z > 4.0, "tram car must be a short visible box, not a streak");
+
+        let gen = crate::terrain::TerrainGenerator::new(12345);
+        let (tram_o, tram_span) = postcard_tram_lane(&gen);
+        assert!(
+            (tram_o.z - crate::frontier::HERO_SKYWAY_Z as f32).abs() < 0.6,
+            "tram must ride the dark left skyway, z={}",
+            tram_o.z
+        );
+        assert!(tram_o.x < origin.x, "tram should be ahead of the -X look");
+        assert!(tram_span.length() > 12.0 && tram_span.length() < 40.0);
+        let left = (tram_o - origin).dot(right_h);
+        assert!(left < -8.0, "tram should sit on the left of the spawn look, lat={left}");
     }
 }
