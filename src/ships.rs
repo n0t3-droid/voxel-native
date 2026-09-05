@@ -1342,33 +1342,38 @@ fn add_future_wave_shuttle_skin(voxels: &mut Vec<ShipVoxel>, kind: ShipKind) {
 
     match kind {
         ShipKind::ScoutShuttle => {
+            // Overwrite the dark X-wing skin with a chunky white/orange
+            // orbiter so a 3× flyby still reads as a shuttle, not a
+            // grey speck or a hull wall.
             push_box(
                 voxels,
-                IVec3::new(-1, -1, -6),
-                IVec3::new(1, -1, 5),
-                BlockType::ShipHullDark,
-            );
-            for sx in [-1, 1] {
-                push_box(
-                    voxels,
-                    IVec3::new(sx * 4, -1, 0),
-                    IVec3::new(sx * 7, -1, 5),
-                    BlockType::ShipHullAlloy,
-                );
-            }
-            // White/orange postcard silhouette so the flyby reads as the
-            // key-art shuttle, not a dark hull wall.
-            push_box(
-                voxels,
-                IVec3::new(-2, 2, -5),
-                IVec3::new(2, 3, 3),
+                IVec3::new(-3, 0, -8),
+                IVec3::new(3, 3, 5),
                 BlockType::PlatingWhite,
             );
             push_box(
                 voxels,
-                IVec3::new(-3, 1, 6),
-                IVec3::new(3, 2, 8),
+                IVec3::new(-5, 1, -2),
+                IVec3::new(5, 2, 3),
+                BlockType::PlatingWhite,
+            );
+            push_box(
+                voxels,
+                IVec3::new(-2, -1, -6),
+                IVec3::new(2, -1, 4),
                 BlockType::NeonAmber,
+            );
+            push_box(
+                voxels,
+                IVec3::new(-3, 1, 6),
+                IVec3::new(3, 3, 9),
+                BlockType::NeonAmber,
+            );
+            push_box(
+                voxels,
+                IVec3::new(-1, 2, -9),
+                IVec3::new(1, 3, -6),
+                BlockType::CockpitGlass,
             );
         }
         ShipKind::StrikeFighter => {
@@ -2073,14 +2078,14 @@ fn ship_trail_specs(kind: ShipKind) -> Vec<ShipTrailSpec> {
     match kind {
         ShipKind::ScoutShuttle => {
             specs.push(ShipTrailSpec {
-                base_translation: Vec3::new(0.0, -0.20, 12.0),
-                base_scale: Vec3::new(0.50, 0.32, 10.5),
+                base_translation: Vec3::new(0.0, -0.15, 14.0),
+                base_scale: Vec3::new(0.85, 0.48, 14.5),
                 phase: 2.8,
                 tone: ShipTrailTone::Cyan,
             });
             specs.push(ShipTrailSpec {
-                base_translation: Vec3::new(0.0, 0.10, 10.4),
-                base_scale: Vec3::new(0.70, 0.36, 6.8),
+                base_translation: Vec3::new(0.0, 0.18, 11.5),
+                base_scale: Vec3::new(1.05, 0.52, 9.2),
                 phase: 1.4,
                 tone: ShipTrailTone::Amber,
             });
@@ -2167,13 +2172,14 @@ fn ship_trail_material(
 
 fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     let u = u.clamp(0.0, 1.0);
-    // Small craft in the open canyon sky: ~30 blocks ahead, ~12 up
-    // (~22°), a few blocks left of the look so it sits in sky not cliff.
-    let x = origin.x + 30.0 + u * 14.0;
-    let z = origin.z - 8.0 + u * 10.0;
-    let y = origin.y + 12.0 + (u * std::f32::consts::PI).sin() * 1.2;
-    let yaw = 14.0_f32.atan2(8.0);
-    let roll = -0.38 + (u * std::f32::consts::TAU).sin() * 0.28;
+    // Readable white/orange craft in the open canyon sky: ~24 blocks
+    // ahead, ~18 up, a few blocks left of look — not a hull wall and
+    // not a distant spec. Banks across +X so the side silhouette reads.
+    let x = origin.x + 24.0 + u * 16.0;
+    let z = origin.z - 3.0 + u * 8.0;
+    let y = origin.y + 18.0 + (u * std::f32::consts::PI).sin() * 2.2;
+    let yaw = 16.0_f32.atan2(8.0);
+    let roll = -0.42 + (u * std::f32::consts::TAU).sin() * 0.30;
     (Vec3::new(x, y, z), yaw, roll)
 }
 
@@ -2191,7 +2197,7 @@ fn update_hero_flyby(
         let (pos, yaw, roll) = hero_flyby_pose(fly.origin, fly.t);
         tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(1.85);
+        tf.scale = Vec3::splat(3.15);
         motion.yaw = yaw;
         motion.pitch = -0.10;
         motion.roll = roll;
@@ -4730,12 +4736,12 @@ mod tests {
                 pos.x
             );
             assert!(
-                pos.y > origin.y + 8.0,
+                pos.y > origin.y + 14.0,
                 "flyby at u={u} is not in the sky (y={})",
                 pos.y
             );
             assert!(
-                pos.y < origin.y + 16.0,
+                pos.y < origin.y + 24.0,
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );
