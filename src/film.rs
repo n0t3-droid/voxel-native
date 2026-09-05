@@ -2169,97 +2169,96 @@ fn spawn_film_waterfall(
     pool: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Lip on +X / +Z rim — falls into the dual-river shelf so painting +
-    // dedicated waterfall beats both catch the cascade.
-    let lip = deck + Vec3::new(46.0, 1.2, 52.0);
-    let pool_y = -17.0_f32;
-    let fall_h = (lip.y - (deck.y + pool_y)).abs().max(16.0);
-    let mid = lip + Vec3::new(2.0, -fall_h * 0.45, 4.0);
-    // Main sheet.
+    // Hero cyan cascade on +X rim — oversized so dedicated + painting cams
+    // read a VERTICAL fall into the plasma shelf (not just horizontal rivers).
+    let lip = deck + Vec3::new(50.0, 2.0, 55.0);
+    let bottom = deck + Vec3::new(52.0, -18.0, 60.0);
+    let mid = lip.lerp(bottom, 0.5);
+    let fall_h = lip.distance(bottom).max(22.0);
+    // Fat main sheet (world-Y tall).
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: cyan.clone(),
-            transform: Transform::from_translation(mid).with_scale(Vec3::new(6.5, fall_h, 2.8)),
+            transform: Transform::from_translation(mid).with_scale(Vec3::new(10.0, fall_h, 3.5)),
             ..default()
         },
         FilmSilhouette,
         Name::new("FilmWaterfallSheet"),
     ));
-    // Deep-blue core for thickness under ACES.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: deep.clone(),
-            transform: Transform::from_translation(mid + Vec3::new(0.0, 0.0, 0.6))
-                .with_scale(Vec3::new(3.8, fall_h * 0.98, 1.6)),
+            transform: Transform::from_translation(mid + Vec3::new(0.0, 0.0, 1.0))
+                .with_scale(Vec3::new(5.5, fall_h * 0.98, 2.0)),
             ..default()
         },
         FilmSilhouette,
         Name::new("FilmWaterfallCore"),
     ));
-    // Side ribbons / braided falls.
-    for (i, ox) in [(-3.5_f32), (3.5)].into_iter().enumerate() {
+    // Braided side falls.
+    for (i, ox) in [(-5.5_f32), (5.5)].into_iter().enumerate() {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mid + Vec3::new(ox, -1.0, 1.2))
-                    .with_scale(Vec3::new(2.4, fall_h * 0.85, 1.8)),
+                transform: Transform::from_translation(mid + Vec3::new(ox, -1.5, 1.5))
+                    .with_scale(Vec3::new(3.5, fall_h * 0.88, 2.4)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmWaterfallRibbon{i}")),
         ));
     }
-    // Lip / brink on the island rim.
+    // Bright lip / brink.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: mist.clone(),
-            transform: Transform::from_translation(lip + Vec3::new(0.0, 0.6, 0.0))
-                .with_scale(Vec3::new(10.0, 1.4, 4.0)),
+            transform: Transform::from_translation(lip + Vec3::new(0.0, 1.0, 0.0))
+                .with_scale(Vec3::new(14.0, 2.2, 5.5)),
             ..default()
         },
         FilmSilhouette,
         Name::new("FilmWaterfallLip"),
     ));
-    // Splash pool feeding the plasma shelf.
-    let splash = deck + Vec3::new(48.0, pool_y + 1.5, 58.0);
+    // Splash pool into plasma shelf.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: pool.clone(),
-            transform: Transform::from_translation(splash).with_scale(Vec3::new(14.0, 3.5, 10.0)),
+            transform: Transform::from_translation(bottom + Vec3::new(0.0, 2.0, 2.0))
+                .with_scale(Vec3::new(18.0, 4.5, 12.0)),
             ..default()
         },
         FilmSilhouette,
         FilmRiverRibbon,
         Name::new("FilmWaterfallPool"),
     ));
-    // Mist / spray voxels cascading mid-fall.
-    for i in 0..10 {
-        let t = i as f32 / 9.0;
-        let p = lip.lerp(splash, t) + Vec3::new((i as f32 * 0.7).sin() * 1.8, 0.0, 0.5);
+    // Mist beads along the fall axis.
+    for i in 0..12 {
+        let tt = i as f32 / 11.0;
+        let p = lip.lerp(bottom, tt) + Vec3::new((i as f32 * 0.9).sin() * 2.2, 0.0, 0.8);
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: mist.clone(),
-                transform: Transform::from_translation(p).with_scale(Vec3::splat(2.2 - t * 0.6)),
+                transform: Transform::from_translation(p).with_scale(Vec3::splat(2.8 - tt * 0.8)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmWaterfallMist{i}")),
         ));
     }
-    // Second shorter fall for painting density (nearer cam look).
-    let lip2 = deck + Vec3::new(34.0, 0.8, 44.0);
-    let mid2 = lip2 + Vec3::new(1.5, -10.0, 3.0);
+    // Near painting-frustum secondary fall (closer to look target).
+    let lip2 = deck + Vec3::new(38.0, 1.5, 48.0);
+    let mid2 = lip2 + Vec3::new(2.0, -12.0, 3.5);
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: cyan.clone(),
-            transform: Transform::from_translation(mid2).with_scale(Vec3::new(4.5, 18.0, 2.2)),
+            transform: Transform::from_translation(mid2).with_scale(Vec3::new(7.0, 22.0, 3.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2269,11 +2268,23 @@ fn spawn_film_waterfall(
         PbrBundle {
             mesh: cube.clone(),
             material: mist.clone(),
-            transform: Transform::from_translation(lip2).with_scale(Vec3::new(7.0, 1.2, 3.0)),
+            transform: Transform::from_translation(lip2).with_scale(Vec3::new(9.0, 1.8, 4.0)),
             ..default()
         },
         FilmSilhouette,
         Name::new("FilmWaterfallLipB"),
+    ));
+    // Extra hero slab parked in dedicated-shot frustum — guaranteed vertical cyan.
+    let hero = deck + Vec3::new(58.0, -6.0, 62.0);
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: cyan.clone(),
+            transform: Transform::from_translation(hero).with_scale(Vec3::new(8.0, 26.0, 4.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmWaterfallHero"),
     ));
 }
 
@@ -2907,10 +2918,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         8 => {
-            // Painting-scale: waterfall on +X rim + fighters + planet tip-up.
+            // Painting-scale: include cyan waterfall on +X rim mid-frame.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-36.0, 24.0, 90.0);
-            let look = deck + Vec3::new(28.0, 6.0, 52.0) + planet_dir * 8.0;
+            let pos = deck + Vec3::new(-34.0, 22.0, 88.0);
+            let look = deck + Vec3::new(40.0, -2.0, 54.0) + planet_dir * 5.0;
             (pos, look)
         }
         9 => {
@@ -2921,10 +2932,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         10 => {
-            // Dedicated waterfall: three-quarter of cyan cascade into pool.
-            let lip = deck + Vec3::new(46.0, 1.0, 52.0);
-            let pos = deck + Vec3::new(68.0, 6.0, 72.0);
-            let look = lip + Vec3::new(-2.0, -8.0, 2.0);
+            // Dedicated waterfall: stand off to see FULL vertical cyan sheet.
+            let mid = deck + Vec3::new(52.0, -6.0, 58.0);
+            let pos = deck + Vec3::new(78.0, 4.0, 78.0);
+            let look = mid + Vec3::new(-2.0, 0.0, -1.0);
             (pos, look)
         }
         11 => {
