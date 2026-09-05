@@ -1710,13 +1710,13 @@ fn spawn_film_tunnel_portal(
 ) {
     // Mountain face on −Z of the station — oversized so the portal reads
     // in a dedicated hero frame (voxel portal alone is tiny).
-    let mouth = deck + Vec3::new(0.0, 5.0, -16.0);
+    let mouth = deck + Vec3::new(0.0, 8.0, -18.0);
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: rock.clone(),
-            transform: Transform::from_translation(mouth + Vec3::new(0.0, 2.0, -4.0))
-                .with_scale(Vec3::new(28.0, 22.0, 14.0)),
+            transform: Transform::from_translation(mouth + Vec3::new(0.0, 4.0, -5.0))
+                .with_scale(Vec3::new(36.0, 28.0, 16.0)),
             ..default()
         },
         FilmSilhouette,
@@ -1726,25 +1726,26 @@ fn spawn_film_tunnel_portal(
         PbrBundle {
             mesh: cube.clone(),
             material: dark.clone(),
-            transform: Transform::from_translation(mouth + Vec3::new(0.0, 1.5, -1.0))
-                .with_scale(Vec3::new(10.0, 12.0, 8.0)),
+            transform: Transform::from_translation(mouth + Vec3::new(0.0, 2.0, -1.5))
+                .with_scale(Vec3::new(12.0, 14.0, 10.0)),
             ..default()
         },
         FilmSilhouette,
         Name::new("FilmTunnelBore"),
     ));
+    // Thick cyan arch — must dominate the mouth silhouette.
     for (ox, oy, sx, sy) in [
-        (-6.0_f32, 1.5, 1.4, 14.0),
-        (6.0, 1.5, 1.4, 14.0),
-        (0.0, 9.0, 14.0, 1.6),
-        (0.0, -5.0, 14.0, 1.6),
+        (-7.5_f32, 2.0, 2.4, 16.0),
+        (7.5, 2.0, 2.4, 16.0),
+        (0.0, 11.0, 18.0, 2.6),
+        (0.0, -6.0, 18.0, 2.6),
     ] {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mouth + Vec3::new(ox, oy, 1.5))
-                    .with_scale(Vec3::new(sx, sy, 1.8)),
+                transform: Transform::from_translation(mouth + Vec3::new(ox, oy, 2.5))
+                    .with_scale(Vec3::new(sx, sy, 2.4)),
                 ..default()
             },
             FilmSilhouette,
@@ -1755,8 +1756,8 @@ fn spawn_film_tunnel_portal(
         PbrBundle {
             mesh: cube.clone(),
             material: glow.clone(),
-            transform: Transform::from_translation(mouth + Vec3::new(0.0, 1.5, 0.2))
-                .with_scale(Vec3::new(7.5, 9.0, 1.2)),
+            transform: Transform::from_translation(mouth + Vec3::new(0.0, 2.0, 1.0))
+                .with_scale(Vec3::new(9.0, 11.0, 1.6)),
             ..default()
         },
         FilmSilhouette,
@@ -1810,16 +1811,31 @@ fn spawn_film_turrets_firing(
             PbrBundle {
                 mesh: cube.clone(),
                 material: muzzle.clone(),
-                transform: Transform::from_translation(flash).with_scale(Vec3::new(2.2, 2.2, 2.2)),
+                transform: Transform::from_translation(flash).with_scale(Vec3::new(3.2, 3.2, 3.2)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTurretMuzzle{i}")),
         ));
-        for s in 1..10 {
-            let t = s as f32 / 10.0;
+        // Continuous tracer beam (thick) so lavapipe mid-shots still read fire.
+        let beam_mid = flash.lerp(alien, 0.45);
+        let beam_len = flash.distance(alien).max(4.0);
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: tracer.clone(),
+                transform: Transform::from_translation(beam_mid)
+                    .looking_at(alien, Vec3::Y)
+                    .with_scale(Vec3::new(1.4, 1.4, beam_len)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmTurretBeam{i}")),
+        ));
+        for s in 1..8 {
+            let t = s as f32 / 8.0;
             let p = flash.lerp(alien, t);
-            let size = 0.9 - t * 0.35;
+            let size = 1.4 - t * 0.5;
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
@@ -2373,9 +2389,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         3 => {
-            // Turrets on +Z rim firing tracers into the alien.
-            let look = station + Vec3::new(3.0, 4.0, 16.5);
-            let pos = station + Vec3::new(-11.0, 6.0, 24.0);
+            // Stand off: both turrets + orange/yellow tracers into the alien.
+            let look = station + Vec3::new(2.0, 4.5, 17.0);
+            let pos = station + Vec3::new(-18.0, 8.0, 28.0);
             (pos, look)
         }
         4 => {
@@ -2385,10 +2401,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         5 => {
-            // Face the oversized film tunnel portal mouth (−Z mountain).
-            let mouth = station + Vec3::new(0.0, 6.0, -14.0);
-            let pos = mouth + Vec3::new(14.0, 3.0, 12.0);
-            let look = mouth + Vec3::new(0.0, 0.5, -1.0);
+            // Face-on to the oversized film tunnel portal (clear of grass lip).
+            let mouth = station + Vec3::new(0.0, 8.0, -16.0);
+            let pos = mouth + Vec3::new(0.0, 2.0, 22.0);
+            let look = mouth + Vec3::new(0.0, 1.0, -2.0);
             (pos, look)
         }
         6 => {
