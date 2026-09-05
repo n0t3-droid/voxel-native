@@ -2728,14 +2728,14 @@ fn spawn_film_skyway_and_shuttle_proxy(
     hull: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Fat left-mid skyway spans — must read at painting_hero distance.
+    // Fat left-mid skyway spans — stop short of mountain so darkrock silhouette stays.
     for (i, (ax, az, bx, bz, y)) in [
-        (-36.0_f32, 108.0, 18.0, 88.0, 22.0),
-        (-28.0, 118.0, 26.0, 94.0, 28.0),
-        (-20.0, 100.0, 30.0, 78.0, 34.0),
-        (-40.0, 96.0, 8.0, 104.0, 18.0),
-        (-12.0, 112.0, 38.0, 82.0, 40.0),
-        (-32.0, 90.0, 14.0, 70.0, 30.0),
+        (-36.0_f32, 108.0, 4.0, 92.0, 22.0),
+        (-28.0, 118.0, 8.0, 98.0, 28.0),
+        (-20.0, 100.0, 2.0, 86.0, 34.0),
+        (-40.0, 96.0, -4.0, 104.0, 18.0),
+        (-12.0, 112.0, 10.0, 90.0, 40.0),
+        (-32.0, 90.0, 0.0, 78.0, 30.0),
     ]
     .into_iter()
     .enumerate()
