@@ -306,8 +306,8 @@ fn film_spawn_lights(
         PointLightBundle {
             point_light: PointLight {
                 color: Color::srgb(0.95, 0.88, 1.0),
-                intensity: 5_800_000.0,
-                range: 140.0,
+                intensity: 8_500_000.0,
+                range: 180.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -316,6 +316,24 @@ fn film_spawn_lights(
         },
         FilmUnderKeelLight,
         Name::new("FilmUnderKeelLightC"),
+    ));
+    // Upward spot so downward-facing voxel keel faces receive direct light.
+    commands.spawn((
+        SpotLightBundle {
+            spot_light: SpotLight {
+                color: Color::srgb(0.7, 0.95, 1.0),
+                intensity: 18_000_000.0,
+                range: 120.0,
+                outer_angle: 1.15,
+                inner_angle: 0.55,
+                shadows_enabled: false,
+                ..default()
+            },
+            transform: Transform::from_xyz(0.0, -30.0, 0.0).looking_at(Vec3::Y * 10.0, Vec3::Z),
+            ..default()
+        },
+        FilmUnderKeelLight,
+        Name::new("FilmUnderKeelSpot"),
     ));
     // Hard side key so mesh silhouettes cast readable limb edges on lavapipe.
     commands.spawn((
@@ -1131,11 +1149,11 @@ fn film_drive_camera(
     if let Projection::Perspective(ref mut persp) = *projection {
         let target: f32 = match film.shot_index {
             1 => 50.0, // deck + keel profile
-            2 => 46.0, // clean combat slab two-shot
+            2 => 50.0, // full-body combat two-shot
             3 => 48.0, // crew pair
             5 => 46.0, // shuttle rear-quarter
             6 => 40.0, // planet close
-            7 => 55.0, // painting-scale wide hero
+            7 => 58.0, // painting-scale wide hero
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -1380,22 +1398,31 @@ fn park_island_lights(
         island.deck_y as f32 + 1.0,
         island.cz as f32 + 0.5,
     );
-    if let Ok(_) = under_q.get_single() {
-        // handled below via iter
-    }
     let mut under_i = 0usize;
     for mut under in under_q.iter_mut() {
-        under.translation = match under_i {
-            0 => deck + Vec3::new(8.0, -(island.keel_depth as f32 * 0.95).max(9.0), 12.0),
-            1 => {
-                deck + Vec3::new(
-                    island.radius_x as f32 * 0.4,
-                    -(island.keel_depth as f32 * 0.55).max(6.0),
-                    island.radius_z as f32 * 0.45,
-                )
+        match under_i {
+            0 => {
+                under.translation =
+                    deck + Vec3::new(8.0, -(island.keel_depth as f32 * 0.95).max(9.0), 12.0);
             }
-            _ => deck + Vec3::new(-10.0, -(island.keel_depth as f32 * 0.75).max(7.0), -6.0),
-        };
+            1 => {
+                under.translation = deck
+                    + Vec3::new(
+                        island.radius_x as f32 * 0.4,
+                        -(island.keel_depth as f32 * 0.55).max(6.0),
+                        island.radius_z as f32 * 0.45,
+                    );
+            }
+            2 => {
+                under.translation =
+                    deck + Vec3::new(-10.0, -(island.keel_depth as f32 * 0.75).max(7.0), -6.0);
+            }
+            _ => {
+                let t = deck + Vec3::new(4.0, -(island.keel_depth as f32 * 1.15).max(12.0), 8.0);
+                *under = Transform::from_translation(t)
+                    .looking_at(deck + Vec3::new(0.0, -2.0, 0.0), Vec3::Z);
+            }
+        }
         under_i += 1;
     }
     if let Ok(mut figure) = figure_q.get_single_mut() {
@@ -1433,9 +1460,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // Southwest two-shot: marine (−X/−Z) and alien (+X/+Z) both visible.
-            let look = station + Vec3::new(0.0, 4.0, 14.0);
-            let pos = look + Vec3::new(-13.0, 3.2, 11.0);
+            // Southwest two-shot pulled back so full biped + multi-leg limbs read.
+            let look = station + Vec3::new(0.2, 3.6, 14.0);
+            let pos = look + Vec3::new(-16.0, 4.8, 14.0);
             (pos, look)
         }
         3 => {
@@ -1470,11 +1497,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         7 => {
-            // Painting-scale hero: keep islands/skyways in the lower half while
-            // the ringed planet + nebula fill the upper sky.
+            // Painting-scale: archipelago fills lower 2/3, planet/nebula upper sky.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-48.0, 18.0, 72.0);
-            let look = deck + Vec3::new(20.0, 14.0, 8.0) + planet_dir * 55.0;
+            let pos = deck + Vec3::new(-62.0, 14.0, 88.0);
+            let look = deck + Vec3::new(28.0, 12.0, 18.0) + planet_dir * 35.0;
             (pos, look)
         }
         _ => {
