@@ -1888,16 +1888,15 @@ fn spawn_film_fighter_swarm(
     cyan: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // V-formation near station/+X skyway so painting_hero and a dedicated
-    // fighter_swarm beat both catch cyan plumes streaming −X.
+    // High open-sky V-formation — clear of sat keels so plumes read.
     for (i, (ox, oy, oz, yaw)) in [
-        (16.0_f32, 16.0, 40.0, -0.55),
-        (22.0, 18.0, 44.0, -0.45),
-        (28.0, 17.0, 42.0, -0.50),
-        (34.0, 19.0, 46.0, -0.40),
-        (20.0, 15.0, 50.0, -0.60),
-        (30.0, 20.0, 52.0, -0.35),
-        (26.0, 22.0, 38.0, -0.48),
+        (16.0_f32, 28.0, 40.0, -0.55),
+        (24.0, 30.0, 44.0, -0.45),
+        (32.0, 29.0, 42.0, -0.50),
+        (40.0, 32.0, 46.0, -0.40),
+        (20.0, 27.0, 50.0, -0.60),
+        (36.0, 33.0, 52.0, -0.35),
+        (28.0, 35.0, 38.0, -0.48),
     ]
     .into_iter()
     .enumerate()
@@ -1908,39 +1907,50 @@ fn spawn_film_fighter_swarm(
                 mesh: cube.clone(),
                 material: hull.clone(),
                 transform: Transform::from_translation(p)
-                    .with_scale(Vec3::new(5.8, 1.8, 2.6))
+                    .with_scale(Vec3::new(8.0, 2.4, 3.5))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmFighter{i}")),
         ));
-        // Long cyan plume — the readable signal at painting distance.
         let plume_dir = Quat::from_rotation_y(yaw) * Vec3::new(-1.0, 0.0, 0.0);
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(p + plume_dir * 5.5)
-                    .with_scale(Vec3::new(9.0, 1.4, 1.3))
+                transform: Transform::from_translation(p + plume_dir * 8.0)
+                    .with_scale(Vec3::new(14.0, 2.2, 2.0))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmFighterPlume{i}")),
         ));
-        // Wing accents so hull ≠ blob at mid distance.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: hull.clone(),
-                transform: Transform::from_translation(p + Vec3::new(0.0, 0.0, 2.2))
-                    .with_scale(Vec3::new(2.2, 0.45, 4.0))
+                transform: Transform::from_translation(p)
+                    .with_scale(Vec3::new(3.0, 0.6, 7.0))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmFighterWing{i}")),
+        ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: cyan.clone(),
+                transform: Transform::from_translation(
+                    p - plume_dir * 4.5 + Vec3::new(0.0, 0.8, 0.0),
+                )
+                .with_scale(Vec3::new(1.6, 1.2, 1.6)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmFighterNose{i}")),
         ));
     }
 }
@@ -2535,8 +2545,8 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             // Painting-scale: archipelago + nebula, with dual-river shelf
             // (z≈60 relative) filling the lower third clear of keel volumes.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-42.0, 24.0, 88.0);
-            let look = deck + Vec3::new(10.0, -6.0, 64.0) + planet_dir * 5.0;
+            let pos = deck + Vec3::new(-42.0, 28.0, 88.0);
+            let look = deck + Vec3::new(16.0, 4.0, 52.0) + planet_dir * 4.0;
             (pos, look)
         }
         9 => {
@@ -2547,10 +2557,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         10 => {
-            // Fighter swarm: high rear-quarter, clear of sat keel volumes.
-            let form = deck + Vec3::new(26.0, 14.0, 46.0);
-            let pos = deck + Vec3::new(52.0, 22.0, 62.0);
-            let look = form + Vec3::new(-4.0, -1.0, -2.0);
+            // Fighter swarm: look up into open-sky formation + cyan plumes.
+            let form = deck + Vec3::new(28.0, 30.0, 44.0);
+            let pos = deck + Vec3::new(55.0, 28.0, 58.0);
+            let look = form + Vec3::new(-6.0, 1.0, -2.0);
             (pos, look)
         }
         _ => {
