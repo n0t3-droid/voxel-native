@@ -1441,15 +1441,15 @@ fn film_spawn_silhouettes(
         3.8,
     );
     commands.entity(arena_alien).insert(FilmCombatArena);
-    // Painting-scale giants — low-left grass edge so mid-right mountain owns the mass.
+    // Painting-scale giants — low on verdant lip, readable but below mountain crest.
     let vista_marine = spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(-28.0, 6.0, 108.0),
-        6.5,
+        deck + Vec3::new(-22.0, 5.0, 102.0),
+        8.0,
     );
     commands.entity(vista_marine).insert(FilmCombatVista);
     let vista_alien = spawn_film_alien(
@@ -1458,8 +1458,8 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(-16.0, 6.0, 112.0),
-        7.0,
+        deck + Vec3::new(-10.0, 5.0, 106.0),
+        8.5,
     );
     commands.entity(vista_alien).insert(FilmCombatVista);
     spawn_film_crew(
@@ -1536,6 +1536,56 @@ fn film_spawn_silhouettes(
         pad,
         alien_world,
     );
+    // Painting-lip turrets — low on verdant crown so shot 8 reads muzzles without clutter.
+    for (i, origin) in [
+        deck + Vec3::new(-34.0, 6.0, 110.0),
+        deck + Vec3::new(-24.0, 6.5, 116.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let aim = deck + Vec3::new(-8.0, 10.0, 106.0);
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: turret_hull.clone(),
+                transform: Transform::from_translation(origin + Vec3::new(0.0, 1.2, 0.0))
+                    .with_scale(Vec3::new(3.2, 3.2, 3.2)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmTurretFx,
+            Name::new(format!("FilmPaintTurretBase{i}")),
+        ));
+        let to = (aim - (origin + Vec3::Y * 3.0)).normalize_or_zero();
+        let flash = origin + Vec3::Y * 3.0 + to * 5.0;
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: turret_muzzle.clone(),
+                transform: Transform::from_translation(flash).with_scale(Vec3::new(4.0, 4.0, 4.0)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmTurretFx,
+            Name::new(format!("FilmPaintTurretMuzzle{i}")),
+        ));
+        let beam_mid = flash.lerp(aim, 0.5);
+        let beam_len = flash.distance(aim).max(8.0);
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: turret_orange.clone(),
+                transform: Transform::from_translation(beam_mid)
+                    .looking_at(aim, Vec3::Y)
+                    .with_scale(Vec3::new(1.8, 1.8, beam_len)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmTurretFx,
+            Name::new(format!("FilmPaintTurretBeam{i}")),
+        ));
+    }
 
     // Cheap docked-fighter swarm (+X / painting frustum) with cyan plumes.
     let fighter_hull = materials.add(sil_mat(
@@ -2014,14 +2064,14 @@ fn spawn_film_tunnel_portal(
         Name::new("FilmTunnelGlow"),
     ));
 
-    // Painting-facing portal/holo arch — left of mountain so shot 8 reads the mouth.
-    let paint_mouth = deck + Vec3::new(-42.0, 18.0, 78.0);
+    // Painting-facing portal/holo arch — left-mid frustum, cyan mouth toward cam.
+    let paint_mouth = deck + Vec3::new(-30.0, 16.0, 96.0);
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: rock.clone(),
             transform: Transform::from_translation(paint_mouth)
-                .with_scale(Vec3::new(22.0, 18.0, 8.0)),
+                .with_scale(Vec3::new(28.0, 22.0, 10.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2032,8 +2082,8 @@ fn spawn_film_tunnel_portal(
         PbrBundle {
             mesh: cube.clone(),
             material: dark.clone(),
-            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 3.0))
-                .with_scale(Vec3::new(12.0, 12.0, 4.0)),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 4.0))
+                .with_scale(Vec3::new(16.0, 14.0, 5.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2044,8 +2094,8 @@ fn spawn_film_tunnel_portal(
         PbrBundle {
             mesh: cube.clone(),
             material: cyan.clone(),
-            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 5.5))
-                .with_scale(Vec3::new(10.0, 10.0, 1.2)),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 7.0))
+                .with_scale(Vec3::new(14.0, 12.0, 1.6)),
             ..default()
         },
         FilmSilhouette,
@@ -2056,8 +2106,8 @@ fn spawn_film_tunnel_portal(
         PbrBundle {
             mesh: cube.clone(),
             material: glow.clone(),
-            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 6.5))
-                .with_scale(Vec3::new(7.0, 8.0, 1.0)),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 8.2))
+                .with_scale(Vec3::new(10.0, 10.0, 1.2)),
             ..default()
         },
         FilmSilhouette,
@@ -2348,13 +2398,15 @@ fn spawn_film_fighter_swarm(
         (45.0, 57.0, 30.0, -0.35, 1.2, true),
         (35.0, 58.0, 16.0, -0.48, 1.3, true),
         (55.0, 55.0, 26.0, -0.42, 1.15, true),
-        // Painting-hero wing — left-mid above crown / skyway.
-        (-20.0_f32, 36.0, 100.0, -0.70, 1.55, false),
-        (-8.0, 40.0, 108.0, -0.65, 1.6, false),
-        (6.0, 38.0, 104.0, -0.55, 1.5, false),
-        (-28.0, 34.0, 94.0, -0.75, 1.45, false),
-        (16.0, 42.0, 98.0, -0.50, 1.5, false),
-        (28.0, 44.0, 90.0, -0.45, 1.4, false),
+        // Painting-hero wing — left-mid above crown / skyway (larger / lower).
+        (-18.0_f32, 28.0, 112.0, -0.70, 1.9, false),
+        (-6.0, 32.0, 118.0, -0.65, 2.0, false),
+        (8.0, 30.0, 114.0, -0.55, 1.85, false),
+        (-26.0, 26.0, 106.0, -0.75, 1.8, false),
+        (18.0, 34.0, 108.0, -0.50, 1.85, false),
+        (30.0, 36.0, 100.0, -0.45, 1.7, false),
+        (-12.0, 24.0, 120.0, -0.68, 1.75, false),
+        (4.0, 27.0, 122.0, -0.58, 1.8, false),
     ]
     .into_iter()
     .enumerate()
@@ -2603,14 +2655,14 @@ fn spawn_film_waterfall(
             Name::new(format!("FilmWaterfallMist{i}")),
         ));
     }
-    // Painting-frustum secondary fall closer to cam / crown.
-    let lip2 = deck + Vec3::new(48.0, 4.0, 88.0);
-    let mid2 = lip2 + Vec3::new(4.0, -16.0, 6.0);
+    // Painting-frustum secondary fall — mid-right of verdant lip toward cam.
+    let lip2 = deck + Vec3::new(22.0, 8.0, 100.0);
+    let mid2 = lip2 + Vec3::new(2.0, -14.0, 4.0);
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: cyan.clone(),
-            transform: Transform::from_translation(mid2).with_scale(Vec3::new(8.0, 24.0, 3.5)),
+            transform: Transform::from_translation(mid2).with_scale(Vec3::new(10.0, 28.0, 4.5)),
             ..default()
         },
         FilmSilhouette,
@@ -2621,12 +2673,25 @@ fn spawn_film_waterfall(
         PbrBundle {
             mesh: cube.clone(),
             material: grass.clone(),
-            transform: Transform::from_translation(lip2).with_scale(Vec3::new(11.0, 2.2, 5.0)),
+            transform: Transform::from_translation(lip2).with_scale(Vec3::new(14.0, 2.4, 6.0)),
             ..default()
         },
         FilmSilhouette,
         FilmWaterfallFx,
         Name::new("FilmWaterfallGrassLipB"),
+    ));
+    // Mist column so the fall reads even under upward planet look.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: mist.clone(),
+            transform: Transform::from_translation(mid2 + Vec3::new(0.0, 2.0, 3.0))
+                .with_scale(Vec3::new(6.0, 20.0, 6.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmWaterfallFx,
+        Name::new("FilmWaterfallMistB"),
     ));
 }
 
