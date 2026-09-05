@@ -38,7 +38,7 @@ use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::daynight::{day_factor, sunset_factor, sun_direction, WorldIntelRuntime};
+use crate::daynight::{day_factor, sun_direction, sunset_factor, WorldIntelRuntime};
 use crate::settings::WorldSettings;
 
 /// Render layer used exclusively by the sky pass. The world camera stays
@@ -344,12 +344,7 @@ fn setup_sky(
     // exactly like the reference art. Cull front-face so we only see it
     // from the inside, and keep it fully unlit/emissive.
     let nebula_image = images.add(build_nebula_image(nebula_res, settings.seed as u64));
-    let nebula_mesh = meshes.add(
-        Sphere::new(SKY_DISTANCE * 2.6)
-            .mesh()
-            .ico(4)
-            .expect("subdivision 4 is within ico limits"),
-    );
+    let nebula_mesh = meshes.add(textured_sky_sphere(SKY_DISTANCE * 2.6));
     let nebula_mat = materials.add(StandardMaterial {
         // ADDITIVE blend so the nebula lays its colored clouds on top
         // of the daynight-driven ClearColor instead of replacing it.
@@ -447,12 +442,7 @@ fn setup_sky(
     // Drawn on a shell outside the nebula so transparency sorting puts
     // it behind the clouds, which is where a scattering band belongs.
     let horizon_image = images.add(build_horizon_gradient_image(128));
-    let horizon_mesh = meshes.add(
-        Sphere::new(SKY_DISTANCE * 3.4)
-            .mesh()
-            .ico(3)
-            .expect("subdivision 3 is within ico limits"),
-    );
+    let horizon_mesh = meshes.add(textured_sky_sphere(SKY_DISTANCE * 3.4));
     let horizon_mat = materials.add(StandardMaterial {
         // Start invisible; `follow_and_animate_sky` raises this only
         // while sunset_factor is high so the orange carrier cannot
@@ -842,7 +832,8 @@ fn follow_and_animate_sky(
             let deep = Vec3::new(0.020, 0.018, 0.055);
             let vis = horizon_band_visibility(sunset, night);
             let dusk_gate = sunset * (1.0 - night).powf(1.4);
-            let e = noon * day * (1.0 - sunset) * 0.15 + deep * night * vis.max(0.02) * 0.25
+            let e = noon * day * (1.0 - sunset) * 0.15
+                + deep * night * vis.max(0.02) * 0.25
                 + dusk * dusk_gate;
             let e = e * intel.profile.sky_saturation.max(0.7);
             mat.base_color = Color::srgba(vis * 1.0, vis * 0.90, vis * 0.70, vis * 0.86);
@@ -873,6 +864,63 @@ fn follow_static_sky_bodies(
     for (mut tf, body) in bodies.iter_mut() {
         tf.translation = origin + body.dir * body.distance;
     }
+}
+
+/// Equirectangular sky shells must be UV spheres with Y as zenith.
+/// Bevy's UV sphere poles along Z; rotate so +Y samples the zenith row.
+/// Ico UVs jump across the 0/1 wrap and tear a vertical zigzag through
+/// the dusk nebula — that seam has been in the sky since the first
+/// textured dome.
+fn textured_sky_sphere(radius: f32) -> Mesh {
+    let mut mesh = Sphere::new(radius).mesh().uv(48, 24);
+    let rotate = |p: &mut [f32; 3]| {
+        // Rx(+90°): (x, y, z) -> (x, -z, y). Bevy UV -Z pole becomes +Y.
+        let (x, y, z) = (p[0], p[1], p[2]);
+        p[0] = x;
+        p[1] = -z;
+        p[2] = y;
+    };
+    if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(pos)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    {
+        for p in pos.iter_mut() {
+            rotate(p);
+        }
+    }
+    if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(nrm)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
+    {
+        for n in nrm.iter_mut() {
+            rotate(n);
+        }
+    }
+    mesh
+}
+
+fn max_triangle_uv_u_span(mesh: &Mesh) -> f32 {
+    let Some(bevy::render::mesh::VertexAttributeValues::Float32x2(uvs)) =
+        mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+    else {
+        return 0.0;
+    };
+    let Some(indices) = mesh.indices() else {
+        return 0.0;
+    };
+    let mut idx = Vec::new();
+    match indices {
+        Indices::U16(v) => idx.extend(v.iter().map(|&i| i as usize)),
+        Indices::U32(v) => idx.extend(v.iter().map(|&i| i as usize)),
+    };
+    let mut max_span = 0.0_f32;
+    for tri in idx.chunks_exact(3) {
+        let u0 = uvs[tri[0]][0];
+        let u1 = uvs[tri[1]][0];
+        let u2 = uvs[tri[2]][0];
+        let min_u = u0.min(u1).min(u2);
+        let max_u = u0.max(u1).max(u2);
+        max_span = max_span.max(max_u - min_u);
+    }
+    max_span
 }
 
 /// Build a single mesh holding `count` tiny triangles at random points on
@@ -1326,14 +1374,47 @@ mod tests {
     }
 
     #[test]
+    fn textured_sky_shells_do_not_cross_the_uv_wrap() {
+        let ico = Sphere::new(1.0)
+            .mesh()
+            .ico(4)
+            .expect("subdivision 4 is within ico limits");
+        let dome = textured_sky_sphere(1.0);
+        assert!(
+            max_triangle_uv_u_span(&ico) > 0.5,
+            "ico UVs should still be the known-bad zigzag case"
+        );
+        assert!(
+            max_triangle_uv_u_span(&dome) < 0.25,
+            "UV sky dome still has a wrap-spanning triangle ({})",
+            max_triangle_uv_u_span(&dome)
+        );
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(pos)) =
+            dome.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("dome missing positions");
+        };
+        let max_y = pos.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = pos.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        assert!(
+            (max_y - 1.0).abs() < 0.02 && (min_y + 1.0).abs() < 0.02,
+            "dome poles should sit on ±Y after the Z-to-Y rotate, y={min_y}..{max_y}"
+        );
+    }
+
+    #[test]
     fn horizon_carrier_is_golden_at_17_and_gone_at_noon_and_night() {
         let noon = sun_direction(11.0);
         let dusk = sun_direction(17.0);
         let night_dir = sun_direction(21.5);
-        let noon_vis = horizon_band_visibility(sunset_factor(noon), (1.0 - day_factor(noon)).powf(2.0));
-        let dusk_vis = horizon_band_visibility(sunset_factor(dusk), (1.0 - day_factor(dusk)).powf(2.0));
-        let night_vis =
-            horizon_band_visibility(sunset_factor(night_dir), (1.0 - day_factor(night_dir)).powf(2.0));
+        let noon_vis =
+            horizon_band_visibility(sunset_factor(noon), (1.0 - day_factor(noon)).powf(2.0));
+        let dusk_vis =
+            horizon_band_visibility(sunset_factor(dusk), (1.0 - day_factor(dusk)).powf(2.0));
+        let night_vis = horizon_band_visibility(
+            sunset_factor(night_dir),
+            (1.0 - day_factor(night_dir)).powf(2.0),
+        );
         assert!(
             noon_vis < 0.08,
             "hour 11 horizon carrier still reads ({noon_vis:.3})"
@@ -1491,7 +1572,10 @@ mod tests {
                 dusty += 1;
             }
         }
-        assert!(gap > 10, "Cassini gap never punched (only {gap} empty verts)");
+        assert!(
+            gap > 10,
+            "Cassini gap never punched (only {gap} empty verts)"
+        );
         assert!(
             dusty > rainbow * 3,
             "rings still look like a rainbow gizmo (dusty={dusty} rainbow={rainbow})"
