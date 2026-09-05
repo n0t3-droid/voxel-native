@@ -266,9 +266,9 @@ fn film_spawn_lights(
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
-                color: Color::srgb(0.55, 0.92, 1.0),
-                intensity: 920_000.0,
-                range: 90.0,
+                color: Color::srgb(0.65, 0.95, 1.0),
+                intensity: 3_600_000.0,
+                range: 140.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -282,9 +282,9 @@ fn film_spawn_lights(
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
-                color: Color::srgb(1.0, 0.96, 0.88),
-                intensity: 1_100_000.0,
-                range: 48.0,
+                color: Color::srgb(1.0, 0.98, 0.92),
+                intensity: 1_800_000.0,
+                range: 70.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -391,69 +391,67 @@ fn film_spawn_silhouettes(
     );
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let marine_body = materials.add(sil_mat(
-        Color::srgb(0.72, 0.78, 0.84),
-        LinearRgba::rgb(0.04, 0.05, 0.06),
+        Color::srgb(0.92, 0.95, 1.0),
+        LinearRgba::rgb(0.15, 0.18, 0.22),
     ));
-    let marine_dark = materials.add(sil_mat(Color::srgb(0.12, 0.14, 0.18), LinearRgba::BLACK));
+    let marine_dark = materials.add(sil_mat(Color::srgb(0.08, 0.10, 0.14), LinearRgba::BLACK));
     let marine_visor = materials.add(sil_mat(
-        Color::srgb(0.15, 0.95, 1.0),
-        LinearRgba::rgb(0.4, 3.2, 4.0),
+        Color::srgb(0.05, 1.0, 1.0),
+        LinearRgba::rgb(0.8, 4.5, 5.5),
     ));
     let alien_body = materials.add(sil_mat(
-        Color::srgb(0.86, 0.78, 0.62),
-        LinearRgba::rgb(0.05, 0.04, 0.02),
+        Color::srgb(0.95, 0.82, 0.45),
+        LinearRgba::rgb(0.12, 0.08, 0.02),
     ));
-    let alien_leg = materials.add(sil_mat(Color::srgb(0.55, 0.48, 0.36), LinearRgba::BLACK));
+    let alien_leg = materials.add(sil_mat(Color::srgb(0.62, 0.42, 0.22), LinearRgba::BLACK));
     let alien_crest = materials.add(sil_mat(
-        Color::srgb(1.0, 0.18, 0.72),
-        LinearRgba::rgb(3.2, 0.2, 2.4),
+        Color::srgb(1.0, 0.05, 0.85),
+        LinearRgba::rgb(4.5, 0.2, 3.5),
     ));
     let crew_body = materials.add(sil_mat(
-        Color::srgb(0.42, 0.48, 0.54),
-        LinearRgba::rgb(0.03, 0.04, 0.05),
+        Color::srgb(0.55, 0.62, 0.72),
+        LinearRgba::rgb(0.08, 0.10, 0.14),
     ));
     let crew_visor = materials.add(sil_mat(
-        Color::srgb(0.2, 0.95, 1.0),
-        LinearRgba::rgb(0.3, 2.8, 3.6),
+        Color::srgb(0.05, 1.0, 1.0),
+        LinearRgba::rgb(0.6, 4.0, 5.0),
     ));
 
-    // Marine west of pad centre — biped + rifle (matches voxel anchor −3,·,2).
+    // Clear sightline on the OPEN deck south of the station footprint so
+    // lavapipe cannot bury limbs inside mast/pad voxel clutter.
     spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(-3.0, 0.0, 2.0),
+        deck + Vec3::new(-5.0, 0.15, 11.0),
     );
-    // Multi-leg alien east — six splayed limbs (voxel anchor +2,·,2).
     spawn_film_alien(
         &mut commands,
         &cube,
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(2.2, 0.0, 2.0),
-    );
-    // Rail crew pair on −Z pad rail.
-    spawn_film_crew(
-        &mut commands,
-        &cube,
-        &crew_body,
-        &crew_visor,
-        deck + Vec3::new(-4.0, 0.0, -2.2),
+        deck + Vec3::new(5.0, 0.15, 11.0),
     );
     spawn_film_crew(
         &mut commands,
         &cube,
         &crew_body,
         &crew_visor,
-        deck + Vec3::new(-4.0, 0.0, -3.4),
+        deck + Vec3::new(-6.0, 0.15, -10.0),
+    );
+    spawn_film_crew(
+        &mut commands,
+        &cube,
+        &crew_body,
+        &crew_visor,
+        deck + Vec3::new(-4.2, 0.15, -10.0),
     );
 
-    // Park under-keel + figure lights on the locked island.
     info!(
-        "FILM: spawned mesh silhouettes (marine/alien/crew) on pad ({}, {})",
+        "FILM: spawned mesh silhouettes (marine/alien/crew) on open deck ({}, {})",
         island.cx, island.cz
     );
 }
@@ -462,9 +460,12 @@ fn sil_mat(base: Color, emissive: LinearRgba) -> StandardMaterial {
     StandardMaterial {
         base_color: base,
         emissive,
-        metallic: 0.35,
-        perceptual_roughness: 0.55,
-        reflectance: 0.4,
+        // Unlit so lavapipe lighting cannot crush limb edges into pad clutter.
+        unlit: true,
+        alpha_mode: AlphaMode::Opaque,
+        metallic: 0.0,
+        perceptual_roughness: 1.0,
+        reflectance: 0.0,
         ..default()
     }
 }
@@ -477,11 +478,11 @@ fn spawn_film_marine(
     visor: &Handle<StandardMaterial>,
     origin: Vec3,
 ) {
-    // Oversized (~2.4× human) so limbs survive 10–14 m lavapipe framing.
+    // Oversized (~3.2× human) so limbs survive mid-distance lavapipe framing.
     let root = commands
         .spawn((
             SpatialBundle {
-                transform: Transform::from_translation(origin),
+                transform: Transform::from_translation(origin).with_scale(Vec3::splat(1.35)),
                 ..default()
             },
             FilmSilhouette,
@@ -578,7 +579,7 @@ fn spawn_film_alien(
     let root = commands
         .spawn((
             SpatialBundle {
-                transform: Transform::from_translation(origin),
+                transform: Transform::from_translation(origin).with_scale(Vec3::splat(1.45)),
                 ..default()
             },
             FilmSilhouette,
@@ -652,7 +653,7 @@ fn spawn_film_crew(
     let root = commands
         .spawn((
             SpatialBundle {
-                transform: Transform::from_translation(origin),
+                transform: Transform::from_translation(origin).with_scale(Vec3::splat(1.25)),
                 ..default()
             },
             FilmSilhouette,
@@ -1050,11 +1051,11 @@ fn park_island_lights(
         island.cz as f32 + 0.5,
     );
     if let Ok(mut under) = under_q.get_single_mut() {
-        under.translation = deck + Vec3::new(2.0, -(island.keel_depth as f32 * 0.72).max(5.0), 4.0);
+        under.translation = deck + Vec3::new(6.0, -(island.keel_depth as f32 * 0.85).max(7.0), 8.0);
     }
     if let Ok(mut figure) = figure_q.get_single_mut() {
-        // Side-lit combat pad so mesh limbs cast crisp edges.
-        figure.translation = deck + Vec3::new(-9.0, 5.5, 6.0);
+        // Side-lit combat pair on the open south deck.
+        figure.translation = deck + Vec3::new(-8.0, 6.0, 16.0);
     }
 }
 
@@ -1076,26 +1077,26 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
         }
         1 => {
             // Single hero: grass deck rim AND crystal keel undersides.
-            let keel_mid = island.keel_depth as f32 * 0.42;
+            let keel = island.keel_depth as f32;
             let pos = deck
                 + Vec3::new(
-                    island.radius_x as f32 * 0.35 + 16.0,
-                    3.0 - keel_mid * 0.15,
-                    island.radius_z as f32 * 0.25 + 20.0,
+                    island.radius_x as f32 * 0.45 + 22.0,
+                    1.0 - keel * 0.22,
+                    island.radius_z as f32 * 0.35 + 26.0,
                 );
-            let look = deck + Vec3::new(0.0, -keel_mid * 0.35, 0.0);
+            let look = deck + Vec3::new(0.0, -keel * 0.48, 0.0);
             (pos, look)
         }
         2 => {
-            // Combat pad — side-on ~11 m on mesh silhouettes (biped vs multi-leg).
-            let look = station + Vec3::new(-0.4, 2.4, 2.0);
-            let pos = look + Vec3::new(-9.5, 2.2, 5.5);
+            // Combat pair on open south deck — biped vs six-leg mesh silhouettes.
+            let look = station + Vec3::new(0.0, 2.6, 11.0);
+            let pos = look + Vec3::new(-12.0, 3.0, 9.0);
             (pos, look)
         }
         3 => {
-            // Pad rail-crew pair — close side-on on mesh crew.
-            let look = station + Vec3::new(-4.0, 2.0, -2.8);
-            let pos = look + Vec3::new(-7.5, 1.8, 4.0);
+            // Pad rail-crew pair — mesh crew on open −Z deck.
+            let look = station + Vec3::new(-5.0, 2.2, -10.0);
+            let pos = look + Vec3::new(-8.0, 2.0, 6.5);
             (pos, look)
         }
         4 => {
