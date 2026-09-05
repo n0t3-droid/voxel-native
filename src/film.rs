@@ -143,6 +143,10 @@ struct FilmGrassFx;
 #[derive(Component)]
 struct FilmCombatFx;
 
+/// Painting-scale combat giants — hidden on dedicated pad beat (declutter).
+#[derive(Component)]
+struct FilmCombatVista;
+
 /// Mountain station mass mesh — always on for painting/station beats.
 #[derive(Component)]
 struct FilmStationFx;
@@ -1377,7 +1381,7 @@ fn film_spawn_silhouettes(
         3.4,
     );
     // Painting-scale giants on the verdant crown — must read in painting_hero.
-    spawn_film_marine(
+    let vista_marine = spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
@@ -1386,7 +1390,8 @@ fn film_spawn_silhouettes(
         deck + Vec3::new(-10.0, 14.0, 90.0),
         14.0,
     );
-    spawn_film_alien(
+    commands.entity(vista_marine).insert(FilmCombatVista);
+    let vista_alien = spawn_film_alien(
         &mut commands,
         &cube,
         &alien_body,
@@ -1395,6 +1400,7 @@ fn film_spawn_silhouettes(
         deck + Vec3::new(6.0, 14.0, 94.0),
         15.0,
     );
+    commands.entity(vista_alien).insert(FilmCombatVista);
     spawn_film_crew(
         &mut commands,
         &cube,
@@ -1619,7 +1625,7 @@ fn spawn_film_marine(
     visor: &Handle<StandardMaterial>,
     origin: Vec3,
     scale: f32,
-) {
+) -> Entity {
     // Oversized so limbs survive mid-distance lavapipe framing.
     let root = commands
         .spawn((
@@ -1720,6 +1726,7 @@ fn spawn_film_marine(
             Name::new("MarineMuzzle"),
         ));
     });
+    root
 }
 
 fn spawn_film_alien(
@@ -1730,7 +1737,7 @@ fn spawn_film_alien(
     crest: &Handle<StandardMaterial>,
     origin: Vec3,
     scale: f32,
-) {
+) -> Entity {
     let root = commands
         .spawn((
             SpatialBundle {
@@ -1800,6 +1807,7 @@ fn spawn_film_alien(
             ));
         }
     });
+    root
 }
 
 fn spawn_film_crew(
@@ -2501,14 +2509,14 @@ fn spawn_film_station_mountain(
     neon: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Mountain in painting mid-frame — large stepped mass + neon crown.
-    let base = deck + Vec3::new(26.0, 2.0, 76.0);
+    // Mountain in painting mid-frame — stepped mass + neon crown (not full-frame).
+    let base = deck + Vec3::new(28.0, 2.0, 74.0);
     for (i, (y, sx, sz)) in [
-        (12.0_f32, 56.0, 46.0),
-        (30.0, 46.0, 38.0),
-        (48.0, 34.0, 28.0),
-        (66.0, 24.0, 20.0),
-        (82.0, 16.0, 16.0),
+        (10.0_f32, 48.0, 40.0),
+        (26.0, 40.0, 32.0),
+        (42.0, 30.0, 24.0),
+        (58.0, 20.0, 18.0),
+        (72.0, 14.0, 14.0),
     ]
     .into_iter()
     .enumerate()
@@ -2518,7 +2526,7 @@ fn spawn_film_station_mountain(
                 mesh: cube.clone(),
                 material: if i < 2 { dark.clone() } else { alloy.clone() },
                 transform: Transform::from_translation(base + Vec3::new(0.0, y, 0.0))
-                    .with_scale(Vec3::new(sx, 20.0, sz)),
+                    .with_scale(Vec3::new(sx, 18.0, sz)),
                 ..default()
             },
             FilmSilhouette,
@@ -2527,13 +2535,13 @@ fn spawn_film_station_mountain(
         ));
     }
     // Neon crown spires — bright so painting mid-frame reads "station".
-    for (i, ox) in [-14.0_f32, -5.0, 5.0, 14.0].into_iter().enumerate() {
+    for (i, ox) in [-12.0_f32, -4.0, 4.0, 12.0].into_iter().enumerate() {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: neon.clone(),
-                transform: Transform::from_translation(base + Vec3::new(ox, 102.0, 0.0))
-                    .with_scale(Vec3::new(8.0, 34.0, 8.0)),
+                transform: Transform::from_translation(base + Vec3::new(ox, 92.0, 0.0))
+                    .with_scale(Vec3::new(7.5, 30.0, 7.5)),
                 ..default()
             },
             FilmSilhouette,
@@ -2546,8 +2554,8 @@ fn spawn_film_station_mountain(
         PbrBundle {
             mesh: cube.clone(),
             material: alloy.clone(),
-            transform: Transform::from_translation(base + Vec3::new(-28.0, 32.0, 30.0))
-                .with_scale(Vec3::new(24.0, 64.0, 18.0)),
+            transform: Transform::from_translation(base + Vec3::new(-24.0, 28.0, 28.0))
+                .with_scale(Vec3::new(20.0, 56.0, 16.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2558,8 +2566,8 @@ fn spawn_film_station_mountain(
         PbrBundle {
             mesh: cube.clone(),
             material: dark.clone(),
-            transform: Transform::from_translation(base + Vec3::new(24.0, 26.0, 24.0))
-                .with_scale(Vec3::new(20.0, 52.0, 18.0)),
+            transform: Transform::from_translation(base + Vec3::new(22.0, 22.0, 22.0))
+                .with_scale(Vec3::new(18.0, 44.0, 16.0)),
             ..default()
         },
         FilmSilhouette,
@@ -3075,7 +3083,7 @@ fn film_toggle_helpers(
         ),
     >,
     mut combat_fx: Query<
-        &mut Visibility,
+        (&mut Visibility, Option<&FilmCombatVista>),
         (
             With<FilmCombatFx>,
             Without<FilmKeelHelper>,
@@ -3197,10 +3205,14 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Combat: pad beat + painting hero (pad beat is combat-only silhouettes).
-    let show_combat = matches!(film.shot_index, 2 | 8);
-    for mut vis in combat_fx.iter_mut() {
-        *vis = if show_combat {
+    // Combat: pad beat = pad figures only; painting = pad + vista giants.
+    for (mut vis, vista) in combat_fx.iter_mut() {
+        let show = match film.shot_index {
+            2 => vista.is_none(),
+            8 => true,
+            _ => false,
+        };
+        *vis = if show {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -3661,9 +3673,9 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         2 => {
-            // Stand-off two-shot — biped vs multi-leg only (fighters/turrets hidden).
-            let look = deck + Vec3::new(0.5, 7.0, 16.0);
-            let pos = look + Vec3::new(-28.0, 10.0, 26.0);
+            // Southwest two-shot — biped vs multi-leg; fighters/turrets/vista hidden.
+            let look = deck + Vec3::new(0.5, 5.2, 15.0);
+            let pos = look + Vec3::new(-17.0, 4.0, 15.0);
             (pos, look)
         }
         3 => {
@@ -3706,13 +3718,13 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         8 => {
             // Painting: planet upper; station mid-frame; grass/rivers/shuttle lower.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-48.0, 46.0, 128.0);
-            let station_mid = deck + Vec3::new(26.0, 55.0, 76.0);
-            let green_crown = deck + Vec3::new(-4.0, 12.0, 94.0);
+            let pos = deck + Vec3::new(-52.0, 48.0, 128.0);
+            let station_mid = deck + Vec3::new(28.0, 48.0, 74.0);
+            let green_crown = deck + Vec3::new(-6.0, 10.0, 96.0);
             let planet = pos + planet_dir * 155.0;
-            // Bias look toward station so the mountain fills mid-frame.
-            let ground = green_crown.lerp(station_mid, 0.62);
-            let look = ground.lerp(planet, 0.22);
+            // Station readable mid-frame without burying the grass crown.
+            let ground = green_crown.lerp(station_mid, 0.5);
+            let look = ground.lerp(planet, 0.24);
             (pos, look)
         }
         9 => {
@@ -3744,7 +3756,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         13 => {
             // Station mountain — stand off so full stepped mass + neon crown read.
-            let station = deck + Vec3::new(26.0, 55.0, 76.0);
+            let station = deck + Vec3::new(28.0, 52.0, 74.0);
             let pos = deck + Vec3::new(-55.0, 78.0, 155.0);
             let look = station;
             (pos, look)
