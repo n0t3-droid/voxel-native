@@ -127,6 +127,10 @@ struct FilmCrystalFx;
 #[derive(Component)]
 struct FilmFighterFx;
 
+/// High open-sky fighters only (dedicated swarm beat — no low painting wing).
+#[derive(Component)]
+struct FilmFighterSky;
+
 /// Waterfall sheets/cliff — hidden on crystal grove (cyan slabs flooded the frame).
 #[derive(Component)]
 struct FilmWaterfallFx;
@@ -2174,81 +2178,77 @@ fn spawn_film_fighter_swarm(
     deck: Vec3,
 ) {
     // High open-sky V for dedicated; painting wing stays lower in frustum.
-    for (i, (ox, oy, oz, yaw, scale)) in [
+    for (i, (ox, oy, oz, yaw, scale, sky)) in [
         // Dedicated core — high altitude, clear of islands/tunnel
-        (20.0_f32, 52.0, 18.0, -0.55, 1.15),
-        (30.0, 54.0, 22.0, -0.45, 1.2),
-        (40.0, 53.0, 20.0, -0.50, 1.15),
-        (50.0, 56.0, 24.0, -0.40, 1.25),
-        (25.0, 50.0, 28.0, -0.60, 1.15),
-        (45.0, 57.0, 30.0, -0.35, 1.2),
-        (35.0, 58.0, 16.0, -0.48, 1.3),
-        (55.0, 55.0, 26.0, -0.42, 1.15),
+        (20.0_f32, 52.0, 18.0, -0.55, 1.15, true),
+        (30.0, 54.0, 22.0, -0.45, 1.2, true),
+        (40.0, 53.0, 20.0, -0.50, 1.15, true),
+        (50.0, 56.0, 24.0, -0.40, 1.25, true),
+        (25.0, 50.0, 28.0, -0.60, 1.15, true),
+        (45.0, 57.0, 30.0, -0.35, 1.2, true),
+        (35.0, 58.0, 16.0, -0.48, 1.3, true),
+        (55.0, 55.0, 26.0, -0.42, 1.15, true),
         // Painting-hero wing — mid deck, toward look target
-        (8.0, 22.0, 56.0, -0.70, 1.35),
-        (14.0, 24.0, 62.0, -0.65, 1.4),
-        (22.0, 26.0, 58.0, -0.55, 1.3),
-        (4.0, 20.0, 48.0, -0.75, 1.25),
+        (8.0, 22.0, 56.0, -0.70, 1.35, false),
+        (14.0, 24.0, 62.0, -0.65, 1.4, false),
+        (22.0, 26.0, 58.0, -0.55, 1.3, false),
+        (4.0, 20.0, 48.0, -0.75, 1.25, false),
     ]
     .into_iter()
     .enumerate()
     {
         let p = deck + Vec3::new(ox, oy, oz);
         let s = scale;
-        commands.spawn((
-            PbrBundle {
-                mesh: cube.clone(),
-                material: hull.clone(),
-                transform: Transform::from_translation(p)
+        let plume_dir = Quat::from_rotation_y(yaw) * Vec3::new(-1.0, 0.0, 0.0);
+        let parts = [
+            (
+                hull.clone(),
+                Transform::from_translation(p)
                     .with_scale(Vec3::new(8.0 * s, 2.4 * s, 3.5 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
-                ..default()
-            },
-            FilmSilhouette,
-            FilmFighterFx,
-            Name::new(format!("FilmFighter{i}")),
-        ));
-        let plume_dir = Quat::from_rotation_y(yaw) * Vec3::new(-1.0, 0.0, 0.0);
-        commands.spawn((
-            PbrBundle {
-                mesh: cube.clone(),
-                material: cyan.clone(),
-                transform: Transform::from_translation(p + plume_dir * (9.0 * s))
+                format!("FilmFighter{i}"),
+            ),
+            (
+                cyan.clone(),
+                Transform::from_translation(p + plume_dir * (9.0 * s))
                     .with_scale(Vec3::new(18.0 * s, 2.6 * s, 2.4 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
-                ..default()
-            },
-            FilmSilhouette,
-            FilmFighterFx,
-            Name::new(format!("FilmFighterPlume{i}")),
-        ));
-        commands.spawn((
-            PbrBundle {
-                mesh: cube.clone(),
-                material: hull.clone(),
-                transform: Transform::from_translation(p)
+                format!("FilmFighterPlume{i}"),
+            ),
+            (
+                hull.clone(),
+                Transform::from_translation(p)
                     .with_scale(Vec3::new(3.2 * s, 0.7 * s, 8.0 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
-                ..default()
-            },
-            FilmSilhouette,
-            FilmFighterFx,
-            Name::new(format!("FilmFighterWing{i}")),
-        ));
-        commands.spawn((
-            PbrBundle {
-                mesh: cube.clone(),
-                material: cyan.clone(),
-                transform: Transform::from_translation(
+                format!("FilmFighterWing{i}"),
+            ),
+            (
+                cyan.clone(),
+                Transform::from_translation(
                     p - plume_dir * (5.0 * s) + Vec3::new(0.0, 0.8 * s, 0.0),
                 )
                 .with_scale(Vec3::new(1.8 * s, 1.4 * s, 1.8 * s)),
-                ..default()
-            },
-            FilmSilhouette,
-            FilmFighterFx,
-            Name::new(format!("FilmFighterNose{i}")),
-        ));
+                format!("FilmFighterNose{i}"),
+            ),
+        ];
+        for (mat, tf, name) in parts {
+            let id = commands
+                .spawn((
+                    PbrBundle {
+                        mesh: cube.clone(),
+                        material: mat,
+                        transform: tf,
+                        ..default()
+                    },
+                    FilmSilhouette,
+                    FilmFighterFx,
+                    Name::new(name),
+                ))
+                .id();
+            if sky {
+                commands.entity(id).insert(FilmFighterSky);
+            }
+        }
     }
 }
 
@@ -2478,18 +2478,17 @@ fn spawn_film_grass_caps(
     // Thick verdant crowns — lids + cliff faces toward painting cam (SW looking NE).
     // Flat lids alone foreshorten under the upward planet look.
     for (i, (ox, oz, w, d, lift)) in [
-        // Near-cam hero crowns (painting pos z≈120) — must fill lower third green
-        (-12.0_f32, 92.0, 34.0, 26.0, 6.0),
-        (10.0, 88.0, 30.0, 24.0, 5.0),
-        (28.0, 94.0, 26.0, 22.0, 7.0),
-        (-28.0, 86.0, 24.0, 20.0, 4.0),
-        (6.0, 78.0, 28.0, 22.0, 5.5),
-        (22.0, 80.0, 22.0, 18.0, 4.5),
-        // Mid archipelago
-        (10.0, 62.0, 26.0, 20.0, 2.0),
-        (-8.0, 70.0, 22.0, 18.0, 1.5),
-        (28.0, 68.0, 20.0, 16.0, 2.5),
-        (40.0, 60.0, 16.0, 13.0, 1.5),
+        // Near-cam mega crown (painting pos z≈128) — fill lower third green
+        (-8.0_f32, 96.0, 42.0, 32.0, 8.0),
+        (18.0, 92.0, 36.0, 28.0, 7.0),
+        (-30.0, 90.0, 30.0, 24.0, 6.0),
+        (8.0, 84.0, 34.0, 26.0, 7.5),
+        (32.0, 88.0, 28.0, 22.0, 6.5),
+        (-18.0, 80.0, 26.0, 22.0, 5.0),
+        (10.0, 72.0, 24.0, 20.0, 4.0),
+        (28.0, 76.0, 22.0, 18.0, 4.5),
+        (-6.0, 68.0, 20.0, 16.0, 3.0),
+        (40.0, 70.0, 18.0, 16.0, 3.5),
     ]
     .into_iter()
     .enumerate()
@@ -2797,7 +2796,7 @@ fn film_toggle_helpers(
         ),
     >,
     mut fighter_fx: Query<
-        &mut Visibility,
+        (&mut Visibility, Option<&FilmFighterSky>),
         (
             With<FilmFighterFx>,
             Without<FilmKeelHelper>,
@@ -2885,10 +2884,14 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Fighters: combat / painting / dedicated (hide on crystal grove).
-    let show_fighters = matches!(film.shot_index, 2 | 8 | 11);
-    for mut vis in fighter_fx.iter_mut() {
-        *vis = if show_fighters {
+    // Fighters: combat/painting show all; dedicated swarm = high-sky only.
+    for (mut vis, sky) in fighter_fx.iter_mut() {
+        let show = match film.shot_index {
+            2 | 8 => true,
+            11 => sky.is_some(),
+            _ => false,
+        };
+        *vis = if show {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -3328,10 +3331,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
 
     match index {
         0 => {
-            // Satellite grass cap (film lids) — not buried in main-deck tufts.
-            let lawn = deck + Vec3::new(8.0, 1.5, 36.0);
-            let pos = lawn + Vec3::new(-24.0, 16.0, 26.0);
-            let look = lawn + Vec3::new(2.0, -1.0, -4.0);
+            // Mega verdant crown near painting frustum.
+            let lawn = deck + Vec3::new(-8.0, 10.0, 96.0);
+            let pos = lawn + Vec3::new(-32.0, 22.0, 34.0);
+            let look = lawn + Vec3::new(4.0, -1.0, -6.0);
             (pos, look)
         }
         1 => {
@@ -3392,12 +3395,12 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         8 => {
-            // Painting: high cam so verdant crowns read as tops; planet still upper.
+            // Painting: still higher — look onto verdant crown, planet fills upper.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-42.0, 44.0, 120.0);
-            let green_crown = deck + Vec3::new(6.0, 10.0, 82.0);
-            let planet = pos + planet_dir * 150.0;
-            let look = green_crown.lerp(planet, 0.30);
+            let pos = deck + Vec3::new(-48.0, 55.0, 128.0);
+            let green_crown = deck + Vec3::new(0.0, 14.0, 92.0);
+            let planet = pos + planet_dir * 160.0;
+            let look = green_crown.lerp(planet, 0.22);
             (pos, look)
         }
         9 => {
