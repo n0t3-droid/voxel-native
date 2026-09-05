@@ -13,6 +13,7 @@
 
 use crate::blocks::{BlockType, Voxel, AIR};
 use crate::chunk::{Chunk, ChunkPos, CHUNK_SIZE, CHUNK_SIZE_I};
+use crate::frontier::{self, SkywayNetwork};
 use noise::{NoiseFn, Perlin};
 
 pub const WATER_LEVEL: i32 = 48;
@@ -131,6 +132,9 @@ pub struct TerrainGenerator {
     /// Secondary region channel, orthogonal to `region`, used to break
     /// up region boundaries so they don't all line up along one axis.
     region_b: Perlin,
+    /// Skyway routes, energy rivers and the lattice-anchored landmarks
+    /// (sky islands, docking stations, crystal clusters).
+    frontier: crate::frontier::FrontierPlanner,
 }
 
 impl TerrainGenerator {
@@ -156,6 +160,7 @@ impl TerrainGenerator {
             moisture: Perlin::new(seed.wrapping_add(11)),
             region: Perlin::new(seed.wrapping_add(12)),
             region_b: Perlin::new(seed.wrapping_add(13)),
+            frontier: crate::frontier::FrontierPlanner::new(seed),
         }
     }
 
@@ -217,15 +222,24 @@ impl TerrainGenerator {
         // Third axis: separates karst out from the other 4 quadrants.
         let c = self.region.get([wx * 0.00013 - 41.7, wz * 0.00013 + 23.1]);
 
-        // Region centers in (a, b, c) space. The automatic default map keeps
-        // Earth-like provinces only; showcase materials stay available for
-        // intentional builds instead of invading normal worlds.
-        let centers: [(f64, f64, f64, Region); 5] = [
-            (-0.55, -0.55, -0.4, Region::Canyon),
-            (0.55, -0.55, -0.4, Region::Plateau),
-            (-0.55, 0.55, -0.4, Region::Highland),
-            (0.55, 0.55, -0.4, Region::Wetland),
-            (0.0, 0.0, 0.4, Region::Karst),
+        // Region centers in (a, b, c) space.
+        //
+        // Every world is the same planet: a neon frontier of banded
+        // canyon mesas, crystal spire fields, volcanic flats, glacier
+        // ridges and bioluminescent reefs. Canyon is deliberately given
+        // two centres because banded mesa country is the terrain the key
+        // art is mostly made of — it should be what you fly over between
+        // the rarer set-pieces, not one province in nine.
+        let centers: [(f64, f64, f64, Region); 9] = [
+            (-0.60, -0.55, -0.45, Region::Canyon),
+            (0.58, 0.60, 0.42, Region::Canyon),
+            (0.60, -0.58, -0.40, Region::CrystalSpires),
+            (-0.58, 0.60, -0.42, Region::AlienReef),
+            (0.55, 0.55, -0.48, Region::VolcanicWaste),
+            (-0.55, -0.55, 0.50, Region::GlacierShards),
+            (0.00, 0.00, 0.46, Region::Karst),
+            (-0.62, 0.05, 0.44, Region::Highland),
+            (0.10, -0.62, 0.40, Region::Plateau),
         ];
 
         // Find dominant region by closest center; strength is how much
@@ -246,16 +260,32 @@ impl TerrainGenerator {
             }
         }
         // Strength: 0 right at the boundary, ~1 deep inside the region.
-        // Squared-distance ratio gives a soft falloff.
+        // Squared-distance ratio gives a soft falloff. Nine provinces sit
+        // closer together than five did, so the ramp is steeper to keep
+        // province interiors at full strength instead of leaving the
+        // whole map in a permanent half-blended boundary state.
         let margin = (second - best.1).max(0.0);
-        let strength = (margin * 4.0).min(1.0);
-        // Below a threshold, treat as "normal" mixed terrain so we don't
-        // see weak canyon striations everywhere.
-        if strength < 0.15 {
+        let strength = (margin * 7.0).min(1.0);
+        // Below a threshold, treat as "normal" mixed terrain — the green
+        // transitional country between the set-piece provinces.
+        if strength < 0.07 {
             (Region::Plains, 0.0)
         } else {
             (best.0, strength)
         }
+    }
+
+    /// Smooth macro elevation — continentalness and erosion only, with
+    /// no hills, ridges or province modifiers layered on.
+    ///
+    /// This is the surface the terrain *would* have if it were sanded
+    /// flat, and it is what the skyway decks ride on: a deck offset from
+    /// this stays level while the real ground heaves 80 blocks up into a
+    /// mesa or drops away into a canyon underneath it.
+    pub fn macro_height(&self, wx: f64, wz: f64) -> f64 {
+        let cont = self.fbm2(&self.continent, wx * 0.0002, wz * 0.0002, 4, 2.0, 0.5);
+        let erod = self.fbm2(&self.erosion, wx * 0.0005, wz * 0.0005, 3, 2.0, 0.5);
+        50.0 + cont * 32.0 + (1.0 - erod.abs()) * 8.0
     }
 
     /// Height of the terrain surface at world (x,z), in blocks.
@@ -416,6 +446,20 @@ impl TerrainGenerator {
             }
         }
 
+        // ----------- Skyline compression -----------
+        // Crystal spikes and reef pillars can stack to 260+ blocks, but
+        // the streamer only loads chunk y in [0, vertical_chunks). Any
+        // terrain above that ceiling is not "tall", it is decapitated:
+        // the player sees a spire sheared off into a flat table. Rather
+        // than clamping (which produces exactly that), compress
+        // everything above the knee so the relief below is untouched and
+        // the tallest hero silhouettes taper into the sky instead.
+        const SKYLINE_KNEE: f64 = 118.0;
+        const SKYLINE_COMPRESSION: f64 = 0.24;
+        if h > SKYLINE_KNEE {
+            h = SKYLINE_KNEE + (h - SKYLINE_KNEE) * SKYLINE_COMPRESSION;
+        }
+
         // Coastal smoothing: heights close to the water line create
         // pointy "teeth" shorelines because rounding flips neighbouring
         // columns between y=48 and y=49. Pull heights in the narrow
@@ -435,7 +479,23 @@ impl TerrainGenerator {
             }
         }
 
-        (h.round() as i32, cont)
+        // ----------- Energy river channels -----------
+        // Carved here rather than in `generate()` so every consumer of
+        // the height field — spawn search, bot siting, ship landing,
+        // collision — agrees the channel is there. `generate()` re-reads
+        // the same channel to decide what fluid pools in it.
+        let mut h = h.round() as i32;
+        if h > WATER_LEVEL + 4 {
+            if let Some(river) = self
+                .frontier
+                .rivers
+                .column(wx.round() as i32, wz.round() as i32)
+            {
+                h -= river.cut;
+            }
+        }
+
+        (h, cont)
     }
 
     /// 3D narrow-band cave noise. Returns `true` if this world cell is
@@ -541,6 +601,9 @@ impl TerrainGenerator {
         if height <= WATER_LEVEL - 2 {
             return Biome::Ocean;
         }
+        if crate::frontier::in_spawn_frontier(wx as i32, wz as i32) && height > WATER_LEVEL + 2 {
+            return Biome::Mesa;
+        }
         // Region overrides (above water): alien & special regions
         // dominate even at weak strength so the player sees them
         // often. Classic canyons / karst need a bit more authority.
@@ -548,12 +611,16 @@ impl TerrainGenerator {
         if rs > 0.08 && height > WATER_LEVEL + 2 {
             match region {
                 Region::Canyon => {
-                    if rs > 0.25 {
+                    // Banded mesa country is the frontier's default
+                    // ground, so it asserts itself well before the
+                    // province interior rather than only at full
+                    // strength like the old earth-like canyon province.
+                    if rs > 0.12 {
                         return Biome::Mesa;
                     }
                 }
                 Region::Karst => {
-                    if rs > 0.25 {
+                    if rs > 0.18 {
                         return Biome::Karst;
                     }
                 }
@@ -665,17 +732,24 @@ impl TerrainGenerator {
     /// canyon cliff faces. Pure function of world Y so adjacent
     /// columns line up perfectly into continuous bands.
     fn mesa_band(wy: i32) -> BlockType {
-        // 6-block bands cycling through 4 colors. The repetition pattern
-        // (red, red, clay, red, clay, red, ...) avoids feeling stripey
-        // while still reading as sedimentary geology.
-        let band = ((wy.rem_euclid(24)) / 4) as u8;
-        match band {
-            0 => BlockType::RedStone,
-            1 => BlockType::MesaClay,
-            2 => BlockType::RedStone,
-            3 => BlockType::RedSand,
-            4 => BlockType::MesaClay,
-            _ => BlockType::RedStone,
+        frontier::strata_block(wy)
+    }
+
+    /// Deep body block for a column.
+    ///
+    /// Most of the frontier's rock is banded: violet, brick, ochre and
+    /// buff stripes running dead level across every cliff, canyon wall
+    /// and cave roof, exactly as in the key art. Only the biomes with
+    /// their own strong material identity (crystal, basalt, ice, bone)
+    /// keep a solid core, so their silhouettes stay readable.
+    fn core_block(biome: Biome, core: BlockType, wy: i32) -> BlockType {
+        match biome {
+            Biome::CrystalSpires
+            | Biome::VolcanicWaste
+            | Biome::GlacierShards
+            | Biome::AlienReef
+            | Biome::Ocean => core,
+            _ => frontier::strata_block(wy),
         }
     }
 
@@ -729,10 +803,21 @@ impl TerrainGenerator {
                 }
             }
             Biome::Mesa => {
-                if r < 0.10 {
+                // Mesa tables in the key art are not bare rock: their
+                // flat tops carry a vivid green skin that stops dead at
+                // the cliff edge. Slope gates it, so the banded cliff
+                // faces stay bare while every plateau reads as living
+                // ground you would want to land a shuttle on.
+                if slope <= 1 && grain > 0.10 {
+                    if r < 0.10 {
+                        BlockType::MossStone
+                    } else {
+                        BlockType::Grass
+                    }
+                } else if r < 0.10 {
                     BlockType::MesaClay
                 } else if grain > 0.50 && r < 0.20 {
-                    BlockType::RedStone
+                    BlockType::AmberStone
                 } else {
                     current
                 }
@@ -838,6 +923,29 @@ impl TerrainGenerator {
                 let biome = self.biome(wx as f64, wz as f64, surface, cont);
                 let (mut top, sub, core) = Self::blocks_for(biome);
 
+                // --------- Energy river ---------
+                // `surface_height` already cut the channel; here we work
+                // out what pools in it. The gate has to be on the height
+                // BEFORE the cut, exactly as in `surface_height`, or a
+                // channel cut near the sea line would be left as a dry
+                // trench because the carve pushed it under the threshold.
+                let river = self
+                    .frontier
+                    .rivers
+                    .column(wx, wz)
+                    .filter(|r| surface + r.cut > WATER_LEVEL + 4);
+                let river_fill_top = river.map(|r| r.fluid_top(surface));
+
+                // --------- Skyway ---------
+                // Decks ride the smooth macro elevation, so a single
+                // route stays level while the ground below it drops into
+                // a canyon (bridge) or heaves into a mesa (cutting).
+                let skyway =
+                    self.frontier
+                        .skyways
+                        .column(wx, wz, self.macro_height(wx as f64, wz as f64));
+                let skyway_lamp = frontier::skyway_lamp(wx, wz);
+
                 // Crystal Spires: tall columns ARE the spires, so their
                 // top block must be Crystal (not the GlowSand floor).
                 // Threshold = floor + 6 blocks: anything above that is
@@ -888,11 +996,39 @@ impl TerrainGenerator {
                         continue;
                     }
 
-                    // Above the surface: air or water (or lava in
-                    // VolcanicWaste regions, where the carved channels
-                    // pool molten basalt instead of seawater).
+                    // The skyway wins against everything: it is the one
+                    // structure the player is meant to drive along, so a
+                    // deck must never be swallowed by the mesa it cuts
+                    // through, and its headroom must never be filled in.
+                    if let Some(way) = skyway {
+                        if let Some(block) = way.deck_block(wy, skyway_lamp) {
+                            chunk.set(lx, ly, lz, block.into());
+                            continue;
+                        }
+                        if wy > way.deck_y && wy <= way.deck_y + SkywayNetwork::CLEARANCE {
+                            continue;
+                        }
+                        // Pylons: fill the gap from the deck underside
+                        // down to whatever ground is beneath, so bridges
+                        // over a canyon stand on legs instead of hanging.
+                        if way.pylon && wy < way.deck_y - 1 && wy > surface {
+                            let block = if wy.rem_euclid(6) == 0 {
+                                BlockType::PlatingTeal
+                            } else {
+                                BlockType::PlatingWhite
+                            };
+                            chunk.set(lx, ly, lz, block.into());
+                            continue;
+                        }
+                    }
+
+                    // Above the surface: air, water, lava, or the glowing
+                    // fluid standing in an energy channel.
                     if wy > surface {
-                        if in_volcanic && wy <= volcanic_lava_level {
+                        if river_fill_top.is_some_and(|fill| wy <= fill) {
+                            let fluid = river.map(|r| r.fluid).unwrap_or(BlockType::PlasmaFlow);
+                            chunk.set(lx, ly, lz, fluid.into());
+                        } else if in_volcanic && wy <= volcanic_lava_level {
                             chunk.set(lx, ly, lz, BlockType::Lava.into());
                         } else if wy <= WATER_LEVEL {
                             chunk.set(lx, ly, lz, BlockType::Water.into());
@@ -942,7 +1078,13 @@ impl TerrainGenerator {
 
                     let depth = surface - wy;
                     let block = if depth == 0 {
-                        top
+                        // A channel bed is scorched by whatever runs
+                        // through it, not grassed over.
+                        match river.map(|r| r.fluid) {
+                            Some(BlockType::Lava) => BlockType::Basalt,
+                            Some(_) => BlockType::GlowSand,
+                            None => top,
+                        }
                     } else if depth <= 3 {
                         sub
                     } else if matches!(biome, Biome::Mesa) {
@@ -952,7 +1094,7 @@ impl TerrainGenerator {
                         // stripes the player can read as geology.
                         Self::mesa_band(wy)
                     } else {
-                        core
+                        Self::core_block(biome, core, wy)
                     };
                     chunk.set(lx, ly, lz, block.into());
                 }
@@ -962,6 +1104,15 @@ impl TerrainGenerator {
         chunk.dirty = true;
         // Decorate AFTER the main fill so trees see the final surface.
         self.decorate(chunk);
+        // Landmarks last: sky islands, docking stations and crystal
+        // clusters are allowed to overwrite decoration, and several of
+        // them straddle chunk borders, so they must be stamped from the
+        // shared world-space lattice rather than from chunk-local rolls.
+        self.frontier.stamp_landmarks(
+            chunk,
+            |x, z| self.surface_height_at(x, z),
+            |x, z| self.macro_height(x as f64, z as f64).round() as i32,
+        );
         chunk.finalize_uniform_flags();
     }
 
@@ -1195,8 +1346,17 @@ impl TerrainGenerator {
                         }
                     }
                     Biome::Mesa => {
-                        if is_sand_ground && r < 0.003 {
-                            chunk.set(lx, above_ly as usize, lz, BlockType::RedStone.into());
+                        // Green mesa tables get scrub; the bare banded
+                        // ledges get crystal glitter instead, so a cliff
+                        // shoulder still catches the light.
+                        if is_grass_ground && r < 0.030 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::Leaves.into());
+                        } else if is_grass_ground && r < 0.042 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::MossStone.into());
+                        } else if r < 0.006 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::Crystal.into());
+                        } else if r < 0.009 {
+                            chunk.set(lx, above_ly as usize, lz, BlockType::AmberStone.into());
                         }
                     }
                     Biome::Karst => {
@@ -1218,9 +1378,9 @@ impl TerrainGenerator {
                         }
                     }
                     Biome::CrystalSpires => {
-                        if r < 0.025 {
+                        if r < 0.010 {
                             chunk.set(lx, above_ly as usize, lz, BlockType::Crystal.into());
-                        } else if r < 0.055 {
+                        } else if r < 0.040 {
                             chunk.set(lx, above_ly as usize, lz, BlockType::AlienMoss.into());
                         }
                     }
@@ -1288,13 +1448,26 @@ impl TerrainGenerator {
 
             // Density gate per biome. Alien biomes get lots of props;
             // forests/jungles get very few (preserve wilderness).
+            // The frontier is inhabited everywhere, so every land biome
+            // gets outpost clutter. Forest and jungle stay lowest: they
+            // are the wilderness the outposts are cut out of, and the
+            // canopy hides most of a prop anyway.
+            // These are per-candidate odds and there are 24 candidates a
+            // chunk, so the numbers are much smaller than they look: at
+            // 0.02 a chunk averages half a prop. Anything near 0.05 puts
+            // one outpost in every chunk, which at render distance is a
+            // field of glowing litter rather than a frontier.
             let density: f64 = match biome {
-                Biome::CrystalSpires => 0.18,
-                Biome::AlienReef => 0.16,
-                Biome::VolcanicWaste => 0.09,
-                Biome::GlacierShards => 0.08,
-                Biome::Mesa | Biome::Karst => 0.025,
-                _ => 0.0,
+                Biome::CrystalSpires => 0.055,
+                Biome::AlienReef => 0.050,
+                Biome::VolcanicWaste => 0.030,
+                Biome::GlacierShards => 0.026,
+                Biome::Mesa => 0.022,
+                Biome::Karst => 0.014,
+                Biome::Plains | Biome::Savanna | Biome::Desert | Biome::Tundra => 0.014,
+                Biome::Mountains | Biome::SnowyMountains => 0.010,
+                Biome::Forest | Biome::Jungle => 0.006,
+                Biome::Ocean | Biome::Beach => 0.0,
             };
             if r_gate > density {
                 continue;
@@ -1654,6 +1827,113 @@ impl TerrainGenerator {
                     );
                 }
 
+                // --- MESA / MOUNTAIN / KARST / FOREST -----------------
+                // Banded canyon country is where the player spends most
+                // of their time, so it gets the richest outpost kit: lit
+                // signage, plated pads and plasma conduits in the same
+                // palette as the skyways that run overhead.
+                (
+                    Biome::Mesa
+                    | Biome::Karst
+                    | Biome::Mountains
+                    | Biome::SnowyMountains
+                    | Biome::Forest
+                    | Biome::Jungle,
+                    0 | 1 | 2,
+                ) => {
+                    // Holo billboard: a plated post carrying a lit pane,
+                    // the neon signage that dots the cliffs in the art.
+                    for dy in 0..3 {
+                        set_safe(
+                            chunk,
+                            lx,
+                            base_y + dy,
+                            lz,
+                            BlockType::PlatingWhite,
+                            origin_y,
+                        );
+                    }
+                    for dy in 3..6 {
+                        for dx in 0..3 {
+                            let nx = lx + dx;
+                            if nx >= CHUNK_SIZE {
+                                continue;
+                            }
+                            let block = if dy == 3 || dx == 2 {
+                                BlockType::NeonMagenta
+                            } else {
+                                BlockType::HoloPanel
+                            };
+                            set_safe(chunk, nx, base_y + dy, lz, block, origin_y);
+                        }
+                    }
+                }
+                (
+                    Biome::Mesa
+                    | Biome::Karst
+                    | Biome::Mountains
+                    | Biome::SnowyMountains
+                    | Biome::Forest
+                    | Biome::Jungle,
+                    3 | 4 | 5,
+                ) => {
+                    // Plated landing pad with a lit rim and a corner mast.
+                    for dx in -2..=2 {
+                        for dz in -2..=2 {
+                            let nx = lx as i32 + dx;
+                            let nz = lz as i32 + dz;
+                            if nx < 0 || nz < 0 {
+                                continue;
+                            }
+                            let edge = dx.abs() == 2 || dz.abs() == 2;
+                            let block = if edge && (dx + dz).rem_euclid(2) == 0 {
+                                BlockType::NeonCyan
+                            } else if edge {
+                                BlockType::PlatingTeal
+                            } else {
+                                BlockType::RoadDeck
+                            };
+                            set_safe(chunk, nx as usize, base_y, nz as usize, block, origin_y);
+                        }
+                    }
+                    for dy in 1..4 {
+                        set_safe(
+                            chunk,
+                            lx,
+                            base_y + dy,
+                            lz,
+                            BlockType::PlatingWhite,
+                            origin_y,
+                        );
+                    }
+                    set_safe(chunk, lx, base_y + 4, lz, BlockType::NeonAmber, origin_y);
+                }
+                (
+                    Biome::Mesa
+                    | Biome::Karst
+                    | Biome::Mountains
+                    | Biome::SnowyMountains
+                    | Biome::Forest
+                    | Biome::Jungle,
+                    6 | 7,
+                ) => {
+                    // Plasma conduit: a short run of glowing pipe on
+                    // plated saddles, tapping the energy rivers below.
+                    for dx in 0..4 {
+                        let nx = lx + dx;
+                        if nx >= CHUNK_SIZE {
+                            continue;
+                        }
+                        set_safe(chunk, nx, base_y, lz, BlockType::PlatingTeal, origin_y);
+                        let block = if dx % 3 == 0 {
+                            BlockType::PlatingWhite
+                        } else {
+                            BlockType::PlasmaFlow
+                        };
+                        set_safe(chunk, nx, base_y + 1, lz, block, origin_y);
+                    }
+                }
+
                 // --- PLAINS / SAVANNA / DESERT -------------------------
                 (Biome::Plains | Biome::Savanna | Biome::Tundra | Biome::Desert, 0 | 1) => {
                     // Cargo crate: 2x2x2 stone box (stackable shipping
@@ -1722,11 +2002,11 @@ impl TerrainGenerator {
                     set_safe(chunk, lx, base_y + 1, lz, BlockType::Lava, origin_y);
                 }
 
-                // --- MESA ---------------------------------------------
-                (Biome::Mesa, _) => {
-                    // Rust-red ruin post with a glow crown.
-                    set_safe(chunk, lx, base_y, lz, BlockType::RedStone, origin_y);
-                    set_safe(chunk, lx, base_y + 1, lz, BlockType::RedStone, origin_y);
+                // --- MESA / KARST / MOUNTAIN ruins --------------------
+                (Biome::Mesa | Biome::Karst | Biome::Mountains | Biome::SnowyMountains, _) => {
+                    // Weathered strata post with a glow crown.
+                    set_safe(chunk, lx, base_y, lz, BlockType::VioletStone, origin_y);
+                    set_safe(chunk, lx, base_y + 1, lz, BlockType::AmberStone, origin_y);
                     set_safe(chunk, lx, base_y + 2, lz, BlockType::MagnetiteOre, origin_y);
                 }
 
@@ -1778,12 +2058,15 @@ impl TerrainGenerator {
             let (surface, _cont) = self.surface_height(wx as f64, wz as f64);
             let biome = self.biome(wx as f64, wz as f64, surface, _cont);
 
+            // Sparse on purpose. At the old rate these read as glitter
+            // only because the ground around them was almost black; over
+            // a lit, saturated surface the same density looks like litter.
             let keep = match biome {
-                Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.18,
-                Biome::GlacierShards => r_gate < 0.045,
-                Biome::VolcanicWaste => r_gate < 0.030,
+                Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.10,
+                Biome::GlacierShards => r_gate < 0.030,
+                Biome::VolcanicWaste => r_gate < 0.022,
                 Biome::Forest | Biome::Jungle | Biome::Karst => false,
-                Biome::Mesa => false,
+                Biome::Mesa => r_gate < 0.016,
                 Biome::Desert | Biome::Savanna | Biome::Beach | Biome::Ocean => false,
                 Biome::Mountains | Biome::SnowyMountains | Biome::Tundra => false,
                 _ => false,
@@ -1827,8 +2110,9 @@ impl TerrainGenerator {
                 },
                 Biome::Mesa => match roll {
                     0 | 1 => BlockType::MesaClay,
-                    2 => BlockType::RedSand,
-                    3 => BlockType::RedStone,
+                    2 => BlockType::Crystal,
+                    3 => BlockType::AmberStone,
+                    4 => BlockType::RedStone,
                     _ => BlockType::Gravel,
                 },
                 Biome::Desert | Biome::Savanna => match roll {
@@ -2462,6 +2746,21 @@ impl TerrainGenerator {
         best.map(|(_, point)| point)
     }
 
+    /// Further back in the look-cone canyon, looking +X at a tall
+    /// banded rock wall that fills the right/center. Crystals sit left;
+    /// lava curtains hang on the face; skyway is a crest ribbon only.
+    pub fn scenic_frontier_spawn(&self) -> ([f32; 3], f32, f32) {
+        let eye = [64.0_f32, 58.0, -79.0];
+        let look = [110.0_f32, 64.0, -80.0];
+        let dx = look[0] - eye[0];
+        let dy = look[1] - eye[1];
+        let dz = look[2] - eye[2];
+        let yaw = dx.atan2(-dz);
+        let horiz = (dx * dx + dz * dz).sqrt();
+        let pitch = dy.atan2(horiz).clamp(-1.2, 0.22);
+        (eye, yaw, pitch)
+    }
+
     pub fn find_natural_spawn(
         &self,
         origin_x: i32,
@@ -2495,7 +2794,14 @@ impl TerrainGenerator {
             for (x, z) in samples {
                 let surface = self.surface_height_at(x, z);
                 let biome = self.biome_at(x, z);
-                if biome.is_showcase_terrain() || surface <= WATER_LEVEL + 4 {
+                if surface <= WATER_LEVEL + 4 {
+                    continue;
+                }
+                // The frontier's showcase biomes ARE the world now, so
+                // the only things that disqualify a spawn are the ones
+                // that would actually hurt: standing in a lava or plasma
+                // channel, or on a wall too steep to walk off.
+                if self.frontier.rivers.column(x, z).is_some() {
                     continue;
                 }
 
@@ -2514,7 +2820,22 @@ impl TerrainGenerator {
 
                 let distance = (x - origin_x).abs().max((z - origin_z).abs());
                 let comfortable_height = (surface - (WATER_LEVEL + 18)).abs();
-                let score = distance + slope * 96 + comfortable_height * 2;
+                // Landing on a mesa table or a reef shelf gives the
+                // player the postcard on their first frame instead of a
+                // featureless field, so nudge the search toward them.
+                // Extra pull toward the hero vista (crystal + river +
+                // skyway parked at ~(-Z, +X) of origin).
+                let hero_dx = (x - 48).abs();
+                let hero_dz = (z - (-28)).abs();
+                let near_postcard = hero_dx < 90 && hero_dz < 90;
+                let vista_bonus = if near_postcard {
+                    -480
+                } else if biome.is_showcase_terrain() || biome == Biome::Mesa {
+                    -220
+                } else {
+                    0
+                };
+                let score = distance + slope * 96 + comfortable_height * 2 + vista_bonus;
                 let candidate = NaturalSpawnPoint {
                     x,
                     y: surface + 10,
@@ -2545,83 +2866,435 @@ impl TerrainGenerator {
 mod tests {
     use super::*;
 
-    #[test]
-    fn default_world_regions_stay_natural_not_alien_showcases() {
-        let generator = TerrainGenerator::new(12345);
-        let mut samples = 0usize;
-
+    /// Walk a large sample grid and report which of the frontier's
+    /// provinces and biomes actually turn up in a default world.
+    fn survey(
+        seed: u32,
+    ) -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    ) {
+        let generator = TerrainGenerator::new(seed);
+        let mut regions = std::collections::BTreeSet::new();
+        let mut biomes = std::collections::BTreeSet::new();
         for z in (-12_000..=12_000).step_by(512) {
             for x in (-12_000..=12_000).step_by(512) {
                 let (region, strength) = generator.region(x as f64, z as f64);
-                assert!(
-                    !matches!(
-                        region,
-                        Region::CrystalSpires
-                            | Region::VolcanicWaste
-                            | Region::GlacierShards
-                            | Region::AlienReef
-                    ),
-                    "default terrain should not pick showcase region {region:?} at strength {strength}"
-                );
-                assert!(
-                    !generator.biome_at(x, z).is_showcase_terrain(),
-                    "default terrain should not pick showcase biome at {x},{z}"
-                );
-                samples += 1;
+                if strength > 0.0 {
+                    regions.insert(format!("{region:?}"));
+                }
+                biomes.insert(format!("{:?}", generator.biome_at(x, z)));
             }
         }
-
-        assert!(samples > 100);
+        (regions, biomes)
     }
 
     #[test]
-    fn natural_spawn_finds_walkable_non_showcase_ground() {
+    fn every_world_is_the_neon_frontier_not_an_earth_like_map() {
+        // The engine used to lock the alien provinces out of ordinary
+        // worlds and keep them for hand-built showcases. The frontier is
+        // now the planet, so a default seed must contain the whole set.
+        let (regions, biomes) = survey(12345);
+
+        for expected in [
+            "Canyon",
+            "CrystalSpires",
+            "VolcanicWaste",
+            "GlacierShards",
+            "AlienReef",
+        ] {
+            assert!(
+                regions.contains(expected),
+                "default world never generated the {expected} province; got {regions:?}"
+            );
+        }
+        for expected in ["Mesa", "CrystalSpires", "VolcanicWaste", "AlienReef"] {
+            assert!(
+                biomes.contains(expected),
+                "default world never generated the {expected} biome; got {biomes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_frontier_shows_up_on_every_seed_not_just_the_default_one() {
+        for seed in [1, 7, 12345, 90210, 4_000_000_007] {
+            let (_, biomes) = survey(seed);
+            let exotic = ["Mesa", "CrystalSpires", "VolcanicWaste", "AlienReef"]
+                .iter()
+                .filter(|b| biomes.contains(**b))
+                .count();
+            assert!(
+                exotic >= 3,
+                "seed {seed} only produced {exotic} of the frontier's signature biomes: {biomes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_stays_on_walkable_ground_out_of_the_energy_channels() {
         let generator = TerrainGenerator::new(12345);
         let spawn = generator
             .find_natural_spawn(0, 0, 4096)
-            .expect("normal worlds need a nearby safe terrain entry");
+            .expect("every world needs a nearby safe terrain entry");
 
-        assert!(!spawn.biome.is_showcase_terrain());
         assert!(spawn.y > WATER_LEVEL + 4);
+        // Never drop the player into a lava or plasma channel.
+        assert!(generator.frontier.rivers.column(spawn.x, spawn.z).is_none());
+        // Spawn postcard is forced mesa country so the opening shot is
+        // banded canyon, not a grassy field the seed happened to put
+        // under the crystal cluster.
+        assert_eq!(
+            generator.biome_at(crate::frontier::HERO_CRYSTAL_X, crate::frontier::HERO_CRYSTAL_Z),
+            Biome::Mesa
+        );
+        // And never onto a wall they would immediately slide off.
+        let surface = generator.surface_height_at(spawn.x, spawn.z);
+        for (dx, dz) in [(-2, 0), (2, 0), (0, -2), (0, 2)] {
+            let neighbour = generator.surface_height_at(spawn.x + dx, spawn.z + dz);
+            assert!((surface - neighbour).abs() <= 6);
+        }
     }
 
     #[test]
-    fn default_generated_chunks_do_not_scatter_showcase_blocks() {
+    fn new_world_scenic_spawn_looks_at_the_frontier_postcard() {
         let generator = TerrainGenerator::new(12345);
-        let showcase_blocks: [Voxel; 9] = [
-            BlockType::Crystal.into(),
-            BlockType::LuminiteCrystal.into(),
-            BlockType::MagnetiteOre.into(),
-            BlockType::IridiumVein.into(),
-            BlockType::AlienMoss.into(),
-            BlockType::BoneRock.into(),
-            BlockType::GlowSand.into(),
-            BlockType::Basalt.into(),
-            BlockType::Lava.into(),
-        ];
-        let sample_columns = [(-8, -8), (-3, 5), (0, 0), (6, -4), (11, 9)];
+        let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
+        assert!(
+            crate::frontier::in_spawn_frontier(pos[0] as i32, pos[2] as i32),
+            "scenic spawn left the frontier disc"
+        );
+        assert!(
+            pos[0] > 52.0 && pos[0] < 70.0,
+            "scenic spawn should stand in the canyon, not against the west rim (x={})",
+            pos[0]
+        );
+        assert!(
+            pos[1] > 50.0,
+            "scenic spawn should be a canyon-face overlook (y={})",
+            pos[1]
+        );
+        assert!(yaw > 0.90, "should look +X at the carved west face");
+        assert!(
+            pitch.abs() < 0.45,
+            "should look nearly level at the west wall (pitch={pitch})"
+        );
+        let meta = crate::settings::WorldMeta::new("test_frontier".into(), 12345);
+        assert!((meta.time_of_day - 17.0).abs() < 0.01);
+        assert!((meta.player_pos[0] - pos[0]).abs() < 0.1);
+        assert!((meta.player_yaw - yaw).abs() < 0.01);
+    }
 
-        for (cx, cz) in sample_columns {
-            for cy in 0..10 {
-                let mut chunk = Chunk::new(ChunkPos::new(cx, cy, cz));
+    #[test]
+    fn new_world_look_ray_hits_banded_cliff() {
+        let generator = TerrainGenerator::new(12345);
+        let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
+        let fx = yaw.sin();
+        let fy = pitch.sin();
+        let fz = -yaw.cos();
+        let mut stone = 0usize;
+        let mut plating = 0usize;
+        let mut lava = 0usize;
+        let mut crystal = 0usize;
+        let mut air = 0usize;
+        let mut first_solid = None;
+        for t in 8..80 {
+            let wx = (pos[0] + fx * t as f32).floor() as i32;
+            let wy = (pos[1] + fy * t as f32).floor() as i32;
+            let wz = (pos[2] + fz * t as f32).floor() as i32;
+            let (cpos, lx, ly, lz) = crate::chunk::world_to_chunk(wx, wy, wz);
+            let mut chunk = Chunk::new(cpos);
+            generator.generate(&mut chunk);
+            let v = chunk.get(lx, ly, lz);
+            let kind = BlockType::from_voxel(v);
+            if first_solid.is_none() && v != AIR {
+                first_solid = Some((t, wx, wy, wz, kind));
+            }
+            match kind {
+                BlockType::VioletStone
+                | BlockType::RedStone
+                | BlockType::MesaClay
+                | BlockType::AmberStone
+                | BlockType::RedSand => stone += 1,
+                BlockType::PlatingWhite
+                | BlockType::PlatingTeal
+                | BlockType::RoadDeck
+                | BlockType::ShipHullAlloy
+                | BlockType::ShipHullDark => plating += 1,
+                BlockType::Lava | BlockType::PlasmaFlow => lava += 1,
+                BlockType::Crystal
+                | BlockType::CrystalMagenta
+                | BlockType::LuminiteCrystal
+                | BlockType::CrystalGreen => crystal += 1,
+                _ if v == AIR => air += 1,
+                _ => {}
+            }
+        }
+        eprintln!(
+            "look ray pos={pos:?} yaw={yaw:.3} pitch={pitch:.3} first={first_solid:?} stone={stone} plating={plating} lava={lava} crystal={crystal} air={air}"
+        );
+        assert!(
+            stone + lava > plating,
+            "look ray should hit the banded cliff, not colony plating (stone={stone} lava={lava} plating={plating} first={first_solid:?})"
+        );
+        assert!(
+            crystal + stone > 8,
+            "opening look should include the hero crystals and the rock wall"
+        );
+    }
+
+    #[test]
+    fn dump_opening_look_grid() {
+        let generator = TerrainGenerator::new(12345);
+        let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
+        eprintln!("spawn pos={pos:?} yaw={yaw:.3} pitch={pitch:.3}");
+        for (label, dyaw, dpitch) in [
+            ("FL", -0.72, 0.12),
+            ("LL", -0.52, 0.10),
+            ("L-up", -0.42, 0.18),
+            ("L", -0.32, 0.04),
+            ("L-dn", -0.32, -0.12),
+            ("C-up", 0.00, 0.18),
+            ("C", 0.00, 0.00),
+            ("C-dn", 0.00, -0.12),
+            ("R-up", 0.28, 0.18),
+            ("R", 0.28, 0.04),
+            ("R-dn", 0.28, -0.12),
+        ] {
+            let y = yaw + dyaw;
+            let p = pitch + dpitch;
+            let fx = y.sin() * p.cos();
+            let fy = p.sin();
+            let fz = -y.cos() * p.cos();
+            let mut first = None;
+            let mut kinds = [0usize; 6];
+            for t in 4..70 {
+                let wx = (pos[0] + fx * t as f32).floor() as i32;
+                let wy = (pos[1] + fy * t as f32).floor() as i32;
+                let wz = (pos[2] + fz * t as f32).floor() as i32;
+                let (cpos, lx, ly, lz) = crate::chunk::world_to_chunk(wx, wy, wz);
+                let mut chunk = Chunk::new(cpos);
                 generator.generate(&mut chunk);
-                for ly in 0..CHUNK_SIZE {
-                    for lz in 0..CHUNK_SIZE {
-                        for lx in 0..CHUNK_SIZE {
-                            let voxel = chunk.get(lx, ly, lz);
-                            assert!(
-                                !showcase_blocks.contains(&voxel),
-                                "default chunk {cx},{cy},{cz} unexpectedly contains showcase block {voxel}"
-                            );
+                let v = chunk.get(lx, ly, lz);
+                if v == AIR {
+                    continue;
+                }
+                let kind = BlockType::from_voxel(v);
+                if first.is_none() {
+                    first = Some((t, wx, wy, wz, kind));
+                }
+                match kind {
+                    BlockType::PlatingWhite
+                    | BlockType::PlatingTeal
+                    | BlockType::RoadDeck
+                    | BlockType::ShipHullAlloy
+                    | BlockType::ShipHullDark => kinds[0] += 1,
+                    BlockType::Crystal
+                    | BlockType::CrystalMagenta
+                    | BlockType::LuminiteCrystal
+                    | BlockType::CrystalGreen => kinds[1] += 1,
+                    BlockType::Lava => kinds[2] += 1,
+                    BlockType::PlasmaFlow => kinds[3] += 1,
+                    BlockType::VioletStone
+                    | BlockType::RedStone
+                    | BlockType::MesaClay
+                    | BlockType::AmberStone
+                    | BlockType::RedSand => kinds[4] += 1,
+                    _ => kinds[5] += 1,
+                }
+            }
+            eprintln!(
+                "{label:5} first={first:?} deck={} xtal={} lava={} plasma={} stone={} other={}",
+                kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], kinds[5]
+            );
+            match label {
+                "FL" | "LL" | "L" | "L-up" | "L-dn" => {
+                    let (t, _, _, _, kind) = first.expect("left look hit nothing");
+                    assert!(
+                        t >= 20,
+                        "{label} still face-hugs the camera (t={t} {kind:?})"
+                    );
+                    assert!(
+                        kinds[1] > 0,
+                        "{label} has no crystals (first={first:?})"
+                    );
+                    assert_eq!(kinds[0], 0, "{label} still hits a deck (first={first:?})");
+                }
+                "C" | "C-dn" => {
+                    let (t, _, _, _, kind) = first.expect("center look hit nothing");
+                    assert!(
+                        matches!(
+                            kind,
+                            BlockType::Lava
+                                | BlockType::PlasmaFlow
+                                | BlockType::RedStone
+                                | BlockType::RedSand
+                                | BlockType::VioletStone
+                                | BlockType::MesaClay
+                                | BlockType::AmberStone
+                        ),
+                        "{label} should hit the lava curtain or banded wall first, got {kind:?} at t={t}"
+                    );
+                }
+                "R" | "R-up" => {
+                    let (_, _, _, _, kind) = first.expect("right look hit nothing");
+                    assert!(
+                        matches!(
+                            kind,
+                            BlockType::Lava
+                                | BlockType::VioletStone
+                                | BlockType::RedStone
+                                | BlockType::MesaClay
+                                | BlockType::AmberStone
+                                | BlockType::RedSand
+                        ),
+                        "{label} should hit the lava curtain or banded mesa, got {kind:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn opening_left_third_hits_hero_crystals_not_a_deck() {
+        let generator = TerrainGenerator::new(12345);
+        let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
+        let left_yaw = yaw - 0.40;
+        let fx = left_yaw.sin() * pitch.cos();
+        let fy = pitch.sin();
+        let fz = -left_yaw.cos() * pitch.cos();
+        let mut crystal = 0usize;
+        let mut deck = 0usize;
+        for t in 16..60 {
+            let wx = (pos[0] + fx * t as f32).floor() as i32;
+            let wy = (pos[1] + fy * t as f32).floor() as i32;
+            let wz = (pos[2] + fz * t as f32).floor() as i32;
+            let (cpos, lx, ly, lz) = crate::chunk::world_to_chunk(wx, wy, wz);
+            let mut chunk = Chunk::new(cpos);
+            generator.generate(&mut chunk);
+            let kind = BlockType::from_voxel(chunk.get(lx, ly, lz));
+            match kind {
+                BlockType::Crystal
+                | BlockType::CrystalMagenta
+                | BlockType::LuminiteCrystal
+                | BlockType::CrystalGreen => crystal += 1,
+                BlockType::RoadDeck | BlockType::PlatingWhite | BlockType::PlatingTeal => {
+                    deck += 1
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            crystal > 4,
+            "left third of the opening look has no hero crystals (crystal={crystal} deck={deck})"
+        );
+        assert!(
+            crystal > deck,
+            "left third is still a skyway deck (crystal={crystal} deck={deck})"
+        );
+    }
+
+    #[test]
+    fn generated_chunks_carry_the_frontier_palette() {
+        let generator = TerrainGenerator::new(12345);
+        let mut seen = std::collections::BTreeSet::new();
+        // A wide net: the signature materials are spread across
+        // provinces, so no single column shows all of them.
+        for cz in -14..14 {
+            for cx in -14..14 {
+                for cy in 2..11 {
+                    let mut chunk = Chunk::new(ChunkPos::new(cx, cy, cz));
+                    generator.generate(&mut chunk);
+                    for ly in 0..CHUNK_SIZE {
+                        for lz in 0..CHUNK_SIZE {
+                            for lx in 0..CHUNK_SIZE {
+                                seen.insert(chunk.get(lx, ly, lz));
+                            }
                         }
                     }
                 }
             }
         }
+
+        for block in [
+            BlockType::VioletStone,
+            BlockType::AmberStone,
+            BlockType::Crystal,
+            BlockType::LuminiteCrystal,
+        ] {
+            let voxel: Voxel = block.into();
+            assert!(
+                seen.contains(&voxel),
+                "generated terrain never produced {block:?}"
+            );
+        }
     }
 
     #[test]
-    fn default_surface_heights_stay_in_playable_streaming_range() {
+    fn look_cone_cliff_carves_windows_into_generated_mesa() {
+        let generator = TerrainGenerator::new(12345);
+        let rim = generator.surface_height_at(108, -80);
+        assert!(rim > 40, "look-cone mesa is missing ({rim})");
+        let holo: Voxel = BlockType::HoloPanel.into();
+        let deck: Voxel = BlockType::RoadDeck.into();
+        let lava: Voxel = BlockType::Lava.into();
+        let plasma: Voxel = BlockType::PlasmaFlow.into();
+        let violet: Voxel = BlockType::VioletStone.into();
+        let red: Voxel = BlockType::RedStone.into();
+        let clay: Voxel = BlockType::MesaClay.into();
+        let amber: Voxel = BlockType::AmberStone.into();
+        let mut windows = 0usize;
+        let mut floors = 0usize;
+        let mut curtains = 0usize;
+        let mut stone = 0usize;
+        for cy in 2..10 {
+            for cx in 6..10 {
+                for cz in -8..-2 {
+                    let mut chunk = Chunk::new(ChunkPos::new(cx, cy, cz));
+                    generator.generate(&mut chunk);
+                    for ly in 0..CHUNK_SIZE {
+                        for lz in 0..CHUNK_SIZE {
+                            for lx in 0..CHUNK_SIZE {
+                                let v = chunk.get(lx, ly, lz);
+                                if v == holo {
+                                    windows += 1;
+                                }
+                                if v == deck {
+                                    floors += 1;
+                                }
+                                if v == lava || v == plasma {
+                                    curtains += 1;
+                                }
+                                if v == violet || v == red || v == clay || v == amber {
+                                    stone += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            windows > 4,
+            "carved cliff face has no lit window accents in generated chunks (windows={windows} floors={floors} rim={rim})"
+        );
+        assert!(floors > 8, "carved cliff face has no terrace accents ({floors})");
+        assert!(
+            curtains > 80,
+            "look-cone west face has no lava curtain in generated chunks ({curtains})"
+        );
+        assert!(
+            stone > 800,
+            "look-cone west face is missing banded rock ({stone})"
+        );
+    }
+
+    #[test]
+    fn peaks_stay_under_the_streamed_ceiling_so_nothing_is_decapitated() {
+        // The default budget streams 10 chunk layers = 160 blocks. A
+        // spire that pokes through that is not tall, it is sheared flat.
+        const DEFAULT_CEILING: i32 = 10 * CHUNK_SIZE_I;
         let generator = TerrainGenerator::new(12345);
         let mut highest = i32::MIN;
 
@@ -2633,8 +3306,34 @@ mod tests {
         }
 
         assert!(
-            highest <= 220,
+            highest < DEFAULT_CEILING,
             "default terrain should stay playable for normal streaming budgets; highest sample was {highest}"
+        );
+    }
+
+    #[test]
+    fn sweep_biomes_exist_within_a_short_flight() {
+        let generator = TerrainGenerator::new(12345);
+        let mut volcanic = None;
+        let mut glacier = None;
+        let mut reef = None;
+        let mut crystal = None;
+        for z in (-2400..=2400).step_by(96) {
+            for x in (-2400..=2400).step_by(96) {
+                let biome = generator.biome_at(x, z);
+                let y = generator.surface_height_at(x, z) + 22;
+                match biome {
+                    Biome::VolcanicWaste if volcanic.is_none() => volcanic = Some((x, y, z)),
+                    Biome::GlacierShards if glacier.is_none() => glacier = Some((x, y, z)),
+                    Biome::AlienReef if reef.is_none() => reef = Some((x, y, z)),
+                    Biome::CrystalSpires if crystal.is_none() => crystal = Some((x, y, z)),
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            glacier.is_some() || crystal.is_some() || volcanic.is_some() || reef.is_some(),
+            "seed 12345 should expose at least one non-canyon biome nearby"
         );
     }
 }

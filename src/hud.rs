@@ -18,7 +18,7 @@ use crate::settings::{HudProfile, WorldSettings};
 use crate::terrain::Biome;
 use crate::toolbelt::ToolbeltTool;
 use crate::weapons::DestructionStats;
-use crate::world::{StreamingGovernor, VoxelWorld};
+use crate::world::{ChunkStreamer, StreamingGovernor, VoxelWorld};
 
 pub struct HudPlugin;
 
@@ -39,6 +39,7 @@ impl Plugin for HudPlugin {
         app.add_plugins(FrameTimeDiagnosticsPlugin)
             .insert_resource(HotbarState::default())
             .insert_resource(DebugOverlay::default())
+            .insert_resource(PhotoMode::from_env())
             .add_systems(
                 Startup,
                 (
@@ -53,6 +54,7 @@ impl Plugin for HudPlugin {
             .add_systems(
                 Update,
                 (
+                    toggle_photo_mode,
                     toggle_debug_overlay,
                     update_stats_text,
                     draw_neon_combat_hud,
@@ -61,11 +63,65 @@ impl Plugin for HudPlugin {
                     hotbar_input.run_if(in_state(crate::menu::GameState::InGame)),
                     hotbar_highlight,
                     toggle_hud_visibility,
+                    draw_generating_overlay,
                     update_scope_overlay,
                     update_combo_text,
                     flash_crosshair_on_hit,
                 ),
             );
+    }
+}
+
+/// Hide gameplay HUD (Build Studio rail, combat overlay, hotbar) for
+/// cinematic framing. Default is off so normal play is unchanged.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct PhotoMode {
+    pub hidden: bool,
+}
+
+impl PhotoMode {
+    fn from_env() -> Self {
+        Self {
+            hidden: env_flag("VOXEL_NATIVE_PHOTO_MODE") || env_flag("VOXEL_NATIVE_AGENT_HIDE_HUD"),
+        }
+    }
+}
+
+impl Default for PhotoMode {
+    fn default() -> Self {
+        Self { hidden: false }
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// F10 toggles photo / hide-HUD mode. Agent-control `hide_hud` forces it
+/// on while the agent is driving, so stills aren't eaten by the rail.
+fn toggle_photo_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    agent: Option<Res<crate::agent_control::AgentControlState>>,
+    mut photo: ResMut<PhotoMode>,
+    state: Res<State<crate::menu::GameState>>,
+) {
+    if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if keys.just_pressed(KeyCode::F10) {
+        photo.hidden = !photo.hidden;
+    }
+    if let Some(agent) = agent {
+        if agent.active() && agent.hide_hud {
+            photo.hidden = true;
+        }
     }
 }
 
@@ -90,6 +146,7 @@ fn toggle_debug_overlay(
 fn toggle_hud_visibility(
     state: Res<State<crate::menu::GameState>>,
     overlay: Res<DebugOverlay>,
+    photo: Res<PhotoMode>,
     mode: Option<Res<crate::mode::ModeContext>>,
     mut crosshair_q: Query<
         &mut Visibility,
@@ -131,23 +188,24 @@ fn toggle_hud_visibility(
     >,
 ) {
     let in_game = *state.get() == crate::menu::GameState::InGame;
+    let photo_hide = photo.hidden;
     let build_mode = mode.as_deref().map(|m| m.is_build()).unwrap_or(false);
     let ship_mode = mode.as_deref().map(|m| m.is_ship()).unwrap_or(false);
     let build_picker = mode
         .as_deref()
         .map(|m| m.is_build_picker())
         .unwrap_or(false);
-    let stats_vis = if in_game && overlay.visible {
+    let stats_vis = if in_game && overlay.visible && !photo_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    let crosshair_vis = if in_game && !build_picker {
+    let crosshair_vis = if in_game && !build_picker && !photo_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    let hotbar_vis = if in_game && !build_mode && !ship_mode {
+    let hotbar_vis = if in_game && !build_mode && !ship_mode && !photo_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -164,6 +222,40 @@ fn toggle_hud_visibility(
     if let Ok(mut v) = hotbar_root_q.get_single_mut() {
         *v = hotbar_vis;
     }
+}
+
+/// True while nearby chunks have not streamed in yet. Cheap to evaluate;
+/// the overlay is a single egui rect.
+pub fn world_is_still_generating(mesh_entities: usize, stream_elapsed: f32) -> bool {
+    mesh_entities < 24 && stream_elapsed < 8.0
+}
+
+fn draw_generating_overlay(
+    mut contexts: EguiContexts,
+    state: Res<State<crate::menu::GameState>>,
+    streamer: Res<ChunkStreamer>,
+) {
+    if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if !world_is_still_generating(streamer.entities.len(), streamer.stream_elapsed) {
+        return;
+    }
+    let ctx = contexts.ctx_mut();
+    let screen = ctx.screen_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("generating_world"),
+    ));
+    painter.rect_filled(screen, 0.0, egui::Color32::from_rgba_unmultiplied(4, 8, 10, 140));
+    let label = "Generating world…";
+    let font = egui::FontId::proportional(28.0);
+    let galley = painter.layout_no_wrap(label.to_string(), font, crate::theme::CYAN);
+    let pos = egui::pos2(
+        screen.center().x - galley.size().x * 0.5,
+        screen.center().y - galley.size().y * 0.5,
+    );
+    painter.galley(pos, galley, crate::theme::CYAN);
 }
 
 // ------------------------------- Crosshair --------------------------------
@@ -385,6 +477,7 @@ fn update_stats_text(
 fn draw_neon_combat_hud(
     mut contexts: EguiContexts,
     state: Res<State<crate::menu::GameState>>,
+    photo: Res<PhotoMode>,
     mode: Option<Res<crate::mode::ModeContext>>,
     settings: Res<WorldSettings>,
     world: Res<VoxelWorld>,
@@ -397,6 +490,9 @@ fn draw_neon_combat_hud(
     suit: Res<SuitVitals>,
 ) {
     if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if photo.hidden {
         return;
     }
     if mode
@@ -863,10 +959,14 @@ fn active_workflow_label(mode: Option<&crate::mode::ModeContext>) -> &'static st
 fn draw_workflow_rail(
     mut contexts: EguiContexts,
     state: Res<State<crate::menu::GameState>>,
+    photo: Res<PhotoMode>,
     settings: Res<WorldSettings>,
     mode: Option<Res<crate::mode::ModeContext>>,
 ) {
     if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if photo.hidden {
         return;
     }
     let steps = workflow_steps_for_profile(settings.hud_profile);
@@ -973,6 +1073,14 @@ mod tests {
     #[test]
     fn focused_hud_hides_workflow_rail() {
         assert!(workflow_steps_for_profile(HudProfile::Focused).is_empty());
+    }
+
+    #[test]
+    fn generating_overlay_clears_once_near_chunks_exist() {
+        assert!(world_is_still_generating(0, 0.5));
+        assert!(world_is_still_generating(12, 3.0));
+        assert!(!world_is_still_generating(24, 1.0));
+        assert!(!world_is_still_generating(8, 8.5));
     }
 }
 

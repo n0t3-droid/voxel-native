@@ -2,6 +2,16 @@
 /web/pkg
 /qa_runs
 /agent_runs
+# Worlds the QA autopilot creates on each run. `saves/` is otherwise
+# tracked, so without this every screenshot run leaves 50 bot files
+# staged behind it.
+/saves/qa_*
+# Capture-run worlds the stills/flythroughs leave behind. The few
+# authored `saves/*.ron` worlds stay tracked; these `_bots` dumps do not.
+/saves/*_bots/
+# Control sessions also write extra bot roster files next to the two
+# tracked agents. Ignore the extras so a clean tree stays clean.
+/saves/agent_control_bots/agents/bot_*.ron
 /agent_control.ron
 /screenshot_*.png
 /engine-tour-live-*.mp4

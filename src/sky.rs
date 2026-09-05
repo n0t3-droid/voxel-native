@@ -38,7 +38,7 @@ use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::daynight::WorldIntelRuntime;
+use crate::daynight::{day_factor, sun_direction, sunset_factor, WorldIntelRuntime};
 use crate::settings::WorldSettings;
 
 /// Render layer used exclusively by the sky pass. The world camera stays
@@ -50,6 +50,35 @@ pub const SKY_LAYER: usize = 1;
 /// shell are placed. Far enough that parallax is invisible during
 /// normal play, close enough that floating-point precision is fine.
 const SKY_DISTANCE: f32 = 950.0;
+
+/// Hero gas giant: parked upper-right of the default spawn look so it
+/// reads as the painting's Saturn, not a distant marble.
+const PLANET_DIR: Vec3 = Vec3::new(0.58, 0.34, -0.52);
+const PLANET_DIST: f32 = SKY_DISTANCE * 0.58;
+
+/// Stars should be a night thing. (1-day)^2 still left them glittering
+/// through golden hour; ^4 kills them by 17:00 and keeps 21:30 bright.
+fn star_night_factor(day: f32) -> f32 {
+    (1.0 - day).powf(4.0)
+}
+
+/// How much of the warm horizon carrier is allowed to show.
+///
+/// Noon and true night must sit near zero so the orange texture cannot
+/// paint a 24h red stripe; hour 17 is the golden band.
+fn horizon_band_visibility(sunset: f32, night: f32) -> f32 {
+    // Pass-5 * 0.82 plus a 1.40 gamma left 17:00 too shy once the
+    // texture stopped being an orange multiply. Sky-only, so this
+    // cannot milk the world pass.
+    (sunset.max(0.0).powf(1.18) * (1.0 - night) * 0.96).clamp(0.0, 1.0)
+}
+
+/// Fixed bearing of the great cratered moon: high and to the left.
+///
+/// The sun sweeps the x/y plane with a constant +z lean, so parking the
+/// moon on the -z side is what guarantees the two never come close
+/// enough for the sun's bloom to wash the moon out.
+const GREAT_MOON_DIR: Vec3 = Vec3::new(-0.52, 0.66, -0.54);
 
 pub struct SkyPlugin;
 
@@ -65,7 +94,9 @@ impl Plugin for SkyPlugin {
             // world view by exactly one frame).
             .add_systems(
                 PostUpdate,
-                follow_and_animate_sky.before(bevy::transform::TransformSystem::TransformPropagate),
+                (follow_and_animate_sky, follow_static_sky_bodies)
+                    .chain()
+                    .before(bevy::transform::TransformSystem::TransformPropagate),
             );
     }
 }
@@ -83,6 +114,34 @@ struct MoonDisc;
 /// moon system (see reference image 1 with its crescent pair).
 #[derive(Component)]
 struct MoonDiscB;
+
+/// Big cratered grey moon parked high on a fixed bearing. Unlike the two
+/// orbiting moons this one never sets: in the key art it is the largest
+/// thing in the sky after the ringed giant, and a landmark that vanishes
+/// for half the day is not a landmark.
+#[derive(Component)]
+struct GreatMoon;
+
+/// A celestial body that keeps a fixed bearing from the player instead
+/// of orbiting. Carrying the bearing on the component lets one small
+/// system place all of them, rather than growing another arm on the
+/// mutually-exclusive `Without<..>` query chain below.
+#[derive(Component)]
+struct StaticSkyBody {
+    dir: Vec3,
+    distance: f32,
+}
+
+/// Broad band of light hugging the horizon.
+///
+/// `daynight.rs` drives a single flat `ClearColor` for the whole dome,
+/// which is what keeps the fog and the sky matched — but a flat sky is
+/// the one thing the key art never has. This dome adds a latitude
+/// gradient on top: gold then peach at dusk, fading before the zenith
+/// so night violet and noon blue stay in ClearColor. Blend (not Add)
+/// so it can cover the flat dome without an HDR bloom wall.
+#[derive(Component)]
+struct HorizonGlow;
 
 /// Distant ringed gas giant parked high in the sky for epic framing.
 /// Stays fixed on the celestial dome and rotates slowly for parallax.
@@ -109,6 +168,8 @@ struct SkyMaterials {
     sun: Handle<StandardMaterial>,
     moon: Handle<StandardMaterial>,
     moon_b: Handle<StandardMaterial>,
+    great_moon: Handle<StandardMaterial>,
+    horizon: Handle<StandardMaterial>,
     planet: Handle<StandardMaterial>,
     ring: Handle<StandardMaterial>,
     planet_b: Handle<StandardMaterial>,
@@ -128,11 +189,12 @@ fn setup_sky(
     // Nebula resolution + star count scale with graphics tier so low-end
     // GPUs still get the look for a fraction of the fill cost.
     use crate::settings::GraphicsMode;
-    let (nebula_res, star_count) = match settings.graphics {
-        GraphicsMode::Fast => (256u32, 1800usize),
-        GraphicsMode::Balanced => (512, 3200),
-        GraphicsMode::High => (1024, 5200),
-    };
+    let (nebula_res, star_count, planet_r, ring_inner, ring_outer, ring_segs) =
+        match settings.graphics {
+            GraphicsMode::Fast => (256u32, 1800usize, 150.0_f32, 220.0_f32, 380.0_f32, 96usize),
+            GraphicsMode::Balanced => (512, 5000, 185.0, 270.0, 470.0, 128),
+            GraphicsMode::High => (1024, 8600, 220.0, 320.0, 560.0, 192),
+        };
 
     // ----- Sky camera --------------------------------------------------
     // order = -1 → renders BEFORE the world camera in `player.rs` and
@@ -145,6 +207,9 @@ fn setup_sky(
             camera: Camera {
                 order: -1,
                 hdr: true,
+                // Sky writes the window first. World (order 0) alpha-blits
+                // on top without clearing, so this pass stays the space
+                // backdrop and never inherits world ColorGrading.
                 ..default()
             },
             tonemapping: Tonemapping::AcesFitted,
@@ -159,13 +224,21 @@ fn setup_sky(
             }),
             ..default()
         },
-        // Bloom — what makes the sun read as a true light source rather
-        // than a flat circle. `OLD_SCHOOL` gives a pronounced halo,
-        // perfect for a stylised voxel sky. Threshold is non-zero in
-        // that preset, so only the high-intensity emissives (sun + the
-        // brightest stars) bloom; the gradient sky stays clean.
+        // Bloom — sun disc only. Threshold is high enough that the
+        // horizon rim and nebula stay out of the bloom buffer; Additive
+        // OLD_SCHOOL at 0.6 was turning the whole lower sky milky.
         BloomSettings {
             composite_mode: BloomCompositeMode::Additive,
+            intensity: 0.08,
+            low_frequency_boost: 0.35,
+            prefilter_settings: bevy::core_pipeline::bloom::BloomPrefilterSettings {
+                // Horizon / nebula sit around 0.2–1.2; only the sun disc
+                // (emissive 60) and the hottest stars should bloom. The
+                // old 0.6 threshold let the additive horizon wall bloom
+                // into milky white and crush the rest of the sky.
+                threshold: 2.4,
+                threshold_softness: 0.35,
+            },
             ..BloomSettings::OLD_SCHOOL
         },
         sky_layer.clone(),
@@ -271,12 +344,7 @@ fn setup_sky(
     // exactly like the reference art. Cull front-face so we only see it
     // from the inside, and keep it fully unlit/emissive.
     let nebula_image = images.add(build_nebula_image(nebula_res, settings.seed as u64));
-    let nebula_mesh = meshes.add(
-        Sphere::new(SKY_DISTANCE * 2.6)
-            .mesh()
-            .ico(4)
-            .expect("subdivision 4 is within ico limits"),
-    );
+    let nebula_mesh = meshes.add(textured_sky_sphere(SKY_DISTANCE * 2.6));
     let nebula_mat = materials.add(StandardMaterial {
         // ADDITIVE blend so the nebula lays its colored clouds on top
         // of the daynight-driven ClearColor instead of replacing it.
@@ -285,10 +353,9 @@ fn setup_sky(
         base_color: Color::srgba(1.0, 1.0, 1.0, 1.0),
         base_color_texture: Some(nebula_image.clone()),
         emissive_texture: Some(nebula_image),
-        // Strong emissive — with AlphaMode::Add the final on-screen
-        // colour is sky_clear + nebula_texture*emissive, so we want
-        // a punchy value. Day/night loop animates this per-frame.
-        emissive: LinearRgba::rgb(2.0, 1.6, 2.6),
+        // Modest start — follow_and_animate_sky owns the live value.
+        // Too high here and the first frames bleach the sky to pink fog.
+        emissive: LinearRgba::rgb(0.85, 0.55, 1.15),
         unlit: true,
         alpha_mode: AlphaMode::Add,
         // Render from inside the sphere — show back faces.
@@ -336,30 +403,107 @@ fn setup_sky(
         Name::new("MoonDiscB"),
     ));
 
+    // ----- Great cratered moon ----------------------------------------
+    // Fixed bearing, upper-left. Big enough to dominate that quadrant of
+    // the sky without covering the play space at the horizon.
+    let great_moon_image = images.add(build_moon_image(nebula_res.min(512), settings.seed as u64));
+    let great_moon_mesh = meshes.add(
+        Sphere::new(58.0)
+            .mesh()
+            .ico(4)
+            .expect("subdivision 4 is within ico limits"),
+    );
+    let great_moon_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.86, 0.87, 0.92),
+        base_color_texture: Some(great_moon_image.clone()),
+        emissive_texture: Some(great_moon_image),
+        emissive: LinearRgba::rgb(3.4, 3.5, 4.0),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        PbrBundle {
+            mesh: great_moon_mesh,
+            material: great_moon_mat.clone(),
+            transform: Transform::from_translation(GREAT_MOON_DIR * SKY_DISTANCE * 0.92),
+            ..default()
+        },
+        NotShadowCaster,
+        sky_layer.clone(),
+        GreatMoon,
+        StaticSkyBody {
+            dir: GREAT_MOON_DIR.normalize(),
+            distance: SKY_DISTANCE * 0.92,
+        },
+        Name::new("GreatMoon"),
+    ));
+
+    // ----- Horizon glow band ------------------------------------------
+    // Drawn on a shell outside the nebula so transparency sorting puts
+    // it behind the clouds, which is where a scattering band belongs.
+    let horizon_image = images.add(build_horizon_gradient_image(128));
+    let horizon_mesh = meshes.add(textured_sky_sphere(SKY_DISTANCE * 3.4));
+    let horizon_mat = materials.add(StandardMaterial {
+        // Start invisible; `follow_and_animate_sky` raises this only
+        // while sunset_factor is high so the orange carrier cannot
+        // paint a 24h red stripe at noon or night.
+        base_color: Color::srgba(0.0, 0.0, 0.0, 0.0),
+        base_color_texture: Some(horizon_image.clone()),
+        emissive_texture: Some(horizon_image),
+        // Blend (not Add): a coloured rim over ClearColor, not extra
+        // HDR energy that bloom turns into a milky white wall.
+        emissive: LinearRgba::BLACK,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: Some(bevy::render::render_resource::Face::Front),
+        double_sided: true,
+        ..default()
+    });
+    commands.spawn((
+        PbrBundle {
+            mesh: horizon_mesh,
+            material: horizon_mat.clone(),
+            ..default()
+        },
+        NotShadowCaster,
+        sky_layer.clone(),
+        HorizonGlow,
+        StaticSkyBody {
+            dir: Vec3::Y,
+            distance: 0.0,
+        },
+        Name::new("HorizonGlow"),
+    ));
+
     // ----- Ringed gas-giant planet ------------------------------------
     // Parked in a fixed sky direction; doesn't track the sun. Serves as
     // a dramatic backdrop feature like in reference image 2.
+    let planet_res = nebula_res.min(512);
+    let planet_image = images.add(build_planet_image(planet_res, settings.seed as u64));
     let planet_mesh = meshes.add(
-        Sphere::new(78.0)
+        Sphere::new(planet_r)
             .mesh()
             .ico(4)
             .expect("subdivision 4 is within ico limits"),
     );
     let planet_mat = materials.add(StandardMaterial {
-        // Vibrant magenta–amber gas giant (matches the purple/teal ringed
-        // giant in the reference art). Very high emissive so it glows
-        // like a light source in its own right, not just reflects the sun.
-        base_color: Color::srgb(0.95, 0.55, 1.0),
-        emissive: LinearRgba::rgb(6.0, 2.2, 8.5),
+        // Banded gas giant: cream / tan / lavender, shaded rather than
+        // a magenta emissive gizmo. The texture already carries a
+        // terminator + limb darkening.
+        base_color: Color::srgb(0.92, 0.86, 0.78),
+        base_color_texture: Some(planet_image.clone()),
+        emissive_texture: Some(planet_image),
+        emissive: LinearRgba::rgb(1.85, 1.48, 1.12),
         unlit: true,
         ..default()
     });
-    // Ring: wide rainbow annulus with strong saturation and per-band
-    // colour variation (painted via vertex colours in build_ring_mesh).
-    let ring_mesh = meshes.add(build_ring_mesh(160.0, 270.0, 160));
+    // Dusty Saturn-like rings with a Cassini-style gap. Vertex colours
+    // carry the band albedo; keep emissive modest so they read as ice
+    // and dust, not a rainbow debug disc.
+    let ring_mesh = meshes.add(build_ring_mesh(ring_inner, ring_outer, ring_segs));
     let ring_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.9, 0.8, 1.0),
-        emissive: LinearRgba::rgb(5.5, 4.5, 6.5),
+        base_color: Color::srgba(0.92, 0.84, 0.70, 1.0),
+        emissive: LinearRgba::rgb(1.85, 1.55, 1.12),
         unlit: true,
         cull_mode: None,
         alpha_mode: AlphaMode::Blend,
@@ -367,8 +511,8 @@ fn setup_sky(
     });
     // Fixed sky direction: upper-right, high enough to dominate the
     // horizon without blocking gameplay sight-lines.
-    let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-    let planet_pos = planet_dir * SKY_DISTANCE * 0.9;
+    let planet_dir = PLANET_DIR.normalize();
+    let planet_pos = planet_dir * PLANET_DIST;
     commands
         .spawn((
             PbrBundle {
@@ -377,7 +521,7 @@ fn setup_sky(
                 transform: Transform::from_translation(planet_pos)
                     // Fixed tilt — ring plane tipped toward the viewer.
                     // Never rotates (planets are stationary landmarks).
-                    .with_rotation(Quat::from_rotation_x(0.55) * Quat::from_rotation_z(-0.18)),
+                    .with_rotation(Quat::from_rotation_x(0.72) * Quat::from_rotation_z(-0.22)),
                 ..default()
             },
             NotShadowCaster,
@@ -435,6 +579,8 @@ fn setup_sky(
         sun: sun_mat,
         moon: moon_mat,
         moon_b: moon_b_mat,
+        great_moon: great_moon_mat,
+        horizon: horizon_mat,
         planet: planet_mat,
         ring: ring_mat,
         planet_b: planet_b_mat,
@@ -559,10 +705,9 @@ fn follow_and_animate_sky(
     sky_tf.translation = trans;
     sky_tf.rotation = rot;
 
-    // Same celestial-angle math as daynight.rs::update_sun. Keep these
-    // formulas in sync; they share the same `time_of_day` resource.
-    let t = (settings.time_of_day / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-    let sun_dir = Vec3::new(t.cos(), t.sin(), 0.3).normalize();
+    // Same cinematic solar geometry as daynight.rs::update_sun.
+    let sun_dir = sun_direction(settings.time_of_day);
+    let t = (settings.time_of_day / 24.0) * std::f32::consts::TAU;
 
     if let Ok(mut sun_tf) = sun_q.get_single_mut() {
         sun_tf.translation = trans + sun_dir * SKY_DISTANCE;
@@ -585,8 +730,8 @@ fn follow_and_animate_sky(
     }
     if let Ok(mut planet_tf) = planet_q.get_single_mut() {
         // Fixed direction, NEVER rotates — stationary landmark.
-        let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-        planet_tf.translation = trans + planet_dir * SKY_DISTANCE * 0.9;
+        let planet_dir = PLANET_DIR.normalize();
+        planet_tf.translation = trans + planet_dir * PLANET_DIST;
     }
     if let Ok(mut planet_b_tf) = planet_b_q.get_single_mut() {
         // Fixed direction on the opposite horizon, NEVER rotates.
@@ -601,9 +746,9 @@ fn follow_and_animate_sky(
     }
 
     // ----- Animate emissives by day factor -----------------------------
-    let day = sun_dir.y.max(0.0); // 1 at noon, 0 at horizon, 0 at night
-    let night = (1.0 - day).powf(2.0); // sharper fade-in for stars
-    let sunset = (1.0 - sun_dir.y.abs()).powf(3.0); // peak at horizon
+    let day = day_factor(sun_dir);
+    let night = (1.0 - day).powf(2.0);
+    let sunset = sunset_factor(sun_dir);
 
     if let Some(sky_mats) = sky_mats {
         // Sun: warm white at noon → fiery red-orange at sunset.
@@ -628,47 +773,155 @@ fn follow_and_animate_sky(
             mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
         }
 
-        // Ringed planet & rings — brightly emissive at all times so the
-        // magenta disc and rainbow rings stay breathtaking at noon too,
-        // just like in the reference art. Slight extra glow at
-        // night/sunset for the cinematic payoff.
-        let planet_scale = 1.8 + 0.8 * night + sunset * 0.5;
+        // Ringed planet & rings — a shaded gas giant, not a neon gizmo.
+        // Slight extra glow at night/sunset so bands stay readable
+        // against the dark sky without blowing out at noon.
+        let planet_scale = 1.05 + 0.22 * night + sunset * 0.12;
         if let Some(mat) = materials.get_mut(&sky_mats.planet) {
-            let base = Vec3::new(8.0, 3.0, 11.0);
+            let base = Vec3::new(2.15, 1.72, 1.28);
             let s = base * planet_scale;
             mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
         }
         if let Some(mat) = materials.get_mut(&sky_mats.ring) {
-            let base = Vec3::new(7.0, 6.0, 8.5);
+            let base = Vec3::new(2.05, 1.72, 1.22);
             let s = base * planet_scale;
             mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
         }
         if let Some(mat) = materials.get_mut(&sky_mats.planet_b) {
-            let base = Vec3::new(3.5, 7.5, 10.0);
+            let base = Vec3::new(0.85, 1.35, 1.70);
             let s = base * planet_scale;
             mat.emissive = LinearRgba::rgb(s.x, s.y, s.z);
         }
 
-        // Nebula — vivid magenta/cyan/orange at all times (additive
-        // blend paints clouds on top of the sky gradient). Day values
-        // are pushed HARD so the cosmic backdrop reads clearly even
-        // against the bright blue noon sky, just like in the reference
-        // art where planets and nebulae are visible in broad daylight.
+        // Nebula — cyan vs magenta filaments over a deep-violet zenith.
+        // Keep day values structured (not a pale wash). Additive blend
+        // plus a high emissive is what bleached noon into milky fog, so
+        // the live multipliers stay well below the old 2–7 range.
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
-            let base_day = Vec3::new(9.0, 5.0, 13.0); // rich purple/magenta at noon
-            let base_night = Vec3::new(8.0, 5.5, 10.0); // full nebula glow at night
-            let base_sunset = Vec3::new(12.0, 5.0, 4.5); // warm dusk glow
-            let e = (base_day * day + base_night * night + base_sunset * sunset * 0.9)
+            // Day/dusk keep a whisper of structure; the volume only
+            // really punches once the sun is down. Hour 17 used to keep
+            // night-level filaments plus stars.
+            let night_vol = (1.0 - day).powf(2.2);
+            let base_day = Vec3::new(0.16, 0.08, 0.32);
+            let base_night = Vec3::new(1.55, 1.05, 2.35);
+            let base_sunset = Vec3::new(1.05, 0.36, 0.78);
+            let e = (base_day * (0.04 + 0.08 * day)
+                + base_night * night_vol
+                + base_sunset * sunset * 0.52)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
-        // Stars: fade in linearly with night.
+        // Great moon: sunlit grey by day, cool silver at night. Never
+        // fades out entirely - it is a permanent sky landmark.
+        if let Some(mat) = materials.get_mut(&sky_mats.great_moon) {
+            let lit = Vec3::new(4.4, 4.4, 4.6);
+            let dark = Vec3::new(2.2, 2.4, 3.4);
+            let e = dark.lerp(lit, day);
+            mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+        }
+
+        // Horizon band: 17:00 gold→peach dome, invisible at noon and
+        // night. Near-white tint lets the *texture* walk gold→peach;
+        // multiplying by orange (1.0, 0.50, 0.18) was the hard stripe.
+        // Alpha stays high so the violet ClearColor cannot bleed down
+        // into the low horizon.
+        if let Some(mat) = materials.get_mut(&sky_mats.horizon) {
+            let noon = Vec3::new(0.004, 0.010, 0.018);
+            let dusk = Vec3::new(0.78, 0.48, 0.16);
+            let deep = Vec3::new(0.020, 0.018, 0.055);
+            let vis = horizon_band_visibility(sunset, night);
+            let dusk_gate = sunset * (1.0 - night).powf(1.4);
+            let e = noon * day * (1.0 - sunset) * 0.15
+                + deep * night * vis.max(0.02) * 0.25
+                + dusk * dusk_gate;
+            let e = e * intel.profile.sky_saturation.max(0.7);
+            mat.base_color = Color::srgba(vis * 1.0, vis * 0.90, vis * 0.70, vis * 0.86);
+            mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
+        }
+
+        // Stars: only after true dusk. Unlit + Additive still draws
+        // `base_color` even when emissive is 0, which is why hour 11/17
+        // stills glittered after the emissive-only fade.
         if let Some(mat) = materials.get_mut(&sky_mats.stars) {
-            let intensity = 14.0 * night * intel.profile.sky_saturation.max(0.7);
+            let star_night = star_night_factor(day);
+            let intensity = 16.0 * star_night * intel.profile.sky_saturation.max(0.7);
+            mat.base_color = Color::srgba(star_night, star_night, star_night, star_night);
             mat.emissive = LinearRgba::rgb(intensity, intensity, intensity * 1.15);
         }
     }
+}
+
+/// Park every fixed-bearing sky body relative to the player camera.
+fn follow_static_sky_bodies(
+    main_cam: Query<&GlobalTransform, (With<Camera3d>, Without<SkyCamera>)>,
+    mut bodies: Query<(&mut Transform, &StaticSkyBody)>,
+) {
+    let Ok(main_tf) = main_cam.get_single() else {
+        return;
+    };
+    let origin = main_tf.translation();
+    for (mut tf, body) in bodies.iter_mut() {
+        tf.translation = origin + body.dir * body.distance;
+    }
+}
+
+/// Equirectangular sky shells must be UV spheres with Y as zenith.
+/// Bevy's UV sphere poles along Z; rotate so +Y samples the zenith row.
+/// Ico UVs jump across the 0/1 wrap and tear a vertical zigzag through
+/// the dusk nebula — that seam has been in the sky since the first
+/// textured dome.
+fn textured_sky_sphere(radius: f32) -> Mesh {
+    let mut mesh = Sphere::new(radius).mesh().uv(48, 24);
+    let rotate = |p: &mut [f32; 3]| {
+        // Rx(+90°): (x, y, z) -> (x, -z, y). Bevy UV -Z pole becomes +Y.
+        let (x, y, z) = (p[0], p[1], p[2]);
+        p[0] = x;
+        p[1] = -z;
+        p[2] = y;
+    };
+    if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(pos)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    {
+        for p in pos.iter_mut() {
+            rotate(p);
+        }
+    }
+    if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(nrm)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
+    {
+        for n in nrm.iter_mut() {
+            rotate(n);
+        }
+    }
+    mesh
+}
+
+#[cfg(test)]
+fn max_triangle_uv_u_span(mesh: &Mesh) -> f32 {
+    let Some(bevy::render::mesh::VertexAttributeValues::Float32x2(uvs)) =
+        mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+    else {
+        return 0.0;
+    };
+    let Some(indices) = mesh.indices() else {
+        return 0.0;
+    };
+    let mut idx = Vec::new();
+    match indices {
+        Indices::U16(v) => idx.extend(v.iter().map(|&i| i as usize)),
+        Indices::U32(v) => idx.extend(v.iter().map(|&i| i as usize)),
+    };
+    let mut max_span = 0.0_f32;
+    for tri in idx.chunks_exact(3) {
+        let u0 = uvs[tri[0]][0];
+        let u1 = uvs[tri[1]][0];
+        let u2 = uvs[tri[2]][0];
+        let min_u = u0.min(u1).min(u2);
+        let max_u = u0.max(u1).max(u2);
+        max_span = max_span.max(max_u - min_u);
+    }
+    max_span
 }
 
 /// Build a single mesh holding `count` tiny triangles at random points on
@@ -713,7 +966,7 @@ fn build_star_mesh(count: usize, seed: u64, radius: f32) -> Mesh {
         // so the visible blob is smaller than `star_size` — that's
         // what makes stars read as round points rather than diamonds.
         let r: f32 = rng.gen();
-        let star_size = 0.6 + r.powf(7.0) * 4.5;
+        let star_size = 0.6 + r.powf(6.5) * 5.5;
 
         // Per-star brightness multiplier — a few punchy, most dim.
         let b: f32 = rng.gen();
@@ -790,60 +1043,85 @@ fn build_star_mesh(count: usize, seed: u64, radius: f32) -> Mesh {
 /// Build a flat annulus (ring) mesh for the gas-giant. Two-sided via
 /// material `cull_mode = None`. `inner`/`outer` are world radii, `segs`
 /// is the number of radial slices.
+///
+/// Colours follow dusty ice-and-dust rings (Saturn A/B/C, cream / tan /
+/// grey) with a Cassini-style gap. Radial bands, not a hue sweep — the
+/// old HSV rainbow read as a debug gizmo.
 fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(segs * 2);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(segs * 2);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(segs * 2);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(segs * 2);
-    let mut indices: Vec<u32> = Vec::with_capacity(segs * 6);
+    // Concentric bands so we can punch a real gap rather than dim a
+    // rainbow. Saturn's Cassini Division sits at ~1.95–2.03 Rs
+    // (NASA Saturn fact sheet); with inner≈1.52 Rs and outer≈2.6 Rs
+    // that maps to roughly the middle of this span.
+    const BANDS: usize = 16;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity((BANDS + 1) * segs);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity((BANDS + 1) * segs);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity((BANDS + 1) * segs);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity((BANDS + 1) * segs);
+    let mut indices: Vec<u32> = Vec::with_capacity(BANDS * segs * 6);
 
-    for i in 0..segs {
+    // Dusty cream / tan / grey albedos. Not saturated primaries.
+    // Approximate Cassini ISS natural-colour rings (ice + dust).
+    let band_albedo = |t: f32| -> [f32; 4] {
+        // Cassini Division: 0.48..0.58 of the span.
+        if t > 0.48 && t < 0.58 {
+            return [0.04, 0.035, 0.03, 0.0];
+        }
+        // C-like inner: dim grey-brown.
+        if t < 0.16 {
+            let k = t / 0.16;
+            return [
+                0.42 + 0.10 * k,
+                0.36 + 0.10 * k,
+                0.30 + 0.08 * k,
+                0.28 + 0.22 * k,
+            ];
+        }
+        // B ring: brightest cream/tan.
+        if t < 0.48 {
+            let k = (t - 0.16) / 0.32;
+            let pulse = (k * 11.0).sin().abs() * 0.07;
+            return [
+                0.92 + pulse,
+                0.80 + pulse * 0.7,
+                0.60 + pulse * 0.4,
+                0.95 - k * 0.05,
+            ];
+        }
+        // A ring: dustier, slightly greyer, with Encke-like dips.
+        let k = ((t - 0.58) / 0.42).clamp(0.0, 1.0);
+        let dip = if (k - 0.55).abs() < 0.04 { 0.35 } else { 1.0 };
+        [
+            (0.82 - k * 0.10) * dip,
+            (0.72 - k * 0.08) * dip,
+            (0.58 - k * 0.06) * dip,
+            (0.82 - k * 0.20) * dip,
+        ]
+    };
+
+    for i in 0..=segs {
         let a = (i as f32 / segs as f32) * std::f32::consts::TAU;
         let (sa, ca) = a.sin_cos();
-        positions.push([ca * inner, 0.0, sa * inner]);
-        positions.push([ca * outer, 0.0, sa * outer]);
-        normals.push([0.0, 1.0, 0.0]);
-        normals.push([0.0, 1.0, 0.0]);
-        let u = i as f32 / segs as f32;
-        uvs.push([u, 0.0]);
-        uvs.push([u, 1.0]);
-        // Rainbow ring: hue sweeps across the annulus radius so the
-        // disc reads as a prismatic Saturn-meets-nebula band. Density
-        // bands modulate alpha to give the classic Cassini-gap feel.
-        // Colour = HSV-ish rotation through magenta → teal → amber.
-        let hue = (u * 3.0).fract();
-        let (r, g, b) = if hue < 0.333 {
-            let k = hue / 0.333;
-            (1.0, 0.45 + 0.5 * k, 0.95 - 0.7 * k)
-        } else if hue < 0.666 {
-            let k = (hue - 0.333) / 0.333;
-            (1.0 - 0.7 * k, 0.95 - 0.2 * k, 0.25 + 0.65 * k)
-        } else {
-            let k = (hue - 0.666) / 0.334;
-            (0.3 + 0.7 * k, 0.75 - 0.25 * k, 0.9 - 0.6 * k)
-        };
-        // Alternating density bands (bright/dim/dark gap).
-        let band = ((i / 4) % 4) as f32;
-        let density = match band as i32 {
-            0 => 1.0,
-            1 => 0.85,
-            2 => 0.45,
-            _ => 0.75,
-        };
-        colors.push([r * density, g * density, b * density, 0.95 * density]);
-        colors.push([
-            r * density * 0.85,
-            g * density * 0.85,
-            b * density * 0.85,
-            0.55 * density,
-        ]);
+        for b in 0..=BANDS {
+            let t = b as f32 / BANDS as f32;
+            let r = inner + (outer - inner) * t;
+            positions.push([ca * r, 0.0, sa * r]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([i as f32 / segs as f32, t]);
+            colors.push(band_albedo(t));
+        }
     }
+    let stride = (BANDS + 1) as u32;
     for i in 0..segs {
-        let a = (i * 2) as u32;
-        let b = (i * 2 + 1) as u32;
-        let c = (((i + 1) % segs) * 2) as u32;
-        let d = (((i + 1) % segs) * 2 + 1) as u32;
-        indices.extend_from_slice(&[a, b, d, a, d, c]);
+        let a = (i as u32) * stride;
+        let c = a + stride;
+        for b in 0..BANDS as u32 {
+            // Skip the Cassini gap entirely so there's a real hole.
+            let t = (b as f32 + 0.5) / BANDS as f32;
+            if t > 0.48 && t < 0.58 {
+                continue;
+            }
+            indices.extend_from_slice(&[a + b, a + b + 1, c + b + 1, a + b, c + b + 1, c + b]);
+        }
     }
 
     let mut mesh = Mesh::new(
@@ -858,16 +1136,14 @@ fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
     mesh
 }
 
-/// Build a procedural nebula image — multi-octave 3D Perlin on a
-/// spherical projection, three colour channels sampled at different
-/// frequencies. Produces billowing magenta / cyan / orange clouds
-/// reminiscent of Hubble field backdrops. Deterministic by seed.
-fn build_nebula_image(size: u32, seed: u64) -> Image {
-    let n_r = Perlin::new(seed as u32 ^ 0x7777_7777);
-    let n_g = Perlin::new(seed as u32 ^ 0x3333_3333);
-    let n_b = Perlin::new(seed as u32 ^ 0xBBBB_BBBB);
-    let n_mask = Perlin::new(seed as u32 ^ 0x1234_5678);
-    // Equirectangular mapping: x → longitude [0, 2π), y → latitude [-π/2, π/2].
+/// Build the cratered surface of the great moon: broad maria picked out
+/// by low-frequency noise, overlaid with a ring-shaped crater field from
+/// sharpened ridge noise. Deterministic by seed.
+fn build_moon_image(size: u32, seed: u64) -> Image {
+    let maria = Perlin::new(seed as u32 ^ 0x4D_4F_4F_4E);
+    let craters = Perlin::new(seed as u32 ^ 0x43_52_41_54);
+    let dust = Perlin::new(seed as u32 ^ 0x44_55_53_54);
+
     let w = size;
     let h = size / 2;
     let mut data = Vec::with_capacity((w * h * 4) as usize);
@@ -877,12 +1153,495 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
         for x in 0..w {
             let u = (x as f64 / w as f64) * std::f64::consts::TAU;
             let (su, cu) = u.sin_cos();
-            // Unit-sphere sample direction.
             let px = cv * cu;
             let py = sv;
             let pz = cv * su;
 
-            // FBM helper inlined for speed.
+            // Dark basaltic plains.
+            let sea = maria.get([px * 1.5, py * 1.5, pz * 1.5]);
+            // `1 - |n|` raised to a high power leaves only the thin
+            // zero-crossing shells: a field of crater rims.
+            let rim = (1.0 - craters.get([px * 7.0, py * 7.0, pz * 7.0]).abs()).powf(14.0);
+            let rim2 = (1.0 - craters.get([px * 15.0, py * 15.0, pz * 15.0]).abs()).powf(20.0);
+            let grain = dust.get([px * 40.0, py * 40.0, pz * 40.0]) * 0.05;
+
+            let mut b = 0.78 + sea * 0.16 + grain;
+            b -= rim * 0.30;
+            b -= rim2 * 0.18;
+            let b = (b.clamp(0.35, 1.0) * 255.0) as u8;
+            // Very slightly warm in the highlands, cool in the maria.
+            let tint = ((sea.max(0.0) * 8.0) as u8).min(10);
+            data.push(b);
+            data.push(b.saturating_sub(tint / 2));
+            data.push(b.saturating_sub(tint));
+            data.push(255);
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
+}
+
+/// Equirectangular banded gas-giant body. Cream / tan / lavender belts
+/// with a baked terminator and cosine limb darkening so the unlit sky
+/// pass still reads as a shaded sphere, not a flat magenta disc.
+fn build_planet_image(size: u32, seed: u64) -> Image {
+    let belts = Perlin::new(seed as u32 ^ 0x47_41_53_31);
+    let swirl = Perlin::new(seed as u32 ^ 0x53_57_52_4C);
+    let storm = Perlin::new(seed as u32 ^ 0x53_54_4F_52);
+
+    let w = size;
+    let h = size / 2;
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    // Subsolar point facing the typical viewer-right sun in the key art.
+    let light = Vec3::new(0.72, 0.18, 0.48).normalize();
+    for y in 0..h {
+        let v = (y as f64 / h as f64) * std::f64::consts::PI - std::f64::consts::FRAC_PI_2;
+        let (sv, cv) = v.sin_cos();
+        let lat = (v / std::f64::consts::FRAC_PI_2) as f32;
+        for x in 0..w {
+            let u = (x as f64 / w as f64) * std::f64::consts::TAU;
+            let (su, cu) = u.sin_cos();
+            let px = cv * cu;
+            let py = sv;
+            let pz = cv * su;
+            let n = Vec3::new(px as f32, py as f32, pz as f32);
+
+            let warp = swirl.get([px * 2.2, py * 6.0, pz * 2.2]) * 0.08;
+            let band_n = belts.get([0.0, py * 7.5 + warp, 0.0]);
+            let band = (lat * 6.5 + warp as f32).sin() * 0.5 + 0.5 + band_n as f32 * 0.18;
+            let band = band.clamp(0.0, 1.0);
+            let cream = Vec3::new(0.90, 0.78, 0.58);
+            let tan = Vec3::new(0.72, 0.52, 0.34);
+            let lavender = Vec3::new(0.62, 0.50, 0.70);
+            let col = if band < 0.45 {
+                cream.lerp(tan, band / 0.45)
+            } else if band < 0.75 {
+                tan.lerp(lavender, (band - 0.45) / 0.30)
+            } else {
+                lavender.lerp(cream, (band - 0.75) / 0.25)
+            };
+            let oval = storm.get([px * 4.0, py * 4.0 - 1.4, pz * 4.0]);
+            let col = if py < -0.15 && oval > 0.55 {
+                col.lerp(Vec3::new(0.95, 0.82, 0.70), ((oval - 0.55) / 0.45) as f32)
+            } else {
+                col
+            };
+
+            let ndl = n.dot(light).max(0.0);
+            // Stronger limb darkening than pass 1 so the disc reads as a
+            // sphere, not a flat sticker, even at the larger hero size.
+            let limb = 0.10 + 0.90 * ndl.powf(1.25);
+            let night = 0.06 + 0.12 * (1.0 - ndl);
+            let shade = if ndl > 0.02 { limb } else { night };
+            let col = col * shade;
+
+            data.push((col.x.clamp(0.0, 1.0) * 255.0) as u8);
+            data.push((col.y.clamp(0.0, 1.0) * 255.0) as u8);
+            data.push((col.z.clamp(0.0, 1.0) * 255.0) as u8);
+            data.push(255);
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
+}
+
+/// Build the horizon-glow gradient.
+///
+/// Deliberately a function of latitude only. Bevy's icosphere UVs are
+/// good enough for billowing nebula clouds but not accurate enough in
+/// longitude to aim a directional lobe, and a band only needs the
+/// vertical mapping to be monotonic. Peaks on the horizon line, dies out
+/// by roughly 40 degrees of elevation, and is black below the ground so
+/// it never brightens the underside of the world.
+fn build_horizon_gradient_image(height: u32) -> Image {
+    const WIDTH: u32 = 4;
+    let mut data = Vec::with_capacity((WIDTH * height * 4) as usize);
+    for y in 0..height {
+        // Latitude in [-PI/2, PI/2]; 0 is the horizon.
+        let lat = (y as f32 / height as f32) * std::f32::consts::PI - std::f32::consts::FRAC_PI_2;
+        let elevation = lat / std::f32::consts::FRAC_PI_2; // -1 below, +1 zenith
+        let [r, g, b, a] = horizon_scatter_rgba(elevation);
+        for _ in 0..WIDTH {
+            data.push(r);
+            data.push(g);
+            data.push(b);
+            data.push(a);
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: WIDTH,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
+}
+
+/// Soft scattering dome: hold warm gold through the lower ~12–15°
+/// (elevation 0.13–0.17), walk to peach, then fade. Violet zenith is
+/// ClearColor / nebula — painting violet into this texture is what
+/// let it bleed down over the gold postcard.
+fn horizon_scatter_rgba(elevation: f32) -> [u8; 4] {
+    let intensity = if elevation < 0.0 {
+        (1.0 + elevation * 5.0).max(0.0)
+    } else {
+        (1.0 - (elevation / 0.55).min(1.0)).powf(0.85)
+    };
+    let intensity = intensity.clamp(0.0, 1.0);
+    let u = elevation.clamp(0.0, 1.0);
+    // Gold through ~12° (u=0.13), peach through ~34° (u=0.38), then
+    // the remaining energy is still warm so the fade does not turn
+    // the mid-sky violet before alpha dies.
+    let (hr, hg, hb) = if elevation <= 0.0 {
+        (255.0, 196.0, 72.0)
+    } else if u < 0.14 {
+        let t = u / 0.14;
+        (255.0, 196.0 + 18.0 * t, 72.0 + 36.0 * t)
+    } else if u < 0.38 {
+        let t = (u - 0.14) / 0.24;
+        (255.0, 214.0 + 28.0 * t, 108.0 + 70.0 * t)
+    } else {
+        let t = ((u - 0.38) / 0.17).clamp(0.0, 1.0);
+        (255.0 - 50.0 * t, 242.0 - 40.0 * t, 178.0 + 10.0 * t)
+    };
+    let alpha = if elevation < 0.0 {
+        intensity * 0.58
+    } else if u < 0.18 {
+        intensity * 0.62
+    } else if u < 0.34 {
+        intensity * 0.50
+    } else {
+        intensity * 0.30
+    };
+    [
+        (hr * intensity) as u8,
+        (hg * intensity) as u8,
+        (hb * intensity) as u8,
+        (alpha * 255.0) as u8,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read the red channel of the single-column gradient at row `y`.
+    fn gradient_row(image: &Image, y: u32) -> u8 {
+        let width = image.texture_descriptor.size.width;
+        image.data[((y * width) * 4) as usize]
+    }
+
+    #[test]
+    fn textured_sky_shells_do_not_cross_the_uv_wrap() {
+        let ico = Sphere::new(1.0)
+            .mesh()
+            .ico(4)
+            .expect("subdivision 4 is within ico limits");
+        let dome = textured_sky_sphere(1.0);
+        assert!(
+            max_triangle_uv_u_span(&ico) > 0.5,
+            "ico UVs should still be the known-bad zigzag case"
+        );
+        assert!(
+            max_triangle_uv_u_span(&dome) < 0.25,
+            "UV sky dome still has a wrap-spanning triangle ({})",
+            max_triangle_uv_u_span(&dome)
+        );
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(pos)) =
+            dome.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("dome missing positions");
+        };
+        let max_y = pos.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = pos.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        assert!(
+            (max_y - 1.0).abs() < 0.02 && (min_y + 1.0).abs() < 0.02,
+            "dome poles should sit on ±Y after the Z-to-Y rotate, y={min_y}..{max_y}"
+        );
+    }
+
+    #[test]
+    fn horizon_carrier_is_golden_at_17_and_gone_at_noon_and_night() {
+        let noon = sun_direction(11.0);
+        let dusk = sun_direction(17.0);
+        let night_dir = sun_direction(21.5);
+        let noon_vis =
+            horizon_band_visibility(sunset_factor(noon), (1.0 - day_factor(noon)).powf(2.0));
+        let dusk_vis =
+            horizon_band_visibility(sunset_factor(dusk), (1.0 - day_factor(dusk)).powf(2.0));
+        let night_vis = horizon_band_visibility(
+            sunset_factor(night_dir),
+            (1.0 - day_factor(night_dir)).powf(2.0),
+        );
+        assert!(
+            noon_vis < 0.08,
+            "hour 11 horizon carrier still reads ({noon_vis:.3})"
+        );
+        assert!(
+            dusk_vis > 0.40,
+            "hour 17 horizon carrier is too shy ({dusk_vis:.3})"
+        );
+        assert!(
+            night_vis < 0.08,
+            "hour 21.5 still inherits a warm rim ({night_vis:.3})"
+        );
+    }
+
+    #[test]
+    fn horizon_glow_peaks_on_the_horizon_and_dies_before_the_zenith() {
+        const H: u32 = 128;
+        let image = build_horizon_gradient_image(H);
+        let horizon = H / 2;
+
+        // Brightest at the horizon line.
+        assert!(gradient_row(&image, horizon) > 180);
+        // Gone below the ground, so the band never lights the underside
+        // of the world or fights the terrain fog.
+        assert_eq!(gradient_row(&image, 0), 0);
+        // Gone at the zenith, so the deep indigo overhead stays deep.
+        assert_eq!(gradient_row(&image, H - 1), 0);
+        // Monotonic decay upward from the horizon.
+        let mut previous = gradient_row(&image, horizon);
+        for y in (horizon + 1)..H {
+            let current = gradient_row(&image, y);
+            assert!(
+                current <= previous,
+                "horizon band brightens again at row {y}: {previous} -> {current}"
+            );
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn horizon_scatter_is_a_soft_gradient_not_a_stripe() {
+        let rim = horizon_scatter_rgba(0.0);
+        let gold = horizon_scatter_rgba(0.12);
+        let peach = horizon_scatter_rgba(0.22);
+        let mid = horizon_scatter_rgba(0.32);
+        let upper = horizon_scatter_rgba(0.40);
+        let zenith = horizon_scatter_rgba(0.95);
+        assert!(rim[0] > 180, "horizon gold too dim ({})", rim[0]);
+        assert!(
+            rim[0] as i16 - rim[2] as i16 > 90,
+            "horizon is not gold (R={} B={})",
+            rim[0],
+            rim[2]
+        );
+        assert!(
+            rim[3] > 120,
+            "horizon alpha too thin ({}); violet zenith would bleed down",
+            rim[3]
+        );
+        assert!(
+            gold[0] as i16 - gold[2] as i16 > 50,
+            "gold did not hold through ~11° (R={} B={})",
+            gold[0],
+            gold[2]
+        );
+        assert!(
+            peach[0] > 80,
+            "peach elevation died ({}); the band is still a hard stripe",
+            peach[0]
+        );
+        assert!(
+            peach[1] as f32 / (peach[0].max(1) as f32) > 0.70,
+            "peach band is still orange-red G/R={:.2}",
+            peach[1] as f32 / peach[0].max(1) as f32
+        );
+        assert!(
+            mid[1] as f32 / (mid[0].max(1) as f32) > 0.80,
+            "peach did not hold through mid-sky G/R={:.2}",
+            mid[1] as f32 / mid[0].max(1) as f32
+        );
+        assert!(
+            mid[0] as i16 - mid[2] as i16 > 0,
+            "mid-sky lost peach warmth (R={} B={})",
+            mid[0],
+            mid[2]
+        );
+        assert!(
+            upper[3] < rim[3] / 2,
+            "upper sky is as opaque as the gold rim (rim a={} upper a={})",
+            rim[3],
+            upper[3]
+        );
+        assert_eq!(zenith[0], 0);
+        assert_eq!(zenith[3], 0);
+    }
+
+    #[test]
+    fn great_moon_surface_has_dark_maria_and_bright_highlands() {
+        let image = build_moon_image(128, 4242);
+        let mut min = u8::MAX;
+        let mut max = u8::MIN;
+        for pixel in image.data.chunks_exact(4) {
+            min = min.min(pixel[0]);
+            max = max.max(pixel[0]);
+        }
+        assert!(
+            max - min > 60,
+            "moon surface only spans {} levels; it would read as a flat disc",
+            max - min
+        );
+    }
+
+    #[test]
+    fn great_moon_keeps_clear_of_the_suns_arc() {
+        // The cinematic sun still sweeps a +z-leaning arc. If the great
+        // moon sat on that arc it would pass behind the sun and get
+        // washed out by the bloom for part of every day.
+        let moon = GREAT_MOON_DIR.normalize();
+        let mut closest = f32::MAX;
+        for step in 0..48 {
+            let hour = step as f32 * 0.5;
+            let sun = sun_direction(hour);
+            closest = closest.min(moon.angle_between(sun));
+        }
+        assert!(
+            closest.to_degrees() > 25.0,
+            "great moon passes within {:.1} degrees of the sun",
+            closest.to_degrees()
+        );
+    }
+
+    #[test]
+    fn ring_mesh_is_dusty_with_a_cassini_gap() {
+        let mesh = build_ring_mesh(132.0, 232.0, 48);
+        let Some(bevy::render::mesh::VertexAttributeValues::Float32x4(cols)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("ring mesh is missing vertex colours");
+        };
+        let mut gap = 0usize;
+        let mut dusty = 0usize;
+        let mut rainbow = 0usize;
+        for c in cols {
+            let [r, g, b, a] = *c;
+            if a < 0.05 {
+                gap += 1;
+                continue;
+            }
+            let max = r.max(g).max(b);
+            let min = r.min(g).min(b);
+            if max > 0.85 && min < 0.25 {
+                rainbow += 1;
+            }
+            if r > 0.30 && g > 0.25 && b > 0.18 && (r - b).abs() < 0.45 {
+                dusty += 1;
+            }
+        }
+        assert!(
+            gap > 10,
+            "Cassini gap never punched (only {gap} empty verts)"
+        );
+        assert!(
+            dusty > rainbow * 3,
+            "rings still look like a rainbow gizmo (dusty={dusty} rainbow={rainbow})"
+        );
+    }
+
+    #[test]
+    fn gas_giant_has_banded_body_and_a_dark_limb() {
+        let image = build_planet_image(128, 4242);
+        let mut min = u8::MAX;
+        let mut max = u8::MIN;
+        for pixel in image.data.chunks_exact(4) {
+            let y = pixel[0] / 3 + pixel[1] / 2 + pixel[2] / 6;
+            min = min.min(y);
+            max = max.max(y);
+        }
+        assert!(
+            max - min > 50,
+            "planet body only spans {} levels; it would read as a flat disc",
+            max - min
+        );
+    }
+
+    #[test]
+    fn stars_are_gone_at_golden_hour_and_present_at_night() {
+        let dusk = star_night_factor(day_factor(sun_direction(17.0)));
+        let noon = star_night_factor(day_factor(sun_direction(11.0)));
+        let night = star_night_factor(day_factor(sun_direction(21.5)));
+        assert!(
+            dusk < 0.08,
+            "hour 17 still has star factor {dusk}; stars would glitter through dusk"
+        );
+        assert!(noon < 0.01);
+        assert!(night > 0.55, "hour 21.5 star factor is only {night}");
+    }
+}
+
+/// Build a procedural nebula image — swirled multi-octave Perlin on a
+/// spherical projection. Magenta and cyan are kept in opposition (not
+/// mixed into mud), the zenith stays deep violet, and the horizon
+/// picks up a warm burn so dusk doesn't flatten the dome.
+fn build_nebula_image(size: u32, seed: u64) -> Image {
+    let n_fil = Perlin::new(seed as u32 ^ 0x7777_7777);
+    let n_pick = Perlin::new(seed as u32 ^ 0x3333_3333);
+    let n_mask = Perlin::new(seed as u32 ^ 0x1234_5678);
+    let n_swirl = Perlin::new(seed as u32 ^ 0x51_57_52_4C);
+    let w = size;
+    let h = size / 2;
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        let v = (y as f64 / h as f64) * std::f64::consts::PI - std::f64::consts::FRAC_PI_2;
+        let (sv, cv) = v.sin_cos();
+        let zenith = sv.max(0.0); // 1 at +Y
+        let horizon = 1.0 - sv.abs();
+        for x in 0..w {
+            let u = (x as f64 / w as f64) * std::f64::consts::TAU;
+            // Swirl: rotate longitude by a latitude-dependent twist so
+            // the clouds read as a volume, not a painted sheet.
+            let twist = 1.70 * (v * 2.85).sin() + n_swirl.get([v * 2.15, u * 0.22]) * 1.12;
+            let u_s = u + twist;
+            let (su, cu) = u_s.sin_cos();
+            let px = cv * cu;
+            let py = sv;
+            let pz = cv * su;
+
             let fbm = |n: &Perlin, f: f64, oct: u32| -> f64 {
                 let mut sum = 0.0;
                 let mut amp = 1.0;
@@ -896,32 +1655,31 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
                 }
                 sum / norm.max(1e-6)
             };
-            let r = fbm(&n_r, 1.3, 5);
-            let g = fbm(&n_g, 1.7, 5);
-            let b = fbm(&n_b, 1.1, 5);
-            let mask = fbm(&n_mask, 0.6, 3);
-            // Soft mask so large regions of the sphere are near-black,
-            // and only a few filaments glow strongly — exactly like
-            // real nebulae.
-            let amp = (mask + 0.2).max(0.0).powf(1.6);
-            let rr = ((r * 0.5 + 0.5) * amp).clamp(0.0, 1.0);
-            let gg = ((g * 0.5 + 0.5) * amp * 0.85).clamp(0.0, 1.0);
-            let bb = ((b * 0.5 + 0.5) * amp * 1.05).clamp(0.0, 1.0);
+            let filament = (fbm(&n_fil, 1.85, 6) * 0.5 + 0.5).powf(1.06);
+            let picker = fbm(&n_pick, 0.62, 3);
+            let mask = (fbm(&n_mask, 0.40, 4) + 0.40).max(0.0).powf(1.18);
+            let amp = (filament * mask).clamp(0.0, 1.0);
 
-            // Colour palette skewed toward magenta / cyan / warm orange
-            // highlights. Mix the raw channels with fixed biases so the
-            // image looks painterly, not random.
-            let mag = (rr * 1.15 + bb * 0.35).min(1.0);
-            let cyn = (gg * 0.9 + bb * 1.1).min(1.0);
-            let wrm = (rr * 1.05 + gg * 0.7).min(1.0);
-            let r_out = (mag * 0.9 + wrm * 0.6).min(1.0);
-            let g_out = (cyn * 0.6 + wrm * 0.55).min(1.0);
-            let b_out = (mag * 0.5 + cyn * 1.0).min(1.0);
+            // Magenta vs cyan: pick a side, don't average them into purple mud.
+            let magenta = Vec3::new(1.10, 0.12, 0.96);
+            let cyan = Vec3::new(0.04, 0.98, 1.08);
+            let mix = ((picker + 0.08) * 1.95).clamp(0.0, 1.0) as f32;
+            let mut col = cyan.lerp(magenta, mix) * (0.82 + 0.55 * amp as f32);
 
-            data.push((r_out * 255.0) as u8);
-            data.push((g_out * 255.0) as u8);
-            data.push((b_out * 255.0) as u8);
-            data.push(255);
+            // Deep-violet zenith fill so the dome never goes empty-black
+            // or pale-fog, plus a warm horizon burn for golden hour.
+            let violet = Vec3::new(0.14, 0.03, 0.36) * (0.16 + 0.58 * zenith as f32);
+            let warm = Vec3::new(0.95, 0.38, 0.12) * (horizon as f32).powf(2.2) * 0.32;
+            col = col + violet * (0.32 + 0.22 * (1.0 - amp as f32)) + warm;
+            col = col.min(Vec3::splat(1.0));
+            // Put density in alpha so Additive empty sky does not wash
+            // the ClearColor to milky pink. Filaments stay punchy.
+            let alpha = (amp * 0.94 + 0.05 * zenith + 0.09 * horizon.powf(1.6)).clamp(0.0, 1.0);
+
+            data.push((col.x * 255.0) as u8);
+            data.push((col.y * 255.0) as u8);
+            data.push((col.z * 255.0) as u8);
+            data.push((alpha * 255.0) as u8);
         }
     }
 

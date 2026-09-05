@@ -3653,6 +3653,7 @@ fn animate_viewmodel(
     active: Res<ActiveWeapon>,
     toolbelt: Option<Res<crate::toolbelt::ToolbeltState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    photo: Option<Res<crate::hud::PhotoMode>>,
     mut holster: ResMut<WeaponHolster>,
     mut q: Query<(&mut Transform, &Weapon, &WeaponRestPose, &mut Visibility)>,
 ) {
@@ -3675,6 +3676,7 @@ fn animate_viewmodel(
     let holster_k = (time.delta_seconds() * holster_speed).min(1.0);
     holster.progress += (holster_target - holster.progress) * holster_k;
     let holster_t = holster.progress * holster.progress * (3.0 - 2.0 * holster.progress);
+    let hide_for_photo = photo.as_deref().map(|p| p.hidden).unwrap_or(false);
     for (mut tf, weapon, rest, mut vis) in q.iter_mut() {
         let rest_tf = rest.0;
         // ------------------------------------------------------------
@@ -3772,7 +3774,7 @@ fn animate_viewmodel(
         // aimed view. Sniper also hands over to its HUD overlay here.
         let hide_for_scope = ads > 0.9;
         let _ = active.kind;
-        *vis = if hide_for_scope || (hide_for_edit && holster_t > 0.96) {
+        *vis = if hide_for_scope || hide_for_photo || (hide_for_edit && holster_t > 0.96) {
             Visibility::Hidden
         } else {
             Visibility::Inherited

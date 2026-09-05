@@ -21,7 +21,9 @@
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::texture::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::render::texture::{
+    Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor,
+};
 use noise::{NoiseFn, Perlin};
 
 use crate::blocks::{BlockType, MaterialId, CUSTOM_MATERIAL_BASE};
@@ -60,34 +62,27 @@ impl MaterialLibrary {
         &mut self,
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
+        swatch_size: u32,
     ) {
         self.handles.clear();
         self.names.clear();
         self.custom_ids.clear();
 
-        for swatch in bake_all_block_swatches(BUILTIN_SWATCH_SIZE) {
+        let size = swatch_size.clamp(32, 256);
+        for swatch in bake_all_block_swatches(size) {
             let image = images.add(make_repeating_image(
                 swatch.width,
                 swatch.height,
                 swatch.rgba.clone(),
             ));
             let alpha = swatch.block.color().to_srgba().alpha;
-            let emissive = if swatch.block.is_emissive() {
-                let lin = swatch.block.color().to_linear();
-                LinearRgba::rgb(
-                    lin.red * 3.2 + 0.35,
-                    lin.green * 3.2 + 0.35,
-                    lin.blue * 3.2 + 0.35,
-                )
-            } else {
-                LinearRgba::BLACK
-            };
+            let emissive = emissive_for_block(swatch.block);
             let handle = materials.add(StandardMaterial {
-                base_color: Color::WHITE.with_alpha(alpha),
+                base_color: albedo_for_block(swatch.block, alpha),
                 base_color_texture: Some(image),
                 emissive,
-                perceptual_roughness: 1.0,
-                reflectance: 0.05,
+                perceptual_roughness: roughness_for_block(swatch.block),
+                reflectance: reflectance_for_block(swatch.block),
                 alpha_mode: terrain_alpha_mode_for_block(swatch.block),
                 ..default()
             });
@@ -323,26 +318,36 @@ pub fn bake_all_block_swatches(size: u32) -> Vec<BlockSwatch> {
         (Gravel, "gravel", BlockStyle::Rock),
         (Bedrock, "bedrock", BlockStyle::Rock),
         (RedSand, "red_sand", BlockStyle::Sand),
-        (RedStone, "red_stone", BlockStyle::Rock),
-        (MesaClay, "mesa_clay", BlockStyle::Rock),
+        (RedStone, "red_stone", BlockStyle::Strata),
+        (MesaClay, "mesa_clay", BlockStyle::Strata),
         (MossStone, "moss_stone", BlockStyle::Rock),
         (Limestone, "limestone", BlockStyle::Rock),
-        (Crystal, "crystal", BlockStyle::Ice),
-        (Basalt, "basalt", BlockStyle::Rock),
+        (Crystal, "crystal", BlockStyle::Crystal),
+        (Basalt, "basalt", BlockStyle::Strata),
         (Lava, "lava", BlockStyle::Lava),
         (AlienMoss, "alien_moss", BlockStyle::Grass),
         (BoneRock, "bone_rock", BlockStyle::Rock),
         (GlowSand, "glow_sand", BlockStyle::Sand),
-        (ShipHullDark, "ship_hull_dark", BlockStyle::Rock),
-        (ShipHullAlloy, "ship_hull_alloy", BlockStyle::Rock),
+        (ShipHullDark, "ship_hull_dark", BlockStyle::Metal),
+        (ShipHullAlloy, "ship_hull_alloy", BlockStyle::Metal),
         (CockpitGlass, "cockpit_glass", BlockStyle::Ice),
-        (NeonCyan, "neon_cyan", BlockStyle::Ice),
-        (NeonMagenta, "neon_magenta", BlockStyle::Ice),
+        (NeonCyan, "neon_cyan", BlockStyle::Energy),
+        (NeonMagenta, "neon_magenta", BlockStyle::Energy),
         (NeonAmber, "neon_amber", BlockStyle::Lava),
         (EngineCore, "engine_core", BlockStyle::Lava),
-        (LuminiteCrystal, "luminite_crystal", BlockStyle::Ice),
+        (LuminiteCrystal, "luminite_crystal", BlockStyle::Crystal),
         (MagnetiteOre, "magnetite_ore", BlockStyle::Rock),
-        (IridiumVein, "iridium_vein", BlockStyle::Ice),
+        (IridiumVein, "iridium_vein", BlockStyle::Crystal),
+        (VioletStone, "violet_stone", BlockStyle::Strata),
+        (AmberStone, "amber_stone", BlockStyle::Strata),
+        (PlasmaFlow, "plasma_flow", BlockStyle::Energy),
+        (CrystalMagenta, "crystal_magenta", BlockStyle::Crystal),
+        (CrystalGreen, "crystal_green", BlockStyle::Crystal),
+        (HoloPanel, "holo_panel", BlockStyle::Crystal),
+        (PlatingWhite, "plating_white", BlockStyle::Metal),
+        (PlatingTeal, "plating_teal", BlockStyle::Metal),
+        (RoadDeck, "road_deck", BlockStyle::Metal),
+        (RoadMarking, "road_marking", BlockStyle::Metal),
     ];
     list.iter()
         .map(|(b, n, style)| bake_block_swatch(*b, n, *style, size))
@@ -352,6 +357,7 @@ pub fn bake_all_block_swatches(size: u32) -> Vec<BlockSwatch> {
 #[derive(Clone, Copy, Debug)]
 enum BlockStyle {
     Rock,
+    Strata,
     Soil,
     Grass,
     Sand,
@@ -361,6 +367,9 @@ enum BlockStyle {
     Snow,
     Ice,
     Lava,
+    Metal,
+    Crystal,
+    Energy,
 }
 
 fn bake_block_swatch(
@@ -477,52 +486,58 @@ fn bake_block_swatch(
                     )
                 }
                 BlockStyle::Grass => {
-                    let blade = detail.get([tx * 18.0, ty * 3.0, tz * 18.0, tw * 3.0]);
-                    let moss_patch = macro_n.max(0.0) * 0.12;
-                    let soil_fleck = if grain_n < -0.55 { 0.14 } else { 0.0 };
+                    let blade = detail.get([tx * 22.0, ty * 2.2, tz * 22.0, tw * 2.2]);
+                    let moss_patch = macro_n.max(0.0) * 0.16;
+                    let soil_fleck = if grain_n < -0.48 { 0.22 } else { 0.0 };
                     let meadow_wave =
-                        (u * two_pi * 1.75 + v * two_pi * 2.35 + broad * 2.2).sin() * 0.16;
+                        (u * two_pi * 1.75 + v * two_pi * 2.35 + broad * 2.2).sin() * 0.22;
                     let meadow_cross =
-                        (u * two_pi * 3.65 - v * two_pi * 1.45 + macro_n * 2.8).sin() * 0.11;
-                    let lush_patch = macro_n.max(0.0) * 0.18;
+                        (u * two_pi * 3.65 - v * two_pi * 1.45 + macro_n * 2.8).sin() * 0.16;
+                    let lush_patch = macro_n.max(0.0) * 0.22;
                     let dry_patch = if vein_wide > 0.50 {
-                        (vein_wide - 0.50) * 0.46
+                        (vein_wide - 0.50) * 0.62
                     } else {
                         0.0
                     };
-                    let b = 0.82
+                    let b = 0.78
                         + macro_shadow
-                        + fbm * 0.16
-                        + blade * 0.20
-                        + micro * 0.08
+                        + fbm * 0.18
+                        + blade * 0.32
+                        + micro * 0.10
                         + moss_patch
                         + meadow_wave
                         + meadow_cross
-                        + lush_patch * 0.45
-                        - soil_fleck * 0.80
-                        - dry_patch * 0.92;
+                        + lush_patch * 0.50
+                        - soil_fleck * 0.90
+                        - dry_patch * 1.05;
                     (
                         b,
-                        (dry_patch as f32) * 0.13 - (soil_fleck as f32) * 0.04,
-                        (blade as f32) * 0.08
-                            + (moss_patch as f32) * 0.10
-                            + (meadow_wave as f32) * 0.10
-                            + (meadow_cross as f32) * 0.075
-                            + (lush_patch as f32) * 0.16
-                            - (dry_patch as f32) * 0.05,
-                        (lush_patch as f32) * 0.045
-                            - (soil_fleck as f32) * 0.03
+                        (dry_patch as f32) * 0.16 - (soil_fleck as f32) * 0.06,
+                        (blade as f32) * 0.12
+                            + (moss_patch as f32) * 0.12
+                            + (meadow_wave as f32) * 0.12
+                            + (meadow_cross as f32) * 0.09
+                            + (lush_patch as f32) * 0.18
                             - (dry_patch as f32) * 0.06,
+                        (lush_patch as f32) * 0.05
+                            - (soil_fleck as f32) * 0.04
+                            - (dry_patch as f32) * 0.07,
                     )
                 }
                 BlockStyle::Sand => {
-                    let ripple = (v * two_pi * 6.0 + broad * 2.4 + fbm * 2.0).sin() * 0.08;
-                    let mineral = (grain_n - 0.52).max(0.0) * 0.08;
+                    let ripple = (v * two_pi * 7.0 + broad * 2.4 + fbm * 2.0).sin() * 0.18;
+                    let dune = (u * two_pi * 2.2 + v * two_pi * 0.8 + macro_n).sin() * 0.10;
+                    let mineral = (grain_n - 0.42).max(0.0) * 0.14;
                     (
-                        0.91 + macro_shadow * 0.75 + fbm * 0.10 + micro * 0.14 + ripple + mineral,
-                        mineral as f32 * 0.05,
-                        0.0,
-                        -(mineral as f32) * 0.02,
+                        0.88 + macro_shadow * 0.85
+                            + fbm * 0.14
+                            + micro * 0.16
+                            + ripple
+                            + dune
+                            + mineral,
+                        mineral as f32 * 0.07 + (dune as f32) * 0.04,
+                        -(ripple as f32) * 0.03,
+                        -(mineral as f32) * 0.03,
                     )
                 }
                 BlockStyle::Water => {
@@ -599,20 +614,92 @@ fn bake_block_swatch(
                 }
                 BlockStyle::Lava => {
                     let heat = cell_n.max(vein_wide);
-                    let b = 0.62 + macro_n.abs() * 0.08 + heat * 0.54 + fbm * 0.18;
+                    let crust = (1.0 - heat) * 0.35;
+                    let b = 0.48 + macro_n.abs() * 0.10 + heat * 0.72 + fbm * 0.16 - crust;
                     (
                         b,
-                        (heat as f32) * 0.28,
-                        (heat as f32) * 0.11 + (vein as f32) * 0.04,
+                        (heat as f32) * 0.38,
+                        (heat as f32) * 0.10 + (vein as f32) * 0.05,
+                        -(crust as f32) * 0.12,
+                    )
+                }
+                BlockStyle::Strata => {
+                    // World Y already paints 6-block canyon bands
+                    // (violet / brick / cream). Extra high-contrast
+                    // stripes *inside* the 128² tile repeated 1:1 per
+                    // voxel as a flying-distance waffle. Keep grit so
+                    // near faces still read as rock.
+                    let grit = grain_n.abs() * 0.08;
+                    let crack = cell_n * 0.10;
+                    let sediment = (v * two_pi * 0.55 + macro_n * 1.4).sin() * 0.06;
+                    let b = 0.92 + macro_shadow * 1.05 + fbm * 0.16 + grit - crack + sediment;
+                    (
+                        b,
+                        (strat as f32) * 0.025 + (sediment as f32) * 0.03,
+                        (broad as f32) * 0.015,
+                        -(grit as f32) * 0.02,
+                    )
+                }
+                BlockStyle::Metal => {
+                    // Large panels, not a high-contrast waffle. Fine grout
+                    // turned into a checkerboard under flying-distance mips.
+                    let cells = 2.0;
+                    let px = (u * cells).fract();
+                    let py = (v * cells).fract();
+                    let grout = if px < 0.05 || py < 0.05 || px > 0.95 || py > 0.95 {
+                        0.94
+                    } else {
+                        1.0
+                    };
+                    let rivet_u = (px - 0.14).abs() + (py - 0.14).abs();
+                    let rivet = if rivet_u < 0.05 { 0.18 } else { 0.0 };
+                    let brush = (u * 24.0 + fbm * 2.0).sin() * 0.07;
+                    let b = 0.92 + macro_shadow * 0.35 + brush + micro * 0.04;
+                    (
+                        b * grout - rivet,
+                        (brush as f32) * 0.02,
                         0.0,
+                        -(grout as f32 - 1.0) * 0.04,
+                    )
+                }
+                BlockStyle::Crystal => {
+                    let facet = cell_n;
+                    let grout = facet * 0.62;
+                    let sparkle = detail.get([tx * 32.0, ty * 32.0, tz * 32.0, tw * 32.0]);
+                    let sp = if sparkle > 0.62 {
+                        (sparkle - 0.62) * 3.1
+                    } else {
+                        0.0
+                    };
+                    let face = macro_n * 0.18 + fbm * 0.10;
+                    (
+                        0.82 + face + sp - grout,
+                        (sp as f32) * 0.12 + 0.06,
+                        (sp as f32) * 0.16 + (face as f32) * 0.05,
+                        0.18 + (sp as f32) * 0.16 - (grout as f32) * 0.08,
+                    )
+                }
+                BlockStyle::Energy => {
+                    let flow = ((u * 7.0 + v * 0.40 + fbm * 0.8).sin() * 0.5 + 0.5).powf(1.8);
+                    let core = (flow - 0.50).max(0.0) * 1.8;
+                    let vein_glow = vein * 0.35;
+                    (
+                        0.42 + flow * 0.90 + micro * 0.08 + vein_glow,
+                        -(core as f32) * 0.06,
+                        (flow as f32) * 0.22,
+                        (core as f32) * 0.28 + 0.10,
                     )
                 }
             };
 
-            let bright = bright.clamp(0.55, 1.30) as f32;
+            let bright = bright.clamp(0.32, 1.55) as f32;
             let r = (base[0] * bright + tint_r).clamp(0.0, 1.0);
             let g = (base[1] * bright + tint_g).clamp(0.0, 1.0);
             let bl = (base[2] * bright + tint_b).clamp(0.0, 1.0);
+
+            // No per-tile grout. A 1–2 px lip around every 128² swatch
+            // became a world-space waffle once UVs tiled 1:1 per voxel.
+            // Far filtering lives in wrap mips instead.
 
             data.push((r * 255.0).round() as u8);
             data.push((g * 255.0).round() as u8);
@@ -634,7 +721,179 @@ fn bake_block_swatch(
 // Helpers -------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
+/// Dark albedo on hero emissives so dusk sunlight cannot add orange
+/// into the cyan/magenta. Colour lives in `emissive` + vertex HDR.
+fn albedo_for_block(block: BlockType, alpha: f32) -> Color {
+    match block {
+        BlockType::Crystal
+        | BlockType::LuminiteCrystal
+        | BlockType::PlasmaFlow
+        | BlockType::NeonCyan => Color::srgba(0.01, 0.05, 0.07, alpha),
+        BlockType::CrystalMagenta => Color::srgba(0.08, 0.01, 0.06, alpha),
+        BlockType::Lava => Color::srgba(0.12, 0.03, 0.00, alpha),
+        _ => Color::WHITE.with_alpha(alpha),
+    }
+}
+
+/// Per-block HDR emissive. Fast has bloom intensity 0, so this is the
+/// only glow those voxels get; Cinematic adds bloom on top, so plasma
+/// stays chromatic and below the ACES clip while crystals stay saturated.
+fn emissive_for_block(block: BlockType) -> LinearRgba {
+    if !block.is_emissive() {
+        return LinearRgba::BLACK;
+    }
+    let lin = block.color().to_linear();
+    match block {
+        BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(0.00, 0.92, 1.22),
+        BlockType::CrystalMagenta => LinearRgba::rgb(1.75, 0.10, 1.35),
+        BlockType::PlasmaFlow | BlockType::NeonCyan => LinearRgba::rgb(0.00, 0.68, 0.94),
+        BlockType::Lava => LinearRgba::rgb(lin.red * 5.20, lin.green * 2.05, 0.00),
+        _ => LinearRgba::rgb(
+            lin.red * 3.2 + 0.35,
+            lin.green * 3.2 + 0.35,
+            lin.blue * 3.2 + 0.35,
+        ),
+    }
+}
+
+fn roughness_for_block(block: BlockType) -> f32 {
+    if matches!(
+        block,
+        BlockType::PlatingWhite
+            | BlockType::PlatingTeal
+            | BlockType::RoadDeck
+            | BlockType::RoadMarking
+            | BlockType::ShipHullDark
+            | BlockType::ShipHullAlloy
+    ) {
+        0.38
+    } else if matches!(
+        block,
+        BlockType::Crystal
+            | BlockType::CrystalMagenta
+            | BlockType::CrystalGreen
+            | BlockType::LuminiteCrystal
+            | BlockType::IridiumVein
+            | BlockType::Ice
+            | BlockType::HoloPanel
+            | BlockType::CockpitGlass
+    ) {
+        0.14
+    } else if block.is_emissive() {
+        0.42
+    } else if matches!(
+        block,
+        BlockType::Sand | BlockType::RedSand | BlockType::GlowSand
+    ) {
+        0.94
+    } else {
+        0.84
+    }
+}
+
+fn reflectance_for_block(block: BlockType) -> f32 {
+    if matches!(
+        block,
+        BlockType::PlatingWhite
+            | BlockType::PlatingTeal
+            | BlockType::ShipHullAlloy
+            | BlockType::RoadMarking
+    ) {
+        0.14
+    } else if matches!(
+        block,
+        BlockType::Crystal
+            | BlockType::CrystalMagenta
+            | BlockType::CrystalGreen
+            | BlockType::Ice
+            | BlockType::HoloPanel
+    ) {
+        0.10
+    } else {
+        0.045
+    }
+}
+
+/// IEC 61966-2-1 sRGB EOTF. Mip averages must happen in linear light or
+/// dark tile edges dominate the far filter and rebuild the waffle.
+fn srgb_u8_to_linear(c: u8) -> f32 {
+    let u = c as f32 / 255.0;
+    if u <= 0.04045 {
+        u / 12.92
+    } else {
+        ((u + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb_u8(lin: f32) -> u8 {
+    let l = lin.clamp(0.0, 1.0);
+    let u = if l <= 0.0031308 {
+        12.92 * l
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (u.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn pixel_at(data: &[u8], w: u32, x: i32, y: i32, h: u32) -> [u8; 4] {
+    let w = w as i32;
+    let h = h as i32;
+    let xx = x.rem_euclid(w) as u32;
+    let yy = y.rem_euclid(h) as u32;
+    let i = ((yy * w as u32 + xx) * 4) as usize;
+    [data[i], data[i + 1], data[i + 2], data[i + 3]]
+}
+
+/// Wrap-mode mip chain. Level 0 is the seamless swatch; each next level
+/// is a 2×2 box in linear RGB so flying-distance faces fade toward the
+/// tile mean instead of a per-block grout grid.
+fn build_wrap_mip_chain(width: u32, height: u32, rgba: Vec<u8>) -> (Vec<u8>, u32) {
+    let mut levels: Vec<(u32, u32, Vec<u8>)> = vec![(width, height, rgba)];
+    let mut w = width;
+    let mut h = height;
+    while w > 1 || h > 1 {
+        let nw = (w / 2).max(1);
+        let nh = (h / 2).max(1);
+        let src = &levels.last().unwrap().2;
+        let mut dst = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                let sx = (x * 2) as i32;
+                let sy = (y * 2) as i32;
+                let samples = [
+                    pixel_at(src, w, sx, sy, h),
+                    pixel_at(src, w, sx + 1, sy, h),
+                    pixel_at(src, w, sx, sy + 1, h),
+                    pixel_at(src, w, sx + 1, sy + 1, h),
+                ];
+                let mut acc = [0.0f32; 4];
+                for p in samples {
+                    acc[0] += srgb_u8_to_linear(p[0]);
+                    acc[1] += srgb_u8_to_linear(p[1]);
+                    acc[2] += srgb_u8_to_linear(p[2]);
+                    acc[3] += p[3] as f32 / 255.0;
+                }
+                let o = ((y * nw + x) * 4) as usize;
+                dst[o] = linear_to_srgb_u8(acc[0] * 0.25);
+                dst[o + 1] = linear_to_srgb_u8(acc[1] * 0.25);
+                dst[o + 2] = linear_to_srgb_u8(acc[2] * 0.25);
+                dst[o + 3] = (acc[3] * 0.25 * 255.0).round() as u8;
+            }
+        }
+        levels.push((nw, nh, dst));
+        w = nw;
+        h = nh;
+    }
+    let mut out = Vec::new();
+    for (_, _, data) in &levels {
+        out.extend_from_slice(data);
+    }
+    (out, levels.len() as u32)
+}
+
 fn make_repeating_image(w: u32, h: u32, data: Vec<u8>) -> Image {
+    let mip0_len = (w as usize) * (h as usize) * 4;
+    let (all, mip_count) = build_wrap_mip_chain(w, h, data);
     let mut image = Image::new(
         Extent3d {
             width: w,
@@ -642,14 +901,20 @@ fn make_repeating_image(w: u32, h: u32, data: Vec<u8>) -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        data,
+        all[..mip0_len].to_vec(),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
+    image.data = all;
+    image.texture_descriptor.mip_level_count = mip_count;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
         address_mode_w: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 8,
         ..ImageSamplerDescriptor::linear()
     });
     image
@@ -720,6 +985,17 @@ mod tests {
         unique.len()
     }
 
+    fn mean_rgb(swatch: &BlockSwatch) -> [f32; 3] {
+        let mut acc = [0.0f32; 3];
+        let n = (swatch.rgba.len() / 4) as f32;
+        for pixel in swatch.rgba.chunks_exact(4) {
+            acc[0] += pixel[0] as f32;
+            acc[1] += pixel[1] as f32;
+            acc[2] += pixel[2] as f32;
+        }
+        [acc[0] / n / 255.0, acc[1] / n / 255.0, acc[2] / n / 255.0]
+    }
+
     fn swatch_for(swatches: &[BlockSwatch], block: BlockType) -> &BlockSwatch {
         swatches
             .iter()
@@ -741,6 +1017,29 @@ mod tests {
 
         assert!(unique_rgb_count(stone) > 512);
         assert!(luma_range(stone) > 54);
+        let red = swatch_for(&swatches, BlockType::RedStone);
+        let crystal = swatch_for(&swatches, BlockType::Crystal);
+        let plate = swatch_for(&swatches, BlockType::PlatingWhite);
+        assert!(
+            luma_range(red) > 22,
+            "mesa strata tile lost near-field grit ({})",
+            luma_range(red)
+        );
+        let red_far = downsample_signature_count(red, 16);
+        assert!(
+            red_far < 48,
+            "strata tile still has a high-frequency waffle at flying mips ({red_far} signatures)"
+        );
+        assert!(
+            luma_range(crystal) > 80,
+            "crystal tile is still too flat ({})",
+            luma_range(crystal)
+        );
+        assert!(
+            luma_range(plate) > 24,
+            "metal tile lost near-field panel variation ({})",
+            luma_range(plate)
+        );
         assert!(
             stone_signatures > 20,
             "stone only preserved {stone_signatures} far-distance material signatures"
@@ -756,15 +1055,75 @@ mod tests {
     }
 
     #[test]
+    fn repeating_swatches_have_wrap_mips_and_no_tile_grout() {
+        let swatches = bake_all_block_swatches(128);
+        let red = swatch_for(&swatches, BlockType::RedStone);
+        let w = red.width as usize;
+        let corner = luma(&red.rgba[0..4]);
+        let inner = luma(&red.rgba[(64 * w + 64) * 4..(64 * w + 64) * 4 + 4]);
+        assert!(
+            (corner as i16 - inner as i16).unsigned_abs() < 70,
+            "tile grout still darkens the swatch edge (corner={corner} inner={inner})"
+        );
+
+        let (mips, count) = build_wrap_mip_chain(red.width, red.height, red.rgba.clone());
+        assert!(count >= 8, "128² should chain down to 1×1, got {count}");
+        let mip0 = w * w * 4;
+        assert!(mips.len() > mip0);
+        // Last mip is 1×1 — the linear-light mean of the tile.
+        let last = &mips[mips.len() - 4..];
+        assert!(last[0] > 40 && last[0] < 220);
+    }
+
+    #[test]
+    fn flying_distance_swatch_means_keep_grass_rock_and_sand_apart() {
+        let swatches = bake_all_block_swatches(128);
+        let grass = mean_rgb(swatch_for(&swatches, BlockType::Grass));
+        let red = mean_rgb(swatch_for(&swatches, BlockType::RedStone));
+        let clay = mean_rgb(swatch_for(&swatches, BlockType::MesaClay));
+        let sand = mean_rgb(swatch_for(&swatches, BlockType::RedSand));
+        let violet = mean_rgb(swatch_for(&swatches, BlockType::VioletStone));
+        let crystal = mean_rgb(swatch_for(&swatches, BlockType::Crystal));
+        let lava = mean_rgb(swatch_for(&swatches, BlockType::Lava));
+        assert!(
+            grass[1] > red[1] + 0.18,
+            "grass mean lost its green vs brick ({grass:?} vs {red:?})"
+        );
+        assert!(
+            red[0] > grass[0] + 0.18,
+            "brick mean lost its rust vs grass ({red:?} vs {grass:?})"
+        );
+        assert!(
+            clay[1] > red[1] + 0.12,
+            "cream stripe should stay brighter than brick ({clay:?} vs {red:?})"
+        );
+        assert!(
+            sand[0] > sand[1] + 0.08,
+            "red sand should stay warm ({sand:?})"
+        );
+        assert!(
+            violet[2] > violet[0] + 0.08,
+            "violet band should stay cool ({violet:?})"
+        );
+        assert!(
+            crystal[2] > crystal[0] + 0.20,
+            "crystal should stay cyan ({crystal:?})"
+        );
+        assert!(
+            lava[0] > lava[2] + 0.35,
+            "lava should stay molten ({lava:?})"
+        );
+    }
+
+    #[test]
     fn translucent_builtin_world_materials_avoid_sorted_alpha_blend() {
         for block in [
             BlockType::Water,
             BlockType::Ice,
-            BlockType::Crystal,
-            BlockType::Lava,
             BlockType::CockpitGlass,
-            BlockType::LuminiteCrystal,
             BlockType::IridiumVein,
+            BlockType::CrystalGreen,
+            BlockType::HoloPanel,
         ] {
             assert_eq!(
                 terrain_alpha_mode_for_block(block),
@@ -772,5 +1131,52 @@ mod tests {
                 "{block:?} should stay out of Bevy's sorted alpha-blend terrain path"
             );
         }
+        for block in [
+            BlockType::Crystal,
+            BlockType::CrystalMagenta,
+            BlockType::LuminiteCrystal,
+            BlockType::Lava,
+            BlockType::PlasmaFlow,
+        ] {
+            assert_eq!(
+                terrain_alpha_mode_for_block(block),
+                AlphaMode::Opaque,
+                "{block:?} must occlude so the hero emissive reads as a mass"
+            );
+        }
+    }
+
+    #[test]
+    fn hero_emissive_materials_stay_chromatic() {
+        let crystal = emissive_for_block(BlockType::Crystal);
+        assert!(
+            crystal.blue > crystal.red * 4.0 && crystal.green > crystal.red * 3.0,
+            "crystal emissive lost cyan ({crystal:?})"
+        );
+        let magenta = emissive_for_block(BlockType::CrystalMagenta);
+        assert!(
+            magenta.red > magenta.green * 4.0 && magenta.blue > magenta.green * 3.0,
+            "magenta emissive lost chroma ({magenta:?})"
+        );
+        let plasma = emissive_for_block(BlockType::PlasmaFlow);
+        let peak = plasma.red.max(plasma.green).max(plasma.blue);
+        assert!(
+            peak < 1.15,
+            "plasma emissive peak {peak:.3} will ACES-clip to white"
+        );
+        assert!(plasma.blue > plasma.red * 3.0);
+        assert!(
+            crystal.red < 0.05,
+            "crystal emissive still has dusk-warming red ({crystal:?})"
+        );
+        assert!(
+            plasma.red < 0.05,
+            "plasma emissive still has dusk-warming red ({plasma:?})"
+        );
+        let lava = emissive_for_block(BlockType::Lava);
+        assert!(
+            lava.red > lava.blue * 8.0,
+            "lava emissive went cream ({lava:?})"
+        );
     }
 }

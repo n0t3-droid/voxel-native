@@ -131,6 +131,9 @@ pub struct WorldSettings {
 }
 
 const NORMAL_TIME_OF_DAY: f32 = 12.25;
+/// Dusk postcard hour for a freshly created world. Existing saves keep
+/// whatever they stored.
+const NEW_WORLD_TIME_OF_DAY: f32 = 17.0;
 
 /// Named teleport target stored in [`WorldSettings::bookmarks`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,7 +384,11 @@ impl Default for WorldSettings {
             seed: 12345,
             ship_skirmish_ai: false,
             render_distance: 50,
-            vertical_chunks: 8,
+            // 10 × 16 = 160 blocks of streamed height. The frontier hangs
+            // sky islands and docking platforms between y=86 and y=152;
+            // at the old 8 chunks (128 blocks) the streamer simply never
+            // loaded the slab they live in.
+            vertical_chunks: 10,
             chunks_per_frame: 10,
             meshes_per_frame: 10,
             mesh_applies_per_frame: default_mesh_applies_per_frame(),
@@ -494,7 +501,7 @@ impl WorldSettings {
                 self.neurocore_enabled = true;
                 self.runtime_profile = RuntimeProfile::Balanced;
                 self.render_distance = 40;
-                self.vertical_chunks = 8;
+                self.vertical_chunks = 10;
                 self.chunks_per_frame = 10;
                 self.meshes_per_frame = 10;
                 self.mesh_applies_per_frame = 8;
@@ -507,10 +514,12 @@ impl WorldSettings {
                 self.neurocore_enabled = true;
                 self.runtime_profile = RuntimeProfile::LowSpec;
                 self.render_distance = 24;
-                self.vertical_chunks = 6;
+                // Still the low-spec preset, but one slab taller so the
+                // lowest sky islands are inside the streamed volume.
+                self.vertical_chunks = 7;
                 self.chunks_per_frame = 18;
                 self.meshes_per_frame = 16;
-                self.mesh_applies_per_frame = 8;
+                self.mesh_applies_per_frame = 10;
                 self.max_in_flight_terrain = 96;
                 self.max_in_flight_meshes = 80;
                 self.target_fps = 60.0;
@@ -710,20 +719,17 @@ pub struct WorldEditManifest {
 impl WorldMeta {
     pub fn new(name: String, seed: u32) -> Self {
         let now = now_epoch();
-        let spawn = crate::terrain::TerrainGenerator::new(seed)
-            .find_natural_spawn(0, 0, 4096)
-            .map(|p| [p.x as f32 + 0.5, p.y as f32, p.z as f32 + 0.5])
-            .unwrap_or([0.0, 140.0, 0.0]);
+        let (spawn, yaw, pitch) = crate::terrain::TerrainGenerator::new(seed).scenic_frontier_spawn();
         Self {
             name,
             seed,
-            time_of_day: NORMAL_TIME_OF_DAY,
+            time_of_day: NEW_WORLD_TIME_OF_DAY,
             time_mode: TimeMode::Fixed,
             cycle_speed: 0.01,
             weather: WeatherSettings::default(),
             player_pos: spawn,
-            player_yaw: 0.0,
-            player_pitch: -0.15,
+            player_yaw: yaw,
+            player_pitch: pitch,
             ships: Vec::new(),
             ship_inventory: crate::ships::ShipInventory::default(),
             player_mining: PlayerMiningSave::default(),
@@ -1123,7 +1129,7 @@ mod tests {
         assert_eq!(settings.graphics, GraphicsMode::Fast);
         assert_eq!(settings.runtime_profile, RuntimeProfile::LowSpec);
         assert!(settings.render_distance <= 24);
-        assert_eq!(settings.vertical_chunks, 6);
+        assert_eq!(settings.vertical_chunks, 7);
 
         settings.apply_world_mode_card(WorldModeCard::Cinematic);
         assert_eq!(settings.graphics, GraphicsMode::High);

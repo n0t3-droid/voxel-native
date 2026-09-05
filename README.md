@@ -11,8 +11,15 @@ The project goal is not just a voxel sandbox.
 - **Bot-built cities:** friendly bot crews plan road-first city growth, keep a
   player-safe build buffer, and store project concepts with phases, owners,
   materials, structure, architecture, texture, and detail rows.
+- **One planet, every world:** every seed generates the same neon frontier
+  of banded canyon mesas, crystal spire fields, volcanic flats, glacier
+  ridges and bioluminescent reefs. There is no "normal" mode to leave.
 - **Cinematic voxel terrain:** procedural coastline, forests, terrain height,
   water, caves, and sci-fi landmarks are generated as real voxels.
+- **Landmarks that outgrow a chunk:** floating islands with glowing crystal
+  roots, elevated skyways bridging the canyons on lit pylons, hovering
+  docking platforms and tilted crystal clusters, all anchored to a
+  world-space lattice so they never depend on chunk generation order.
 - **Shuttle and shooter loop:** ships, weapons, drone combat, editor tools, and
   bot companions live in the same world instead of separate demos.
 - **Liquid-glass engine UI:** HUD, toolbelt, bot panels, and system surfaces are
@@ -20,7 +27,32 @@ The project goal is not just a voxel sandbox.
 
 ## Current Focus
 
-The latest engine work turns bot construction into a road-first city planner:
+The latest engine work makes the frontier planet the world every seed
+generates, rather than a showcase preset the player had to go looking for:
+
+- nine macro provinces replace the earth-like-only set, so crystal spires,
+  volcanic flats, glacier ridges and alien reefs turn up in ordinary worlds;
+- cliff faces, canyon walls and cave roofs share one violet/ochre strata
+  cycle that runs dead level across the whole map, and mesa tables grow a
+  green cap that stops at the cliff edge;
+- canyon floors carry glowing lava and plasma channels from two independent
+  river networks, so an orange river and a blue one can thread the same
+  canyon;
+- winding elevated skyways bridge those canyons on lit pylons and cut
+  straight through the mesas, following gradient-normalised noise contours
+  so a carriageway keeps its width and a deck keeps its level;
+- sky islands, docking stations and crystal clusters are stamped from a
+  world-space lattice, so a landmark that straddles four chunks is
+  identical no matter which chunk is generated first;
+- the ground palette was rebuilt for linear light after rendering showed
+  the old colours resolving to near-black next to the emissive blocks;
+- the vertical streaming budget grew to 10 chunks so the slab the sky
+  content lives in is actually loaded.
+
+The maths and the reasoning behind each piece live in
+[`docs/FRONTIER_WORLD.md`](docs/FRONTIER_WORLD.md).
+
+Bot construction remains a road-first city planner:
 
 - bot autonomy is command-gated by default: workers stay parked on load until
   the player places a city area or explicitly queues a bot task;

@@ -78,7 +78,11 @@ fn reload_material_library(
     if !library.reload_requested {
         return;
     }
-    library.rebuild(&mut materials, &mut images);
+    library.rebuild(
+        &mut materials,
+        &mut images,
+        crate::textures::BUILTIN_SWATCH_SIZE,
+    );
     let mut dirty = Vec::new();
     for chunk in world.chunks.values_mut() {
         chunk.dirty = true;
@@ -124,6 +128,7 @@ fn reinit_world_for_active(
     streamer.pending_terrain.clear();
     streamer.pending_meshes.clear();
     streamer.dirty_queue.clear();
+    streamer.mesh_blocked.clear();
     streamer.mesh_candidates_scratch.clear();
     streamer.load_offsets.clear();
     streamer.load_offsets_rd = -1;
@@ -132,6 +137,7 @@ fn reinit_world_for_active(
     streamer.frontier_complete = false;
     streamer.last_anchor_cxz = None;
     streamer.needs_orphan_scan = true;
+    streamer.stream_elapsed = 0.0;
     for (_, group) in streamer.entities.drain() {
         for entry in group {
             if let Some(entity_commands) = commands.get_entity(entry.entity) {
@@ -357,30 +363,24 @@ fn override_looks_like_visual_artifact(
     let wx = pos.x * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
     let wz = pos.z * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
     let biome = generator.biome_at(wx, wz);
-    if biome.is_showcase_terrain() {
-        return false;
-    }
 
+    // Crystal, moss, glow-sand and lava are ordinary frontier materials
+    // now, and the palette is a headline building feature, so a chunk
+    // full of them is a player's neon build - not an artifact. The only
+    // surviving signature is the old bug that flooded a chunk with solid
+    // ice or snow in a biome that has no business being frozen.
     let mut non_air = 0usize;
-    let mut showcase = 0usize;
     let mut cold = 0usize;
     for &voxel in &data.voxels {
         if voxel == AIR {
             continue;
         }
         non_air += 1;
-        match BlockType::from_voxel(voxel) {
-            BlockType::Crystal
-            | BlockType::LuminiteCrystal
-            | BlockType::MagnetiteOre
-            | BlockType::IridiumVein
-            | BlockType::AlienMoss
-            | BlockType::BoneRock
-            | BlockType::GlowSand
-            | BlockType::Basalt
-            | BlockType::Lava => showcase += 1,
-            BlockType::Snow | BlockType::Ice => cold += 1,
-            _ => {}
+        if matches!(
+            BlockType::from_voxel(voxel),
+            BlockType::Snow | BlockType::Ice
+        ) {
+            cold += 1;
         }
     }
 
@@ -388,16 +388,15 @@ fn override_looks_like_visual_artifact(
         return false;
     }
 
-    let showcase_ratio = showcase as f32 / non_air as f32;
     let cold_ratio = cold as f32 / non_air as f32;
-    showcase_ratio >= 0.35
-        || (cold_ratio >= 0.72
-            && !matches!(
-                biome,
-                crate::terrain::Biome::SnowyMountains
-                    | crate::terrain::Biome::Tundra
-                    | crate::terrain::Biome::Ocean
-            ))
+    cold_ratio >= 0.72
+        && !matches!(
+            biome,
+            crate::terrain::Biome::SnowyMountains
+                | crate::terrain::Biome::Tundra
+                | crate::terrain::Biome::Ocean
+                | crate::terrain::Biome::GlacierShards
+        )
 }
 
 fn now_epoch() -> u64 {
@@ -855,7 +854,7 @@ pub struct ChunkStreamer {
     pub pending_terrain: AHashMap<ChunkPos, Task<(ChunkPos, SharedVoxels)>>,
     /// In-flight meshing tasks (one per chunk position). `None` mesh =
     /// chunk is empty / uniform-solid and needs no geometry.
-    pub pending_meshes: AHashMap<ChunkPos, Task<(ChunkPos, Vec<(MaterialId, Mesh)>)>>,
+    pub pending_meshes: AHashMap<ChunkPos, Task<(ChunkPos, Vec<(MaterialId, Mesh)>, bool)>>,
     /// Dirty-chunk set so the mesh scheduler doesn't walk the entire
     /// chunk hashmap every frame AND so a given chunk cannot end up in
     /// the work list 20× per frame. Before this was a `Vec<ChunkPos>`
@@ -866,6 +865,11 @@ pub struct ChunkStreamer {
     /// contain the same ChunkPos thousands of times, causing a slow
     /// per-frame drift as the scheduler iterated the same duplicates.
     pub dirty_queue: AHashSet<ChunkPos>,
+    /// Chunks waiting on an in-disc neighbour that has not generated yet.
+    /// Kept out of `dirty_queue` so a still camera does not rescan them
+    /// every frame. Woken when that neighbour loads, or when the player
+    /// moves (LOD / deep-far skip may change).
+    pub mesh_blocked: AHashSet<ChunkPos>,
     /// Scratch buffer for the mesh scheduler's priority-sorted
     /// candidate list. Reused across frames to avoid a 10 KB+
     /// allocation per frame at RD=50.
@@ -894,6 +898,10 @@ pub struct ChunkStreamer {
     /// this flag only when the player crosses a chunk boundary (new
     /// chunks might be needed) or a chunk unloads (slot opened up).
     pub frontier_complete: bool,
+    /// Seconds since this world started streaming. First few seconds
+    /// fill a small disc as fast as possible so the player sees ground
+    /// instead of an empty sky.
+    pub stream_elapsed: f32,
     /// Last anchor chunk position we scanned from. When this changes, a
     /// new frontier sweep is required.
     pub last_anchor_cxz: Option<(i32, i32)>,
@@ -904,6 +912,7 @@ pub struct ChunkMeshEntity {
     pub entity: Entity,
     pub handle: Handle<Mesh>,
     pub material: MaterialId,
+    pub far_lod: bool,
 }
 
 fn init_world(
@@ -915,7 +924,14 @@ fn init_world(
     settings: Res<WorldSettings>,
 ) {
     world.generator = TerrainGenerator::new(settings.seed);
-    material_library.rebuild(&mut materials, &mut images);
+    let swatch_size = match settings.graphics {
+        crate::settings::GraphicsMode::Fast => 64,
+        // High used to bake 256² swatches on the first Startup frame,
+        // which delayed the window on iGPUs. 128 already survives mips;
+        // Cinematic stills stay readable and Fast actually appears.
+        crate::settings::GraphicsMode::Balanced | crate::settings::GraphicsMode::High => 128,
+    };
+    material_library.rebuild(&mut materials, &mut images, swatch_size);
 
     // Bake the procedural surface-grain texture once. 128×128 is the
     // sweet spot: still crisp at arm's length under `Repeat` sampling,
@@ -923,11 +939,7 @@ fn init_world(
     // the 6-octave + warp + Worley + strata + sparkle pipeline). Users
     // who drop a real 512²/1024² PNG in ./textures/universal_grain.png
     // get photorealistic detail for free via the override path.
-    let grain_size = match settings.graphics {
-        crate::settings::GraphicsMode::Fast => 64,
-        crate::settings::GraphicsMode::Balanced => 128,
-        crate::settings::GraphicsMode::High => 256,
-    };
+    let grain_size = swatch_size;
     let grain = images.add(crate::textures::universal_grain_or_override(grain_size));
 
     streamer.material = Some(materials.add(StandardMaterial {
@@ -972,6 +984,54 @@ fn biome_stream_bonus(generator: &TerrainGenerator, cx: i32, cz: i32) -> i32 {
     crate::daynight::BiomeArtProfile::for_biome(generator.biome_at(wx, wz)).streaming_bonus
 }
 
+/// Fast keeps a 6-chunk near field at full materials. Beyond that, opaque
+/// terrain collapses to one draw call. Balanced only collapses the outer
+/// third. Cinematic/High keep the rich far geometry.
+fn chunk_wants_far_lod(
+    graphics: crate::settings::GraphicsMode,
+    render_distance: i32,
+    dx: i32,
+    dz: i32,
+) -> bool {
+    let d2 = dx * dx + dz * dz;
+    match graphics {
+        crate::settings::GraphicsMode::Fast => d2 > 6 * 6,
+        crate::settings::GraphicsMode::Balanced => {
+            let r = (render_distance * 2 / 3).max(10);
+            d2 > r * r
+        }
+        crate::settings::GraphicsMode::High => false,
+    }
+}
+
+/// Per-corner AO is what makes nearby voxels read as cubes. Past a short
+/// radius those same dark corners become the flying-distance waffle on
+/// every cliff face. Fast skips AO entirely; cinematic keeps it only in
+/// the near 8 chunks (128 m) so spawn colony detail survives.
+fn chunk_uses_vertex_ao(
+    graphics: crate::settings::GraphicsMode,
+    render_distance: i32,
+    dx: i32,
+    dz: i32,
+) -> bool {
+    let d2 = dx * dx + dz * dz;
+    match graphics {
+        crate::settings::GraphicsMode::Fast => false,
+        crate::settings::GraphicsMode::Balanced => {
+            let r = (render_distance / 2).max(4);
+            d2 <= r * r
+        }
+        crate::settings::GraphicsMode::High => d2 <= 8 * 8,
+    }
+}
+
+/// Fast far columns keep the surface slab, one below for cliff faces,
+/// and the +2 safety slabs for trees / low islands. Deep underground
+/// is skipped until the player flies closer.
+fn skip_fast_deep_far(fast: bool, far_lod: bool, cy: i32, col_top: i32) -> bool {
+    fast && far_lod && cy + 3 < col_top
+}
+
 fn rebuild_load_offsets(streamer: &mut ChunkStreamer, rd: i32) {
     streamer.load_offsets.clear();
     let rd2 = rd * rd;
@@ -1006,6 +1066,123 @@ fn chunk_slot_loaded_or_known_air(
     vertical_chunks: i32,
 ) -> bool {
     world.chunks.contains_key(&pos) || chunk_slot_known_air(world, pos, vertical_chunks)
+}
+
+/// True when this slot will never get a real chunk at the current
+/// horizon: outside the load disc, above the column ceiling, or Fast
+/// far underground that we deliberately do not generate.
+fn chunk_slot_never_generated(
+    world: &mut VoxelWorld,
+    pos: ChunkPos,
+    vertical_chunks: i32,
+    pcx: i32,
+    pcz: i32,
+    load_r2: i32,
+    fast: bool,
+    graphics: crate::settings::GraphicsMode,
+    rd: i32,
+) -> bool {
+    if pos.y < 0 || pos.y >= vertical_chunks {
+        return true;
+    }
+    let dx = pos.x - pcx;
+    let dz = pos.z - pcz;
+    if dx * dx + dz * dz > load_r2 {
+        return true;
+    }
+    let col_top = world.column_top_cy_cached(pos.x, pos.z);
+    if pos.y > col_top {
+        return true;
+    }
+    skip_fast_deep_far(
+        fast,
+        chunk_wants_far_lod(graphics, rd, dx, dz),
+        pos.y,
+        col_top,
+    )
+}
+
+/// Neighbours past the load disc, above the column, or in the Fast far
+/// underground skip are never generated. Treat those slots as ready so
+/// the dirty queue can drain; the snapshot already samples missing
+/// voxels as AIR. Inside the disc we still wait on real terrain jobs.
+fn chunk_slot_mesh_neighbour_ready(
+    world: &mut VoxelWorld,
+    pos: ChunkPos,
+    vertical_chunks: i32,
+    pcx: i32,
+    pcz: i32,
+    load_r2: i32,
+    fast: bool,
+    graphics: crate::settings::GraphicsMode,
+    rd: i32,
+) -> bool {
+    world.chunks.contains_key(&pos)
+        || chunk_slot_never_generated(
+            world,
+            pos,
+            vertical_chunks,
+            pcx,
+            pcz,
+            load_r2,
+            fast,
+            graphics,
+            rd,
+        )
+}
+
+/// Far uniform solid is buried (no visible face) when every neighbour is
+/// the same solid, or a Fast deep-far slot we will never generate.
+/// Outside-disc / known-air neighbours are a real surface — those mesh.
+fn far_uniform_solid_is_hidden(
+    world: &mut VoxelWorld,
+    pos: ChunkPos,
+    vertical_chunks: i32,
+    pcx: i32,
+    pcz: i32,
+    load_r2: i32,
+    fast: bool,
+    graphics: crate::settings::GraphicsMode,
+    rd: i32,
+) -> bool {
+    let expected = {
+        let Some(center) = world.chunks.get(&pos) else {
+            return false;
+        };
+        if !center.is_uniform_solid {
+            return false;
+        }
+        center.uniform_voxel
+    };
+    [
+        ChunkPos::new(pos.x + 1, pos.y, pos.z),
+        ChunkPos::new(pos.x - 1, pos.y, pos.z),
+        ChunkPos::new(pos.x, pos.y, pos.z + 1),
+        ChunkPos::new(pos.x, pos.y, pos.z - 1),
+        ChunkPos::new(pos.x, pos.y + 1, pos.z),
+        ChunkPos::new(pos.x, pos.y - 1, pos.z),
+    ]
+    .into_iter()
+    .all(|n| {
+        if let Some(chunk) = world.chunks.get(&n) {
+            return chunk.is_uniform_solid && chunk.uniform_voxel == expected;
+        }
+        if chunk_slot_known_air(world, n, vertical_chunks) {
+            return false;
+        }
+        let dx = n.x - pcx;
+        let dz = n.z - pcz;
+        if dx * dx + dz * dz > load_r2 {
+            return false;
+        }
+        let col_top = world.column_top_cy_cached(n.x, n.z);
+        skip_fast_deep_far(
+            fast,
+            chunk_wants_far_lod(graphics, rd, dx, dz),
+            n.y,
+            col_top,
+        )
+    })
 }
 
 #[inline]
@@ -1084,6 +1261,7 @@ fn stream_chunks(
     anchors: Query<&Transform, With<ChunkAnchor>>,
     settings: Res<WorldSettings>,
     budget: Res<RuntimeBudget>,
+    time: Res<Time>,
     mut world: ResMut<VoxelWorld>,
     mut streamer: ResMut<ChunkStreamer>,
     mut governor: ResMut<StreamingGovernor>,
@@ -1099,7 +1277,26 @@ fn stream_chunks(
     let pcx = px.div_euclid(CHUNK_SIZE_I);
     let pcz = pz.div_euclid(CHUNK_SIZE_I);
 
-    let rd = sync_streaming_governor(&mut governor, &budget, &streamer);
+    streamer.stream_elapsed += time.delta_seconds();
+    // Staged startup: fill a spawn ring first, then open the horizon.
+    // Holding RD=8 for a full 4s made Fast/iGPU worlds feel like they
+    // "take super long till it shows up" — the disc was ready but the
+    // streamer refused to apply it.
+    let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
+    let elapsed = streamer.stream_elapsed;
+    let mut rd = sync_streaming_governor(&mut governor, &budget, &streamer);
+    let (rd_cap, warmup_boost) = if elapsed < 0.90 {
+        (if fast { 5 } else { 6 }, true)
+    } else if elapsed < 2.20 {
+        (if fast { 8 } else { 10 }, true)
+    } else if elapsed < 3.40 {
+        (rd.min(if fast { 12 } else { 16 }), elapsed < 3.0)
+    } else if elapsed < 5.0 {
+        (rd.min(if fast { 12 } else { 18 }), false)
+    } else {
+        (rd, false)
+    };
+    rd = rd.min(rd_cap).max(2);
     let retain = rd + 2;
     let retain2 = retain * retain;
     let vertical = settings.vertical_chunks as i32;
@@ -1123,6 +1320,10 @@ fn stream_chunks(
         streamer.frontier_complete = false;
         streamer.last_anchor_cxz = Some(cur_anchor);
         streamer.load_cursor = 0;
+        // LOD and deep-far skip are camera-relative; blocked chunks may
+        // now be near-field or have neighbours that will generate.
+        let woken: Vec<ChunkPos> = streamer.mesh_blocked.drain().collect();
+        streamer.dirty_queue.extend(woken);
     }
 
     // 1. Unload chunks outside the retention radius (also drop stale
@@ -1166,13 +1367,23 @@ fn stream_chunks(
         streamer.dirty_queue.retain(|p| {
             (p.x - pcx).pow(2) + (p.z - pcz).pow(2) <= retain2 && p.y >= 0 && p.y < vertical
         });
+        streamer.mesh_blocked.retain(|p| {
+            (p.x - pcx).pow(2) + (p.z - pcz).pow(2) <= retain2 && p.y >= 0 && p.y < vertical
+        });
     }
 
     // 2. Poll finished terrain tasks and fold them back into the world.
     // Cap installs too: terrain generation finishes on worker threads in
     // waves, and installing every completed chunk in one frame causes the
     // one-second hitch the player sees while flying at max distance.
-    let terrain_apply_cap = (budget.chunks_per_frame.max(1) as usize).min(6);
+    let terrain_apply_cap = if warmup_boost || budget.startup_fill {
+        (budget.chunks_per_frame.max(1) as usize)
+            .saturating_mul(if warmup_boost { 3 } else { 2 })
+            .max(if fast { 20 } else { 16 })
+            .min(if fast { 40 } else { 32 })
+    } else {
+        (budget.chunks_per_frame.max(1) as usize).min(12)
+    };
     let mut applied_terrain = 0usize;
     let mut done: Vec<ChunkPos> = Vec::new();
     let mut newly_loaded: Vec<ChunkPos> = Vec::new();
@@ -1200,6 +1411,7 @@ fn stream_chunks(
     // Enqueue every newly-loaded chunk + its 6 neighbours so seams get
     // remeshed cleanly without a whole-world scan.
     for cp in newly_loaded {
+        streamer.mesh_blocked.remove(&cp);
         streamer.dirty_queue.insert(cp);
         for (dx, dy, dz) in [
             (1, 0, 0),
@@ -1210,6 +1422,24 @@ fn stream_chunks(
             (0, 0, -1),
         ] {
             let n = ChunkPos::new(cp.x + dx, cp.y + dy, cp.z + dz);
+            if streamer.mesh_blocked.remove(&n) {
+                if let Some(c) = world.chunks.get_mut(&n) {
+                    c.dirty = true;
+                }
+                streamer.dirty_queue.insert(n);
+            }
+            // Fast far meshes skip seam remesh later; don't keep those
+            // neighbours in the dirty queue or the governor never settles.
+            if fast {
+                let already_far = streamer
+                    .entities
+                    .get(&n)
+                    .and_then(|group| group.first())
+                    .is_some_and(|entry| entry.far_lod);
+                if already_far && chunk_wants_far_lod(settings.graphics, rd, n.x - pcx, n.z - pcz) {
+                    continue;
+                }
+            }
             if let Some(c) = world.chunks.get_mut(&n) {
                 c.dirty = true;
                 streamer.dirty_queue.insert(n);
@@ -1231,7 +1461,11 @@ fn stream_chunks(
         #[cfg(not(target_arch = "wasm32"))]
         let pool = AsyncComputeTaskPool::get();
         let gen_seed = world.generator.seed;
-        let spawn_budget = budget.chunks_per_frame.max(1) as usize;
+        let spawn_budget = if warmup_boost {
+            (budget.chunks_per_frame.max(1) as usize).max(if fast { 16 } else { 12 })
+        } else {
+            budget.chunks_per_frame.max(1) as usize
+        };
         let scan_budget = (spawn_budget * 192).min(streamer.load_offsets.len()).max(1);
         let mut spawned = 0usize;
         let mut scanned = 0usize;
@@ -1254,6 +1488,14 @@ fn stream_chunks(
                     continue;
                 }
                 if cy > col_top {
+                    continue;
+                }
+                if skip_fast_deep_far(
+                    fast,
+                    chunk_wants_far_lod(settings.graphics, rd, dx, dz),
+                    cy,
+                    col_top,
+                ) {
                     continue;
                 }
                 if streamer.pending_terrain.len() >= max_in_flight || spawned >= spawn_budget {
@@ -1298,6 +1540,22 @@ fn stream_chunks(
     }
 }
 
+fn despawn_streamer_chunk_meshes(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    streamer: &mut ChunkStreamer,
+    pos: ChunkPos,
+) {
+    if let Some(previous) = streamer.entities.remove(&pos) {
+        for entry in previous {
+            if let Some(entity_commands) = commands.get_entity(entry.entity) {
+                entity_commands.despawn_recursive();
+            }
+            let _ = meshes.remove(&entry.handle);
+        }
+    }
+}
+
 /// Re-mesh every chunk marked dirty. Meshing runs on background threads
 /// using cheap `Arc`-clone snapshots of the chunk + 6 cardinal neighbours
 /// so the main thread doesn't touch chunk storage while the mesher works.
@@ -1330,17 +1588,29 @@ fn mesh_dirty_chunks(
     // 1. Poll finished meshing tasks. Cap how many we actually *apply*
     //    (spawn entities for) per frame so a flood of finished tasks
     //    can't spike the frame budget with mesh.add() + commands.spawn().
-    let spawn_cap = budget.mesh_applies_per_frame as usize;
+    let spawn_cap = if budget.startup_fill || streamer.stream_elapsed < 2.4 {
+        (budget.mesh_applies_per_frame as usize)
+            .saturating_mul(3)
+            .max(24)
+            .min(56)
+    } else if streamer.stream_elapsed < 4.0 {
+        (budget.mesh_applies_per_frame as usize)
+            .saturating_mul(2)
+            .max(16)
+            .min(48)
+    } else {
+        budget.mesh_applies_per_frame as usize
+    };
     let mut applied = 0usize;
     let mut done_keys: Vec<ChunkPos> = Vec::new();
-    let mut finished: Vec<(ChunkPos, Vec<(MaterialId, Mesh)>)> = Vec::new();
+    let mut finished: Vec<(ChunkPos, Vec<(MaterialId, Mesh)>, bool)> = Vec::new();
 
     for (pos, task) in streamer.pending_meshes.iter_mut() {
         if applied >= spawn_cap {
             break;
         }
-        if let Some((cp, mesh)) = future::block_on(future::poll_once(task)) {
-            finished.push((cp, mesh));
+        if let Some((cp, mesh, far_lod)) = future::block_on(future::poll_once(task)) {
+            finished.push((cp, mesh, far_lod));
             done_keys.push(*pos);
             applied += 1;
         }
@@ -1348,7 +1618,7 @@ fn mesh_dirty_chunks(
     for p in done_keys {
         streamer.pending_meshes.remove(&p);
     }
-    for (pos, buckets) in finished {
+    for (pos, buckets, far_lod) in finished {
         let mut previous = streamer.entities.remove(&pos).unwrap_or_default();
         if buckets.is_empty() {
             for entry in previous {
@@ -1395,6 +1665,7 @@ fn mesh_dirty_chunks(
                     }
                     entry.handle = new_handle;
                 }
+                entry.far_lod = far_lod;
                 next_entries.push(entry);
                 continue;
             }
@@ -1430,6 +1701,7 @@ fn mesh_dirty_chunks(
                 entity,
                 handle,
                 material: material_id,
+                far_lod,
             });
         }
 
@@ -1445,12 +1717,18 @@ fn mesh_dirty_chunks(
         }
     }
 
-    // 2. Queue new mesh jobs. Camera-priority first.
+    // 2. Classify dirty, then queue mesh jobs. Empty chunks and far
+    //    buried uniform solids never produce a visible surface — drop
+    //    them here so a still camera's dirty queue can reach zero.
+    //    Neighbour waits go to `mesh_blocked` instead of spinning in
+    //    dirty_queue. Classify even when in-flight slots are full.
     let max_in_flight = budget.max_in_flight_meshes as usize;
-    if streamer.pending_meshes.len() >= max_in_flight {
-        return;
-    }
-
+    let vertical_chunks = settings.vertical_chunks as i32;
+    let load_r2 = budget.render_distance.max(2) * budget.render_distance.max(2);
+    let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
+    let graphics = settings.graphics;
+    let rd = budget.render_distance;
+    let disc_up = streamer.frontier_complete && streamer.pending_terrain.is_empty();
     let forward = anchors
         .get_single()
         .map(|t| {
@@ -1459,31 +1737,11 @@ fn mesh_dirty_chunks(
         })
         .unwrap_or(Vec2::ZERO);
 
-    // Drain a bounded window of the dirty set into a candidate list.
-    // Retain anything we can't schedule this frame (no slots / missing
-    // neighbours) so it is picked up next frame. We deliberately avoid
-    // sorting the whole dirty backlog: bot cities, road edits, and dense
-    // scenic biomes can mark thousands of chunks dirty at once, while the
-    // runtime budget may only allow a handful of mesh jobs this frame.
     let mut candidates = std::mem::take(&mut streamer.mesh_candidates_scratch);
     candidates.clear();
-    let dirty_total = streamer.dirty_queue.len();
-    let schedule_budget = budget.meshes_per_frame.max(1) as usize;
-    let scan_budget = dirty_mesh_candidate_scan_budget(
-        dirty_total,
-        schedule_budget,
-        max_in_flight,
-        budget.queue_pressure.max(budget.frame_pressure),
-    );
-    candidates.reserve(scan_budget.min(dirty_total));
     let queue: AHashSet<ChunkPos> = std::mem::take(&mut streamer.dirty_queue);
-    let mut scanned = 0usize;
-    let mut queue_iter = queue.into_iter();
-    while scanned < scan_budget {
-        let Some(p) = queue_iter.next() else {
-            break;
-        };
-        scanned += 1;
+    candidates.reserve(queue.len().min(256));
+    for p in queue {
         let Some(c) = world.chunks.get(&p) else {
             continue;
         };
@@ -1491,138 +1749,169 @@ fn mesh_dirty_chunks(
             continue;
         }
         if streamer.pending_meshes.contains_key(&p) {
-            // A mesh task is already in-flight for this chunk based on
-            // potentially stale neighbour data. We must NOT drop the
-            // dirty flag here — put it back in the set so the next
-            // frame (after the stale task finishes and drains out of
-            // pending_meshes) re-enqueues a fresh task with the current
-            // neighbour data. Dropping it here caused permanent dark
-            // patches whenever a neighbour streamed in while the chunk
-            // was already meshing.
             streamer.dirty_queue.insert(p);
             continue;
         }
+        let is_empty = c.is_empty;
+        let is_uniform_solid = c.is_uniform_solid;
+        let dx = p.x - pcx;
+        let dz = p.z - pcz;
+        let far_collapse = chunk_wants_far_lod(graphics, rd, dx, dz);
+
+        if is_empty {
+            despawn_streamer_chunk_meshes(&mut commands, &mut meshes, &mut streamer, p);
+            if let Some(chunk) = world.chunks.get_mut(&p) {
+                chunk.dirty = false;
+            }
+            continue;
+        }
+        if far_collapse
+            && is_uniform_solid
+            && far_uniform_solid_is_hidden(
+                &mut world,
+                p,
+                vertical_chunks,
+                pcx,
+                pcz,
+                load_r2,
+                fast,
+                graphics,
+                rd,
+            )
+        {
+            despawn_streamer_chunk_meshes(&mut commands, &mut meshes, &mut streamer, p);
+            if let Some(chunk) = world.chunks.get_mut(&p) {
+                chunk.dirty = false;
+            }
+            continue;
+        }
+        let already_far_lod = streamer
+            .entities
+            .get(&p)
+            .and_then(|group| group.first())
+            .is_some_and(|entry| entry.far_lod);
+        if far_collapse && already_far_lod {
+            if let Some(chunk) = world.chunks.get_mut(&p) {
+                chunk.dirty = false;
+            }
+            continue;
+        }
+
+        let neighbours_needed = [
+            ChunkPos::new(p.x + 1, p.y, p.z),
+            ChunkPos::new(p.x - 1, p.y, p.z),
+            ChunkPos::new(p.x, p.y, p.z + 1),
+            ChunkPos::new(p.x, p.y, p.z - 1),
+            ChunkPos::new(p.x, p.y + 1, p.z),
+            ChunkPos::new(p.x, p.y - 1, p.z),
+        ];
+        let all_neighbours_ready = neighbours_needed.into_iter().all(|n| {
+            chunk_slot_mesh_neighbour_ready(
+                &mut world,
+                n,
+                vertical_chunks,
+                pcx,
+                pcz,
+                load_r2,
+                fast,
+                graphics,
+                rd,
+            )
+        });
+        if !all_neighbours_ready && !disc_up {
+            streamer.mesh_blocked.insert(p);
+            continue;
+        }
+
         let scenic = biome_stream_bonus(&world.generator, p.x, p.z);
-        candidates.push((priority_score(p.x - pcx, p.z - pcz, forward) + scenic, p));
+        candidates.push((priority_score(dx, dz, forward) + scenic, p));
     }
-    streamer.dirty_queue.extend(queue_iter);
+
+    let schedule_budget = budget.meshes_per_frame.max(1) as usize;
     candidates.sort_unstable_by_key(|(s, _)| *s);
 
-    #[cfg(not(target_arch = "wasm32"))]
-    let pool = AsyncComputeTaskPool::get();
-    let mut slots = max_in_flight - streamer.pending_meshes.len();
-    let mut scheduled_this_frame = 0usize;
-
-    for (_s, pos) in candidates.drain(..) {
-        if slots == 0 || scheduled_this_frame >= schedule_budget {
-            // Put back into the dirty set for next frame.
+    if streamer.pending_meshes.len() >= max_in_flight {
+        for (_s, pos) in candidates.drain(..) {
             streamer.dirty_queue.insert(pos);
-            continue;
         }
-        // Seam avoidance: require all 6 cardinal neighbours to be loaded
-        // or proven-air before meshing. Horizontal neighbours prevent XZ seams; vertical
-        // neighbours close a nasty streaming race where a chunk meshed
-        // with its top neighbour missing would sample AIR above, cache
-        // the top faces, and then — if the newly-loaded top chunk's
-        // dirty re-queue happened while this chunk was already in
-        // pending_meshes — never get re-meshed, leaving visible holes /
-        // dark patches scattered across the terrain at high altitudes.
-        // Terrain slots above the cached column ceiling are treated as
-        // implicit AIR, so the streamer does not need placeholder chunks.
-        let vertical_chunks = settings.vertical_chunks as i32;
-        let neighbours_needed = [
-            ChunkPos::new(pos.x + 1, pos.y, pos.z),
-            ChunkPos::new(pos.x - 1, pos.y, pos.z),
-            ChunkPos::new(pos.x, pos.y, pos.z + 1),
-            ChunkPos::new(pos.x, pos.y, pos.z - 1),
-            ChunkPos::new(pos.x, pos.y + 1, pos.z),
-            ChunkPos::new(pos.x, pos.y - 1, pos.z),
-        ];
-        let all_neighbours_ready = neighbours_needed
-            .into_iter()
-            .all(|n| chunk_slot_loaded_or_known_air(&mut world, n, vertical_chunks));
-        if !all_neighbours_ready {
-            // Neighbours haven't streamed in yet; try again next frame.
-            streamer.dirty_queue.insert(pos);
-            continue;
-        }
+        streamer.mesh_candidates_scratch = candidates;
+    } else {
+        #[cfg(not(target_arch = "wasm32"))]
+        let pool = AsyncComputeTaskPool::get();
+        let mut slots = max_in_flight - streamer.pending_meshes.len();
+        let mut scheduled_this_frame = 0usize;
 
-        // Safe fast-skip: a uniform chunk is invisible iff every one of
-        // its 6 neighbours is the same uniform voxel, or the neighbour
-        // slot is known implicit AIR and this chunk is AIR too.
-        let fast_skip = uniform_chunk_is_trivially_invisible(&mut world, pos, vertical_chunks);
-        if fast_skip {
-            if let Some(previous) = streamer.entities.remove(&pos) {
-                for entry in previous {
-                    if let Some(entity_commands) = commands.get_entity(entry.entity) {
-                        entity_commands.despawn_recursive();
-                    }
-                    let _ = meshes.remove(&entry.handle);
-                }
+        for (_s, pos) in candidates.drain(..) {
+            let dx = pos.x - pcx;
+            let dz = pos.z - pcz;
+            let far_collapse = chunk_wants_far_lod(graphics, rd, dx, dz);
+            if slots == 0 || scheduled_this_frame >= schedule_budget {
+                streamer.dirty_queue.insert(pos);
+                continue;
             }
+            let fast_skip = uniform_chunk_is_trivially_invisible(&mut world, pos, vertical_chunks);
+            if fast_skip {
+                despawn_streamer_chunk_meshes(&mut commands, &mut meshes, &mut streamer, pos);
+                if let Some(c) = world.chunks.get_mut(&pos) {
+                    c.dirty = false;
+                }
+                continue;
+            }
+
+            let snap = ChunkSnapshot::build(&world, pos);
+
+            // Mark clean BEFORE the task starts so a second mutation during
+            // meshing will still re-flag the chunk as dirty.
             if let Some(c) = world.chunks.get_mut(&pos) {
                 c.dirty = false;
             }
-            continue;
-        }
 
-        let snap = ChunkSnapshot::build(&world, pos);
+            // LOD: skip per-corner AO past `lod_radius`. Fast also collapses
+            // opaque far chunks to one draw call (vertex-tinted + emissives).
+            let use_ao = chunk_uses_vertex_ao(graphics, rd, dx, dz);
 
-        // Mark clean BEFORE the task starts so a second mutation during
-        // meshing will still re-flag the chunk as dirty.
-        if let Some(c) = world.chunks.get_mut(&pos) {
-            c.dirty = false;
-        }
-
-        // LOD: chunks further than `lod_radius` from the player skip
-        // per-corner ambient occlusion. Visually indistinguishable
-        // through fog at that distance; mesher runs ~3× faster and
-        // emits ~40% fewer triangles (greedy merge no longer breaks
-        // on AO seams). Threshold chosen so the nearest ~60% of the
-        // visible disc keeps full-quality AO.
-        let lod_radius = (budget.render_distance / 2).max(4);
-        let dx = pos.x - pcx;
-        let dz = pos.z - pcz;
-        let use_ao = dx * dx + dz * dz <= lod_radius * lod_radius;
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let buckets = build_mesh_buckets_ex(
-                pos,
-                |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
-                use_ao,
-            );
-            apply_mesh_buckets_now(
-                &mut commands,
-                &mut meshes,
-                &mut streamer,
-                &material_library,
-                &budget,
-                pcx,
-                pcz,
-                pos,
-                buckets,
-            );
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let task = pool.spawn(async move {
+            #[cfg(target_arch = "wasm32")]
+            {
                 let buckets = build_mesh_buckets_ex(
                     pos,
                     |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
                     use_ao,
+                    far_collapse,
                 );
-                (pos, buckets)
-            });
-            streamer.pending_meshes.insert(pos, task);
+                apply_mesh_buckets_now(
+                    &mut commands,
+                    &mut meshes,
+                    &mut streamer,
+                    &material_library,
+                    &budget,
+                    pcx,
+                    pcz,
+                    pos,
+                    buckets,
+                    far_collapse,
+                );
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let task = pool.spawn(async move {
+                    let buckets = build_mesh_buckets_ex(
+                        pos,
+                        |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
+                        use_ao,
+                        far_collapse,
+                    );
+                    (pos, buckets, far_collapse)
+                });
+                streamer.pending_meshes.insert(pos, task);
+            }
+            slots -= 1;
+            scheduled_this_frame += 1;
         }
-        slots -= 1;
-        scheduled_this_frame += 1;
-    }
 
-    // Return the scratch buffer to the resource so it keeps its
-    // allocated capacity for next frame.
-    streamer.mesh_candidates_scratch = candidates;
+        // Return the scratch buffer to the resource so it keeps its
+        // allocated capacity for next frame.
+        streamer.mesh_candidates_scratch = candidates;
+    }
 
     // 3. Clean up orphaned mesh entities whose chunk has streamed out.
     //    Free the GPU buffer too so long sessions don't accumulate.
@@ -1673,6 +1962,7 @@ fn mark_chunk_and_neighbours_dirty(
     }
 }
 
+#[cfg(test)]
 fn dirty_mesh_candidate_scan_budget(
     dirty_total: usize,
     schedule_budget: usize,
@@ -1710,6 +2000,7 @@ fn apply_mesh_buckets_now(
     pcz: i32,
     pos: ChunkPos,
     buckets: Vec<(MaterialId, Mesh)>,
+    far_lod: bool,
 ) {
     let mut previous = streamer.entities.remove(&pos).unwrap_or_default();
     if buckets.is_empty() {
@@ -1755,6 +2046,7 @@ fn apply_mesh_buckets_now(
                 }
                 entry.handle = new_handle;
             }
+            entry.far_lod = far_lod;
             next_entries.push(entry);
             continue;
         }
@@ -1790,6 +2082,7 @@ fn apply_mesh_buckets_now(
             entity,
             handle,
             material: material_id,
+            far_lod,
         });
     }
 
@@ -1985,14 +2278,12 @@ mod tests {
     }
 
     #[test]
-    fn visual_artifact_repair_removes_showcase_override_and_regenerates_loaded_chunk() {
+    fn visual_artifact_repair_removes_frozen_override_and_regenerates_loaded_chunk() {
         let mut world = VoxelWorld::new();
         let pos = ChunkPos::new(0, 3, 0);
-        let alien_moss: Voxel = BlockType::AlienMoss.into();
-        world
-            .edited_overrides
-            .insert(pos, override_chunk(alien_moss));
-        world.insert_chunk(pos, solid_chunk(pos, alien_moss));
+        let ice: Voxel = BlockType::Ice.into();
+        world.edited_overrides.insert(pos, override_chunk(ice));
+        world.insert_chunk(pos, solid_chunk(pos, ice));
 
         let report = world.repair_visual_artifact_overrides();
 
@@ -2003,7 +2294,7 @@ mod tests {
         assert!(!world.edited_overrides.contains_key(&pos));
         assert!(world.edit_save_dirty);
         assert!(world.edit_dirty_chunks.contains(&pos));
-        assert_ne!(world.chunks.get(&pos).unwrap().get(0, 0, 0), alien_moss);
+        assert_ne!(world.chunks.get(&pos).unwrap().get(0, 0, 0), ice);
     }
 
     #[test]
@@ -2022,5 +2313,182 @@ mod tests {
         assert_eq!(world.last_repair_report, Some(report));
         assert!(world.edited_overrides.contains_key(&pos));
         assert!(!world.edit_save_dirty);
+    }
+
+    #[test]
+    fn visual_artifact_repair_keeps_neon_builds_made_from_the_frontier_palette() {
+        // Crystal and glow-sand are ordinary frontier materials and a
+        // headline building feature. Wiping a player's neon tower as an
+        // "artifact" would be the single most destructive thing the
+        // repair pass could do.
+        for block in [
+            BlockType::Crystal,
+            BlockType::LuminiteCrystal,
+            BlockType::AlienMoss,
+            BlockType::GlowSand,
+            BlockType::CrystalMagenta,
+            BlockType::PlatingWhite,
+        ] {
+            let mut world = VoxelWorld::new();
+            let pos = ChunkPos::new(2, 3, 2);
+            world
+                .edited_overrides
+                .insert(pos, override_chunk(block.into()));
+
+            let report = world.repair_visual_artifact_overrides();
+
+            assert_eq!(
+                report.removed_chunks, 0,
+                "repair pass deleted a build made of {block:?}"
+            );
+            assert!(world.edited_overrides.contains_key(&pos));
+        }
+    }
+
+    #[test]
+    fn fast_collapses_far_chunks_and_cinematic_does_not() {
+        assert!(chunk_wants_far_lod(
+            crate::settings::GraphicsMode::Fast,
+            16,
+            8,
+            0
+        ));
+        assert!(!chunk_wants_far_lod(
+            crate::settings::GraphicsMode::Fast,
+            16,
+            4,
+            0
+        ));
+        assert!(!chunk_wants_far_lod(
+            crate::settings::GraphicsMode::High,
+            40,
+            20,
+            0
+        ));
+        assert!(!chunk_uses_vertex_ao(
+            crate::settings::GraphicsMode::Fast,
+            16,
+            2,
+            0
+        ));
+        assert!(chunk_uses_vertex_ao(
+            crate::settings::GraphicsMode::High,
+            32,
+            4,
+            0
+        ));
+        assert!(
+            !chunk_uses_vertex_ao(crate::settings::GraphicsMode::High, 32, 12, 0),
+            "cinematic far cliffs must drop vertex AO or they waffle"
+        );
+        assert!(skip_fast_deep_far(true, true, 0, 6));
+        assert!(!skip_fast_deep_far(true, true, 4, 6));
+        assert!(!skip_fast_deep_far(true, false, 0, 6));
+        assert!(!skip_fast_deep_far(false, true, 0, 6));
+    }
+
+    #[test]
+    fn mesh_neighbours_outside_the_load_disc_count_as_ready() {
+        let mut world = VoxelWorld::new();
+        let load_r2 = 12 * 12;
+        let graphics = crate::settings::GraphicsMode::Fast;
+        world.column_top_cy.insert((5, 0), 2);
+        world.column_top_cy.insert((13, 0), 2);
+        world.column_top_cy.insert((8, 0), 6);
+        assert!(chunk_slot_mesh_neighbour_ready(
+            &mut world,
+            ChunkPos::new(13, 0, 0),
+            7,
+            0,
+            0,
+            load_r2,
+            true,
+            graphics,
+            12
+        ));
+        assert!(!chunk_slot_mesh_neighbour_ready(
+            &mut world,
+            ChunkPos::new(5, 0, 0),
+            7,
+            0,
+            0,
+            load_r2,
+            true,
+            graphics,
+            12
+        ));
+        // Fast far underground is never generated, so it must not pin
+        // the dirty queue.
+        assert!(chunk_slot_mesh_neighbour_ready(
+            &mut world,
+            ChunkPos::new(8, 0, 0),
+            7,
+            0,
+            0,
+            load_r2,
+            true,
+            graphics,
+            12
+        ));
+        world.insert_chunk(ChunkPos::new(5, 0, 0), Chunk::new(ChunkPos::new(5, 0, 0)));
+        assert!(chunk_slot_mesh_neighbour_ready(
+            &mut world,
+            ChunkPos::new(5, 0, 0),
+            7,
+            0,
+            0,
+            load_r2,
+            true,
+            graphics,
+            12
+        ));
+    }
+
+    #[test]
+    fn far_uniform_solid_against_deep_far_skip_is_hidden() {
+        let mut world = VoxelWorld::new();
+        let graphics = crate::settings::GraphicsMode::Fast;
+        let pos = ChunkPos::new(8, 3, 0);
+        for (cx, cz) in [(8, 0), (7, 0), (9, 0), (8, -1), (8, 1)] {
+            world.column_top_cy.insert((cx, cz), 6);
+        }
+        let stone = BlockType::Stone.into();
+        world.insert_chunk(pos, solid_chunk(pos, stone));
+        for n in [
+            ChunkPos::new(9, 3, 0),
+            ChunkPos::new(7, 3, 0),
+            ChunkPos::new(8, 3, 1),
+            ChunkPos::new(8, 3, -1),
+            ChunkPos::new(8, 4, 0),
+        ] {
+            world.insert_chunk(n, solid_chunk(n, stone));
+        }
+        // Bottom neighbour (8,2,0) is Fast far underground — never generated.
+        assert!(far_uniform_solid_is_hidden(
+            &mut world,
+            pos,
+            7,
+            0,
+            0,
+            12 * 12,
+            true,
+            graphics,
+            12
+        ));
+
+        let near = ChunkPos::new(4, 1, 0);
+        world.column_top_cy.insert((4, 0), 4);
+        world.insert_chunk(near, solid_chunk(near, stone));
+        assert!(!far_uniform_solid_is_hidden(
+            &mut world,
+            near,
+            7,
+            0,
+            0,
+            12 * 12,
+            true,
+            graphics,
+            12
+        ));
     }
 }

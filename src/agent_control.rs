@@ -31,6 +31,7 @@ impl Plugin for AgentControlPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(AgentControlState::from_env())
             .insert_resource(AgentControlRuntime::from_env())
+            .add_systems(PreStartup, apply_agent_world_card_before_init)
             .add_systems(Startup, agent_control_startup_marker)
             .add_systems(
                 PreUpdate,
@@ -85,6 +86,7 @@ pub struct AgentControlState {
     pub handoff: bool,
     pub screenshot: bool,
     pub exit: bool,
+    pub hide_hud: bool,
     pub status: String,
 }
 
@@ -113,6 +115,7 @@ impl Default for AgentControlState {
             handoff: false,
             screenshot: false,
             exit: false,
+            hide_hud: false,
             status: "agent control off".into(),
         }
     }
@@ -237,6 +240,7 @@ struct AgentControlCommand {
     handoff: bool,
     screenshot: bool,
     exit: bool,
+    hide_hud: bool,
 }
 
 impl Default for AgentControlCommand {
@@ -263,6 +267,7 @@ impl Default for AgentControlCommand {
             handoff: false,
             screenshot: false,
             exit: false,
+            hide_hud: false,
         }
     }
 }
@@ -316,6 +321,9 @@ struct AgentLiveStatus {
     in_game_frames: u32,
     last_screenshot: Option<String>,
     session_dir: String,
+    time_of_day: f32,
+    world_name: String,
+    visual_preset: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -453,6 +461,7 @@ fn apply_command(state: &mut AgentControlState, command: AgentControlCommand) {
     }
     state.screenshot = command.screenshot;
     state.exit = command.exit;
+    state.hide_hud = command.hide_hud;
     state.status = if state.enabled {
         "agent live".into()
     } else {
@@ -553,7 +562,13 @@ fn agent_control_enter_game(
     }
     if active.is_none() {
         let seed = env_u32("VOXEL_NATIVE_AGENT_SEED").unwrap_or(settings.seed);
-        let mut meta = WorldMeta::new("agent_control".into(), seed);
+        // Never reuse the leftover `agent_control` world: it has ~1000
+        // edited chunks and a NeonShuttle save overlay, which hid the
+        // frontier postcard behind floating green islands.
+        let world_name = env_string("VOXEL_NATIVE_AGENT_WORLD")
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "cinematic_look_pass".into());
+        let mut meta = WorldMeta::new(world_name, seed);
         meta.time_mode = TimeMode::Fixed;
         meta.time_of_day = env_f32("VOXEL_NATIVE_AGENT_HOUR")
             .unwrap_or(10.8)
@@ -561,10 +576,62 @@ fn agent_control_enter_game(
         settings.seed = seed;
         settings.time_mode = meta.time_mode;
         settings.time_of_day = meta.time_of_day;
+        // Ignore voxel-native-save.ron's NeonShuttle / Fog presets so
+        // agent stills actually show generated mesas + Clear weather.
+        settings.visual_preset = crate::settings::VisualPreset::NaturalWorld;
+        settings
+            .weather
+            .apply_preset(crate::settings::WeatherPreset::Clear);
+        apply_agent_mode_card(&mut settings);
+        info!(
+            "agent control: entering world '{}' seed={} hour={:.2} preset={:?} graphics={:?} rd={}",
+            meta.name,
+            seed,
+            meta.time_of_day,
+            settings.visual_preset,
+            settings.graphics,
+            settings.render_distance
+        );
         commands.insert_resource(ActiveWorld { meta });
         pending.0 = true;
     }
     next.set(GameState::InGame);
+}
+
+/// Apply Fast/Cinematic agent cards before `init_world` bakes swatches,
+/// so a Fast iGPU session does not wait on Balanced 128² textures.
+fn apply_agent_world_card_before_init(settings: Option<ResMut<WorldSettings>>) {
+    if !agent_runtime_enabled() {
+        return;
+    }
+    let Some(mut settings) = settings else {
+        return;
+    };
+    apply_agent_mode_card(&mut settings);
+}
+
+fn apply_agent_mode_card(settings: &mut WorldSettings) {
+    if env_flag("VOXEL_NATIVE_AGENT_CINEMATIC") {
+        settings.apply_world_mode_card(crate::settings::WorldModeCard::Cinematic);
+        settings.visual_preset = crate::settings::VisualPreset::NaturalWorld;
+        settings
+            .weather
+            .apply_preset(crate::settings::WeatherPreset::Clear);
+        // Software Vulkan fills a 56-chunk disc too slowly for a
+        // 20s still; 40 chunks still covers the spawn postcard.
+        settings.render_distance = env_u32("VOXEL_NATIVE_AGENT_RD")
+            .unwrap_or(40)
+            .clamp(8, 64);
+    } else if env_flag("VOXEL_NATIVE_AGENT_FAST") {
+        settings.apply_world_mode_card(crate::settings::WorldModeCard::FastLaptop);
+        settings.visual_preset = crate::settings::VisualPreset::NaturalWorld;
+        settings
+            .weather
+            .apply_preset(crate::settings::WeatherPreset::Clear);
+        if let Some(rd) = env_u32("VOXEL_NATIVE_AGENT_RD") {
+            settings.render_distance = rd.clamp(8, 48);
+        }
+    }
 }
 
 fn agent_control_startup_marker(runtime: Res<AgentControlRuntime>, state: Res<AgentControlState>) {
@@ -763,7 +830,11 @@ fn agent_control_toggle_panel(
     mut contexts: EguiContexts,
     mut state: ResMut<AgentControlState>,
     runtime: Res<AgentControlRuntime>,
+    photo: Option<Res<crate::hud::PhotoMode>>,
 ) {
+    if photo.map(|p| p.hidden).unwrap_or(false) || state.hide_hud {
+        return;
+    }
     let anchor = if state.enabled {
         egui::Align2::RIGHT_BOTTOM
     } else {
@@ -850,7 +921,11 @@ fn agent_control_overlay(
     active_weapon: Option<Res<ActiveWeapon>>,
     toolbelt: Option<Res<ToolbeltState>>,
     player: Query<(&Transform, &Player)>,
+    photo: Option<Res<crate::hud::PhotoMode>>,
 ) {
+    if photo.map(|p| p.hidden).unwrap_or(false) || state.hide_hud {
+        return;
+    }
     let Ok((transform, player)) = player.get_single() else {
         return;
     };
@@ -1010,6 +1085,8 @@ fn agent_control_status(
     streamer: Res<ChunkStreamer>,
     governor: Res<StreamingGovernor>,
     state: Res<AgentControlState>,
+    settings: Res<WorldSettings>,
+    active_world: Option<Res<ActiveWorld>>,
     mut runtime: ResMut<AgentControlRuntime>,
     active_weapon: Option<Res<ActiveWeapon>>,
     toolbelt: Option<Res<ToolbeltState>>,
@@ -1113,6 +1190,12 @@ fn agent_control_status(
             in_game_frames: runtime.in_game_frames,
             last_screenshot,
             session_dir: runtime_session_dir(&runtime),
+            time_of_day: settings.time_of_day,
+            world_name: active_world
+                .as_deref()
+                .map(|world| world.meta.name.clone())
+                .unwrap_or_default(),
+            visual_preset: format!("{:?}", settings.visual_preset),
         };
         if let Err(e) = std::fs::create_dir_all(&runtime.session_dir) {
             warn!(
@@ -1193,6 +1276,7 @@ fn write_agent_control_file(runtime: &AgentControlRuntime, state: &AgentControlS
             handoff: state.handoff,
             screenshot: false,
             exit: false,
+            hide_hud: state.hide_hud,
         };
         if let Ok(text) = ron::ser::to_string_pretty(&command, ron::ser::PrettyConfig::default()) {
             let _ = std::fs::write(&runtime.control_path, text);
@@ -1328,4 +1412,11 @@ fn env_f32(name: &str) -> Option<f32> {
 
 fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok()?.trim().parse().ok()
+}
+
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }

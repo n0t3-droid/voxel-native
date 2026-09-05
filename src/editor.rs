@@ -1684,6 +1684,7 @@ fn handle_regen(
     streamer.pending_terrain.clear();
     streamer.pending_meshes.clear();
     streamer.dirty_queue.clear();
+    streamer.mesh_blocked.clear();
     streamer.mesh_candidates_scratch.clear();
     streamer.load_cursor = 0;
     streamer.load_offsets_rd = -1;

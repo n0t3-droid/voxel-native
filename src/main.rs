@@ -13,6 +13,7 @@ mod commands;
 mod daynight;
 mod director;
 mod editor;
+mod frontier;
 mod hud;
 mod icons;
 mod menu;
@@ -213,6 +214,7 @@ fn print_controls() {
     info!("  ESC          : pause menu / close overlay");
     info!("  Shift+F3     : toggle debug overlay");
     info!("  F2           : screenshot");
+    info!("  F10          : photo mode (hide HUD for cinematic framing)");
     info!("  F5           : save world + settings");
     info!("  LMB          : capture mouse");
     info!("---------------------------------------------------------");

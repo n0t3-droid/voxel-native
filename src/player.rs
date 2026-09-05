@@ -7,9 +7,13 @@ use bevy::core_pipeline::bloom::{BloomCompositeMode, BloomSettings};
 use bevy::input::mouse::MouseMotion;
 use bevy::pbr::{FogFalloff, FogSettings};
 use bevy::prelude::*;
+use bevy::render::camera::{CameraOutputMode, Exposure};
+use bevy::render::render_resource::BlendState;
+use bevy::render::view::{ColorGrading, ColorGradingSection};
 use bevy::window::PrimaryWindow;
 
-use crate::daynight::WorldIntelRuntime;
+use crate::daynight::{day_factor, sun_direction, sunset_factor, WorldIntelRuntime};
+use crate::neurocore::RuntimeProfile;
 use crate::settings::{ActiveWorld, PlayerMiningSave, SuitVitalsSave, WorldSettings};
 use crate::weapons::DestructionStats;
 use crate::world::{ChunkAnchor, VoxelWorld};
@@ -66,6 +70,7 @@ impl Plugin for PlayerPlugin {
                     tick_suit_vitals.run_if(in_state(crate::menu::GameState::InGame)),
                     update_camera_fov,
                     update_bloom_by_graphics,
+                    update_cinematic_exposure,
                 )
                     .chain(),
             );
@@ -132,7 +137,7 @@ fn tick_suit_vitals(time: Res<Time>, mut vitals: ResMut<SuitVitals>, player_q: Q
 fn load_player_from_world(
     active: Option<Res<crate::settings::ActiveWorld>>,
     pending: Res<crate::menu::PendingWorldLoad>,
-    settings: Res<WorldSettings>,
+    _settings: Res<WorldSettings>,
     mut query: Query<(&mut Transform, &mut Player)>,
 ) {
     if !pending.0 {
@@ -152,19 +157,30 @@ fn load_player_from_world(
     let bx = crate::chunk::floor_to_i32_safe(translation.x);
     let bz = crate::chunk::floor_to_i32_safe(translation.z);
     let surface = generator.surface_height_at(bx, bz);
-    if settings.visual_preset == crate::settings::VisualPreset::NaturalWorld
-        && (generator.biome_at(bx, bz).is_showcase_terrain()
-            || translation.y > surface as f32 + 90.0)
-    {
-        if let Some(spawn) = generator.find_natural_spawn(0, 0, 4096) {
+    // Only rescue a saved position that is genuinely unusable. Every
+    // biome is part of the frontier now, so "you are standing somewhere
+    // exotic" is no longer a reason to move the player - being stranded
+    // in the void far above the terrain still is.
+    if translation.y > surface as f32 + 160.0 || translation.y < 1.0 {
+        if let Some(spawn) = generator.find_natural_spawn(bx, bz, 4096) {
             translation = Vec3::new(spawn.x as f32 + 0.5, spawn.y as f32, spawn.z as f32 + 0.5);
             yaw = 0.0;
             pitch = -0.12;
             info!(
-                "Natural world entry: {:?} at {}, {}, {}",
+                "Recovered stranded world entry to {:?} at {}, {}, {}",
                 spawn.biome, spawn.x, spawn.y, spawn.z
             );
         }
+    }
+    // Keep an authored New World look (scenic yaw is never ~0). Only
+    // retarget at the hero crystal when the save has the old default
+    // heading, otherwise the mesa-top spawn got overwritten into a
+    // tabletop stare and the canyon postcard never appeared.
+    if translation.x.abs() < 280.0 && translation.z.abs() < 280.0 && yaw.abs() < 0.05 {
+        let dx = crate::frontier::HERO_CRYSTAL_X as f32 + 0.5 - translation.x;
+        let dz = crate::frontier::HERO_CRYSTAL_Z as f32 + 0.5 - translation.z;
+        yaw = dx.atan2(-dz);
+        pitch = -0.22;
     }
     tf.translation = translation;
     player.yaw = yaw;
@@ -240,6 +256,11 @@ fn spawn_player(mut commands: Commands) {
             // hides the chunk-streaming edge against the sky gradient.
             camera: bevy::prelude::Camera {
                 hdr: true,
+                // Default composite: sky already blitted, world HDR not
+                // cleared so leftover sky pixels show through. Cinematic
+                // High switches to a transparent-HDR + alpha blit in
+                // `update_cinematic_exposure` so world ColorGrading cannot
+                // milk space.
                 clear_color: bevy::prelude::ClearColorConfig::None,
                 ..default()
             },
@@ -252,17 +273,15 @@ fn spawn_player(mut commands: Commands) {
             ..default()
         },
         FogSettings {
-            color: Color::srgba(0.53, 0.80, 0.98, 1.0),
-            // Cinematic aerial-perspective fog: long visibility
-            // (1800 blocks) lets huge mountains and distant mesas
-            // dominate the horizon. The inscatter colour is a warm
-            // sunlit haze that picks up golden hour beautifully
-            // through `update_sun()` in daynight.rs.
-            falloff: FogFalloff::from_visibility_colors(
-                1800.0,
-                Color::srgb(0.80, 0.88, 1.0),
-                Color::srgb(0.58, 0.72, 0.95),
-            ),
+            color: Color::srgba(0.42, 0.58, 0.78, 0.28),
+            // Starting density is a placeholder: `update_sun()` in
+            // daynight.rs owns the live ExponentialSquared aerial
+            // perspective (thin at noon, warm inscatter at dusk, a
+            // lifted fill at night). Keep this conservative so the
+            // first frames before that system runs aren't milky.
+            falloff: FogFalloff::ExponentialSquared { density: 0.00014 },
+            directional_light_color: Color::srgba(0.72, 0.62, 0.48, 0.30),
+            directional_light_exponent: 14.0,
             ..default()
         },
         // Bloom on the world camera. Combined with HDR-boosted vertex
@@ -332,27 +351,219 @@ fn update_camera_fov(
     }
 }
 
-/// React to GraphicsMode changes by scaling bloom intensity. In Fast
-/// mode bloom is ~free (iGPU still runs ~0.8 ms at 720p) but the
-/// tonemap pass dominates; set bloom to 0 so the compositor can skip
-/// the whole sub-pipeline. Balanced = subtle, High = full.
+/// React to GraphicsMode / runtime-profile / time-of-day band changes
+/// by scaling bloom. Fast skips the pass entirely. Dusk gets a slightly
+/// lusher halo so crystals glow; noon stays conservative so the hull
+/// and horizon don't milk.
 fn update_bloom_by_graphics(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
-    mut q: Query<&mut BloomSettings, With<Player>>,
-    mut last: Local<Option<crate::settings::GraphicsMode>>,
+    mut commands: Commands,
+    mut bloom_q: Query<(Entity, &mut BloomSettings), With<Player>>,
+    player_q: Query<Entity, With<Player>>,
+    mut last: Local<Option<(crate::settings::GraphicsMode, RuntimeProfile, u8)>>,
 ) {
-    if *last == Some(settings.graphics) && !intel.is_changed() {
+    let sun = sun_direction(settings.time_of_day);
+    let dusk = sunset_factor(sun);
+    let night = 1.0 - day_factor(sun);
+    let band = if night > 0.55 {
+        0u8
+    } else if dusk > 0.40 {
+        1
+    } else {
+        2
+    };
+    let key = (settings.graphics, settings.runtime_profile, band);
+    if *last == Some(key) && !intel.is_changed() {
         return;
     }
-    *last = Some(settings.graphics);
-    let target: f32 = match settings.graphics {
-        crate::settings::GraphicsMode::Fast => 0.0,
-        crate::settings::GraphicsMode::Balanced => 0.10,
-        crate::settings::GraphicsMode::High => 0.18,
-    } * intel.profile.bloom_mul;
-    if let Ok(mut b) = q.get_single_mut() {
-        b.intensity = target.clamp(0.0, 0.35);
+    *last = Some(key);
+    let cinematic = settings.runtime_profile == RuntimeProfile::Cinematic;
+    let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
+    // Bloom on Fast is a full extra HDR downsample on iGPU. Intensity 0
+    // still ran the pass; strip it so Vega isn't paying for a no-op.
+    if fast {
+        if let Ok((entity, _)) = bloom_q.get_single_mut() {
+            commands.entity(entity).remove::<BloomSettings>();
+        }
+        return;
+    }
+    let (mut intensity, mut threshold, lf_boost): (f32, f32, f32) = match settings.graphics {
+        crate::settings::GraphicsMode::Fast => (0.0, 0.85, 0.20),
+        crate::settings::GraphicsMode::Balanced => (0.10, 0.76, 0.28),
+        crate::settings::GraphicsMode::High if cinematic => (0.15, 0.78, 0.28),
+        crate::settings::GraphicsMode::High => (0.14, 0.70, 0.32),
+    };
+    if cinematic {
+        intensity += dusk * 0.055;
+        threshold -= dusk * 0.07;
+    }
+    let target = (intensity * intel.profile.bloom_mul).clamp(0.0, 0.22);
+    let apply = |b: &mut BloomSettings| {
+        b.intensity = target;
+        b.low_frequency_boost = lf_boost;
+        b.prefilter_settings.threshold = threshold.clamp(0.62, 0.88);
+        b.prefilter_settings.threshold_softness = if cinematic { 0.30 } else { 0.28 };
+    };
+    if let Ok((_, mut b)) = bloom_q.get_single_mut() {
+        apply(&mut b);
+        return;
+    }
+    let Ok(entity) = player_q.get_single() else {
+        return;
+    };
+    let mut bloom = BloomSettings {
+        intensity: target,
+        low_frequency_boost: lf_boost,
+        high_pass_frequency: 1.4,
+        prefilter_settings: bevy::core_pipeline::bloom::BloomPrefilterSettings {
+            threshold: threshold.clamp(0.62, 0.88),
+            threshold_softness: if cinematic { 0.30 } else { 0.28 },
+        },
+        composite_mode: BloomCompositeMode::Additive,
+        ..BloomSettings::OLD_SCHOOL
+    };
+    apply(&mut bloom);
+    commands.entity(entity).insert(bloom);
+}
+
+/// Cinematic High renders the world HDR buffer independently of the sky
+/// pass: transparent clear, grade/tonemap only those pixels, alpha-blit
+/// over the already-tonemapped sky. Fast/Balanced keep the legacy
+/// uncleared composite so they stay cheap and unchanged.
+fn world_pass_splits_from_sky(cinematic: bool, fast: bool) -> bool {
+    cinematic && !fast
+}
+
+fn configure_world_camera_composite(camera: &mut Camera, split: bool) {
+    if split {
+        camera.clear_color = ClearColorConfig::Custom(Color::srgba(0.0, 0.0, 0.0, 0.0));
+        camera.output_mode = CameraOutputMode::Write {
+            blend_state: Some(BlendState::ALPHA_BLENDING),
+            clear_color: ClearColorConfig::None,
+        };
+    } else {
+        camera.clear_color = ClearColorConfig::None;
+        camera.output_mode = CameraOutputMode::Write {
+            blend_state: None,
+            clear_color: ClearColorConfig::Default,
+        };
+    }
+}
+
+/// Pre-ACES look-pass for the WORLD camera only.
+///
+/// Combined-camera EV / shadow-lift washed the night sky grey because
+/// leftover sky HDR sat in the uncleared world buffer and got re-graded.
+/// Cinematic High now clears that buffer to transparent and alpha-blits,
+/// so night lift recovers mesa faces without milking space. Fast stays
+/// at the Blender default on the legacy composite.
+fn update_cinematic_exposure(
+    settings: Res<WorldSettings>,
+    mut q: Query<(&mut Camera, &mut ColorGrading, &mut Exposure), With<Player>>,
+    mut last: Local<Option<(u8, bool, bool)>>,
+) {
+    let sun = sun_direction(settings.time_of_day);
+    let dusk = sunset_factor(sun);
+    let night_amt = (1.0 - day_factor(sun)).powf(1.55);
+    let band = if night_amt > 0.55 {
+        0u8
+    } else if dusk > 0.40 {
+        1
+    } else {
+        2
+    };
+    let cinematic = settings.runtime_profile == RuntimeProfile::Cinematic;
+    let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
+    let key = (band, cinematic, fast);
+    if *last == Some(key) {
+        return;
+    }
+    *last = Some(key);
+    let split = world_pass_splits_from_sky(cinematic, fast);
+    let grade = look_pass_grade(night_amt, dusk, cinematic, fast);
+    if let Ok((mut camera, mut grading, mut exposure)) = q.get_single_mut() {
+        configure_world_camera_composite(&mut camera, split);
+        exposure.ev100 = grade.ev100;
+        grading.global.exposure = grade.exposure;
+        grading.global.temperature = grade.temperature;
+        grading.shadows = ColorGradingSection {
+            saturation: 1.0,
+            contrast: 1.0,
+            gamma: grade.shadow_gamma,
+            gain: grade.shadow_gain,
+            lift: grade.shadow_lift,
+        };
+        grading.midtones = ColorGradingSection {
+            saturation: grade.mid_sat,
+            contrast: 1.0,
+            gamma: 1.0,
+            gain: grade.mid_gain,
+            lift: 0.0,
+        };
+        // Bright emissives (cyan plasma, magenta shards, lava, neon)
+        // live in the highlight section. Golden-hour temperature adds R
+        // and would grey those hues; a highlight sat bump keeps chroma
+        // without a one-camera postcard hack.
+        grading.highlights = ColorGradingSection {
+            saturation: grade.highlight_sat,
+            contrast: 1.0,
+            gamma: 1.0,
+            gain: 1.0,
+            lift: 0.0,
+        };
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LookPassGrade {
+    ev100: f32,
+    exposure: f32,
+    shadow_lift: f32,
+    shadow_gain: f32,
+    shadow_gamma: f32,
+    mid_gain: f32,
+    mid_sat: f32,
+    highlight_sat: f32,
+    temperature: f32,
+}
+
+fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> LookPassGrade {
+    let n = night_amt.clamp(0.0, 1.0);
+    let dusk = dusk.clamp(0.0, 1.0);
+    if fast {
+        // Fast stays on the uncleared composite: EV / lift stay identity
+        // so the night sky does not milk. Chroma-only levers still run
+        // so dusk cyan/magenta/orange emissives survive the warm grade
+        // on the same path a 5700G player actually flies.
+        return LookPassGrade {
+            ev100: Exposure::EV100_BLENDER,
+            exposure: 0.0,
+            shadow_lift: 0.0,
+            shadow_gain: 1.0,
+            shadow_gamma: 1.0,
+            mid_gain: 1.0,
+            mid_sat: (1.0 + n * 0.05 + dusk * 0.16).min(1.28),
+            highlight_sat: (1.0 + n * 0.04 + dusk * 0.26).min(1.40),
+            temperature: dusk * 0.028,
+        };
+    }
+    let mul = if cinematic { 1.0 } else { 0.55 };
+    // Shadow lift + a mild EV drop are world-only. Fast never splits
+    // the composite, so those levers stay at identity there.
+    let split = world_pass_splits_from_sky(cinematic, fast);
+    let night_lift = if split { n * 0.11 * mul } else { 0.0 };
+    let night_ev = if split { n * 1.35 * mul } else { 0.0 };
+    LookPassGrade {
+        ev100: Exposure::EV100_BLENDER - night_ev,
+        exposure: dusk * 0.08 * mul,
+        shadow_lift: night_lift,
+        shadow_gain: 1.0 + n * 0.16 * mul,
+        shadow_gamma: 1.0 - n * 0.26 * mul,
+        mid_gain: 1.0 + n * 0.12 * mul + dusk * 0.04,
+        mid_sat: 1.0 + n * 0.08 + dusk * 0.12,
+        highlight_sat: (1.0 + n * 0.04 + dusk * 0.28).min(1.36),
+        temperature: dusk * 0.035,
     }
 }
 
@@ -1055,5 +1266,37 @@ mod tests {
         keys.press(KeyCode::F9);
 
         assert!(wants_neon_showcase_warp(&keys));
+    }
+
+    #[test]
+    fn night_grade_opens_midtones_without_lifting_the_sky_or_fast() {
+        let night = look_pass_grade(0.92, 0.05, true, false);
+        let noon = look_pass_grade(0.0, 0.0, true, false);
+        let dusk = look_pass_grade(0.18, 0.70, true, false);
+        let fast = look_pass_grade(0.92, 0.0, true, true);
+        assert!(world_pass_splits_from_sky(true, false));
+        assert!(!world_pass_splits_from_sky(true, true));
+        assert!(!world_pass_splits_from_sky(false, false));
+        assert!(night.ev100 < Exposure::EV100_BLENDER - 0.8);
+        assert_eq!(noon.ev100, Exposure::EV100_BLENDER);
+        assert!(night.shadow_lift > 0.08);
+        assert_eq!(noon.shadow_lift, 0.0);
+        assert!(night.shadow_gamma < 0.85);
+        assert_eq!(noon.shadow_gamma, 1.0);
+        assert!(night.mid_gain > noon.mid_gain);
+        assert!(dusk.mid_gain < 1.20);
+        assert!(dusk.temperature < 0.05);
+        assert!(dusk.highlight_sat > 1.15);
+        assert!(dusk.mid_sat > noon.mid_sat);
+        assert_eq!(fast.ev100, Exposure::EV100_BLENDER);
+        assert_eq!(fast.shadow_lift, 0.0);
+        assert_eq!(fast.mid_gain, 1.0);
+        let fast_dusk = look_pass_grade(0.18, 0.70, true, true);
+        assert_eq!(fast_dusk.ev100, Exposure::EV100_BLENDER);
+        assert_eq!(fast_dusk.shadow_lift, 0.0);
+        assert_eq!(fast_dusk.mid_gain, 1.0);
+        assert!(fast_dusk.highlight_sat > 1.15);
+        assert!(fast_dusk.temperature < 0.04);
+        assert!(!world_pass_splits_from_sky(true, true));
     }
 }

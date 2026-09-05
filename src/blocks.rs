@@ -85,12 +85,11 @@ pub enum BlockType {
     /// Light grey limestone — bright karst columns.
     Limestone = 19,
     /// Cyan-violet alien crystal — towering Pandora-style spires.
-    /// Translucent, non-opaque so light bleeds through the spires.
     Crystal = 20,
     /// Near-black volcanic basalt — Io / Mars cap rock.
     Basalt = 21,
-    /// Glowing lava — non-solid, non-opaque (treated like water for
-    /// face culling so it pools in flat sheets in lava channels).
+    /// Glowing lava — non-solid for collision, opaque so curtains read
+    /// as sheets instead of stained glass over the banded wall.
     Lava = 22,
     /// Magenta bioluminescent ground cover — alien reef floors.
     AlienMoss = 23,
@@ -118,6 +117,29 @@ pub enum BlockType {
     MagnetiteOre = 34,
     /// Deep purple rare vein — reference "Iridium".
     IridiumVein = 35,
+    /// Violet sedimentary band — the purple stripe that runs through
+    /// every frontier cliff face in the key art.
+    VioletStone = 36,
+    /// Warm ochre sedimentary band — the orange stripe between the
+    /// violet and the buff cap-rock.
+    AmberStone = 37,
+    /// Cyan energy current. Flows like lava but reads as coolant /
+    /// plasma: the glowing blue rivers threading the canyon floors.
+    PlasmaFlow = 38,
+    /// Magenta crystal shard — hero foreground crystal clusters.
+    CrystalMagenta = 39,
+    /// Emerald crystal shard — the green tips in mixed clusters.
+    CrystalGreen = 40,
+    /// Translucent cyan holo pane for station windows and signage.
+    HoloPanel = 41,
+    /// Bright station plating — skyway decks, platforms, pylons.
+    PlatingWhite = 42,
+    /// Teal accent plating for station hulls and deck undersides.
+    PlatingTeal = 43,
+    /// Dark skyway carriageway surface.
+    RoadDeck = 44,
+    /// Painted lane marking on a skyway deck.
+    RoadMarking = 45,
 }
 
 /// Voxel ids for the three mineable neon resources (HUD + telemetry).
@@ -128,7 +150,10 @@ pub const VOXEL_IRIDIUM: Voxel = BlockType::IridiumVein as Voxel;
 impl BlockType {
     #[inline]
     pub fn is_solid(self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water)
+        !matches!(
+            self,
+            BlockType::Air | BlockType::Water | BlockType::PlasmaFlow
+        )
     }
 
     #[inline]
@@ -141,6 +166,8 @@ impl BlockType {
                 | BlockType::JungleLeaves
                 | BlockType::Ice
                 | BlockType::CockpitGlass
+                | BlockType::CrystalGreen
+                | BlockType::HoloPanel
         )
     }
 
@@ -163,53 +190,64 @@ impl BlockType {
                 | BlockType::LuminiteCrystal
                 | BlockType::MagnetiteOre
                 | BlockType::IridiumVein
+                | BlockType::PlasmaFlow
+                | BlockType::CrystalMagenta
+                | BlockType::CrystalGreen
+                | BlockType::HoloPanel
         )
     }
 
     /// Vertex colour (sRGB). Real texture atlas will replace this later.
     pub fn color(self) -> Color {
         match self {
+            // The whole ground palette is deliberately high-key. sRGB
+            // values in the 0.1-0.3 range look reasonable in a swatch but
+            // land around 0.01-0.06 in linear light, which is what made
+            // the terrain read as a black silhouette next to the
+            // emissive blocks. Everything the player walks on is lifted
+            // and saturated to match the key art.
             BlockType::Air => Color::NONE,
-            BlockType::Stone => Color::srgb(0.34, 0.36, 0.44),
-            BlockType::Dirt => Color::srgb(0.24, 0.15, 0.11),
-            BlockType::Grass => Color::srgb(0.11, 0.40, 0.15),
-            BlockType::Sand => Color::srgb(0.76, 0.67, 0.45),
+            BlockType::Stone => Color::srgb(0.46, 0.48, 0.58),
+            BlockType::Dirt => Color::srgb(0.40, 0.25, 0.17),
+            BlockType::Grass => Color::srgb(0.14, 0.82, 0.22),
+            BlockType::Sand => Color::srgb(0.93, 0.78, 0.38),
             // Turquoise energy-water read (concept underground river).
             BlockType::Water => Color::srgba(0.06, 0.78, 0.92, 0.62),
-            BlockType::Wood => Color::srgb(0.24, 0.14, 0.08),
-            BlockType::Leaves => Color::srgb(0.06, 0.32, 0.11),
+            BlockType::Wood => Color::srgb(0.38, 0.23, 0.13),
+            BlockType::Leaves => Color::srgb(0.16, 0.56, 0.20),
             BlockType::Snow => Color::srgb(0.96, 0.97, 0.99),
             BlockType::Ice => Color::srgba(0.70, 0.88, 0.98, 0.85),
-            BlockType::TundraGrass => Color::srgb(0.62, 0.76, 0.55),
-            BlockType::JungleLeaves => Color::srgb(0.03, 0.38, 0.13),
-            BlockType::SavannaGrass => Color::srgb(0.46, 0.50, 0.20),
-            BlockType::Gravel => Color::srgb(0.42, 0.40, 0.45),
-            BlockType::Bedrock => Color::srgb(0.12, 0.12, 0.14),
+            BlockType::TundraGrass => Color::srgb(0.64, 0.78, 0.57),
+            BlockType::JungleLeaves => Color::srgb(0.12, 0.60, 0.22),
+            BlockType::SavannaGrass => Color::srgb(0.60, 0.64, 0.26),
+            BlockType::Gravel => Color::srgb(0.54, 0.52, 0.58),
+            BlockType::Bedrock => Color::srgb(0.14, 0.14, 0.17),
             // Sedona red — saturated rust-orange surface dust.
-            BlockType::RedSand => Color::srgb(0.92, 0.46, 0.24),
+            BlockType::RedSand => Color::srgb(0.98, 0.38, 0.12),
             // Brick-red sandstone cliff body.
-            BlockType::RedStone => Color::srgb(0.76, 0.32, 0.20),
+            BlockType::RedStone => Color::srgb(0.78, 0.26, 0.14),
             // Pale yellow mesa cap, the bright stripe between reds.
-            BlockType::MesaClay => Color::srgb(0.94, 0.76, 0.48),
-            // Dark mossy limestone — wet karst pillar bodies.
-            BlockType::MossStone => Color::srgb(0.20, 0.31, 0.25),
+            BlockType::MesaClay => Color::srgb(0.97, 0.88, 0.58),
+            // Mossy limestone — wet karst pillar bodies.
+            BlockType::MossStone => Color::srgb(0.33, 0.56, 0.37),
             // Bright pale limestone — sun-lit karst sides.
             BlockType::Limestone => Color::srgb(0.86, 0.84, 0.76),
-            // Alien crystal — saturated cyan-violet, slightly translucent.
-            BlockType::Crystal => Color::srgba(0.18, 0.72, 1.00, 0.70),
+            // Alien crystal — saturated cyan. Fully opaque so the mass
+            // reads as a gem, not stained glass over the banded wall.
+            BlockType::Crystal => Color::srgb(0.00, 0.86, 1.00),
             // Volcanic basalt — dark, but not unreadable black. Keeping
             // it above pure black makes ledges and jump targets visible
             // under strong bloom from nearby lava.
-            BlockType::Basalt => Color::srgb(0.26, 0.24, 0.28),
+            BlockType::Basalt => Color::srgb(0.34, 0.31, 0.38),
             // Lava — saturated orange-red. Read as glowing thanks to
             // the player camera's HDR + tonemapping.
-            BlockType::Lava => Color::srgba(1.00, 0.48, 0.12, 0.88),
+            BlockType::Lava => Color::srgb(1.00, 0.36, 0.04),
             // Bioluminescent magenta moss for alien reef floors.
-            BlockType::AlienMoss => Color::srgb(0.26, 0.06, 0.44),
+            BlockType::AlienMoss => Color::srgb(0.40, 0.11, 0.62),
             // Bone-white organic pillar rock.
-            BlockType::BoneRock => Color::srgb(0.62, 0.54, 0.70),
+            BlockType::BoneRock => Color::srgb(0.68, 0.60, 0.76),
             // Pale glowing crystal-biome sand — almost white-cyan.
-            BlockType::GlowSand => Color::srgb(0.12, 0.30, 0.42),
+            BlockType::GlowSand => Color::srgb(0.30, 0.52, 0.62),
             BlockType::ShipHullDark => Color::srgb(0.055, 0.065, 0.095),
             BlockType::ShipHullAlloy => Color::srgb(0.56, 0.68, 0.78),
             BlockType::CockpitGlass => Color::srgba(0.03, 0.48, 0.78, 0.50),
@@ -217,9 +255,27 @@ impl BlockType {
             BlockType::NeonMagenta => Color::srgb(1.00, 0.04, 0.82),
             BlockType::NeonAmber => Color::srgb(1.00, 0.52, 0.06),
             BlockType::EngineCore => Color::srgb(0.06, 0.76, 1.00),
-            BlockType::LuminiteCrystal => Color::srgba(0.12, 0.82, 1.00, 0.68),
+            BlockType::LuminiteCrystal => Color::srgb(0.00, 0.90, 1.00),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
+            // Violet sedimentary band — saturated enough to read as an
+            // alien mineral stripe from a kilometre out.
+            BlockType::VioletStone => Color::srgb(0.48, 0.18, 0.82),
+            // Ochre band that separates the violet from the buff cap.
+            BlockType::AmberStone => Color::srgb(0.98, 0.46, 0.08),
+            // Coolant-blue energy current in the canyon floors.
+            BlockType::PlasmaFlow => Color::srgb(0.00, 0.92, 1.00),
+            BlockType::CrystalMagenta => Color::srgb(1.00, 0.10, 0.78),
+            BlockType::CrystalGreen => Color::srgba(0.30, 1.00, 0.56, 0.70),
+            // Holo pane — mostly transparent, tinted cyan.
+            BlockType::HoloPanel => Color::srgba(0.32, 0.90, 1.00, 0.36),
+            // Structural surfaces stay below the bloom threshold. Pure
+            // white plating turned every skyway into a glare streak that
+            // outshone the neon it was supposed to frame.
+            BlockType::PlatingWhite => Color::srgb(0.52, 0.56, 0.64),
+            BlockType::PlatingTeal => Color::srgb(0.22, 0.54, 0.60),
+            BlockType::RoadDeck => Color::srgb(0.28, 0.29, 0.34),
+            BlockType::RoadMarking => Color::srgb(0.62, 0.64, 0.58),
         }
     }
 
@@ -260,6 +316,16 @@ impl BlockType {
             33 => BlockType::LuminiteCrystal,
             34 => BlockType::MagnetiteOre,
             35 => BlockType::IridiumVein,
+            36 => BlockType::VioletStone,
+            37 => BlockType::AmberStone,
+            38 => BlockType::PlasmaFlow,
+            39 => BlockType::CrystalMagenta,
+            40 => BlockType::CrystalGreen,
+            41 => BlockType::HoloPanel,
+            42 => BlockType::PlatingWhite,
+            43 => BlockType::PlatingTeal,
+            44 => BlockType::RoadDeck,
+            45 => BlockType::RoadMarking,
             _ => BlockType::Air,
         }
     }
@@ -272,7 +338,7 @@ impl From<BlockType> for Voxel {
     }
 }
 
-pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
+pub const BUILDABLE_BLOCKS: [BlockType; 45] = [
     BlockType::Stone,
     BlockType::Dirt,
     BlockType::Grass,
@@ -308,6 +374,16 @@ pub const BUILDABLE_BLOCKS: [BlockType; 35] = [
     BlockType::LuminiteCrystal,
     BlockType::MagnetiteOre,
     BlockType::IridiumVein,
+    BlockType::VioletStone,
+    BlockType::AmberStone,
+    BlockType::PlasmaFlow,
+    BlockType::CrystalMagenta,
+    BlockType::CrystalGreen,
+    BlockType::HoloPanel,
+    BlockType::PlatingWhite,
+    BlockType::PlatingTeal,
+    BlockType::RoadDeck,
+    BlockType::RoadMarking,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +416,16 @@ const ASPHALT_CONCRETE: &[BlockPaletteEntry] = &[
         label: "Bedrock",
         role: "dark foundation",
     },
+    BlockPaletteEntry {
+        block: BlockType::RoadDeck,
+        label: "Skyway Deck",
+        role: "carriageway surface",
+    },
+    BlockPaletteEntry {
+        block: BlockType::RoadMarking,
+        label: "Lane Marking",
+        role: "painted road line",
+    },
 ];
 
 const BRICK_MASONRY: &[BlockPaletteEntry] = &[
@@ -357,6 +443,16 @@ const BRICK_MASONRY: &[BlockPaletteEntry] = &[
         block: BlockType::RedSand,
         label: "Red Sand",
         role: "terracotta dust",
+    },
+    BlockPaletteEntry {
+        block: BlockType::VioletStone,
+        label: "Violet Strata",
+        role: "purple mineral band",
+    },
+    BlockPaletteEntry {
+        block: BlockType::AmberStone,
+        label: "Amber Strata",
+        role: "ochre mineral band",
     },
 ];
 
@@ -385,6 +481,21 @@ const GLASS: &[BlockPaletteEntry] = &[
         block: BlockType::IridiumVein,
         label: "Iridium",
         role: "violet rare-glass vein",
+    },
+    BlockPaletteEntry {
+        block: BlockType::CrystalMagenta,
+        label: "Magenta Crystal",
+        role: "hot pink crystal facet",
+    },
+    BlockPaletteEntry {
+        block: BlockType::CrystalGreen,
+        label: "Emerald Crystal",
+        role: "green crystal facet",
+    },
+    BlockPaletteEntry {
+        block: BlockType::HoloPanel,
+        label: "Holo Pane",
+        role: "see-through hologram",
     },
 ];
 
@@ -451,6 +562,16 @@ const METAL: &[BlockPaletteEntry] = &[
         block: BlockType::EngineCore,
         label: "Engine Core",
         role: "hot machinery",
+    },
+    BlockPaletteEntry {
+        block: BlockType::PlatingWhite,
+        label: "Station Plating",
+        role: "bright hull panel",
+    },
+    BlockPaletteEntry {
+        block: BlockType::PlatingTeal,
+        label: "Teal Plating",
+        role: "accent hull panel",
     },
 ];
 
@@ -526,6 +647,11 @@ const WATER_ENERGY: &[BlockPaletteEntry] = &[
         block: BlockType::Lava,
         label: "Lava",
         role: "hot emissive liquid",
+    },
+    BlockPaletteEntry {
+        block: BlockType::PlasmaFlow,
+        label: "Plasma Flow",
+        role: "cyan energy current",
     },
 ];
 
@@ -611,10 +737,11 @@ pub fn block_label(block: BlockType) -> &'static str {
 }
 
 /// Fast voxel → solid? (without converting through the enum).
-/// AIR (0), Water (5) and Lava (22) are non-solid for collision.
+/// AIR (0), Water (5), Lava (22) and PlasmaFlow (38) are non-solid for
+/// collision — the energy rivers are a hazard you fall into, not a floor.
 #[inline]
 pub fn voxel_is_solid(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 22)
+    !matches!(v, 0 | 5 | 22 | 38)
 }
 
 /// Fast voxel -> can weapons intentionally hit and destroy this block?
@@ -628,10 +755,13 @@ pub fn voxel_is_weapon_target(v: Voxel) -> bool {
 
 /// Fast voxel → opaque? (used for face-culling).
 /// Air (0), water (5), leaves (7), ice (9), jungle leaves (11),
-/// crystal (20), lava (22), cockpit (28), luminite/iridium glass are non-opaque.
+/// cockpit (28), iridium glass (35), emerald crystal (40) and holo
+/// panes (41) stay see-through. Hero cyan/magenta crystal, lava and
+/// plasma must occlude so they read as masses, not as stained glass
+/// over the banded wall.
 #[inline]
 pub fn voxel_is_opaque(v: Voxel) -> bool {
-    !matches!(v, 0 | 5 | 7 | 9 | 11 | 20 | 22 | 28 | 33 | 35)
+    !matches!(v, 0 | 5 | 7 | 9 | 11 | 28 | 35 | 40 | 41)
 }
 
 /// Fast voxel → is this block bioluminescent? Emissive blocks get
@@ -640,9 +770,13 @@ pub fn voxel_is_opaque(v: Voxel) -> bool {
 /// alien moss, glow-sand).
 #[inline]
 pub fn voxel_is_emissive(v: Voxel) -> bool {
-    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9.
+    // Lava=22, Crystal=20, AlienMoss=23, GlowSand=25, neon ores 33–35, Ice=9,
+    // plasma rivers=38, coloured crystal=39/40, holo panes=41.
     // Ice gets a whisper of glow so glacier biomes shimmer at night.
-    matches!(v, 9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35)
+    matches!(
+        v,
+        9 | 20 | 22 | 23 | 25 | 29 | 30 | 31 | 32 | 33 | 34 | 35 | 38 | 39 | 40 | 41
+    )
 }
 
 #[inline]
@@ -662,46 +796,54 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 2.15;
         }
         22 => {
-            // Lava — hot orange, dialled back so VolcanicWaste fields
-            // don't drown the screen in bloom. Still glows, just
-            // doesn't blind the player.
-            c[0] *= 2.0;
-            c[1] *= 1.15;
-            c[2] *= 0.55;
+            // Lava — hot orange curtains. Keep blue near-zero so ACES
+            // cannot wash the sheet into cream.
+            c[0] *= 4.10;
+            c[1] *= 1.85;
+            c[2] *= 0.04;
         }
         20 => {
-            // Crystal — cyan-violet spires. Subtler than lava so the
-            // biome still reads as sky-coloured rock, not lightning.
-            c[0] *= 1.7;
-            c[1] *= 3.0;
-            c[2] *= 4.2;
+            // Crystal — R stays at zero so golden-hour ACES cannot
+            // grey the shard. G/B sit below the ACES clip so dusk
+            // does not crush the pair toward white (which reintroduces R).
+            c[0] *= 0.00;
+            c[1] *= 1.18;
+            c[2] *= 1.52;
         }
         23 => {
-            // AlienMoss — bioluminescent magenta/violet.
-            c[0] *= 3.0;
-            c[1] *= 0.9;
-            c[2] *= 5.2;
+            // AlienMoss — bioluminescent magenta/violet. The multiplier
+            // is modest because the base colour was lifted: moss carpets
+            // whole reef floors, and a bloom scalar tuned for the old
+            // near-black base would now white out the biome.
+            c[0] *= 1.4;
+            c[1] *= 0.5;
+            c[2] *= 2.6;
         }
         25 => {
-            // GlowSand — cool pale wash.
-            c[0] *= 1.4;
-            c[1] *= 2.2;
-            c[2] *= 3.4;
+            // GlowSand — cool pale wash, likewise a whole-biome floor.
+            c[0] *= 0.9;
+            c[1] *= 1.2;
+            c[2] *= 1.7;
         }
         29 => {
-            c[0] *= 0.9;
-            c[1] *= 3.5;
-            c[2] *= 4.4;
+            // Neon cyan rim — chromatic, below crystal so shards stay
+            // the left-third hero. Soft enough that river banks don't
+            // clip to white next to plasma.
+            c[0] *= 0.00;
+            c[1] *= 0.92;
+            c[2] *= 1.22;
         }
         30 => {
-            c[0] *= 3.7;
-            c[1] *= 0.8;
-            c[2] *= 3.5;
+            c[0] *= 2.6;
+            c[1] *= 0.7;
+            c[2] *= 2.4;
         }
         31 => {
-            c[0] *= 3.8;
-            c[1] *= 2.2;
-            c[2] *= 0.7;
+            // Skyway lamps — warm, below crystal/plasma so energy reads
+            // as the brightest thing instead of a glare streak.
+            c[0] *= 2.35;
+            c[1] *= 1.25;
+            c[2] *= 0.35;
         }
         32 => {
             c[0] *= 1.4;
@@ -715,10 +857,11 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 1.25;
         }
         33 => {
-            // Luminite — brilliant aquamarine (concept cavern key light).
-            c[0] *= 1.2;
-            c[1] *= 3.6;
-            c[2] *= 4.8;
+            // Luminite — aquamarine shard core, same dusk-cyan budget
+            // as Crystal so mixed shards stay one hue family.
+            c[0] *= 0.00;
+            c[1] *= 1.22;
+            c[2] *= 1.58;
         }
         34 => {
             // Magnetite — hot ember orange, reads as ore against cyan crystal.
@@ -731,6 +874,31 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[0] *= 2.8;
             c[1] *= 0.9;
             c[2] *= 4.6;
+        }
+        38 => {
+            // Plasma river — glowing cyan ribbon. Peak stays well below
+            // the ACES clip so dusk cannot crush it to pale grey-white.
+            c[0] *= 0.00;
+            c[1] *= 0.82;
+            c[2] *= 1.12;
+        }
+        39 => {
+            // Magenta crystal — hot pink hero shards.
+            c[0] *= 2.35;
+            c[1] *= 0.50;
+            c[2] *= 2.05;
+        }
+        40 => {
+            // Emerald crystal.
+            c[0] *= 0.95;
+            c[1] *= 3.40;
+            c[2] *= 1.70;
+        }
+        41 => {
+            // Warm window glow — cliff-city interiors, not cyan glare.
+            c[0] *= 1.85;
+            c[1] *= 1.55;
+            c[2] *= 1.15;
         }
         _ => {}
     }
@@ -768,9 +936,92 @@ mod tests {
         assert_eq!(BlockType::from_voxel(35), BlockType::IridiumVein);
         assert!(voxel_is_emissive(BlockType::NeonCyan.into()));
         assert!(!voxel_is_opaque(BlockType::CockpitGlass.into()));
-        assert!(!voxel_is_opaque(BlockType::LuminiteCrystal.into()));
+        assert!(
+            voxel_is_opaque(BlockType::LuminiteCrystal.into()),
+            "hero luminite must occlude the wall behind it"
+        );
+        assert!(voxel_is_opaque(BlockType::Crystal.into()));
+        assert!(voxel_is_opaque(BlockType::CrystalMagenta.into()));
+        assert!(voxel_is_opaque(BlockType::Lava.into()));
+        assert!(voxel_is_opaque(BlockType::PlasmaFlow.into()));
         assert!(voxel_is_opaque(BlockType::MagnetiteOre.into()));
         assert!(ore_units_for_mined_voxel(VOXEL_LUMINITE) > 0);
+        let cyan = voxel_color(BlockType::Crystal.into());
+        assert!(
+            cyan[2] > cyan[0] * 8.0 && cyan[1] > cyan[0] * 4.0,
+            "hero crystal vertex colour must stay cyan, got {cyan:?}"
+        );
+        let magenta = voxel_color(BlockType::CrystalMagenta.into());
+        assert!(
+            magenta[0] > magenta[1] * 8.0 && magenta[2] > magenta[1] * 4.0,
+            "hero magenta vertex colour must stay magenta, got {magenta:?}"
+        );
+        let plasma = voxel_color(BlockType::PlasmaFlow.into());
+        let plasma_peak = plasma[0].max(plasma[1]).max(plasma[2]);
+        assert!(
+            plasma_peak < 1.25,
+            "plasma vertex peak {plasma_peak:.3} will bloom to white"
+        );
+        assert!(plasma[2] > plasma[0] * 8.0);
+        assert!(
+            cyan[0] < 0.02,
+            "crystal vertex still has dusk-warming red ({cyan:?})"
+        );
+    }
+
+    #[test]
+    fn walkable_ground_materials_survive_conversion_to_linear_light() {
+        // sRGB values in the 0.1-0.3 range look like a reasonable colour
+        // in a swatch but land near 0.01-0.06 once converted to linear,
+        // which renders as a black silhouette beside the emissive blocks.
+        // Anything the player stands on has to clear that floor.
+        for block in [
+            BlockType::Grass,
+            BlockType::Dirt,
+            BlockType::Stone,
+            BlockType::Sand,
+            BlockType::Gravel,
+            BlockType::MossStone,
+            BlockType::Basalt,
+            BlockType::VioletStone,
+            BlockType::AmberStone,
+            BlockType::RedStone,
+            BlockType::GlowSand,
+            BlockType::AlienMoss,
+            BlockType::Leaves,
+            BlockType::JungleLeaves,
+        ] {
+            let lin = block.color().to_linear();
+            let luminance = 0.2126 * lin.red + 0.7152 * lin.green + 0.0722 * lin.blue;
+            assert!(
+                luminance > 0.045,
+                "{block:?} has linear luminance {luminance:.4}; it will read as black terrain"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_surfaces_stay_below_the_bloom_threshold() {
+        // Decks, plating and lane paint frame the neon; they must not
+        // out-glare it. Bevy's OLD_SCHOOL bloom preset starts biting
+        // around linear 0.6.
+        for block in [
+            BlockType::PlatingWhite,
+            BlockType::PlatingTeal,
+            BlockType::RoadDeck,
+            BlockType::RoadMarking,
+        ] {
+            assert!(
+                !block.is_emissive(),
+                "{block:?} should be a lit surface, not a light source"
+            );
+            let lin = block.color().to_linear();
+            let peak = lin.red.max(lin.green).max(lin.blue);
+            assert!(
+                peak < 0.40,
+                "{block:?} peaks at linear {peak:.3} and will bloom into a glare streak"
+            );
+        }
     }
 
     #[test]
