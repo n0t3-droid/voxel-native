@@ -470,6 +470,14 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             for y in bottom..=(island.deck_y - 1).max(bottom) {
                 let near_bottom = y <= bottom + 2;
                 let near_rim = edge > 0.42;
+                // Carve the absolute bottom layer to Air — unlit mesh plates
+                // replace those downward faces so screenshots never show ink.
+                if y == bottom {
+                    if world.edit_set_voxel(x, y, z, AIR) {
+                        keel_lit += 1;
+                    }
+                    continue;
+                }
                 let block = if near_bottom && ((dx + dz + y) & 1) == 0 {
                     BlockType::LuminiteCrystal
                 } else if near_bottom {
@@ -913,7 +921,7 @@ fn film_spawn_silhouettes(
     // crystal/alloy cards sit flush under the keel footprint so the camera
     // reads color instead of a black slab (shot 1 hero + painting vista).
     let keel = island.keel_depth as f32;
-    let underside_y = -(keel.max(6.0) + 0.35);
+    let underside_y = -(keel.max(6.0) + 0.05);
     let crystal_plate = materials.add(sil_mat(
         Color::srgb(0.45, 0.95, 1.0),
         LinearRgba::rgb(1.8, 5.5, 6.5),
