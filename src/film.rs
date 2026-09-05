@@ -441,7 +441,7 @@ fn film_spawn_silhouettes(
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(-5.0, 0.15, 11.0),
+        deck + Vec3::new(-5.5, 1.2, 11.0),
     );
     spawn_film_alien(
         &mut commands,
@@ -449,22 +449,60 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(5.0, 0.15, 11.0),
+        deck + Vec3::new(5.5, 1.2, 11.0),
     );
     spawn_film_crew(
         &mut commands,
         &cube,
         &crew_body,
         &crew_visor,
-        deck + Vec3::new(-6.0, 0.15, -10.0),
+        deck + Vec3::new(-6.0, 1.0, -10.0),
     );
     spawn_film_crew(
         &mut commands,
         &cube,
         &crew_body,
         &crew_visor,
-        deck + Vec3::new(-4.2, 0.15, -10.0),
+        deck + Vec3::new(-4.0, 1.0, -10.0),
     );
+
+    // Film-only hanging crystal spikes so underside reads with the grass deck.
+    let crystal_a = materials.add(sil_mat(
+        Color::srgb(0.55, 1.0, 0.95),
+        LinearRgba::rgb(1.2, 5.5, 5.0),
+    ));
+    let crystal_b = materials.add(sil_mat(
+        Color::srgb(0.95, 0.35, 1.0),
+        LinearRgba::rgb(3.5, 0.6, 4.5),
+    ));
+    let keel_y = -(island.keel_depth as f32 * 0.55).max(4.0);
+    for (i, (ox, oz, mat)) in [
+        (-8.0_f32, 6.0, &crystal_a),
+        (0.0, 10.0, &crystal_b),
+        (9.0, 5.0, &crystal_a),
+        (-4.0, -7.0, &crystal_b),
+        (7.0, -5.0, &crystal_a),
+        (2.0, 0.0, &crystal_b),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let h = 3.2 + (i as f32) * 0.35;
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: mat.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, keel_y - h * 0.35, oz))
+                    .with_scale(Vec3::new(0.55, h, 0.55))
+                    .with_rotation(Quat::from_rotation_z(
+                        0.18 * if i % 2 == 0 { 1.0 } else { -1.0 },
+                    )),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmKeelCrystal{i}")),
+        ));
+    }
 
     info!(
         "FILM: spawned mesh silhouettes (marine/alien/crew) on open deck ({}, {})",
@@ -1129,9 +1167,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // Combat pair — stand far enough that biped AND six-leg fill frame.
-            let look = station + Vec3::new(0.0, 2.8, 11.0);
-            let pos = look + Vec3::new(-16.0, 4.5, 14.0);
+            // True side-on two-shot: marine (−X) vs alien (+X) equally distant.
+            let look = station + Vec3::new(0.0, 3.2, 11.0);
+            let pos = look + Vec3::new(-22.0, 3.8, 1.5);
             (pos, look)
         }
         3 => {
