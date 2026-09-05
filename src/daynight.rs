@@ -344,7 +344,7 @@ fn update_sun(
             let dens = base_density
                 * (1.0 + sunset * 1.4 + (1.0 - day) * 0.25)
                 * intel.profile.fog_density_mul;
-            *density = if film_nebula_shot { dens * 0.55 } else { dens };
+            *density = if film_nebula_shot { dens * 0.70 } else { dens };
         }
         // Directional light scattering — makes god-ray / atmospheric
         // tints at sunset and during the night. Much stronger sunset

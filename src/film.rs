@@ -1231,9 +1231,18 @@ fn film_spawn_silhouettes(
             Name::new(format!("FilmSatKeelDeck{si}")),
         ));
         // Painting-visible organic taper: stepped crystal clusters under rim.
-        for (ti, (ty, sc)) in [(-2.5_f32, 0.95), (-5.0, 0.72), (-7.2, 0.48), (-8.8, 0.28)]
-            .into_iter()
-            .enumerate()
+        // Scale up near-frustum sats so taper reads at hero distance.
+        let near = sz > 55.0 || (sx.abs() < 40.0 && sz > 40.0);
+        let boost = if near { 1.55 } else { 1.0 };
+        for (ti, (ty, sc)) in [
+            (-2.2_f32, 1.0),
+            (-4.8, 0.70),
+            (-7.0, 0.42),
+            (-9.0, 0.22),
+            (-10.4, 0.12),
+        ]
+        .into_iter()
+        .enumerate()
         {
             let tip_mat = if (si + ti) % 2 == 0 {
                 crystal_plate.clone()
@@ -1244,8 +1253,14 @@ fn film_spawn_silhouettes(
                 PbrBundle {
                     mesh: cube.clone(),
                     material: tip_mat,
-                    transform: Transform::from_translation(sat_deck + Vec3::new(0.0, ty, 0.0))
-                        .with_scale(Vec3::new(srx * 1.6 * sc, 2.4, srz * 1.6 * sc)),
+                    transform: Transform::from_translation(
+                        sat_deck + Vec3::new(0.0, ty * boost, 0.0),
+                    )
+                    .with_scale(Vec3::new(
+                        srx * 1.55 * sc * boost,
+                        2.1 * boost,
+                        srz * 1.55 * sc * boost,
+                    )),
                     ..default()
                 },
                 FilmSilhouette,
@@ -1253,29 +1268,30 @@ fn film_spawn_silhouettes(
                 Name::new(format!("FilmSatKeelTaper{si}_{ti}")),
             ));
         }
-        // Side hanging spikes for cluster read.
+        // Side hanging spikes for cluster read (lean + stagger, not upright pillars).
         for (ki, (ox, oz)) in [
             (srx * 0.55, 0.0),
             (-srx * 0.45, srz * 0.35),
             (0.0, -srz * 0.55),
+            (srx * 0.25, srz * 0.4),
         ]
         .into_iter()
         .enumerate()
         {
-            let h = 4.5 + (ki as f32) * 0.8;
+            let h = (5.5 + (ki as f32) * 1.1) * boost;
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
                     material: crystal_plate.clone(),
                     transform: Transform::from_translation(
-                        sat_deck + Vec3::new(ox, -6.0 - h * 0.25, oz),
+                        sat_deck + Vec3::new(ox, -5.5 - h * 0.45, oz),
                     )
-                    .with_scale(Vec3::new(0.7, h, 0.7))
+                    .with_scale(Vec3::new(0.55 * boost, h, 0.55 * boost))
                     .with_rotation(Quat::from_euler(
                         EulerRot::ZYX,
-                        0.22 * if ki % 2 == 0 { 1.0 } else { -1.0 },
-                        0.15 * (ki as f32),
-                        0.1,
+                        0.55 * if ki % 2 == 0 { 1.0 } else { -1.0 },
+                        0.35 * (ki as f32),
+                        0.25,
                     )),
                     ..default()
                 },
@@ -1326,23 +1342,27 @@ fn film_spawn_silhouettes(
         (5.0, 16.0, &crystal_b),
         (14.0, 10.0, &crystal_a),
         (-12.0, 4.0, &crystal_b),
-        // Painting-frustum organic cluster under near islands.
-        (-18.0, 102.0, &crystal_a),
-        (-8.0, 108.0, &crystal_b),
-        (6.0, 104.0, &crystal_a),
-        (16.0, 98.0, &crystal_b),
-        (-28.0, 96.0, &crystal_a),
-        (22.0, 110.0, &crystal_b),
-        (-4.0, 114.0, &crystal_a),
-        (12.0, 116.0, &crystal_b),
+        // Painting-frustum organic hangers — under station/right islands, away from skyway.
+        (22.0, 78.0, &crystal_a),
+        (34.0, 70.0, &crystal_b),
+        (14.0, 66.0, &crystal_a),
+        (42.0, 82.0, &crystal_b),
+        (28.0, 58.0, &crystal_a),
+        (8.0, 72.0, &crystal_b),
+        (48.0, 64.0, &crystal_a),
+        (18.0, 88.0, &crystal_b),
     ]
     .into_iter()
     .enumerate()
     {
-        let h = 3.8 + (i as f32) * 0.28;
         let organic = i >= 10;
+        let h = if organic {
+            7.5 + ((i - 10) as f32) * 0.9
+        } else {
+            3.8 + (i as f32) * 0.28
+        };
         let y0 = if organic {
-            -3.5 - h * 0.35
+            -4.5 - h * 0.55
         } else {
             keel_y - h * 0.35
         };
@@ -1353,15 +1373,16 @@ fn film_spawn_silhouettes(
                     material: mat.clone(),
                     transform: Transform::from_translation(deck + Vec3::new(ox, y0, oz))
                         .with_scale(Vec3::new(
-                            if organic { 0.55 } else { 0.85 },
+                            if organic { 0.85 } else { 0.85 },
                             h,
-                            if organic { 0.55 } else { 0.85 },
+                            if organic { 0.85 } else { 0.85 },
                         ))
                         .with_rotation(Quat::from_euler(
                             EulerRot::ZYX,
-                            0.22 * if i % 2 == 0 { 1.0 } else { -1.0 },
-                            0.12 * (i as f32 % 5.0),
-                            0.08,
+                            (if organic { 0.65 } else { 0.22 })
+                                * if i % 2 == 0 { 1.0 } else { -1.0 },
+                            0.18 * (i as f32 % 5.0),
+                            if organic { 0.35 } else { 0.08 },
                         )),
                     ..default()
                 },
@@ -1373,6 +1394,47 @@ fn film_spawn_silhouettes(
             commands.entity(id).insert(FilmKeelOrganic);
         } else {
             commands.entity(id).insert(FilmKeelHelper);
+        }
+    }
+    // Extra multi-spike clusters under mid-right island rims (organic keel read).
+    for (ci, (cx, cz)) in [(26.0_f32, 76.0), (38.0, 68.0), (16.0, 84.0), (44.0, 78.0)]
+        .into_iter()
+        .enumerate()
+    {
+        for (si, (ox, oz, lean)) in [
+            (0.0_f32, 0.0, 0.4),
+            (2.2, 1.4, -0.55),
+            (-1.8, 1.8, 0.7),
+            (1.2, -2.0, -0.45),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let h = 6.0 + si as f32 * 1.4;
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: if (ci + si) % 2 == 0 {
+                        crystal_a.clone()
+                    } else {
+                        crystal_b.clone()
+                    },
+                    transform: Transform::from_translation(
+                        deck + Vec3::new(cx + ox, -5.0 - h * 0.5, cz + oz),
+                    )
+                    .with_scale(Vec3::new(0.7, h, 0.7))
+                    .with_rotation(Quat::from_euler(
+                        EulerRot::ZYX,
+                        lean,
+                        0.2 * si as f32,
+                        0.15,
+                    )),
+                    ..default()
+                },
+                FilmSilhouette,
+                FilmKeelOrganic,
+                Name::new(format!("FilmKeelCluster{ci}_{si}")),
+            ));
         }
     }
 
@@ -1845,18 +1907,18 @@ fn film_spawn_silhouettes(
         Color::srgb(0.55, 0.58, 0.65),
         LinearRgba::rgb(0.4, 0.45, 0.55),
     ));
-    // Softer skyway cyan — still PASS-readable, less left-plane dominance.
+    // Dimmer skyway cyan — keep left-mid PASS without washing other planes.
     let skyway_cyan = materials.add(sil_mat(
-        Color::srgb(0.22, 0.88, 0.95),
-        LinearRgba::rgb(1.2, 5.2, 6.0),
+        Color::srgb(0.28, 0.82, 0.90),
+        LinearRgba::rgb(0.7, 3.2, 3.8),
     ));
     let shuttle_hull = materials.add(sil_mat(
-        Color::srgb(0.88, 0.90, 0.94),
-        LinearRgba::rgb(0.7, 0.75, 0.9),
+        Color::srgb(0.92, 0.94, 0.97),
+        LinearRgba::rgb(1.1, 1.2, 1.4),
     ));
     let shuttle_canopy = materials.add(sil_mat(
-        Color::srgb(0.55, 0.95, 1.0),
-        LinearRgba::rgb(1.5, 4.5, 5.5),
+        Color::srgb(0.45, 0.98, 1.0),
+        LinearRgba::rgb(2.0, 5.5, 6.5),
     ));
     spawn_film_skyway_and_shuttle_proxy(
         &mut commands,
@@ -2554,12 +2616,12 @@ fn spawn_film_fighter_swarm(
         (35.0, 58.0, 16.0, -0.48, 1.3, true),
         (55.0, 55.0, 26.0, -0.42, 1.15, true),
         // Painting wing — upper mid-right sky above mountain shoulder (not left cyan).
-        (18.0_f32, 52.0, 78.0, -0.55, 1.85, false),
-        (28.0, 56.0, 72.0, -0.45, 1.9, false),
-        (38.0, 54.0, 82.0, -0.50, 1.8, false),
-        (12.0, 50.0, 68.0, -0.60, 1.75, false),
-        (46.0, 58.0, 76.0, -0.40, 1.85, false),
-        (22.0, 48.0, 88.0, -0.52, 1.7, false),
+        (18.0_f32, 52.0, 78.0, -0.55, 2.35, false),
+        (28.0, 56.0, 72.0, -0.45, 2.45, false),
+        (38.0, 54.0, 82.0, -0.50, 2.30, false),
+        (12.0, 50.0, 68.0, -0.60, 2.25, false),
+        (46.0, 58.0, 76.0, -0.40, 2.40, false),
+        (22.0, 48.0, 88.0, -0.52, 2.20, false),
     ]
     .into_iter()
     .enumerate()
@@ -3006,16 +3068,16 @@ fn spawn_film_skyway_and_shuttle_proxy(
 ) {
     // Four thinner left-mid spans — keep skyway PASS without crushing other planes.
     for (i, (ax, az, bx, bz, y)) in [
-        (-34.0_f32, 106.0, -4.0, 92.0, 24.0),
-        (-26.0, 114.0, 0.0, 98.0, 30.0),
-        (-18.0, 98.0, -6.0, 88.0, 36.0),
-        (-38.0, 94.0, -10.0, 104.0, 20.0),
+        (-34.0_f32, 106.0, -4.0, 92.0, 18.0),
+        (-26.0, 114.0, 0.0, 98.0, 28.0),
+        (-18.0, 98.0, -6.0, 88.0, 38.0),
+        (-38.0, 94.0, -10.0, 104.0, 48.0),
     ]
     .into_iter()
     .enumerate()
     {
         let a = deck + Vec3::new(ax, y, az);
-        let b = deck + Vec3::new(bx, y + 2.0, bz);
+        let b = deck + Vec3::new(bx, y + 1.5, bz);
         let mid = a.lerp(b, 0.5);
         let len = a.distance(b).max(10.0);
         let dir = (b - a).normalize_or_zero();
@@ -3025,7 +3087,7 @@ fn spawn_film_skyway_and_shuttle_proxy(
                 material: deck_mat.clone(),
                 transform: Transform::from_translation(mid)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(4.2, 1.8, len)),
+                    .with_scale(Vec3::new(3.4, 1.4, len)),
                 ..default()
             },
             FilmSilhouette,
@@ -3036,9 +3098,9 @@ fn spawn_film_skyway_and_shuttle_proxy(
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mid + Vec3::Y * 1.4)
+                transform: Transform::from_translation(mid + Vec3::Y * 1.1)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(1.6, 2.2, len * 0.98)),
+                    .with_scale(Vec3::new(1.15, 1.6, len * 0.98)),
                 ..default()
             },
             FilmSilhouette,
@@ -3090,15 +3152,15 @@ fn spawn_film_skyway_and_shuttle_proxy(
         ),
         (
             cyan.clone(),
-            Transform::from_translation(shuttle + plume_dir * 20.0)
-                .with_scale(Vec3::new(28.0, 5.0, 5.0))
+            Transform::from_translation(shuttle + plume_dir * 18.0)
+                .with_scale(Vec3::new(22.0, 3.8, 3.8))
                 .with_rotation(rot),
             "FilmShuttleProxyPlume",
         ),
         (
             cyan.clone(),
-            Transform::from_translation(shuttle + plume_dir * 14.0 + Vec3::Y * 3.0)
-                .with_scale(Vec3::new(20.0, 3.2, 3.2))
+            Transform::from_translation(shuttle + plume_dir * 12.0 + Vec3::Y * 2.5)
+                .with_scale(Vec3::new(14.0, 2.4, 2.4))
                 .with_rotation(rot),
             "FilmShuttleProxyPlumeB",
         ),
