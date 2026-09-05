@@ -1927,16 +1927,16 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Profile the rim: grass deck on the upper edge + colored unlit
-            // underside plates filling the keel below (no black slab).
+            // Outside the island, below-and-SE: grass deck rim on the far
+            // edge + unlit crystal/alloy underside plates in the near field.
             let keel = island.keel_depth as f32;
             let pos = deck
                 + Vec3::new(
-                    island.radius_x as f32 * 0.7 + 18.0,
-                    -(keel * 0.55).max(5.0),
-                    island.radius_z as f32 * 0.65 + 22.0,
+                    island.radius_x as f32 + 28.0,
+                    -(keel * 0.95).max(8.0) - 1.5,
+                    island.radius_z as f32 + 30.0,
                 );
-            let look = deck + Vec3::new(-2.0, -keel * 0.15, 4.0);
+            let look = deck + Vec3::new(-4.0, 0.8, -2.0);
             (pos, look)
         }
         2 => {
