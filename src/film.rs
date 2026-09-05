@@ -1398,10 +1398,10 @@ fn film_spawn_silhouettes(
         Color::srgb(1.0, 0.95, 0.20),
         LinearRgba::rgb(10.0, 8.0, 0.6),
     ));
-    // Deep red beam — keep G≈0 and tame emissive so ACES cannot wash to yellow.
+    // Deep red beam — pure R channel, moderate emissive (ACES-safe).
     let turret_tracer = materials.add(sil_mat(
-        Color::srgb(0.98, 0.02, 0.0),
-        LinearRgba::rgb(3.8, 0.04, 0.0),
+        Color::srgb(1.0, 0.0, 0.0),
+        LinearRgba::rgb(6.0, 0.0, 0.0),
     ));
     spawn_film_turrets_firing(
         &mut commands,
@@ -1840,25 +1840,29 @@ fn spawn_film_turrets_firing(
                 material: tracer.clone(),
                 transform: Transform::from_translation(beam_mid)
                     .looking_at(aim, Vec3::Y)
-                    .with_scale(Vec3::new(2.8, 2.8, beam_len)),
+                    .with_scale(Vec3::new(3.6, 3.6, beam_len)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTurretBeam{i}")),
         ));
-        // Secondary thinner core (still red tracer, not yellow muzzle).
-        commands.spawn((
-            PbrBundle {
-                mesh: cube.clone(),
-                material: tracer.clone(),
-                transform: Transform::from_translation(beam_mid)
-                    .looking_at(aim, Vec3::Y)
-                    .with_scale(Vec3::new(1.2, 1.2, beam_len * 1.05)),
-                ..default()
-            },
-            FilmSilhouette,
-            Name::new(format!("FilmTurretCore{i}")),
-        ));
+        // Hero beam slab parked in the fire lane for the turrets shot —
+        // guaranteed red/orange body even if thin tracers crush under ACES.
+        if i == 0 {
+            let hero_mid = flash.lerp(aim, 0.5);
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: tracer.clone(),
+                    transform: Transform::from_translation(hero_mid)
+                        .looking_at(aim, Vec3::Y)
+                        .with_scale(Vec3::new(5.5, 5.5, beam_len * 0.95)),
+                    ..default()
+                },
+                FilmSilhouette,
+                Name::new("FilmTurretHeroBeam"),
+            ));
+        }
         for s in 1..7 {
             let t = s as f32 / 7.0;
             let p = flash.lerp(aim, t);
@@ -1887,13 +1891,13 @@ fn spawn_film_fighter_swarm(
     // V-formation near station/+X skyway so painting_hero and a dedicated
     // fighter_swarm beat both catch cyan plumes streaming −X.
     for (i, (ox, oy, oz, yaw)) in [
-        (16.0_f32, 9.0, 40.0, -0.55),
-        (22.0, 11.0, 44.0, -0.45),
-        (28.0, 10.0, 42.0, -0.50),
-        (34.0, 12.0, 46.0, -0.40),
-        (20.0, 8.0, 50.0, -0.60),
-        (30.0, 13.0, 52.0, -0.35),
-        (26.0, 15.0, 38.0, -0.48),
+        (16.0_f32, 16.0, 40.0, -0.55),
+        (22.0, 18.0, 44.0, -0.45),
+        (28.0, 17.0, 42.0, -0.50),
+        (34.0, 19.0, 46.0, -0.40),
+        (20.0, 15.0, 50.0, -0.60),
+        (30.0, 20.0, 52.0, -0.35),
+        (26.0, 22.0, 38.0, -0.48),
     ]
     .into_iter()
     .enumerate()
@@ -1950,11 +1954,11 @@ fn spawn_film_crystal_towers(
 ) {
     // Tall crystal towers — next most visible painting gap after fighters.
     for (i, (ox, oz, h)) in [
-        (8.0_f32, 22.0, 28.0),
-        (-10.0, 26.0, 34.0),
-        (14.0, 34.0, 24.0),
-        (-4.0, 38.0, 40.0),
-        (6.0, 46.0, 30.0),
+        (18.0_f32, 18.0, 28.0),
+        (28.0, 24.0, 34.0),
+        (22.0, 32.0, 24.0),
+        (36.0, 28.0, 40.0),
+        (14.0, 40.0, 30.0),
     ]
     .into_iter()
     .enumerate()
@@ -2489,13 +2493,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         3 => {
-            // Along the −X turret beam axis: yellow muzzle in foreground,
-            // deep-red beam body stretching to the alien (survives ACES).
-            let turret = station + Vec3::new(-9.0, 3.5, 22.0);
-            let alien = station + Vec3::new(6.0, 5.0, 16.5);
-            let dir = (alien - turret).normalize_or_zero();
-            let pos = turret - dir * 12.0 + Vec3::new(0.0, 1.8, 0.0);
-            let look = alien + dir * 3.0;
+            // High stand-off along the fire lane: yellow muzzles + fat red
+            // beams into the alien (avoid crystal-tower occlusion on −X).
+            let pos = station + Vec3::new(-24.0, 10.0, 34.0);
+            let look = station + Vec3::new(5.0, 4.5, 16.0);
             (pos, look)
         }
         4 => {
@@ -2546,11 +2547,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         10 => {
-            // Fighter swarm V-formation: rear-quarter so cyan plumes stream
-            // toward camera (same −X wake language as the hero shuttle).
-            let form = deck + Vec3::new(26.0, 11.0, 46.0);
-            let pos = form + Vec3::new(18.0, 4.0, 10.0);
-            let look = form + Vec3::new(-8.0, 0.0, 0.0);
+            // Fighter swarm: high rear-quarter, clear of sat keel volumes.
+            let form = deck + Vec3::new(26.0, 14.0, 46.0);
+            let pos = deck + Vec3::new(52.0, 22.0, 62.0);
+            let look = form + Vec3::new(-4.0, -1.0, -2.0);
             (pos, look)
         }
         _ => {
