@@ -1738,6 +1738,7 @@ pub fn spawn_aether_film_shuttle(
         None,
         true, // cyan wakes only — amber bloom washes the painting cue
         true, // remaps stern AmberHeat + MagentaSignal → CyanEmission for film
+        true, // hide cockpit HUD/chrome so pink streaks don't leak into film
     );
     // Replace the default parked motion with a cruise so trails bloom.
     commands.entity(entity).insert(ShipMotion {
@@ -1766,6 +1767,7 @@ fn spawn_ship_entity(
     shield_override: Option<f32>,
     cyan_trails_only: bool,
     film_cyan_nozzles: bool,
+    hide_cockpit_chrome: bool,
 ) -> Entity {
     let bp = blueprint(kind);
     let root = commands
@@ -1810,21 +1812,27 @@ fn spawn_ship_entity(
     commands.entity(root).with_children(|p| {
         spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview, film_cyan_nozzles);
         if !preview {
-            spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp);
+            // Film hero shuttle: skip cockpit HUD panels — Magenta/Amber
+            // holograms leak pink bloom into rear-quarter nozzle frames.
+            if !hide_cockpit_chrome {
+                spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp);
+            }
             spawn_ship_energy_trails(p, materials, fx, &cube, kind, cyan_trails_only);
-            p.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: Color::srgb(0.64, 0.92, 1.0),
-                    intensity: 130_000.0,
-                    range: 18.0,
-                    shadows_enabled: false,
+            if !hide_cockpit_chrome {
+                p.spawn(PointLightBundle {
+                    point_light: PointLight {
+                        color: Color::srgb(0.64, 0.92, 1.0),
+                        intensity: 130_000.0,
+                        range: 18.0,
+                        shadows_enabled: false,
+                        ..default()
+                    },
+                    transform: Transform::from_translation(
+                        bp.cockpit_offset + Vec3::new(0.0, 1.0, 0.6),
+                    ),
                     ..default()
-                },
-                transform: Transform::from_translation(
-                    bp.cockpit_offset + Vec3::new(0.0, 1.0, 0.6),
-                ),
-                ..default()
-            });
+                });
+            }
             p.spawn(PointLightBundle {
                 point_light: PointLight {
                     color: Color::srgb(0.25, 0.90, 1.0),
@@ -2619,6 +2627,7 @@ fn spawn_saved_ships_once(
             Some(saved.shield),
             false,
             false,
+            false,
         );
     }
 
@@ -2641,6 +2650,7 @@ fn spawn_saved_ships_once(
             player_yaw + std::f32::consts::PI,
             false,
             None,
+            false,
             false,
             false,
         );
@@ -2756,6 +2766,7 @@ fn ship_placement_input(
                 None,
                 false,
                 false,
+                false,
             );
             placement.preview = Some(e);
             e
@@ -2795,6 +2806,7 @@ fn ship_placement_input(
             placement.yaw,
             false,
             None,
+            false,
             false,
             false,
         );

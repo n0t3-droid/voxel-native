@@ -39,6 +39,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::daynight::WorldIntelRuntime;
+use crate::film::FilmRuntime;
 use crate::settings::WorldSettings;
 
 /// Render layer used exclusively by the sky pass. The world camera stays
@@ -228,6 +229,7 @@ fn setup_sky(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     settings: Res<WorldSettings>,
+    film: Res<FilmRuntime>,
 ) {
     let sky_layer = RenderLayers::layer(SKY_LAYER);
 
@@ -376,7 +378,11 @@ fn setup_sky(
     // Multi-channel Perlin produces billowing magenta/cyan/orange clouds
     // exactly like the reference art. Cull front-face so we only see it
     // from the inside, and keep it fully unlit/emissive.
-    let nebula_image = images.add(build_nebula_image(nebula_res, settings.seed as u64));
+    let nebula_image = images.add(build_nebula_image(
+        nebula_res,
+        settings.seed as u64,
+        film.enabled,
+    ));
     let nebula_mesh = meshes.add(
         Sphere::new(SKY_DISTANCE * 2.6)
             .mesh()
@@ -584,6 +590,7 @@ fn setup_sky(
 fn follow_and_animate_sky(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
+    film: Option<Res<FilmRuntime>>,
     main_cam: Query<&GlobalTransform, (With<Camera3d>, Without<SkyCamera>)>,
     mut sky_cam: Query<&mut Transform, With<SkyCamera>>,
     mut sun_q: Query<
@@ -825,10 +832,23 @@ fn follow_and_animate_sky(
         // are pushed HARD so the cosmic backdrop reads clearly even
         // against the bright blue noon sky, just like in the reference
         // art where planets and nebulae are visible in broad daylight.
+        // Film mode pushes saturation further for painting-hero frames
+        // without changing the daytime pad lighting path.
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
-            let base_day = Vec3::new(9.0, 5.0, 13.0); // rich purple/magenta at noon
-            let base_night = Vec3::new(8.0, 5.5, 10.0); // full nebula glow at night
-            let base_sunset = Vec3::new(12.0, 5.0, 4.5); // warm dusk glow
+            let film_on = film.as_ref().map(|f| f.enabled).unwrap_or(false);
+            let (base_day, base_night, base_sunset) = if film_on {
+                (
+                    Vec3::new(18.0, 10.0, 26.0),
+                    Vec3::new(16.0, 11.0, 22.0),
+                    Vec3::new(20.0, 9.0, 8.0),
+                )
+            } else {
+                (
+                    Vec3::new(9.0, 5.0, 13.0),
+                    Vec3::new(8.0, 5.5, 10.0),
+                    Vec3::new(12.0, 5.0, 4.5),
+                )
+            };
             let e = (base_day * day + base_night * night + base_sunset * sunset * 0.9)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
@@ -1096,7 +1116,7 @@ fn ring_mesh_y_extent(mesh: &Mesh) -> f32 {
 /// spherical projection, three colour channels sampled at different
 /// frequencies. Produces billowing magenta / cyan / orange clouds
 /// reminiscent of Hubble field backdrops. Deterministic by seed.
-fn build_nebula_image(size: u32, seed: u64) -> Image {
+fn build_nebula_image(size: u32, seed: u64, dense: bool) -> Image {
     let n_r = Perlin::new(seed as u32 ^ 0x7777_7777);
     let n_g = Perlin::new(seed as u32 ^ 0x3333_3333);
     let n_b = Perlin::new(seed as u32 ^ 0xBBBB_BBBB);
@@ -1136,11 +1156,16 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
             let mask = fbm(&n_mask, 0.6, 3);
             // Soft mask so large regions of the sphere are near-black,
             // and only a few filaments glow strongly — exactly like
-            // real nebulae.
-            let amp = (mask + 0.2).max(0.0).powf(1.6);
-            let rr = ((r * 0.5 + 0.5) * amp).clamp(0.0, 1.0);
-            let gg = ((g * 0.5 + 0.5) * amp * 0.85).clamp(0.0, 1.0);
-            let bb = ((b * 0.5 + 0.5) * amp * 1.05).clamp(0.0, 1.0);
+            // real nebulae. Film mode widens/saturates the cloud mass.
+            let amp = if dense {
+                (mask + 0.48).max(0.0).powf(1.05)
+            } else {
+                (mask + 0.2).max(0.0).powf(1.6)
+            };
+            let sat = if dense { 1.25 } else { 1.0 };
+            let rr = ((r * 0.5 + 0.5) * amp * sat).clamp(0.0, 1.0);
+            let gg = ((g * 0.5 + 0.5) * amp * 0.85 * sat).clamp(0.0, 1.0);
+            let bb = ((b * 0.5 + 0.5) * amp * 1.05 * sat).clamp(0.0, 1.0);
 
             // Colour palette skewed toward magenta / cyan / warm orange
             // highlights. Mix the raw channels with fixed biases so the
