@@ -48,6 +48,12 @@ impl Plugin for FilmPlugin {
             )
                 .chain(),
         );
+        // After daynight's Update ClearColor write so painting/planet nebula
+        // isn't crushed by noon sky wash.
+        app.add_systems(
+            PostUpdate,
+            film_override_sky_clear.run_if(in_state(GameState::InGame)),
+        );
     }
 }
 
@@ -685,6 +691,31 @@ fn stamp_film_dual_rivers(world: &mut VoxelWorld, island: IslandSpec) -> usize {
             n += 2;
         }
     }
+    // Hero ribbon aimed at painting cam look (deck+24,-6,+28) — thick dual
+    // channel hanging just under the near archipelago rim.
+    let hx = island.cx + 18;
+    let hz = island.cz + 40;
+    let hy = (island.deck_y - 14).max(crate::terrain::WATER_LEVEL + 4);
+    for i in 0..80 {
+        let t = i as f32 * 0.11;
+        let px = hx + (i as f32 * 0.75 + t.sin() * 2.0).round() as i32;
+        let pz = hz + ((i as f32 * 0.35) + (t * 1.1).cos() * 3.0).round() as i32;
+        for dy in 0..5 {
+            for ox in 0..4 {
+                if world.edit_set_voxel(px + ox, hy + dy, pz, BlockType::PlasmaFlow.into()) {
+                    n += 1;
+                }
+            }
+            for oz in 0..4 {
+                if world.edit_set_voxel(px + 6, hy + dy, pz + oz, BlockType::Lava.into()) {
+                    n += 1;
+                }
+            }
+            if world.edit_set_voxel(px + 7, hy + dy, pz + 1, BlockType::NeonAmber.into()) {
+                n += 1;
+            }
+        }
+    }
     n
 }
 
@@ -767,8 +798,11 @@ fn stamp_film_skyway_stub(
                 if world.edit_set_voxel(x + ox, y, z + oz, BlockType::SkywayDeck.into()) {
                     n += 1;
                 }
-                if world.edit_set_voxel(x + ox, y + 1, z + oz, BlockType::NeonCyan.into()) {
-                    n += 1;
+                // Sparse neon trim — full NeonCyan web white-outs painting_hero.
+                if (i + ox + oz) % 3 == 0 {
+                    if world.edit_set_voxel(x + ox, y + 1, z + oz, BlockType::NeonCyan.into()) {
+                        n += 1;
+                    }
                 }
             }
         }
@@ -1379,6 +1413,23 @@ const SHOTS: &[FilmShot] = &[
     },
 ];
 
+fn film_override_sky_clear(film: Res<FilmRuntime>, mut clear_color: ResMut<ClearColor>) {
+    if !film.enabled || film.finished || !film.ready_to_roll {
+        return;
+    }
+    // Must win against daynight::update_sun (Update) so nebula volume reads.
+    match film.shot_index {
+        6 | 7 => {
+            clear_color.0 = Color::srgb(0.12, 0.08, 0.20);
+        }
+        8 => {
+            // Dual rivers: slightly cooler dusk so cyan/lava pop off grey wash.
+            clear_color.0 = Color::srgb(0.28, 0.26, 0.34);
+        }
+        _ => {}
+    }
+}
+
 fn film_drive_camera(
     time: Res<Time>,
     world: Res<VoxelWorld>,
@@ -1485,8 +1536,9 @@ fn film_drive_camera(
 
     // Darken ClearColor on planet/painting so additive nebula isn't crushed
     // by noon sky wash (daytime pad shots keep the normal daynight clear).
+    // Final write also happens in PostUpdate — see film_override_sky_clear.
     if matches!(film.shot_index, 6 | 7) {
-        clear_color.0 = Color::srgb(0.22, 0.18, 0.32);
+        clear_color.0 = Color::srgb(0.14, 0.10, 0.22);
     }
 
     // Extra ambient bounce on deck+keel / dual-river so undersides aren't crushed.
@@ -1822,10 +1874,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
         }
         7 => {
             // Painting-scale: denser archipelago fills lower 2/3, planet/nebula upper.
-            // Angle down enough to catch dual rivers under the near islands.
+            // Aim so dual rivers under the near rim sit in the lower third.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-42.0, 18.0, 78.0);
-            let look = deck + Vec3::new(24.0, -6.0, 28.0) + planet_dir * 18.0;
+            let pos = deck + Vec3::new(-38.0, 22.0, 72.0);
+            let look = deck + Vec3::new(22.0, -10.0, 36.0) + planet_dir * 12.0;
             (pos, look)
         }
         8 => {
