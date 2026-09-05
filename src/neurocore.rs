@@ -175,8 +175,8 @@ pub struct RuntimeBudget {
     pub queue_pressure: f32,
     pub frame_pressure: f32,
     pub status: String,
-    /// First ~2s of a session: fill the spawn disc at the card's full
-    /// job budget instead of the LowSpec / smoothness throttle.
+    /// Spawn disc is still filling: keep the card's full job budget
+    /// instead of the LowSpec / smoothness throttle.
     pub startup_fill: bool,
 }
 
@@ -189,8 +189,11 @@ const STARTUP_MAX_MESH_APPLIES_PER_FRAME: u32 = 16;
 const SMOOTH_MAX_IN_FLIGHT_TERRAIN: u32 = 96;
 const SMOOTH_MAX_IN_FLIGHT_MESHES: u32 = 80;
 /// First seconds of a session fill the spawn disc at the card budget
-/// instead of the LowSpec / smoothness throttle.
+/// instead of the LowSpec / smoothness throttle. After that, LowSpec
+/// keeps the fill budget only while the disc is still dirty.
 const STARTUP_FILL_SECONDS: f32 = 2.2;
+const DISC_CATCHUP_SECONDS: f32 = 12.0;
+const DISC_CATCHUP_BACKLOG: usize = 48;
 
 impl Default for RuntimeBudget {
     fn default() -> Self {
@@ -376,8 +379,13 @@ impl NeuroCore {
 
     fn profile_budget(&mut self, settings: &WorldSettings, dt: f32) -> RuntimeBudget {
         let target = (settings.render_distance as i32).max(2);
+        let backlog = self.telemetry.dirty_chunks
+            + self.telemetry.pending_meshes
+            + self.telemetry.pending_terrain;
+        let disc_filling = backlog > DISC_CATCHUP_BACKLOG;
         let startup_fill = self.telemetry.stream_elapsed > 0.05
-            && self.telemetry.stream_elapsed < STARTUP_FILL_SECONDS;
+            && (self.telemetry.stream_elapsed < STARTUP_FILL_SECONDS
+                || (disc_filling && self.telemetry.stream_elapsed < DISC_CATCHUP_SECONDS));
         let (
             rd,
             mut job_scale,
@@ -389,9 +397,9 @@ impl NeuroCore {
         ) = match self.profile {
             RuntimeProfile::LowSpec => {
                 let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
-                // Fast keeps a 16-chunk settled horizon so Vega isn't
+                // Fast keeps a 12-chunk settled horizon so Vega isn't
                 // drawing the Cinematic 24-chunk disc. Spawn fill still
-                // ramps 5→8→16 via the streamer; this is only the cap.
+                // ramps 5→8→12 via the streamer; this is only the cap.
                 let rd_cap = if fast { 12 } else { 24 };
                 (
                 target.min(rd_cap).max(6),
@@ -924,6 +932,40 @@ mod tests {
             fill.chunks_per_frame
         );
         assert!(fill.render_distance >= 6);
+    }
+
+    #[test]
+    fn lowspec_keeps_fill_budget_while_the_disc_is_still_dirty() {
+        let mut settings = WorldSettings::default();
+        settings.apply_world_mode_card(crate::settings::WorldModeCard::FastLaptop);
+        let mut core = NeuroCore::default();
+        let mut tel = telemetry(48.0, 0.2, RuntimeIntent::Explore);
+        tel.stream_elapsed = 6.0;
+        tel.dirty_chunks = 200;
+        tel.pending_terrain = 16;
+        let fill = core.update_budget(&settings, tel, 0.16);
+        assert!(fill.startup_fill);
+        assert!(
+            fill.chunks_per_frame >= 12,
+            "disc still dirty should keep fill budget, got {}",
+            fill.chunks_per_frame
+        );
+        assert_eq!(fill.render_distance, 12);
+    }
+
+    #[test]
+    fn lowspec_stops_fill_after_the_disc_catchup_window() {
+        let mut settings = WorldSettings::default();
+        settings.apply_world_mode_card(crate::settings::WorldModeCard::FastLaptop);
+        let mut core = NeuroCore::default();
+        let mut tel = telemetry(48.0, 0.2, RuntimeIntent::Explore);
+        tel.stream_elapsed = 13.0;
+        tel.dirty_chunks = 200;
+        tel.pending_terrain = 16;
+        let steady = core.update_budget(&settings, tel, 0.16);
+        assert!(!steady.startup_fill);
+        assert!(steady.chunks_per_frame < settings.chunks_per_frame);
+        assert_eq!(steady.render_distance, 12);
     }
 
     #[test]
