@@ -1395,12 +1395,12 @@ fn film_spawn_silhouettes(
         LinearRgba::rgb(0.15, 0.16, 0.18),
     ));
     let turret_muzzle = materials.add(sil_mat(
-        Color::srgb(1.0, 0.92, 0.35),
-        LinearRgba::rgb(12.0, 9.0, 1.5),
+        Color::srgb(1.0, 0.95, 0.25),
+        LinearRgba::rgb(16.0, 14.0, 1.2),
     ));
     let turret_tracer = materials.add(sil_mat(
-        Color::srgb(1.0, 0.55, 0.08),
-        LinearRgba::rgb(10.0, 3.5, 0.2),
+        Color::srgb(1.0, 0.22, 0.0),
+        LinearRgba::rgb(14.0, 1.8, 0.05),
     ));
     spawn_film_turrets_firing(
         &mut commands,
@@ -1777,6 +1777,7 @@ fn spawn_film_turrets_firing(
     for (i, origin) in [
         pad + Vec3::new(-9.0, 0.0, 8.0),
         pad + Vec3::new(9.5, 0.0, 7.5),
+        pad + Vec3::new(-2.0, 0.0, 10.0),
     ]
     .into_iter()
     .enumerate()
@@ -1785,66 +1786,66 @@ fn spawn_film_turrets_firing(
             PbrBundle {
                 mesh: cube.clone(),
                 material: hull.clone(),
-                transform: Transform::from_translation(origin + Vec3::new(0.0, 1.2, 0.0))
-                    .with_scale(Vec3::new(2.2, 2.4, 2.2)),
+                transform: Transform::from_translation(origin + Vec3::new(0.0, 1.4, 0.0))
+                    .with_scale(Vec3::new(2.8, 2.8, 2.8)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTurretBase{i}")),
         ));
-        let to_alien = (alien - (origin + Vec3::new(0.0, 3.0, 0.0))).normalize_or_zero();
-        let barrel_mid = origin + Vec3::new(0.0, 3.0, 0.0) + to_alien * 2.5;
+        let aim = alien + Vec3::new(0.0, 1.0, 0.0);
+        let to_alien = (aim - (origin + Vec3::new(0.0, 3.2, 0.0))).normalize_or_zero();
+        let barrel_mid = origin + Vec3::new(0.0, 3.2, 0.0) + to_alien * 3.0;
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: hull.clone(),
                 transform: Transform::from_translation(barrel_mid)
-                    .looking_at(alien, Vec3::Y)
-                    .with_scale(Vec3::new(0.7, 0.7, 4.5)),
+                    .looking_at(aim, Vec3::Y)
+                    .with_scale(Vec3::new(0.9, 0.9, 5.5)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTurretBarrel{i}")),
         ));
-        let flash = origin + Vec3::new(0.0, 3.0, 0.0) + to_alien * 5.0;
+        let flash = origin + Vec3::new(0.0, 3.2, 0.0) + to_alien * 6.2;
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: muzzle.clone(),
-                transform: Transform::from_translation(flash).with_scale(Vec3::new(3.2, 3.2, 3.2)),
+                transform: Transform::from_translation(flash).with_scale(Vec3::new(4.5, 4.5, 4.5)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTurretMuzzle{i}")),
         ));
-        // Continuous tracer beam (thick) so lavapipe mid-shots still read fire.
-        let beam_mid = flash.lerp(alien, 0.45);
-        let beam_len = flash.distance(alien).max(4.0);
+        let beam_mid = flash.lerp(aim, 0.5);
+        let beam_len = flash.distance(aim).max(6.0);
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: tracer.clone(),
                 transform: Transform::from_translation(beam_mid)
-                    .looking_at(alien, Vec3::Y)
-                    .with_scale(Vec3::new(1.4, 1.4, beam_len)),
+                    .looking_at(aim, Vec3::Y)
+                    .with_scale(Vec3::new(2.0, 2.0, beam_len)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmTurretBeam{i}")),
         ));
-        for s in 1..8 {
-            let t = s as f32 / 8.0;
-            let p = flash.lerp(alien, t);
-            let size = 1.4 - t * 0.5;
+        for s in 1..6 {
+            let t = s as f32 / 6.0;
+            let p = flash.lerp(aim, t);
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
-                    material: tracer.clone(),
-                    transform: Transform::from_translation(p).with_scale(Vec3::splat(size)),
+                    material: muzzle.clone(),
+                    transform: Transform::from_translation(p)
+                        .with_scale(Vec3::splat(2.2 - t * 0.8)),
                     ..default()
                 },
                 FilmSilhouette,
-                Name::new(format!("FilmTurretTracer{i}_{s}")),
+                Name::new(format!("FilmTurretSpark{i}_{s}")),
             ));
         }
     }
@@ -2389,9 +2390,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         3 => {
-            // Stand off: both turrets + orange/yellow tracers into the alien.
-            let look = station + Vec3::new(2.0, 4.5, 17.0);
-            let pos = station + Vec3::new(-18.0, 8.0, 28.0);
+            // Over-the-shoulder of the −X turret: yellow muzzle + orange beam
+            // into the alien must dominate the frame (not a combat two-shot).
+            let pos = station + Vec3::new(-20.0, 7.5, 30.0);
+            let look = station + Vec3::new(4.0, 4.5, 16.5);
             (pos, look)
         }
         4 => {
