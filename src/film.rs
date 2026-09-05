@@ -127,6 +127,10 @@ struct FilmCrystalFx;
 #[derive(Component)]
 struct FilmFighterFx;
 
+/// Waterfall sheets/cliff — hidden on crystal grove (cyan slabs flooded the frame).
+#[derive(Component)]
+struct FilmWaterfallFx;
+
 #[derive(Component)]
 struct FilmShuttleMarker;
 
@@ -2305,6 +2309,7 @@ fn spawn_film_waterfall(
             ..default()
         },
         FilmSilhouette,
+        FilmWaterfallFx,
         Name::new("FilmWaterfallCliff"),
     ));
     // Grass lip on cliff top.
@@ -2317,6 +2322,7 @@ fn spawn_film_waterfall(
             ..default()
         },
         FilmSilhouette,
+        FilmWaterfallFx,
         Name::new("FilmWaterfallLip"),
     ));
     // Main vertical cyan sheet — fills dedicated frame.
@@ -2328,6 +2334,7 @@ fn spawn_film_waterfall(
             ..default()
         },
         FilmSilhouette,
+        FilmWaterfallFx,
         Name::new("FilmWaterfallSheet"),
     ));
     commands.spawn((
@@ -2339,6 +2346,7 @@ fn spawn_film_waterfall(
             ..default()
         },
         FilmSilhouette,
+        FilmWaterfallFx,
         Name::new("FilmWaterfallCore"),
     ));
     for (i, ox) in [(-6.5_f32), (6.5)].into_iter().enumerate() {
@@ -2351,6 +2359,7 @@ fn spawn_film_waterfall(
                 ..default()
             },
             FilmSilhouette,
+            FilmWaterfallFx,
             Name::new(format!("FilmWaterfallRibbon{i}")),
         ));
     }
@@ -2378,6 +2387,7 @@ fn spawn_film_waterfall(
                 ..default()
             },
             FilmSilhouette,
+            FilmWaterfallFx,
             Name::new(format!("FilmWaterfallMist{i}")),
         ));
     }
@@ -2392,6 +2402,7 @@ fn spawn_film_waterfall(
             ..default()
         },
         FilmSilhouette,
+        FilmWaterfallFx,
         Name::new("FilmWaterfallSheetB"),
     ));
     commands.spawn((
@@ -2402,6 +2413,7 @@ fn spawn_film_waterfall(
             ..default()
         },
         FilmSilhouette,
+        FilmWaterfallFx,
         Name::new("FilmWaterfallLipB"),
     ));
 }
@@ -2415,6 +2427,7 @@ fn spawn_film_crystal_towers(
 ) {
     // Tapered cyan spires (base→mid→shaft→tip) so dedicated + painting read as towers.
     let ice = verdant;
+    let lift = 8.0; // float grove above pad clutter
     for (i, (ox, oz, h)) in [
         (18.0_f32, 18.0, 44.0),
         (28.0, 24.0, 58.0),
@@ -2435,7 +2448,7 @@ fn spawn_film_crystal_towers(
             PbrBundle {
                 mesh: cube.clone(),
                 material: crystal.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.12, oz))
+                transform: Transform::from_translation(deck + Vec3::new(ox, lift + h * 0.12, oz))
                     .with_scale(Vec3::new(7.5, h * 0.24, 7.5))
                     .with_rotation(rot),
                 ..default()
@@ -2449,7 +2462,7 @@ fn spawn_film_crystal_towers(
             PbrBundle {
                 mesh: cube.clone(),
                 material: crystal.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.38, oz))
+                transform: Transform::from_translation(deck + Vec3::new(ox, lift + h * 0.38, oz))
                     .with_scale(Vec3::new(5.2, h * 0.32, 5.2))
                     .with_rotation(rot * Quat::from_rotation_y(0.35)),
                 ..default()
@@ -2463,7 +2476,7 @@ fn spawn_film_crystal_towers(
             PbrBundle {
                 mesh: cube.clone(),
                 material: ice.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.68, oz))
+                transform: Transform::from_translation(deck + Vec3::new(ox, lift + h * 0.68, oz))
                     .with_scale(Vec3::new(3.2, h * 0.36, 3.2))
                     .with_rotation(rot),
                 ..default()
@@ -2477,7 +2490,7 @@ fn spawn_film_crystal_towers(
             PbrBundle {
                 mesh: cube.clone(),
                 material: ice.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, h + 4.0, oz))
+                transform: Transform::from_translation(deck + Vec3::new(ox, lift + h + 4.0, oz))
                     .with_scale(Vec3::new(6.5, 7.0, 6.5))
                     .with_rotation(Quat::from_rotation_y(0.55) * Quat::from_rotation_z(0.55)),
                 ..default()
@@ -2492,7 +2505,7 @@ fn spawn_film_crystal_towers(
                 mesh: cube.clone(),
                 material: crystal.clone(),
                 transform: Transform::from_translation(
-                    deck + Vec3::new(ox + 4.0, h * 0.50, oz - 2.5),
+                    deck + Vec3::new(ox + 4.0, lift + h * 0.50, oz - 2.5),
                 )
                 .with_scale(Vec3::new(2.2, h * 0.48, 2.2))
                 .with_rotation(Quat::from_rotation_z(-lean * 2.2) * Quat::from_rotation_x(0.25)),
@@ -2566,6 +2579,7 @@ fn film_toggle_helpers(
             Without<FilmPlanetProxy>,
             Without<FilmCrystalFx>,
             Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
         ),
     >,
     mut river_ribbons: Query<
@@ -2577,6 +2591,7 @@ fn film_toggle_helpers(
             Without<FilmPlanetProxy>,
             Without<FilmCrystalFx>,
             Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
         ),
     >,
     mut turret_fx: Query<
@@ -2588,6 +2603,7 @@ fn film_toggle_helpers(
             Without<FilmPlanetProxy>,
             Without<FilmCrystalFx>,
             Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
         ),
     >,
     mut planet_proxy: Query<
@@ -2599,6 +2615,7 @@ fn film_toggle_helpers(
             Without<FilmTurretFx>,
             Without<FilmCrystalFx>,
             Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
         ),
     >,
     mut crystal_fx: Query<
@@ -2610,6 +2627,7 @@ fn film_toggle_helpers(
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
             Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
         ),
     >,
     mut fighter_fx: Query<
@@ -2621,6 +2639,19 @@ fn film_toggle_helpers(
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
             Without<FilmCrystalFx>,
+            Without<FilmWaterfallFx>,
+        ),
+    >,
+    mut waterfall_fx: Query<
+        &mut Visibility,
+        (
+            With<FilmWaterfallFx>,
+            Without<FilmKeelHelper>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
         ),
     >,
 ) {
@@ -2677,6 +2708,15 @@ fn film_toggle_helpers(
     let show_fighters = matches!(film.shot_index, 2 | 8 | 11);
     for mut vis in fighter_fx.iter_mut() {
         *vis = if show_fighters {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Waterfall cyan sheets: painting + dedicated (hide on crystal — cyan flood).
+    let show_waterfall = matches!(film.shot_index, 8 | 10);
+    for mut vis in waterfall_fx.iter_mut() {
+        *vis = if show_waterfall {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -3184,16 +3224,16 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         11 => {
-            // Fighter swarm: high rear 3/4 so cyan plumes read as a V (no deck).
-            let form = deck + Vec3::new(26.0, 32.0, 46.0);
-            let pos = form + Vec3::new(18.0, 22.0, 28.0);
-            let look = form + Vec3::new(-6.0, -3.0, -8.0);
+            // Fighter swarm: high sky rear-quarter — plumes as V, no deck slab.
+            let form = deck + Vec3::new(28.0, 36.0, 48.0);
+            let pos = form + Vec3::new(42.0, 38.0, 48.0);
+            let look = form + Vec3::new(-4.0, -4.0, -6.0);
             (pos, look)
         }
         12 => {
-            // Crystal towers: pure +X side elevation — full taper against sky.
-            let cluster = deck + Vec3::new(28.0, 30.0, 28.0);
-            let pos = deck + Vec3::new(118.0, 32.0, 30.0);
+            // Crystal towers: −Z elevation — full taper against sky (no waterfall).
+            let cluster = deck + Vec3::new(30.0, 48.0, 28.0);
+            let pos = deck + Vec3::new(34.0, 50.0, -90.0);
             let look = cluster;
             (pos, look)
         }
