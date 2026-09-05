@@ -147,6 +147,10 @@ struct FilmCombatFx;
 #[derive(Component)]
 struct FilmStationFx;
 
+/// Cyan skyway rails / decks — painting + skyway_shuttle beat.
+#[derive(Component)]
+struct FilmSkywayFx;
+
 #[derive(Component)]
 struct FilmShuttleMarker;
 
@@ -891,10 +895,11 @@ fn film_spawn_shuttle(
         return;
     };
     film.shuttle_spawned = true;
+    // Park real shuttle in painting frustum (proxy carries the plume read).
     let pos = Vec3::new(
-        island.cx as f32 + 28.0,
-        island.deck_y as f32 + 7.0,
-        island.cz as f32 + 6.0,
+        island.cx as f32 + 12.0,
+        island.deck_y as f32 + 32.0,
+        island.cz as f32 + 86.0,
     );
     // Nose toward −X so wakes stream +X toward a rear-quarter camera.
     let yaw = std::f32::consts::FRAC_PI_2;
@@ -907,7 +912,9 @@ fn film_spawn_shuttle(
         pos,
         yaw,
     );
-    commands.entity(entity).insert(FilmShuttleMarker);
+    commands
+        .entity(entity)
+        .insert((FilmShuttleMarker, FilmSkywayFx));
     info!("FILM: spawned hero shuttle at {pos:?}");
 }
 
@@ -1511,6 +1518,28 @@ fn film_spawn_silhouettes(
         &station_dark,
         &station_alloy,
         &station_neon,
+        deck,
+    );
+
+    // Skyway lattice + oversized shuttle proxy with cyan plumes.
+    let skyway_deck = materials.add(sil_mat(
+        Color::srgb(0.55, 0.58, 0.65),
+        LinearRgba::rgb(0.4, 0.45, 0.55),
+    ));
+    let skyway_cyan = materials.add(sil_mat(
+        Color::srgb(0.20, 0.95, 1.0),
+        LinearRgba::rgb(2.0, 9.0, 10.0),
+    ));
+    let shuttle_hull = materials.add(sil_mat(
+        Color::srgb(0.82, 0.86, 0.92),
+        LinearRgba::rgb(0.5, 0.55, 0.7),
+    ));
+    spawn_film_skyway_and_shuttle_proxy(
+        &mut commands,
+        &cube,
+        &skyway_deck,
+        &skyway_cyan,
+        &shuttle_hull,
         deck,
     );
 
@@ -2472,14 +2501,14 @@ fn spawn_film_station_mountain(
     neon: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Huge stepped mountain in painting mid-frustum (+X of crown).
-    let base = deck + Vec3::new(38.0, 0.0, 58.0);
+    // Mountain in painting mid-frame — large stepped mass + neon crown.
+    let base = deck + Vec3::new(26.0, 2.0, 76.0);
     for (i, (y, sx, sz)) in [
-        (8.0_f32, 42.0, 36.0),
-        (22.0, 34.0, 28.0),
-        (36.0, 26.0, 22.0),
-        (50.0, 18.0, 16.0),
-        (62.0, 12.0, 12.0),
+        (12.0_f32, 56.0, 46.0),
+        (30.0, 46.0, 38.0),
+        (48.0, 34.0, 28.0),
+        (66.0, 24.0, 20.0),
+        (82.0, 16.0, 16.0),
     ]
     .into_iter()
     .enumerate()
@@ -2489,7 +2518,7 @@ fn spawn_film_station_mountain(
                 mesh: cube.clone(),
                 material: if i < 2 { dark.clone() } else { alloy.clone() },
                 transform: Transform::from_translation(base + Vec3::new(0.0, y, 0.0))
-                    .with_scale(Vec3::new(sx, 16.0, sz)),
+                    .with_scale(Vec3::new(sx, 20.0, sz)),
                 ..default()
             },
             FilmSilhouette,
@@ -2497,14 +2526,14 @@ fn spawn_film_station_mountain(
             Name::new(format!("FilmStationTier{i}")),
         ));
     }
-    // Neon crown spires — brighter/taller so dedicated station reads.
-    for (i, ox) in [-10.0_f32, -3.0, 4.0, 11.0].into_iter().enumerate() {
+    // Neon crown spires — bright so painting mid-frame reads "station".
+    for (i, ox) in [-14.0_f32, -5.0, 5.0, 14.0].into_iter().enumerate() {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: neon.clone(),
-                transform: Transform::from_translation(base + Vec3::new(ox, 78.0, 0.0))
-                    .with_scale(Vec3::new(6.0, 24.0, 6.0)),
+                transform: Transform::from_translation(base + Vec3::new(ox, 102.0, 0.0))
+                    .with_scale(Vec3::new(8.0, 34.0, 8.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -2512,31 +2541,143 @@ fn spawn_film_station_mountain(
             Name::new(format!("FilmStationSpire{i}")),
         ));
     }
-    // Side buttress toward painting cam.
+    // Buttresses toward painting cam (−Z / −X).
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: alloy.clone(),
-            transform: Transform::from_translation(base + Vec3::new(-22.0, 24.0, 24.0))
-                .with_scale(Vec3::new(18.0, 48.0, 14.0)),
+            transform: Transform::from_translation(base + Vec3::new(-28.0, 32.0, 30.0))
+                .with_scale(Vec3::new(24.0, 64.0, 18.0)),
             ..default()
         },
         FilmSilhouette,
         FilmStationFx,
         Name::new("FilmStationButtress"),
     ));
-    // Second buttress for mountain silhouette width.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: dark.clone(),
-            transform: Transform::from_translation(base + Vec3::new(20.0, 18.0, 18.0))
-                .with_scale(Vec3::new(16.0, 36.0, 14.0)),
+            transform: Transform::from_translation(base + Vec3::new(24.0, 26.0, 24.0))
+                .with_scale(Vec3::new(20.0, 52.0, 18.0)),
             ..default()
         },
         FilmSilhouette,
         FilmStationFx,
         Name::new("FilmStationButtressB"),
+    ));
+}
+
+fn spawn_film_skyway_and_shuttle_proxy(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    deck_mat: &Handle<StandardMaterial>,
+    cyan: &Handle<StandardMaterial>,
+    hull: &Handle<StandardMaterial>,
+    deck: Vec3,
+) {
+    // Elevated cyan skyway spans across painting frustum toward station.
+    for (i, (ax, az, bx, bz, y)) in [
+        (-24.0_f32, 102.0, 34.0, 80.0, 24.0),
+        (-12.0, 110.0, 44.0, 86.0, 28.0),
+        (2.0, 98.0, 38.0, 68.0, 32.0),
+        (-8.0, 90.0, 28.0, 98.0, 20.0),
+        (8.0, 84.0, 42.0, 74.0, 36.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let a = deck + Vec3::new(ax, y, az);
+        let b = deck + Vec3::new(bx, y + 2.0, bz);
+        let mid = a.lerp(b, 0.5);
+        let len = a.distance(b).max(8.0);
+        let dir = (b - a).normalize_or_zero();
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: deck_mat.clone(),
+                transform: Transform::from_translation(mid)
+                    .looking_to(dir, Vec3::Y)
+                    .with_scale(Vec3::new(6.0, 2.4, len)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmSkywayFx,
+            Name::new(format!("FilmSkywayDeck{i}")),
+        ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: cyan.clone(),
+                transform: Transform::from_translation(mid + Vec3::Y * 1.8)
+                    .looking_to(dir, Vec3::Y)
+                    .with_scale(Vec3::new(1.8, 3.0, len * 0.98)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmSkywayFx,
+            Name::new(format!("FilmSkywayRail{i}")),
+        ));
+    }
+    // Oversized shuttle proxy with fat cyan plumes — reads in painting + skyway beat.
+    let shuttle = deck + Vec3::new(12.0, 32.0, 86.0);
+    let yaw = -0.65_f32;
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: hull.clone(),
+            transform: Transform::from_translation(shuttle)
+                .with_scale(Vec3::new(28.0, 8.0, 12.0))
+                .with_rotation(Quat::from_rotation_y(yaw)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmSkywayFx,
+        FilmShuttleMarker,
+        Name::new("FilmShuttleProxyHull"),
+    ));
+    let plume_dir = Quat::from_rotation_y(yaw) * Vec3::new(-1.0, 0.0, 0.0);
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: cyan.clone(),
+            transform: Transform::from_translation(shuttle + plume_dir * 24.0)
+                .with_scale(Vec3::new(44.0, 6.5, 6.5))
+                .with_rotation(Quat::from_rotation_y(yaw)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmSkywayFx,
+        FilmShuttleMarker,
+        Name::new("FilmShuttleProxyPlume"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: cyan.clone(),
+            transform: Transform::from_translation(shuttle + plume_dir * 16.0 + Vec3::Y * 3.5)
+                .with_scale(Vec3::new(34.0, 4.5, 4.5))
+                .with_rotation(Quat::from_rotation_y(yaw)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmSkywayFx,
+        FilmShuttleMarker,
+        Name::new("FilmShuttleProxyPlumeB"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: hull.clone(),
+            transform: Transform::from_translation(shuttle)
+                .with_scale(Vec3::new(10.0, 2.5, 22.0))
+                .with_rotation(Quat::from_rotation_y(yaw)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmSkywayFx,
+        FilmShuttleMarker,
+        Name::new("FilmShuttleProxyWing"),
     ));
 }
 
@@ -2798,6 +2939,9 @@ const SHOTS: &[FilmShot] = &[
     FilmShot {
         name: "station_mass",
     },
+    FilmShot {
+        name: "skyway_shuttle",
+    },
 ];
 
 fn film_toggle_helpers(
@@ -2815,6 +2959,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut river_ribbons: Query<
@@ -2830,6 +2975,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut turret_fx: Query<
@@ -2845,6 +2991,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut planet_proxy: Query<
@@ -2860,6 +3007,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut crystal_fx: Query<
@@ -2875,6 +3023,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut fighter_fx: Query<
@@ -2890,6 +3039,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut waterfall_fx: Query<
@@ -2905,6 +3055,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut grass_fx: Query<
@@ -2920,6 +3071,7 @@ fn film_toggle_helpers(
             Without<FilmWaterfallFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut combat_fx: Query<
@@ -2935,6 +3087,7 @@ fn film_toggle_helpers(
             Without<FilmWaterfallFx>,
             Without<FilmGrassFx>,
             Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
     mut station_fx: Query<
@@ -2950,6 +3103,23 @@ fn film_toggle_helpers(
             Without<FilmWaterfallFx>,
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
+            Without<FilmSkywayFx>,
+        ),
+    >,
+    mut skyway_fx: Query<
+        &mut Visibility,
+        (
+            With<FilmSkywayFx>,
+            Without<FilmKeelHelper>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
+            Without<FilmGrassFx>,
+            Without<FilmCombatFx>,
+            Without<FilmStationFx>,
         ),
     >,
 ) {
@@ -2972,7 +3142,8 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    let show_turrets = matches!(film.shot_index, 2 | 3 | 8);
+    // Turrets off combat_pad — biped vs alien must read without beam clutter.
+    let show_turrets = matches!(film.shot_index, 3 | 8);
     for mut vis in turret_fx.iter_mut() {
         *vis = if show_turrets {
             Visibility::Visible
@@ -2996,9 +3167,10 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
+    // Fighters: painting wing + dedicated sky — NOT combat_pad.
     for (mut vis, sky) in fighter_fx.iter_mut() {
         let show = match film.shot_index {
-            2 | 8 => true,
+            8 => true,
             11 => sky.is_some(),
             _ => false,
         };
@@ -3025,7 +3197,7 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Combat: pad beat + painting hero.
+    // Combat: pad beat + painting hero (pad beat is combat-only silhouettes).
     let show_combat = matches!(film.shot_index, 2 | 8);
     for mut vis in combat_fx.iter_mut() {
         *vis = if show_combat {
@@ -3038,6 +3210,15 @@ fn film_toggle_helpers(
     let show_station = matches!(film.shot_index, 8 | 13);
     for mut vis in station_fx.iter_mut() {
         *vis = if show_station {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Skyway spans + cyan-plume shuttle proxy: painting, shuttle perch, dedicated.
+    let show_skyway = matches!(film.shot_index, 6 | 8 | 14);
+    for mut vis in skyway_fx.iter_mut() {
+        *vis = if show_skyway {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -3139,6 +3320,8 @@ fn film_drive_camera(
             10 => 48.0, // cyan waterfall cascade
             11 => 36.0, // fighter swarm — tight on open-sky V
             12 => 44.0, // crystal tower side elevation
+            13 => 50.0, // station mountain stand-off
+            14 => 48.0, // skyway span + cyan plume shuttle
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -3154,12 +3337,15 @@ fn film_drive_camera(
             10 => 0.16, // waterfall cyan emissives
             11 => 0.10, // fighter plumes
             12 => 0.14, // crystal emissives
+            13 => 0.12, // station neon crown
+            14 => 0.14, // skyway cyan plumes
             _ => 0.05,
         };
         bloom.prefilter_settings.threshold = match film.shot_index {
             3 => 0.50,
             6 => 0.62, // tame pink/white bloom around nozzles
             8 => 0.70,
+            14 => 0.58,
             _ => 0.55,
         };
     }
@@ -3475,9 +3661,9 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         2 => {
-            // Southwest two-shot — full biped + multi-leg limbs unmistakable.
-            let look = station + Vec3::new(0.5, 5.0, 15.0);
-            let pos = look + Vec3::new(-15.0, 3.2, 13.0);
+            // Stand-off two-shot — biped vs multi-leg only (fighters/turrets hidden).
+            let look = deck + Vec3::new(0.5, 7.0, 16.0);
+            let pos = look + Vec3::new(-28.0, 10.0, 26.0);
             (pos, look)
         }
         3 => {
@@ -3504,15 +3690,10 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         6 => {
-            // Hero shuttle REAR-QUARTER: behind and off-axis so cyan wakes
-            // stream toward camera (nose yaw = +π/2 → forward −X).
-            let shuttle = Vec3::new(
-                island.cx as f32 + 28.0,
-                island.deck_y as f32 + 7.0,
-                island.cz as f32 + 6.0,
-            );
-            let pos = shuttle + Vec3::new(11.0, 3.5, 8.0);
-            let look = shuttle + Vec3::new(-4.0, 0.5, 0.0);
+            // Hero shuttle REAR-QUARTER on elevated painting-frustum perch.
+            let shuttle = deck + Vec3::new(12.0, 32.0, 86.0);
+            let pos = shuttle + Vec3::new(16.0, 5.0, 14.0);
+            let look = shuttle + Vec3::new(-6.0, 0.5, -2.0);
             (pos, look)
         }
         7 => {
@@ -3523,12 +3704,15 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         8 => {
-            // Painting: planet upper, grass+rivers+combat lower, station mid-right.
+            // Painting: planet upper; station mid-frame; grass/rivers/shuttle lower.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-52.0, 48.0, 130.0);
+            let pos = deck + Vec3::new(-48.0, 46.0, 128.0);
+            let station_mid = deck + Vec3::new(26.0, 55.0, 76.0);
             let green_crown = deck + Vec3::new(-4.0, 12.0, 94.0);
             let planet = pos + planet_dir * 155.0;
-            let look = green_crown.lerp(planet, 0.24);
+            // Bias look toward station so the mountain fills mid-frame.
+            let ground = green_crown.lerp(station_mid, 0.62);
+            let look = ground.lerp(planet, 0.22);
             (pos, look)
         }
         9 => {
@@ -3558,11 +3742,18 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             let look = cluster;
             (pos, look)
         }
-        _ => {
+        13 => {
             // Station mountain — stand off so full stepped mass + neon crown read.
-            let station = deck + Vec3::new(38.0, 42.0, 58.0);
-            let pos = deck + Vec3::new(-55.0, 70.0, 155.0);
+            let station = deck + Vec3::new(26.0, 55.0, 76.0);
+            let pos = deck + Vec3::new(-55.0, 78.0, 155.0);
             let look = station;
+            (pos, look)
+        }
+        _ => {
+            // Skyway + shuttle — rear-quarter of cyan-plume craft over spans.
+            let shuttle = deck + Vec3::new(12.0, 32.0, 86.0);
+            let pos = shuttle + Vec3::new(28.0, 12.0, 30.0);
+            let look = shuttle + Vec3::new(-4.0, 1.0, -6.0);
             (pos, look)
         }
     }
