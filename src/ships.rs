@@ -1737,7 +1737,7 @@ pub fn spawn_aether_film_shuttle(
         false,
         None,
         true, // cyan wakes only — amber bloom washes the painting cue
-        true, // remaps stern AmberHeat → CyanEmission for film nozzles
+        true, // remaps stern AmberHeat + MagentaSignal → CyanEmission for film
     );
     // Replace the default parked motion with a cruise so trails bloom.
     commands.entity(entity).insert(ShipMotion {
@@ -1851,9 +1851,15 @@ fn spawn_realistic_ship_exterior(
     film_cyan_nozzles: bool,
 ) {
     for mut part in realistic_ship_exterior_specs(kind) {
-        if film_cyan_nozzles && matches!(part.tone, RealShipTone::AmberHeat) {
-            // Film hero shuttle: stern heat bloom must read cyan, not amber.
-            part.tone = RealShipTone::CyanEmission;
+        if film_cyan_nozzles {
+            match part.tone {
+                // Film hero shuttle: stern heat + pink signal accents must
+                // read cyan so nozzles dominate (no amber/magenta bloom).
+                RealShipTone::AmberHeat | RealShipTone::MagentaSignal => {
+                    part.tone = RealShipTone::CyanEmission;
+                }
+                _ => {}
+            }
         }
         spawn_real_ship_part(
             parent,

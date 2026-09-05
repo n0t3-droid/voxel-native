@@ -12,6 +12,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::ScreenshotManager;
 use bevy::window::PrimaryWindow;
 
+use crate::blocks::{BlockType, AIR};
 use crate::daynight::Sun;
 use crate::frontier::{
     find_nearest_island, IslandSpec, ISLAND_CLOSEUP_DISTANCE_M, STATION_HEADROOM,
@@ -37,6 +38,8 @@ impl Plugin for FilmPlugin {
                 film_enter_game,
                 film_spawn_lights.run_if(in_state(GameState::InGame)),
                 film_spawn_shuttle.run_if(in_state(GameState::InGame)),
+                film_stage_combat_slab.run_if(in_state(GameState::InGame)),
+                film_stamp_vista_archipelago.run_if(in_state(GameState::InGame)),
                 film_spawn_silhouettes.run_if(in_state(GameState::InGame)),
                 film_ensure_station_pad.run_if(in_state(GameState::InGame)),
                 film_drive_camera.run_if(in_state(GameState::InGame)),
@@ -67,6 +70,8 @@ pub struct FilmRuntime {
     lights_spawned: bool,
     shuttle_spawned: bool,
     silhouettes_spawned: bool,
+    combat_slab_staged: bool,
+    vista_stamped: bool,
     station_forced: bool,
     ready_to_roll: bool,
     island: Option<IslandSpec>,
@@ -127,6 +132,8 @@ impl FilmRuntime {
             lights_spawned: false,
             shuttle_spawned: false,
             silhouettes_spawned: false,
+            combat_slab_staged: false,
+            vista_stamped: false,
             station_forced: false,
             ready_to_roll: false,
             island: None,
@@ -266,9 +273,9 @@ fn film_spawn_lights(
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
-                color: Color::srgb(0.75, 0.98, 1.0),
-                intensity: 6_500_000.0,
-                range: 180.0,
+                color: Color::srgb(0.78, 0.98, 1.0),
+                intensity: 9_500_000.0,
+                range: 220.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -282,9 +289,9 @@ fn film_spawn_lights(
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
-                color: Color::srgb(0.55, 1.0, 0.85),
-                intensity: 4_200_000.0,
-                range: 120.0,
+                color: Color::srgb(0.65, 1.0, 0.88),
+                intensity: 7_200_000.0,
+                range: 160.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -294,13 +301,29 @@ fn film_spawn_lights(
         FilmUnderKeelLight,
         Name::new("FilmUnderKeelLightB"),
     ));
+    // Bounce fill toward rim crystals (third under-island key).
+    commands.spawn((
+        PointLightBundle {
+            point_light: PointLight {
+                color: Color::srgb(0.95, 0.88, 1.0),
+                intensity: 5_800_000.0,
+                range: 140.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            transform: Transform::from_xyz(0.0, -20.0, 0.0),
+            ..default()
+        },
+        FilmUnderKeelLight,
+        Name::new("FilmUnderKeelLightC"),
+    ));
     // Hard side key so mesh silhouettes cast readable limb edges on lavapipe.
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
                 color: Color::srgb(1.0, 0.98, 0.92),
-                intensity: 1_800_000.0,
-                range: 70.0,
+                intensity: 2_400_000.0,
+                range: 90.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -347,6 +370,162 @@ fn film_ensure_station_pad(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmR
     });
     film.station_forced = true;
     info!("FILM: force-stamped orbital station at ({ox},{oy},{oz}) wrote={written} voxels");
+}
+
+/// Clear grass/props and stamp a flat dark hull slab south of the station so
+/// biped vs multi-leg mesh silhouettes always read without voxel clutter.
+fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRuntime>) {
+    if !film.enabled || film.finished || film.combat_slab_staged {
+        return;
+    }
+    let Some(island) = film.island else {
+        return;
+    };
+    if film.elapsed < 3.5 {
+        return;
+    }
+    film.combat_slab_staged = true;
+    let ox = island.cx;
+    let oy = island.deck_y;
+    let oz = island.cz + 14;
+    let mut cleared = 0usize;
+    let mut stamped = 0usize;
+    for dx in -8..=8 {
+        for dz in -5..=5 {
+            let x = ox + dx;
+            let z = oz + dz;
+            // Suppress tall grass / props in the combat frustum.
+            for dy in 1..=10 {
+                if world.edit_set_voxel(x, oy + dy, z, AIR) {
+                    cleared += 1;
+                }
+            }
+            // Clean dark pad slab (two layers) for silhouette feet.
+            if world.edit_set_voxel(x, oy, z, BlockType::ShipHullDark.into()) {
+                stamped += 1;
+            }
+            if world.edit_set_voxel(x, oy + 1, z, BlockType::ShipHullAlloy.into()) {
+                stamped += 1;
+            }
+        }
+    }
+    info!("FILM: combat slab at ({ox},{oy},{oz}) cleared={cleared} stamped={stamped}");
+}
+
+/// Stamp extra floating islands near the hero station so a wide painting
+/// beat can stack archipelago + skyway + station in one lavapipe frame.
+fn film_stamp_vista_archipelago(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRuntime>) {
+    if !film.enabled || film.finished || film.vista_stamped {
+        return;
+    }
+    let Some(island) = film.island else {
+        return;
+    };
+    if film.elapsed < 4.0 {
+        return;
+    }
+    film.vista_stamped = true;
+    let mut written = 0usize;
+    for (ox, oz, rx, rz, lift) in [
+        (island.cx + 55, island.cz + 28, 10, 8, -2),
+        (island.cx - 48, island.cz + 42, 9, 7, 1),
+        (island.cx + 72, island.cz - 18, 8, 9, -4),
+        (island.cx - 30, island.cz - 55, 11, 8, 2),
+        (island.cx + 38, island.cz + 70, 7, 7, -1),
+    ] {
+        let deck_y = island.deck_y + lift;
+        written += stamp_film_vista_island(&mut world, ox, oz, deck_y, rx, rz, island.crystal);
+    }
+    // Short skyway stubs toward the nearest satellite so the hero frame
+    // picks up glowing rails without waiting on procedural spans.
+    for (tx, tz) in [
+        (island.cx + 40, island.cz + 18),
+        (island.cx - 28, island.cz + 30),
+    ] {
+        written += stamp_film_skyway_stub(
+            &mut world,
+            island.cx,
+            island.cz,
+            island.deck_y + 1,
+            tx,
+            tz,
+            island.deck_y,
+        );
+    }
+    info!("FILM: vista archipelago stamped voxels={written}");
+}
+
+fn stamp_film_vista_island(
+    world: &mut VoxelWorld,
+    cx: i32,
+    cz: i32,
+    deck_y: i32,
+    rx: i32,
+    rz: i32,
+    crystal: BlockType,
+) -> usize {
+    let mut n = 0usize;
+    let keel = 7i32;
+    for dx in -rx..=rx {
+        for dz in -rz..=rz {
+            let nx = dx as f32 / rx.max(1) as f32;
+            let nz = dz as f32 / rz.max(1) as f32;
+            if nx * nx + nz * nz > 1.05 {
+                continue;
+            }
+            let x = cx + dx;
+            let z = cz + dz;
+            let edge = (nx * nx + nz * nz).sqrt();
+            let thickness = ((keel as f32) * (0.35 + 0.65 * (1.0 - edge).max(0.0))).round() as i32;
+            // Clear air column above deck so grass isn't swallowed by terrain.
+            for y in (deck_y + 1)..=(deck_y + 4) {
+                let _ = world.edit_set_voxel(x, y, z, AIR);
+            }
+            if world.edit_set_voxel(x, deck_y, z, BlockType::Grass.into()) {
+                n += 1;
+            }
+            for dy in 1..=thickness.max(2) {
+                let y = deck_y - dy;
+                let block = if dy == thickness {
+                    crystal
+                } else if dy + 1 == thickness {
+                    BlockType::Crystal
+                } else {
+                    BlockType::Stone
+                };
+                if world.edit_set_voxel(x, y, z, block.into()) {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+fn stamp_film_skyway_stub(
+    world: &mut VoxelWorld,
+    ax: i32,
+    az: i32,
+    ay: i32,
+    bx: i32,
+    bz: i32,
+    by: i32,
+) -> usize {
+    let mut n = 0usize;
+    let steps = 28i32;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let x = (ax as f32 + (bx - ax) as f32 * t).round() as i32;
+        let z = (az as f32 + (bz - az) as f32 * t).round() as i32;
+        let y = (ay as f32 + (by - ay) as f32 * t).round() as i32;
+        if world.edit_set_voxel(x, y, z, BlockType::SkywayDeck.into()) {
+            n += 1;
+        }
+        if world.edit_set_voxel(x, y + 1, z, BlockType::NeonCyan.into()) {
+            n += 1;
+        }
+    }
+    n
 }
 
 fn film_spawn_shuttle(
@@ -398,6 +577,10 @@ fn film_spawn_silhouettes(
     let Some(island) = film.island else {
         return;
     };
+    // Wait for the clean combat slab so feet land on dark hull, not grass.
+    if !film.combat_slab_staged {
+        return;
+    }
     film.silhouettes_spawned = true;
 
     let deck = Vec3::new(
@@ -407,22 +590,22 @@ fn film_spawn_silhouettes(
     );
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let marine_body = materials.add(sil_mat(
-        Color::srgb(0.92, 0.95, 1.0),
-        LinearRgba::rgb(0.15, 0.18, 0.22),
+        Color::srgb(0.94, 0.97, 1.0),
+        LinearRgba::rgb(0.18, 0.22, 0.28),
     ));
-    let marine_dark = materials.add(sil_mat(Color::srgb(0.08, 0.10, 0.14), LinearRgba::BLACK));
+    let marine_dark = materials.add(sil_mat(Color::srgb(0.05, 0.06, 0.09), LinearRgba::BLACK));
     let marine_visor = materials.add(sil_mat(
         Color::srgb(0.05, 1.0, 1.0),
-        LinearRgba::rgb(0.8, 4.5, 5.5),
+        LinearRgba::rgb(1.0, 5.5, 6.5),
     ));
     let alien_body = materials.add(sil_mat(
-        Color::srgb(0.95, 0.82, 0.45),
-        LinearRgba::rgb(0.12, 0.08, 0.02),
+        Color::srgb(0.98, 0.84, 0.42),
+        LinearRgba::rgb(0.18, 0.10, 0.02),
     ));
-    let alien_leg = materials.add(sil_mat(Color::srgb(0.62, 0.42, 0.22), LinearRgba::BLACK));
+    let alien_leg = materials.add(sil_mat(Color::srgb(0.58, 0.36, 0.16), LinearRgba::BLACK));
     let alien_crest = materials.add(sil_mat(
         Color::srgb(1.0, 0.05, 0.85),
-        LinearRgba::rgb(4.5, 0.2, 3.5),
+        LinearRgba::rgb(5.0, 0.25, 4.0),
     ));
     let crew_body = materials.add(sil_mat(
         Color::srgb(0.55, 0.62, 0.72),
@@ -432,16 +615,20 @@ fn film_spawn_silhouettes(
         Color::srgb(0.05, 1.0, 1.0),
         LinearRgba::rgb(0.6, 4.0, 5.0),
     ));
+    let bounce = materials.add(sil_mat(
+        Color::srgb(0.75, 0.95, 1.0),
+        LinearRgba::rgb(2.5, 4.5, 5.5),
+    ));
 
-    // Clear sightline on the OPEN deck south of the station footprint so
-    // lavapipe cannot bury limbs inside mast/pad voxel clutter.
+    // Staged on the cleared combat slab (z≈+14) — dark hull, no grass clutter.
     spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(-3.2, 1.4, 12.0),
+        deck + Vec3::new(-4.8, 0.2, 14.0),
+        2.45,
     );
     spawn_film_alien(
         &mut commands,
@@ -449,7 +636,8 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(3.2, 1.4, 12.0),
+        deck + Vec3::new(4.8, 0.2, 14.0),
+        2.7,
     );
     spawn_film_crew(
         &mut commands,
@@ -466,34 +654,56 @@ fn film_spawn_silhouettes(
         deck + Vec3::new(-4.0, 1.0, -10.0),
     );
 
+    // Upward bounce card under the island so voxel keel faces aren't crushed.
+    let keel = island.keel_depth as f32;
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: bounce,
+            transform: Transform::from_translation(
+                deck + Vec3::new(0.0, -(keel * 0.95).max(8.0), 4.0),
+            )
+            .with_scale(Vec3::new(
+                (island.radius_x as f32 * 1.6).max(28.0),
+                0.35,
+                (island.radius_z as f32 * 1.6).max(24.0),
+            )),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmKeelBounceCard"),
+    ));
+
     // Film-only hanging crystal spikes so underside reads with the grass deck.
     let crystal_a = materials.add(sil_mat(
         Color::srgb(0.55, 1.0, 0.95),
-        LinearRgba::rgb(1.2, 5.5, 5.0),
+        LinearRgba::rgb(1.6, 6.5, 6.0),
     ));
     let crystal_b = materials.add(sil_mat(
         Color::srgb(0.95, 0.35, 1.0),
-        LinearRgba::rgb(3.5, 0.6, 4.5),
+        LinearRgba::rgb(4.0, 0.7, 5.0),
     ));
-    let keel_y = -(island.keel_depth as f32 * 0.55).max(4.0);
+    let keel_y = -(keel * 0.55).max(4.0);
     for (i, (ox, oz, mat)) in [
-        (-8.0_f32, 6.0, &crystal_a),
-        (0.0, 10.0, &crystal_b),
-        (9.0, 5.0, &crystal_a),
-        (-4.0, -7.0, &crystal_b),
-        (7.0, -5.0, &crystal_a),
-        (2.0, 0.0, &crystal_b),
+        (-10.0_f32, 8.0, &crystal_a),
+        (0.0, 12.0, &crystal_b),
+        (11.0, 6.0, &crystal_a),
+        (-6.0, -8.0, &crystal_b),
+        (8.0, -6.0, &crystal_a),
+        (3.0, 1.0, &crystal_b),
+        (-2.0, 14.0, &crystal_a),
+        (5.0, 16.0, &crystal_b),
     ]
     .into_iter()
     .enumerate()
     {
-        let h = 3.2 + (i as f32) * 0.35;
+        let h = 3.8 + (i as f32) * 0.4;
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, keel_y - h * 0.35, oz))
-                    .with_scale(Vec3::new(0.55, h, 0.55))
+                transform: Transform::from_translation(deck + Vec3::new(ox, keel_y - h * 0.4, oz))
+                    .with_scale(Vec3::new(0.65, h, 0.65))
                     .with_rotation(Quat::from_rotation_z(
                         0.18 * if i % 2 == 0 { 1.0 } else { -1.0 },
                     )),
@@ -505,7 +715,7 @@ fn film_spawn_silhouettes(
     }
 
     info!(
-        "FILM: spawned mesh silhouettes (marine/alien/crew) on open deck ({}, {})",
+        "FILM: spawned mesh silhouettes on combat slab ({}, {})",
         island.cx, island.cz
     );
 }
@@ -531,12 +741,13 @@ fn spawn_film_marine(
     dark: &Handle<StandardMaterial>,
     visor: &Handle<StandardMaterial>,
     origin: Vec3,
+    scale: f32,
 ) {
-    // Oversized (~3.2× human) so limbs survive mid-distance lavapipe framing.
+    // Oversized so limbs survive mid-distance lavapipe framing.
     let root = commands
         .spawn((
             SpatialBundle {
-                transform: Transform::from_translation(origin).with_scale(Vec3::splat(1.85)),
+                transform: Transform::from_translation(origin).with_scale(Vec3::splat(scale)),
                 ..default()
             },
             FilmSilhouette,
@@ -640,11 +851,15 @@ fn spawn_film_alien(
     leg: &Handle<StandardMaterial>,
     crest: &Handle<StandardMaterial>,
     origin: Vec3,
+    scale: f32,
 ) {
     let root = commands
         .spawn((
             SpatialBundle {
-                transform: Transform::from_translation(origin).with_scale(Vec3::splat(2.05)),
+                // Face the marine (−X) so splayed legs read in the side-on two-shot.
+                transform: Transform::from_translation(origin)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::PI))
+                    .with_scale(Vec3::splat(scale)),
                 ..default()
             },
             FilmSilhouette,
@@ -675,12 +890,12 @@ fn spawn_film_alien(
         ));
         // Six splayed legs — unmistakable multi-leg vs biped marine.
         let legs = [
-            Vec3::new(-2.05, 0.55, -1.75),
-            Vec3::new(2.05, 0.55, -1.75),
-            Vec3::new(-2.35, 0.55, 0.05),
-            Vec3::new(2.35, 0.55, 0.05),
-            Vec3::new(-1.85, 0.55, 1.85),
-            Vec3::new(1.85, 0.55, 1.85),
+            Vec3::new(-2.25, 0.55, -1.95),
+            Vec3::new(2.25, 0.55, -1.95),
+            Vec3::new(-2.55, 0.55, 0.05),
+            Vec3::new(2.55, 0.55, 0.05),
+            Vec3::new(-2.05, 0.55, 2.05),
+            Vec3::new(2.05, 0.55, 2.05),
         ];
         for (i, offset) in legs.iter().enumerate() {
             let mid = Vec3::new(offset.x * 0.5, 1.35, offset.z * 0.5);
@@ -689,7 +904,7 @@ fn spawn_film_alien(
                     mesh: cube.clone(),
                     material: leg.clone(),
                     transform: Transform::from_translation(*offset)
-                        .with_scale(Vec3::new(0.28, 1.55, 0.28)),
+                        .with_scale(Vec3::new(0.32, 1.65, 0.32)),
                     ..default()
                 },
                 Name::new(format!("AlienLeg{i}")),
@@ -699,7 +914,7 @@ fn spawn_film_alien(
                     mesh: cube.clone(),
                     material: leg.clone(),
                     transform: Transform::from_translation(mid)
-                        .with_scale(Vec3::new(0.42, 0.5, 0.42)),
+                        .with_scale(Vec3::new(0.48, 0.55, 0.48)),
                     ..default()
                 },
                 Name::new(format!("AlienJoint{i}")),
@@ -807,6 +1022,9 @@ const SHOTS: &[FilmShot] = &[
         name: "ringed_planet_hero",
     },
     FilmShot {
+        name: "painting_hero",
+    },
+    FilmShot {
         name: "skyway_rail_crew",
     },
 ];
@@ -876,10 +1094,11 @@ fn film_drive_camera(
     if let Projection::Perspective(ref mut persp) = *projection {
         let target: f32 = match film.shot_index {
             1 => 50.0, // deck + keel profile
-            2 => 48.0, // tight side-on biped + multi-leg pair
+            2 => 46.0, // clean combat slab two-shot
             3 => 48.0, // crew pair
             5 => 46.0, // shuttle rear-quarter
-            6 => 40.0, // planet
+            6 => 40.0, // planet close
+            7 => 55.0, // painting-scale wide hero
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -887,14 +1106,22 @@ fn film_drive_camera(
     if let Ok(mut bloom) = bloom_q.get_single_mut() {
         // Keep bloom low so non-emissive limbs / grass survive lavapipe.
         bloom.intensity = match film.shot_index {
-            5 => 0.12, // shuttle wakes need a little bloom
-            6 => 0.16,
-            _ => 0.06,
+            5 => 0.10, // shuttle wakes — cyan, not washed
+            6 | 7 => 0.14,
+            _ => 0.05,
         };
-        bloom.prefilter_settings.threshold = 0.55;
+        bloom.prefilter_settings.threshold = match film.shot_index {
+            5 => 0.62, // tame pink/white bloom around nozzles
+            _ => 0.55,
+        };
     }
 
-    ambient.brightness = ambient.brightness.max(2_050.0);
+    // Extra ambient bounce on deck+keel so voxel undersides aren't crushed.
+    ambient.brightness = if film.shot_index == 1 {
+        ambient.brightness.max(2_650.0)
+    } else {
+        ambient.brightness.max(2_050.0)
+    };
     ambient.color = Color::srgb(0.82, 0.88, 0.78);
     if let Ok(mut sun) = sun_q.get_single_mut() {
         sun.illuminance = sun.illuminance.max(28_000.0);
@@ -1121,20 +1348,22 @@ fn park_island_lights(
     }
     let mut under_i = 0usize;
     for mut under in under_q.iter_mut() {
-        under.translation = if under_i == 0 {
-            deck + Vec3::new(8.0, -(island.keel_depth as f32 * 0.9).max(8.0), 10.0)
-        } else {
-            deck + Vec3::new(
-                island.radius_x as f32 * 0.35,
-                -(island.keel_depth as f32 * 0.55).max(5.0),
-                island.radius_z as f32 * 0.4,
-            )
+        under.translation = match under_i {
+            0 => deck + Vec3::new(8.0, -(island.keel_depth as f32 * 0.95).max(9.0), 12.0),
+            1 => {
+                deck + Vec3::new(
+                    island.radius_x as f32 * 0.4,
+                    -(island.keel_depth as f32 * 0.55).max(6.0),
+                    island.radius_z as f32 * 0.45,
+                )
+            }
+            _ => deck + Vec3::new(-10.0, -(island.keel_depth as f32 * 0.75).max(7.0), -6.0),
         };
         under_i += 1;
     }
     if let Ok(mut figure) = figure_q.get_single_mut() {
-        // Side-lit combat pair on the open south deck.
-        figure.translation = deck + Vec3::new(-8.0, 6.0, 16.0);
+        // Side-lit combat pair on the cleared south slab.
+        figure.translation = deck + Vec3::new(-10.0, 7.0, 18.0);
     }
 }
 
@@ -1159,17 +1388,17 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             let keel = island.keel_depth as f32;
             let pos = deck
                 + Vec3::new(
-                    island.radius_x as f32 * 0.45 + 22.0,
-                    1.0 - keel * 0.22,
-                    island.radius_z as f32 * 0.35 + 26.0,
+                    island.radius_x as f32 * 0.5 + 24.0,
+                    0.5 - keel * 0.28,
+                    island.radius_z as f32 * 0.4 + 28.0,
                 );
-            let look = deck + Vec3::new(0.0, -keel * 0.48, 0.0);
+            let look = deck + Vec3::new(0.0, -keel * 0.55, 2.0);
             (pos, look)
         }
         2 => {
-            // Side-on two-shot from pure west; stand-off so neither figure clips.
-            let look = station + Vec3::new(0.0, 4.0, 12.0);
-            let pos = look + Vec3::new(-18.0, 2.2, 0.0);
+            // Clean combat slab two-shot: biped west, multi-leg east.
+            let look = station + Vec3::new(0.0, 4.2, 14.0);
+            let pos = look + Vec3::new(-17.0, 2.4, -1.5);
             (pos, look)
         }
         3 => {
@@ -1192,8 +1421,6 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
                 island.deck_y as f32 + 7.0,
                 island.cz as f32 + 6.0,
             );
-            // Sit behind the stern (+X of craft when yaw=π/2 means nose −X,
-            // so stern is +X) and slightly to +Z.
             let pos = shuttle + Vec3::new(11.0, 3.5, 8.0);
             let look = shuttle + Vec3::new(-4.0, 0.5, 0.0);
             (pos, look)
@@ -1203,6 +1430,14 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
             let pos = deck + Vec3::new(-6.0, 14.0, 12.0);
             let look = pos + planet_dir * 120.0;
+            (pos, look)
+        }
+        7 => {
+            // Painting-scale hero: nebula + ringed planet + archipelago +
+            // skyway stubs + station island in one wide frame.
+            let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
+            let pos = deck + Vec3::new(-42.0, 32.0, 58.0);
+            let look = deck + planet_dir * 90.0 + Vec3::new(18.0, 10.0, -8.0);
             (pos, look)
         }
         _ => {
@@ -1374,7 +1609,7 @@ mod tests {
 
     #[test]
     fn film_shots_cover_painting_beats() {
-        assert!(SHOTS.len() >= 8);
+        assert!(SHOTS.len() >= 9);
         assert!((ISLAND_CLOSEUP_DISTANCE_M - 14.0).abs() < 1e-3);
         let names: Vec<_> = SHOTS.iter().map(|s| s.name).collect();
         assert!(names
@@ -1389,6 +1624,7 @@ mod tests {
             .iter()
             .any(|n| n.contains("portal") || n.contains("fighter")));
         assert!(names.iter().any(|n| n.contains("planet")));
+        assert!(names.iter().any(|n| n.contains("painting")));
         assert!(names.iter().any(|n| n.contains("rail")));
     }
 
