@@ -875,25 +875,37 @@ fn stamp_film_vista_island(
                 }
             }
             // Sparse hanging tip spikes for organic read (not a flat slab).
-            if edge < 0.42 && ((dx + dz * 2) % 3 == 0) {
-                for extra in 1..=3 {
+            if edge < 0.45 && ((dx + dz * 2) % 3 == 0) {
+                for extra in 1..=4 {
                     let y = deck_y - thickness - extra;
-                    let tip = if (extra + dx.abs()) % 2 == 0 {
-                        accent
-                    } else {
-                        BlockType::Crystal
+                    let tip = match (extra + dx.abs() + dz.abs()) % 3 {
+                        0 => accent,
+                        1 => BlockType::Crystal,
+                        _ => BlockType::LuminiteCrystal,
                     };
                     let _ = world.edit_set_voxel(x, y, z, tip.into());
                     n += 1;
                 }
             }
             // Rim cluster hangers — denser organic keel silhouette.
-            if edge > 0.55 && edge < 0.92 && ((dx * 2 + dz * 3) % 4 == 0) {
-                for extra in 1..=2 {
+            if edge > 0.50 && edge < 0.95 && ((dx * 2 + dz * 3) % 3 == 0) {
+                for extra in 1..=3 {
                     let y = deck_y - thickness - extra;
-                    let _ = world.edit_set_voxel(x, y, z, accent.into());
+                    let tip = if (extra + dx) % 2 == 0 {
+                        accent
+                    } else {
+                        BlockType::CrystalVerdant
+                    };
+                    let _ = world.edit_set_voxel(x, y, z, tip.into());
                     n += 1;
                 }
+            }
+            // Offset twin spike for cluster variety (readable underside color).
+            if edge > 0.35 && edge < 0.70 && ((dx * 5 + dz) % 7 == 0) {
+                let y = deck_y - thickness - 2;
+                let _ = world.edit_set_voxel(x + 1, y, z, BlockType::Crystal.into());
+                let _ = world.edit_set_voxel(x, y - 1, z + 1, accent.into());
+                n += 2;
             }
         }
     }
@@ -965,9 +977,7 @@ fn film_spawn_shuttle(
         pos,
         yaw,
     );
-    commands
-        .entity(entity)
-        .insert((FilmShuttleMarker, FilmSkywayFx));
+    commands.entity(entity).insert(FilmShuttleMarker);
     info!("FILM: spawned hero shuttle at {pos:?}");
 }
 
@@ -1419,6 +1429,10 @@ fn film_spawn_silhouettes(
         (20.0, 70.0),
         (50.0, 72.0),
         (12.0, 80.0),
+        (34.0, 82.0),
+        (22.0, 64.0),
+        (40.0, 90.0),
+        (8.0, 74.0),
     ]
     .into_iter()
     .enumerate()
@@ -1435,14 +1449,15 @@ fn film_spawn_silhouettes(
         .enumerate()
         {
             let h = 7.0 + si as f32 * 1.5;
+            let mat = match (ci + si) % 3 {
+                0 => crystal_a.clone(),
+                1 => crystal_b.clone(),
+                _ => luminite_plate.clone(),
+            };
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
-                    material: if (ci + si) % 2 == 0 {
-                        crystal_a.clone()
-                    } else {
-                        crystal_b.clone()
-                    },
+                    material: mat,
                     transform: Transform::from_translation(
                         deck + Vec3::new(cx + ox, -5.5 - h * 0.5, cz + oz),
                     )
@@ -1906,12 +1921,12 @@ fn film_spawn_silhouettes(
     // Dark rock mountain — darkrock dominates; alloy only as faint crown lip.
     // Carved darkrock (readable stone gray) — not void-black, not tan alloy.
     let station_dark = materials.add(sil_mat(
-        Color::srgb(0.30, 0.28, 0.32),
-        LinearRgba::rgb(0.12, 0.10, 0.14),
+        Color::srgb(0.22, 0.20, 0.24),
+        LinearRgba::rgb(0.08, 0.07, 0.10),
     ));
     let station_alloy = materials.add(sil_mat(
-        Color::srgb(0.38, 0.34, 0.30),
-        LinearRgba::rgb(0.18, 0.14, 0.10),
+        Color::srgb(0.32, 0.29, 0.26),
+        LinearRgba::rgb(0.12, 0.10, 0.08),
     ));
     let station_neon = materials.add(sil_mat(
         Color::srgb(0.25, 0.95, 0.90),
@@ -3018,8 +3033,8 @@ fn spawn_film_station_mountain(
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
-                // Darkrock through mid tiers — alloy only on tip lip.
-                material: if i < 5 { dark.clone() } else { alloy.clone() },
+                // Darkrock through all tiers — alloy reserved for faint accents only.
+                material: dark.clone(),
                 transform: Transform::from_translation(base + Vec3::new(0.0, y, 0.0))
                     .with_scale(Vec3::new(sx, h, sz)),
                 ..default()
@@ -3029,6 +3044,19 @@ fn spawn_film_station_mountain(
             Name::new(format!("FilmStationTier{i}")),
         ));
     }
+    // Faint alloy crown lip — installation cue, not tan wash.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: alloy.clone(),
+            transform: Transform::from_translation(base + Vec3::new(0.0, 64.0, 0.0))
+                .with_scale(Vec3::new(16.0, 2.5, 14.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmStationFx,
+        Name::new("FilmStationAlloyLip"),
+    ));
     // Low neon rim lights — installation cue without tall white spires.
     for (i, ox) in [-8.0_f32, 0.0, 8.0].into_iter().enumerate() {
         commands.spawn((
@@ -3036,7 +3064,7 @@ fn spawn_film_station_mountain(
                 mesh: cube.clone(),
                 material: neon.clone(),
                 transform: Transform::from_translation(base + Vec3::new(ox, 66.0, 2.0))
-                    .with_scale(Vec3::new(3.5, 6.0, 3.5)),
+                    .with_scale(Vec3::new(3.0, 5.0, 3.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -3201,7 +3229,6 @@ fn spawn_film_skyway_and_shuttle_proxy(
                 ..default()
             },
             FilmSilhouette,
-            FilmSkywayFx,
             FilmShuttleMarker,
             Name::new(name),
         ));
@@ -3499,6 +3526,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3517,6 +3545,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3535,6 +3564,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3553,6 +3583,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3571,6 +3602,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3589,6 +3621,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3607,6 +3640,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3625,6 +3659,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3643,6 +3678,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3665,6 +3701,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3683,6 +3720,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3701,6 +3739,26 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmShuttleMarker>,
+            Without<FilmTunnelFx>,
+        ),
+    >,
+    mut shuttle_fx: Query<
+        &mut Visibility,
+        (
+            With<FilmShuttleMarker>,
+            Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
+            Without<FilmGrassFx>,
+            Without<FilmCombatFx>,
+            Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
             Without<FilmTunnelFx>,
         ),
     >,
@@ -3720,6 +3778,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmShuttleMarker>,
         ),
     >,
 ) {
@@ -3776,10 +3835,10 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Fighters: painting wing + dedicated sky + craft closeup — NOT combat_pad.
+    // Fighters: painting wing + dedicated sky — NOT combat_pad / craft closeup.
     for (mut vis, sky) in fighter_fx.iter_mut() {
         let show = match film.shot_index {
-            8 | 15 => true,
+            8 => true,
             11 => sky.is_some(),
             _ => false,
         };
@@ -3828,10 +3887,19 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Skyway spans + cyan-plume shuttle proxy: painting, shuttle perch, dedicated, closeup.
-    let show_skyway = matches!(film.shot_index, 6 | 8 | 14 | 15);
+    // Skyway rails/decks only — painting + shuttle perch + dedicated skyway.
+    let show_skyway = matches!(film.shot_index, 6 | 8 | 14);
     for mut vis in skyway_fx.iter_mut() {
         *vis = if show_skyway {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Articulated shuttle proxy — same beats + craft closeup (spans hidden).
+    let show_shuttle = matches!(film.shot_index, 6 | 8 | 14 | 15);
+    for mut vis in shuttle_fx.iter_mut() {
+        *vis = if show_shuttle {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -3847,7 +3915,6 @@ fn film_toggle_helpers(
         };
     }
 }
-
 fn film_override_sky_clear(film: Res<FilmRuntime>, mut clear_color: ResMut<ClearColor>) {
     if !film.enabled || film.finished || !film.ready_to_roll {
         return;
@@ -4388,17 +4455,17 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         14 => {
-            // Skyway + shuttle — rear-quarter of near-cam cyan-plume craft.
+            // Skyway + shuttle — spans visible with articulated shuttle (not span-washed).
             let shuttle = deck + Vec3::new(-22.0, 28.0, 102.0);
-            let pos = shuttle + Vec3::new(36.0, 16.0, 38.0);
-            let look = shuttle + Vec3::new(-8.0, 2.0, -10.0);
+            let pos = shuttle + Vec3::new(28.0, 12.0, 30.0);
+            let look = shuttle + Vec3::new(-6.0, 1.5, -6.0);
             (pos, look)
         }
         15 => {
-            // Craft closeup — rear-quarter shuttle silhouette (nose/canopy/wing/fin).
+            // Craft closeup — shuttle only (spans hidden via visibility split).
             let shuttle = deck + Vec3::new(-22.0, 28.0, 102.0);
-            let pos = shuttle + Vec3::new(16.0, 6.0, 14.0);
-            let look = shuttle + Vec3::new(-8.0, 1.0, -2.0);
+            let pos = shuttle + Vec3::new(18.0, 5.5, 15.0);
+            let look = shuttle + Vec3::new(-9.0, 1.0, -2.0);
             (pos, look)
         }
         _ => {
