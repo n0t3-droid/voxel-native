@@ -107,6 +107,10 @@ struct FilmSilhouette;
 #[derive(Component)]
 struct FilmKeelHelper;
 
+/// Organic hanging keel crystals — painting + keel beats (not solid slabs).
+#[derive(Component)]
+struct FilmKeelOrganic;
+
 /// Unlit plasma/lava mesh ribbons — visible on painting_hero + dual_rivers.
 #[derive(Component)]
 struct FilmRiverRibbon;
@@ -846,20 +850,35 @@ fn stamp_film_vista_island(
             }
             for dy in 1..=thickness.max(2) {
                 let y = deck_y - dy;
-                let block = if dy == thickness {
-                    if ((dx + dz) & 1) == 0 {
+                // Organic taper: tip crystals cluster; mid stone; rim alloy flecks.
+                let tip = dy >= thickness - 1;
+                let near_tip = dy + 2 >= thickness;
+                let block = if tip {
+                    if ((dx * 3 + dz * 5 + dy) & 3) == 0 {
                         BlockType::LuminiteCrystal
                     } else {
                         accent
                     }
-                } else if dy + 1 == thickness {
+                } else if near_tip && ((dx + dz + dy) & 1) == 0 {
                     BlockType::Crystal
-                } else if edge > 0.55 {
+                } else if edge > 0.72 && (dy & 1) == 0 {
                     BlockType::ShipHullAlloy
+                } else if edge > 0.45 {
+                    BlockType::Stone
+                } else if dy > thickness / 2 {
+                    BlockType::Crystal
                 } else {
                     BlockType::Stone
                 };
                 if world.edit_set_voxel(x, y, z, block.into()) {
+                    n += 1;
+                }
+            }
+            // Sparse hanging tip spikes for organic read (not a flat slab).
+            if edge < 0.35 && ((dx + dz * 2) % 5 == 0) {
+                for extra in 1..=2 {
+                    let y = deck_y - thickness - extra;
+                    let _ = world.edit_set_voxel(x, y, z, accent.into());
                     n += 1;
                 }
             }
@@ -1198,10 +1217,11 @@ fn film_spawn_silhouettes(
         } else {
             alloy_plate.clone()
         };
+        // Shot-1 solid volume (hidden on painting).
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
-                material: mat,
+                material: mat.clone(),
                 transform: Transform::from_translation(sat_deck + Vec3::new(0.0, -4.8, 0.0))
                     .with_scale(Vec3::new(srx * 2.35, 9.0, srz * 2.35)),
                 ..default()
@@ -1210,6 +1230,60 @@ fn film_spawn_silhouettes(
             FilmKeelHelper,
             Name::new(format!("FilmSatKeelDeck{si}")),
         ));
+        // Painting-visible organic taper: stepped crystal clusters under rim.
+        for (ti, (ty, sc)) in [(-2.5_f32, 0.95), (-5.0, 0.72), (-7.2, 0.48), (-8.8, 0.28)]
+            .into_iter()
+            .enumerate()
+        {
+            let tip_mat = if (si + ti) % 2 == 0 {
+                crystal_plate.clone()
+            } else {
+                luminite_plate.clone()
+            };
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: tip_mat,
+                    transform: Transform::from_translation(sat_deck + Vec3::new(0.0, ty, 0.0))
+                        .with_scale(Vec3::new(srx * 1.6 * sc, 2.4, srz * 1.6 * sc)),
+                    ..default()
+                },
+                FilmSilhouette,
+                FilmKeelOrganic,
+                Name::new(format!("FilmSatKeelTaper{si}_{ti}")),
+            ));
+        }
+        // Side hanging spikes for cluster read.
+        for (ki, (ox, oz)) in [
+            (srx * 0.55, 0.0),
+            (-srx * 0.45, srz * 0.35),
+            (0.0, -srz * 0.55),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let h = 4.5 + (ki as f32) * 0.8;
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: crystal_plate.clone(),
+                    transform: Transform::from_translation(
+                        sat_deck + Vec3::new(ox, -6.0 - h * 0.25, oz),
+                    )
+                    .with_scale(Vec3::new(0.7, h, 0.7))
+                    .with_rotation(Quat::from_euler(
+                        EulerRot::ZYX,
+                        0.22 * if ki % 2 == 0 { 1.0 } else { -1.0 },
+                        0.15 * (ki as f32),
+                        0.1,
+                    )),
+                    ..default()
+                },
+                FilmSilhouette,
+                FilmKeelOrganic,
+                Name::new(format!("FilmSatKeelSpike{si}_{ki}")),
+            ));
+        }
         for (ox, oz, sxv, szv) in [
             (0.0_f32, srz * 0.98, srx * 1.9, 0.75),
             (0.0, -srz * 0.98, srx * 1.9, 0.75),
@@ -1252,26 +1326,54 @@ fn film_spawn_silhouettes(
         (5.0, 16.0, &crystal_b),
         (14.0, 10.0, &crystal_a),
         (-12.0, 4.0, &crystal_b),
+        // Painting-frustum organic cluster under near islands.
+        (-18.0, 102.0, &crystal_a),
+        (-8.0, 108.0, &crystal_b),
+        (6.0, 104.0, &crystal_a),
+        (16.0, 98.0, &crystal_b),
+        (-28.0, 96.0, &crystal_a),
+        (22.0, 110.0, &crystal_b),
+        (-4.0, 114.0, &crystal_a),
+        (12.0, 116.0, &crystal_b),
     ]
     .into_iter()
     .enumerate()
     {
-        let h = 3.8 + (i as f32) * 0.35;
-        commands.spawn((
-            PbrBundle {
-                mesh: cube.clone(),
-                material: mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, keel_y - h * 0.35, oz))
-                    .with_scale(Vec3::new(0.85, h, 0.85))
-                    .with_rotation(Quat::from_rotation_z(
-                        0.18 * if i % 2 == 0 { 1.0 } else { -1.0 },
-                    )),
-                ..default()
-            },
-            FilmSilhouette,
-            FilmKeelHelper,
-            Name::new(format!("FilmKeelCrystal{i}")),
-        ));
+        let h = 3.8 + (i as f32) * 0.28;
+        let organic = i >= 10;
+        let y0 = if organic {
+            -3.5 - h * 0.35
+        } else {
+            keel_y - h * 0.35
+        };
+        let id = commands
+            .spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: mat.clone(),
+                    transform: Transform::from_translation(deck + Vec3::new(ox, y0, oz))
+                        .with_scale(Vec3::new(
+                            if organic { 0.55 } else { 0.85 },
+                            h,
+                            if organic { 0.55 } else { 0.85 },
+                        ))
+                        .with_rotation(Quat::from_euler(
+                            EulerRot::ZYX,
+                            0.22 * if i % 2 == 0 { 1.0 } else { -1.0 },
+                            0.12 * (i as f32 % 5.0),
+                            0.08,
+                        )),
+                    ..default()
+                },
+                FilmSilhouette,
+                Name::new(format!("FilmKeelCrystal{i}")),
+            ))
+            .id();
+        if organic {
+            commands.entity(id).insert(FilmKeelOrganic);
+        } else {
+            commands.entity(id).insert(FilmKeelHelper);
+        }
     }
 
     // Unlit dual-river ribbons for painting_hero / dual_rivers.
@@ -1743,13 +1845,18 @@ fn film_spawn_silhouettes(
         Color::srgb(0.55, 0.58, 0.65),
         LinearRgba::rgb(0.4, 0.45, 0.55),
     ));
+    // Softer skyway cyan — still PASS-readable, less left-plane dominance.
     let skyway_cyan = materials.add(sil_mat(
-        Color::srgb(0.20, 0.95, 1.0),
-        LinearRgba::rgb(2.0, 9.0, 10.0),
+        Color::srgb(0.22, 0.88, 0.95),
+        LinearRgba::rgb(1.2, 5.2, 6.0),
     ));
     let shuttle_hull = materials.add(sil_mat(
-        Color::srgb(0.82, 0.86, 0.92),
-        LinearRgba::rgb(0.5, 0.55, 0.7),
+        Color::srgb(0.88, 0.90, 0.94),
+        LinearRgba::rgb(0.7, 0.75, 0.9),
+    ));
+    let shuttle_canopy = materials.add(sil_mat(
+        Color::srgb(0.55, 0.95, 1.0),
+        LinearRgba::rgb(1.5, 4.5, 5.5),
     ));
     spawn_film_skyway_and_shuttle_proxy(
         &mut commands,
@@ -1757,6 +1864,7 @@ fn film_spawn_silhouettes(
         &skyway_deck,
         &skyway_cyan,
         &shuttle_hull,
+        &shuttle_canopy,
         deck,
     );
 
@@ -2468,32 +2576,60 @@ fn spawn_film_fighter_swarm(
             (
                 hull.clone(),
                 Transform::from_translation(p)
-                    .with_scale(Vec3::new(9.0 * s, 2.8 * s, 4.0 * s))
+                    .with_scale(Vec3::new(10.0 * s, 2.4 * s, 3.2 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 format!("FilmFighter{i}"),
             ),
             (
                 plume_mat.clone(),
-                Transform::from_translation(p + plume_dir * (10.0 * s))
-                    .with_scale(Vec3::new(14.0 * s, 2.2 * s, 2.0 * s))
+                Transform::from_translation(p + plume_dir * (11.0 * s))
+                    .with_scale(Vec3::new(12.0 * s, 1.8 * s, 1.6 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 format!("FilmFighterPlume{i}"),
             ),
             (
                 hull.clone(),
                 Transform::from_translation(p)
-                    .with_scale(Vec3::new(3.6 * s, 0.8 * s, 9.0 * s))
+                    .with_scale(Vec3::new(2.4 * s, 0.55 * s, 11.0 * s))
                     .with_rotation(Quat::from_rotation_y(yaw)),
                 format!("FilmFighterWing{i}"),
             ),
             (
-                // Nose matches hull — never cyan blob in painting.
                 hull.clone(),
                 Transform::from_translation(
-                    p - plume_dir * (5.5 * s) + Vec3::new(0.0, 0.8 * s, 0.0),
+                    p - plume_dir * (6.0 * s) + Vec3::new(0.0, 0.6 * s, 0.0),
                 )
-                .with_scale(Vec3::new(2.0 * s, 1.5 * s, 2.0 * s)),
+                .with_scale(Vec3::new(1.6 * s, 1.2 * s, 2.2 * s)),
                 format!("FilmFighterNose{i}"),
+            ),
+            // Cockpit canopy — brighter silhouette cue at hero distance.
+            (
+                cream_plume.clone(),
+                Transform::from_translation(
+                    p - plume_dir * (1.5 * s) + Vec3::new(0.0, 1.6 * s, 0.0),
+                )
+                .with_scale(Vec3::new(2.8 * s, 1.4 * s, 2.2 * s))
+                .with_rotation(Quat::from_rotation_y(yaw)),
+                format!("FilmFighterCanopy{i}"),
+            ),
+            // Twin vertical fins.
+            (
+                hull.clone(),
+                Transform::from_translation(
+                    p + plume_dir * (2.0 * s) + Vec3::new(0.0, 2.2 * s, 1.8 * s),
+                )
+                .with_scale(Vec3::new(0.45 * s, 2.8 * s, 1.6 * s))
+                .with_rotation(Quat::from_rotation_y(yaw)),
+                format!("FilmFighterFinA{i}"),
+            ),
+            (
+                hull.clone(),
+                Transform::from_translation(
+                    p + plume_dir * (2.0 * s) + Vec3::new(0.0, 2.2 * s, -1.8 * s),
+                )
+                .with_scale(Vec3::new(0.45 * s, 2.8 * s, 1.6 * s))
+                .with_rotation(Quat::from_rotation_y(yaw)),
+                format!("FilmFighterFinB{i}"),
             ),
         ];
         for (mat, tf, name) in parts {
@@ -2865,16 +3001,15 @@ fn spawn_film_skyway_and_shuttle_proxy(
     deck_mat: &Handle<StandardMaterial>,
     cyan: &Handle<StandardMaterial>,
     hull: &Handle<StandardMaterial>,
+    canopy: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Fat left-mid skyway spans — keep left of mountain; thinner so darkrock reads.
+    // Four thinner left-mid spans — keep skyway PASS without crushing other planes.
     for (i, (ax, az, bx, bz, y)) in [
-        (-36.0_f32, 108.0, -2.0, 94.0, 22.0),
-        (-28.0, 118.0, 2.0, 100.0, 28.0),
-        (-20.0, 100.0, -4.0, 88.0, 34.0),
-        (-40.0, 96.0, -8.0, 106.0, 18.0),
-        (-12.0, 112.0, 4.0, 92.0, 40.0),
-        (-32.0, 90.0, -6.0, 80.0, 30.0),
+        (-34.0_f32, 106.0, -4.0, 92.0, 24.0),
+        (-26.0, 114.0, 0.0, 98.0, 30.0),
+        (-18.0, 98.0, -6.0, 88.0, 36.0),
+        (-38.0, 94.0, -10.0, 104.0, 20.0),
     ]
     .into_iter()
     .enumerate()
@@ -2890,7 +3025,7 @@ fn spawn_film_skyway_and_shuttle_proxy(
                 material: deck_mat.clone(),
                 transform: Transform::from_translation(mid)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(6.0, 2.6, len)),
+                    .with_scale(Vec3::new(4.2, 1.8, len)),
                 ..default()
             },
             FilmSilhouette,
@@ -2901,9 +3036,9 @@ fn spawn_film_skyway_and_shuttle_proxy(
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mid + Vec3::Y * 2.0)
+                transform: Transform::from_translation(mid + Vec3::Y * 1.4)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(2.4, 3.2, len * 0.98)),
+                    .with_scale(Vec3::new(1.6, 2.2, len * 0.98)),
                 ..default()
             },
             FilmSilhouette,
@@ -2911,66 +3046,76 @@ fn spawn_film_skyway_and_shuttle_proxy(
             Name::new(format!("FilmSkywayRail{i}")),
         ));
     }
-    // Oversized shuttle + cyan plumes — left of mountain face.
+    // Articulated shuttle — hull + nose + canopy + wing + fin + short plumes.
     let shuttle = deck + Vec3::new(-18.0, 28.0, 98.0);
     let yaw = -0.55_f32;
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: hull.clone(),
-            transform: Transform::from_translation(shuttle)
-                .with_scale(Vec3::new(34.0, 10.0, 14.0))
-                .with_rotation(Quat::from_rotation_y(yaw)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmSkywayFx,
-        FilmShuttleMarker,
-        Name::new("FilmShuttleProxyHull"),
-    ));
-    let plume_dir = Quat::from_rotation_y(yaw) * Vec3::new(-1.0, 0.0, 0.0);
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: cyan.clone(),
-            transform: Transform::from_translation(shuttle + plume_dir * 28.0)
-                .with_scale(Vec3::new(52.0, 8.0, 8.0))
-                .with_rotation(Quat::from_rotation_y(yaw)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmSkywayFx,
-        FilmShuttleMarker,
-        Name::new("FilmShuttleProxyPlume"),
-    ));
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: cyan.clone(),
-            transform: Transform::from_translation(shuttle + plume_dir * 18.0 + Vec3::Y * 4.0)
-                .with_scale(Vec3::new(40.0, 5.5, 5.5))
-                .with_rotation(Quat::from_rotation_y(yaw)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmSkywayFx,
-        FilmShuttleMarker,
-        Name::new("FilmShuttleProxyPlumeB"),
-    ));
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: hull.clone(),
-            transform: Transform::from_translation(shuttle)
-                .with_scale(Vec3::new(12.0, 3.0, 26.0))
-                .with_rotation(Quat::from_rotation_y(yaw)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmSkywayFx,
-        FilmShuttleMarker,
-        Name::new("FilmShuttleProxyWing"),
-    ));
+    let rot = Quat::from_rotation_y(yaw);
+    let plume_dir = rot * Vec3::new(-1.0, 0.0, 0.0);
+    let fwd = rot * Vec3::new(1.0, 0.0, 0.0);
+    for (mat, tf, name) in [
+        (
+            hull.clone(),
+            Transform::from_translation(shuttle)
+                .with_scale(Vec3::new(22.0, 7.0, 9.0))
+                .with_rotation(rot),
+            "FilmShuttleProxyHull",
+        ),
+        (
+            hull.clone(),
+            Transform::from_translation(shuttle + fwd * 14.0 + Vec3::Y * 0.5)
+                .with_scale(Vec3::new(10.0, 4.5, 5.5))
+                .with_rotation(rot),
+            "FilmShuttleProxyNose",
+        ),
+        (
+            canopy.clone(),
+            Transform::from_translation(shuttle + fwd * 4.0 + Vec3::Y * 4.2)
+                .with_scale(Vec3::new(8.0, 3.2, 5.0))
+                .with_rotation(rot),
+            "FilmShuttleProxyCanopy",
+        ),
+        (
+            hull.clone(),
+            Transform::from_translation(shuttle)
+                .with_scale(Vec3::new(8.0, 1.8, 22.0))
+                .with_rotation(rot),
+            "FilmShuttleProxyWing",
+        ),
+        (
+            hull.clone(),
+            Transform::from_translation(shuttle + plume_dir * 4.0 + Vec3::Y * 5.5)
+                .with_scale(Vec3::new(1.2, 6.5, 4.0))
+                .with_rotation(rot),
+            "FilmShuttleProxyFin",
+        ),
+        (
+            cyan.clone(),
+            Transform::from_translation(shuttle + plume_dir * 20.0)
+                .with_scale(Vec3::new(28.0, 5.0, 5.0))
+                .with_rotation(rot),
+            "FilmShuttleProxyPlume",
+        ),
+        (
+            cyan.clone(),
+            Transform::from_translation(shuttle + plume_dir * 14.0 + Vec3::Y * 3.0)
+                .with_scale(Vec3::new(20.0, 3.2, 3.2))
+                .with_rotation(rot),
+            "FilmShuttleProxyPlumeB",
+        ),
+    ] {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: mat,
+                transform: tf,
+                ..default()
+            },
+            FilmSilhouette,
+            FilmSkywayFx,
+            FilmShuttleMarker,
+            Name::new(name),
+        ));
+    }
 }
 
 fn spawn_film_grass_caps(
@@ -3248,6 +3393,25 @@ fn film_toggle_helpers(
         &mut Visibility,
         (
             With<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
+            Without<FilmGrassFx>,
+            Without<FilmCombatFx>,
+            Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
+        ),
+    >,
+    mut keel_organic: Query<
+        &mut Visibility,
+        (
+            With<FilmKeelOrganic>,
+            Without<FilmKeelHelper>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3266,6 +3430,7 @@ fn film_toggle_helpers(
         (
             With<FilmRiverRibbon>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
             Without<FilmCrystalFx>,
@@ -3283,6 +3448,7 @@ fn film_toggle_helpers(
         (
             With<FilmTurretFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmPlanetProxy>,
             Without<FilmCrystalFx>,
@@ -3300,6 +3466,7 @@ fn film_toggle_helpers(
         (
             With<FilmPlanetProxy>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmCrystalFx>,
@@ -3317,6 +3484,7 @@ fn film_toggle_helpers(
         (
             With<FilmCrystalFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3334,6 +3502,7 @@ fn film_toggle_helpers(
         (
             With<FilmFighterFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3351,6 +3520,7 @@ fn film_toggle_helpers(
         (
             With<FilmWaterfallFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3368,6 +3538,7 @@ fn film_toggle_helpers(
         (
             With<FilmGrassFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3389,6 +3560,7 @@ fn film_toggle_helpers(
         (
             With<FilmCombatFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3406,6 +3578,7 @@ fn film_toggle_helpers(
         (
             With<FilmStationFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3423,6 +3596,7 @@ fn film_toggle_helpers(
         (
             With<FilmSkywayFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3440,6 +3614,7 @@ fn film_toggle_helpers(
         (
             With<FilmTunnelFx>,
             Without<FilmKeelHelper>,
+            Without<FilmKeelOrganic>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
@@ -3459,6 +3634,15 @@ fn film_toggle_helpers(
     let show_keel = film.shot_index == 1;
     for mut vis in keel_helpers.iter_mut() {
         *vis = if show_keel {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Organic tapers/spikes visible on keel beat + painting (not solid slabs).
+    let show_keel_organic = matches!(film.shot_index, 1 | 8);
+    for mut vis in keel_organic.iter_mut() {
+        *vis = if show_keel_organic {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -3573,13 +3757,13 @@ fn film_override_sky_clear(film: Res<FilmRuntime>, mut clear_color: ResMut<Clear
     if !film.enabled || film.finished || !film.ready_to_roll {
         return;
     }
-    // Must win against daynight::update_sun (Update) so nebula volume reads.
+    // Soft film sky — richer violet clear without noon wash.
     match film.shot_index {
         7 | 8 => {
-            clear_color.0 = Color::srgb(0.06, 0.03, 0.14);
+            clear_color.0 = Color::srgb(0.09, 0.04, 0.18);
         }
         9 | 10 => {
-            clear_color.0 = Color::srgb(0.14, 0.10, 0.22);
+            clear_color.0 = Color::srgb(0.16, 0.11, 0.24);
         }
         _ => {}
     }
@@ -3699,12 +3883,12 @@ fn film_drive_camera(
     // by noon sky wash (daytime pad shots keep the normal daynight clear).
     // Final write also happens in PostUpdate — see film_override_sky_clear.
     if matches!(film.shot_index, 7 | 8) {
-        clear_color.0 = Color::srgb(0.06, 0.03, 0.14);
+        clear_color.0 = Color::srgb(0.09, 0.04, 0.18);
         if let Ok(mut sun) = sun_q.get_single_mut() {
-            sun.illuminance = 4_500.0; // tame noon wash so nebula chroma survives
+            sun.illuminance = 3_800.0; // softer key so nebula depth + subject chroma survive
         }
     } else if matches!(film.shot_index, 9 | 10) {
-        clear_color.0 = Color::srgb(0.22, 0.20, 0.28);
+        clear_color.0 = Color::srgb(0.18, 0.14, 0.26);
     }
 
     // Extra ambient bounce on deck+keel / dual-river so undersides aren't crushed.
@@ -3712,18 +3896,18 @@ fn film_drive_camera(
         1 => ambient.brightness.max(6_800.0),
         2 | 3 => ambient.brightness.max(3_800.0),
         9 | 10 => ambient.brightness.max(4_800.0),
-        8 => ambient.brightness.max(2_200.0),
+        8 => ambient.brightness.max(2_600.0),
         _ => ambient.brightness.max(2_050.0),
     };
     ambient.color = match film.shot_index {
         1 => Color::srgb(0.78, 0.94, 1.0),
         9 => Color::srgb(0.9, 0.82, 0.7),
-        8 => Color::srgb(0.7, 0.72, 0.85),
+        8 => Color::srgb(0.62, 0.55, 0.82), // soft violet bounce for nebula depth
         _ => Color::srgb(0.82, 0.88, 0.78),
     };
     if let Ok(mut sun) = sun_q.get_single_mut() {
         if matches!(film.shot_index, 7 | 8) {
-            sun.illuminance = 4_500.0;
+            sun.illuminance = 3_800.0;
         } else {
             sun.illuminance = sun.illuminance.max(28_000.0);
         }

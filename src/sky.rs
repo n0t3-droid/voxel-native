@@ -866,11 +866,11 @@ fn follow_and_animate_sky(
                 .map(|f| matches!(f.shot_index, 7 | 8 | 9))
                 .unwrap_or(false);
             let (base_day, base_night, base_sunset) = if film_hero {
-                // Painting/planet/rivers: richer magenta–violet filaments.
+                // Soft depth: violet filaments with room for subject chroma.
                 (
-                    Vec3::new(14.0, 4.0, 20.0),
-                    Vec3::new(15.0, 5.0, 22.0),
-                    Vec3::new(16.0, 5.0, 6.0),
+                    Vec3::new(11.0, 3.5, 18.0),
+                    Vec3::new(12.0, 4.0, 20.0),
+                    Vec3::new(13.0, 4.0, 5.5),
                 )
             } else if film_on {
                 (
