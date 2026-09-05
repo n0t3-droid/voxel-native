@@ -268,7 +268,7 @@ impl TerrainGenerator {
         let strength = (margin * 7.0).min(1.0);
         // Below a threshold, treat as "normal" mixed terrain — the green
         // transitional country between the set-piece provinces.
-        if strength < 0.10 {
+        if strength < 0.07 {
             (Region::Plains, 0.0)
         } else {
             (best.0, strength)
@@ -2062,11 +2062,11 @@ impl TerrainGenerator {
             // only because the ground around them was almost black; over
             // a lit, saturated surface the same density looks like litter.
             let keep = match biome {
-                Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.075,
+                Biome::CrystalSpires | Biome::AlienReef => r_gate < 0.10,
                 Biome::GlacierShards => r_gate < 0.030,
                 Biome::VolcanicWaste => r_gate < 0.022,
                 Biome::Forest | Biome::Jungle | Biome::Karst => false,
-                Biome::Mesa => false,
+                Biome::Mesa => r_gate < 0.016,
                 Biome::Desert | Biome::Savanna | Biome::Beach | Biome::Ocean => false,
                 Biome::Mountains | Biome::SnowyMountains | Biome::Tundra => false,
                 _ => false,
@@ -2110,8 +2110,9 @@ impl TerrainGenerator {
                 },
                 Biome::Mesa => match roll {
                     0 | 1 => BlockType::MesaClay,
-                    2 => BlockType::RedSand,
-                    3 => BlockType::RedStone,
+                    2 => BlockType::Crystal,
+                    3 => BlockType::AmberStone,
+                    4 => BlockType::RedStone,
                     _ => BlockType::Gravel,
                 },
                 Biome::Desert | Biome::Savanna => match roll {

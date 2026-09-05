@@ -13,6 +13,8 @@
 //!      windows and neon rim lights.
 //!   4. **Crystal clusters** — the tilted magenta / cyan / emerald shard
 //!      groups that erupt out of cliff shoulders.
+//!   5. **Rock arches** — two-pillar lintels scattered on the frontier
+//!      so flying off the spawn axis still hits a silhouette.
 //!
 //! Everything here is a **pure function of world coordinates**. Features
 //! are anchored to a coarse deterministic lattice, so a feature that
@@ -35,6 +37,8 @@ pub const SKY_ISLAND_CELL: i32 = 208;
 pub const STATION_CELL: i32 = 512;
 /// Crystal clusters are common: they are ground detail, not landmarks.
 pub const CRYSTAL_CELL: i32 = 96;
+/// Sparse rock arches — two pillars and a lintel, cheap enough for Fast.
+pub const ROCK_ARCH_CELL: i32 = 176;
 
 /// Postcard composition parked in front of the default look direction
 /// (camera forward is −Z at yaw 0). Kept within ~200 blocks of origin
@@ -215,7 +219,7 @@ impl SkyIsland {
     ) -> Option<SkyIsland> {
         // Not every cell gets an island; a sky full of them stops reading
         // as remarkable and boxes the player in from above.
-        if cell_rand(seed, 0x15_1A_11, ix, iz) > 0.62 {
+        if cell_rand(seed, 0x15_1A_11, ix, iz) > 0.70 {
             return None;
         }
         let jitter_x = (cell_rand(seed, 0x15_1A_12, ix, iz) * SKY_ISLAND_CELL as f64) as i32;
@@ -563,7 +567,7 @@ impl CrystalCluster {
 
     pub fn for_cell(seed: u32, ix: i32, iz: i32) -> Option<Self> {
         let near_spawn = ix.abs() <= 3 && iz.abs() <= 3;
-        let keep = if near_spawn { 0.82 } else { 0.42 };
+        let keep = if near_spawn { 0.86 } else { 0.58 };
         if cell_rand(seed, 0x0C_10_01, ix, iz) > keep {
             return None;
         }
@@ -779,7 +783,7 @@ impl SkyStation {
         iz: i32,
         ground: impl Fn(i32, i32) -> i32,
     ) -> Option<SkyStation> {
-        if cell_rand(seed, 0x57_A7_01, ix, iz) > 0.55 {
+        if cell_rand(seed, 0x57_A7_01, ix, iz) > 0.62 {
             return None;
         }
         let cx =
@@ -933,6 +937,118 @@ impl SkyStation {
             self.cz,
             BlockType::NeonMagenta,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rock arches ---------------------------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// Two pillars and a lintel. Sparse enough for Fast meshing, visible
+/// from the air in any direction — not a spawn-postcard prop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RockArch {
+    pub cx: i32,
+    pub cz: i32,
+    pub span: i32,
+    pub height: i32,
+    pub east_west: bool,
+}
+
+impl RockArch {
+    pub fn for_cell(
+        seed: u32,
+        ix: i32,
+        iz: i32,
+        ground: impl Fn(i32, i32) -> i32,
+    ) -> Option<Self> {
+        if cell_rand(seed, 0xA4_C4_01, ix, iz) > 0.40 {
+            return None;
+        }
+        let cx =
+            ix * ROCK_ARCH_CELL + (cell_rand(seed, 0xA4_C4_02, ix, iz) * ROCK_ARCH_CELL as f64) as i32;
+        let cz =
+            iz * ROCK_ARCH_CELL + (cell_rand(seed, 0xA4_C4_03, ix, iz) * ROCK_ARCH_CELL as f64) as i32;
+        let g = ground(cx, cz);
+        if g < 40 {
+            return None;
+        }
+        Some(Self {
+            cx,
+            cz,
+            span: 7 + (cell_rand(seed, 0xA4_C4_04, ix, iz) * 6.0) as i32,
+            height: 7 + (cell_rand(seed, 0xA4_C4_05, ix, iz) * 7.0) as i32,
+            east_west: cell_rand(seed, 0xA4_C4_06, ix, iz) > 0.5,
+        })
+    }
+
+    pub fn near(seed: u32, cx: i32, cz: i32, ground: impl Fn(i32, i32) -> i32 + Copy) -> Vec<Self> {
+        let ix = cx.div_euclid(ROCK_ARCH_CELL);
+        let iz = cz.div_euclid(ROCK_ARCH_CELL);
+        let mut out = Vec::new();
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if let Some(arch) = Self::for_cell(seed, ix + dx, iz + dz, ground) {
+                    out.push(arch);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn stamp(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
+        let origin = chunk.pos.origin();
+        let (ox, _, oz) = origin;
+        let half = (self.span / 2).clamp(3, 7);
+        let reach = half + 2;
+        if (ox + CHUNK_SIZE_I <= self.cx - reach)
+            || (ox > self.cx + reach)
+            || (oz + CHUNK_SIZE_I <= self.cz - reach)
+            || (oz > self.cz + reach)
+        {
+            return;
+        }
+        let g = ground(self.cx, self.cz);
+        let h = self.height.clamp(6, 14);
+        let (ax, az) = if self.east_west { (1, 0) } else { (0, 1) };
+        for side in [-1, 1] {
+            let px = self.cx + ax * side * half;
+            let pz = self.cz + az * side * half;
+            for wy in g..=(g + h) {
+                for o in -1..=1 {
+                    place_over_unless_glow(
+                        chunk,
+                        origin,
+                        px + az * o,
+                        wy,
+                        pz + ax * o,
+                        strata_block(wy),
+                    );
+                }
+            }
+        }
+        for t in -half..=half {
+            let wx = self.cx + ax * t;
+            let wz = self.cz + az * t;
+            for o in -1..=1 {
+                place_over_unless_glow(
+                    chunk,
+                    origin,
+                    wx + az * o,
+                    g + h,
+                    wz + ax * o,
+                    BlockType::AmberStone,
+                );
+                place_over_unless_glow(
+                    chunk,
+                    origin,
+                    wx + az * o,
+                    g + h + 1,
+                    wz + ax * o,
+                    strata_block(g + h + 1),
+                );
+            }
+        }
     }
 }
 
@@ -1157,7 +1273,7 @@ impl RiverNetwork {
         let x = wx as f64;
         let z = wz as f64;
         let a = Self::field(source, x, z, phase);
-        if a.abs() > 0.06 {
+        if a.abs() > 0.072 {
             return None;
         }
         let e = 3.0;
@@ -2053,6 +2169,12 @@ impl FrontierPlanner {
                 station.stamp(chunk);
             }
         }
+        for arch in RockArch::near(self.seed, wx, wz, ground) {
+            if in_opening_look(arch.cx, arch.cz) || in_spawn_left_sky(arch.cx, arch.cz) {
+                continue;
+            }
+            arch.stamp(chunk, ground);
+        }
     }
 }
 
@@ -2536,6 +2658,29 @@ mod tests {
             solid > 20,
             "cluster only wrote {solid} voxels into its chunk"
         );
+    }
+
+    #[test]
+    fn rock_arches_span_above_the_ground_outside_spawn() {
+        let mut found = 0;
+        let mut lintel = 0;
+        for ix in -8..8 {
+            for iz in -8..8 {
+                let Some(arch) = RockArch::for_cell(4242, ix, iz, flat) else {
+                    continue;
+                };
+                found += 1;
+                let mut chunk = Chunk::new(ChunkPos::new(
+                    arch.cx.div_euclid(CHUNK_SIZE_I),
+                    (flat(arch.cx, arch.cz) + arch.height).div_euclid(CHUNK_SIZE_I),
+                    arch.cz.div_euclid(CHUNK_SIZE_I),
+                ));
+                arch.stamp(&mut chunk, flat);
+                lintel += count_blocks(&chunk, BlockType::AmberStone);
+            }
+        }
+        assert!(found > 12, "only rolled {found} arches across 256 cells");
+        assert!(lintel > 20, "arches wrote no lintel stone ({lintel})");
     }
 
     #[test]
