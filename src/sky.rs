@@ -897,6 +897,7 @@ fn textured_sky_sphere(radius: f32) -> Mesh {
     mesh
 }
 
+#[cfg(test)]
 fn max_triangle_uv_u_span(mesh: &Mesh) -> f32 {
     let Some(bevy::render::mesh::VertexAttributeValues::Float32x2(uvs)) =
         mesh.attribute(Mesh::ATTRIBUTE_UV_0)
