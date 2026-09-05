@@ -529,7 +529,11 @@ fn bake_block_swatch(
                     let dune = (u * two_pi * 2.2 + v * two_pi * 0.8 + macro_n).sin() * 0.10;
                     let mineral = (grain_n - 0.42).max(0.0) * 0.14;
                     (
-                        0.88 + macro_shadow * 0.85 + fbm * 0.14 + micro * 0.16 + ripple + dune
+                        0.88 + macro_shadow * 0.85
+                            + fbm * 0.14
+                            + micro * 0.16
+                            + ripple
+                            + dune
                             + mineral,
                         mineral as f32 * 0.07 + (dune as f32) * 0.04,
                         -(ripple as f32) * 0.03,
@@ -620,22 +624,20 @@ fn bake_block_swatch(
                     )
                 }
                 BlockStyle::Strata => {
-                    // Three thick world-readable bands. Thin 6-band
-                    // stripes averaged to mud under mips at flying
-                    // distance; 3 bands survive an 8× box filter.
-                    let band = ((v * 3.0 + strat * 0.12).floor() as i32).rem_euclid(3);
-                    let (mul, tr, tg, tb) = match band {
-                        0 => (0.42, 0.22, -0.10, 0.18),
-                        1 => (1.22, 0.08, 0.10, -0.06),
-                        _ => (0.70, 0.18, 0.00, -0.14),
-                    };
+                    // World Y already paints 6-block canyon bands
+                    // (violet / brick / cream). Extra high-contrast
+                    // stripes *inside* the 128² tile repeated 1:1 per
+                    // voxel as a flying-distance waffle. Keep grit so
+                    // near faces still read as rock.
                     let grit = grain_n.abs() * 0.08;
-                    let crack = cell_n * 0.22;
+                    let crack = cell_n * 0.10;
+                    let sediment = (v * two_pi * 0.55 + macro_n * 1.4).sin() * 0.06;
+                    let b = 0.92 + macro_shadow * 1.05 + fbm * 0.16 + grit - crack + sediment;
                     (
-                        mul + macro_shadow * 0.5 + fbm * 0.08 + grit - crack,
-                        tr,
-                        tg,
-                        tb,
+                        b,
+                        (strat as f32) * 0.025 + (sediment as f32) * 0.03,
+                        (broad as f32) * 0.015,
+                        -(grit as f32) * 0.02,
                     )
                 }
                 BlockStyle::Metal => {
@@ -645,7 +647,7 @@ fn bake_block_swatch(
                     let px = (u * cells).fract();
                     let py = (v * cells).fract();
                     let grout = if px < 0.05 || py < 0.05 || px > 0.95 || py > 0.95 {
-                        0.78
+                        0.94
                     } else {
                         1.0
                     };
@@ -691,27 +693,13 @@ fn bake_block_swatch(
             };
 
             let bright = bright.clamp(0.32, 1.55) as f32;
-            let mut r = (base[0] * bright + tint_r).clamp(0.0, 1.0);
-            let mut g = (base[1] * bright + tint_g).clamp(0.0, 1.0);
-            let mut bl = (base[2] * bright + tint_b).clamp(0.0, 1.0);
+            let r = (base[0] * bright + tint_r).clamp(0.0, 1.0);
+            let g = (base[1] * bright + tint_g).clamp(0.0, 1.0);
+            let bl = (base[2] * bright + tint_b).clamp(0.0, 1.0);
 
-            // Thin 1px lip only. A 10% bevel ate the mip average and
-            // washed flying-distance faces into grey-brown.
-            let margin = 2.0_f32;
-            let dxe = (x as f32).min((size - 1 - x) as f32);
-            let dye = (y as f32).min((size - 1 - y) as f32);
-            let edge = dxe.min(dye);
-            let mut bevel = if edge < margin {
-                0.55 + 0.45 * (edge / margin)
-            } else {
-                1.0
-            };
-            if edge < 0.6 {
-                bevel *= 0.72;
-            }
-            r = (r * bevel).clamp(0.0, 1.0);
-            g = (g * bevel).clamp(0.0, 1.0);
-            bl = (bl * bevel).clamp(0.0, 1.0);
+            // No per-tile grout. A 1–2 px lip around every 128² swatch
+            // became a world-space waffle once UVs tiled 1:1 per voxel.
+            // Far filtering lives in wrap mips instead.
 
             data.push((r * 255.0).round() as u8);
             data.push((g * 255.0).round() as u8);
@@ -793,7 +781,10 @@ fn roughness_for_block(block: BlockType) -> f32 {
         0.14
     } else if block.is_emissive() {
         0.42
-    } else if matches!(block, BlockType::Sand | BlockType::RedSand | BlockType::GlowSand) {
+    } else if matches!(
+        block,
+        BlockType::Sand | BlockType::RedSand | BlockType::GlowSand
+    ) {
         0.94
     } else {
         0.84
@@ -823,7 +814,86 @@ fn reflectance_for_block(block: BlockType) -> f32 {
     }
 }
 
+/// IEC 61966-2-1 sRGB EOTF. Mip averages must happen in linear light or
+/// dark tile edges dominate the far filter and rebuild the waffle.
+fn srgb_u8_to_linear(c: u8) -> f32 {
+    let u = c as f32 / 255.0;
+    if u <= 0.04045 {
+        u / 12.92
+    } else {
+        ((u + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb_u8(lin: f32) -> u8 {
+    let l = lin.clamp(0.0, 1.0);
+    let u = if l <= 0.0031308 {
+        12.92 * l
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (u.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn pixel_at(data: &[u8], w: u32, x: i32, y: i32, h: u32) -> [u8; 4] {
+    let w = w as i32;
+    let h = h as i32;
+    let xx = x.rem_euclid(w) as u32;
+    let yy = y.rem_euclid(h) as u32;
+    let i = ((yy * w as u32 + xx) * 4) as usize;
+    [data[i], data[i + 1], data[i + 2], data[i + 3]]
+}
+
+/// Wrap-mode mip chain. Level 0 is the seamless swatch; each next level
+/// is a 2×2 box in linear RGB so flying-distance faces fade toward the
+/// tile mean instead of a per-block grout grid.
+fn build_wrap_mip_chain(width: u32, height: u32, rgba: Vec<u8>) -> (Vec<u8>, u32) {
+    let mut levels: Vec<(u32, u32, Vec<u8>)> = vec![(width, height, rgba)];
+    let mut w = width;
+    let mut h = height;
+    while w > 1 || h > 1 {
+        let nw = (w / 2).max(1);
+        let nh = (h / 2).max(1);
+        let src = &levels.last().unwrap().2;
+        let mut dst = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                let sx = (x * 2) as i32;
+                let sy = (y * 2) as i32;
+                let samples = [
+                    pixel_at(src, w, sx, sy, h),
+                    pixel_at(src, w, sx + 1, sy, h),
+                    pixel_at(src, w, sx, sy + 1, h),
+                    pixel_at(src, w, sx + 1, sy + 1, h),
+                ];
+                let mut acc = [0.0f32; 4];
+                for p in samples {
+                    acc[0] += srgb_u8_to_linear(p[0]);
+                    acc[1] += srgb_u8_to_linear(p[1]);
+                    acc[2] += srgb_u8_to_linear(p[2]);
+                    acc[3] += p[3] as f32 / 255.0;
+                }
+                let o = ((y * nw + x) * 4) as usize;
+                dst[o] = linear_to_srgb_u8(acc[0] * 0.25);
+                dst[o + 1] = linear_to_srgb_u8(acc[1] * 0.25);
+                dst[o + 2] = linear_to_srgb_u8(acc[2] * 0.25);
+                dst[o + 3] = (acc[3] * 0.25 * 255.0).round() as u8;
+            }
+        }
+        levels.push((nw, nh, dst));
+        w = nw;
+        h = nh;
+    }
+    let mut out = Vec::new();
+    for (_, _, data) in &levels {
+        out.extend_from_slice(data);
+    }
+    (out, levels.len() as u32)
+}
+
 fn make_repeating_image(w: u32, h: u32, data: Vec<u8>) -> Image {
+    let mip0_len = (w as usize) * (h as usize) * 4;
+    let (all, mip_count) = build_wrap_mip_chain(w, h, data);
     let mut image = Image::new(
         Extent3d {
             width: w,
@@ -831,19 +901,18 @@ fn make_repeating_image(w: u32, h: u32, data: Vec<u8>) -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        data,
+        all[..mip0_len].to_vec(),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
+    image.data = all;
+    image.texture_descriptor.mip_level_count = mip_count;
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
         address_mode_w: ImageAddressMode::Repeat,
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
-        // Linear mips + 8× aniso kill the flying-distance checkerboard
-        // on cliff faces. Nearest mips kept hue, but every greedy quad
-        // turned into a waffle once a mip boundary hit the pixel grid.
         mipmap_filter: ImageFilterMode::Linear,
         anisotropy_clamp: 8,
         ..ImageSamplerDescriptor::linear()
@@ -952,9 +1021,14 @@ mod tests {
         let crystal = swatch_for(&swatches, BlockType::Crystal);
         let plate = swatch_for(&swatches, BlockType::PlatingWhite);
         assert!(
-            luma_range(red) > 90,
-            "mesa strata tile is still too flat ({})",
+            luma_range(red) > 22,
+            "mesa strata tile lost near-field grit ({})",
             luma_range(red)
+        );
+        let red_far = downsample_signature_count(red, 16);
+        assert!(
+            red_far < 48,
+            "strata tile still has a high-frequency waffle at flying mips ({red_far} signatures)"
         );
         assert!(
             luma_range(crystal) > 80,
@@ -962,8 +1036,8 @@ mod tests {
             luma_range(crystal)
         );
         assert!(
-            luma_range(plate) > 80,
-            "metal tile is still too flat ({})",
+            luma_range(plate) > 24,
+            "metal tile lost near-field panel variation ({})",
             luma_range(plate)
         );
         assert!(
@@ -978,6 +1052,27 @@ mod tests {
             lava_signatures > 14,
             "lava only preserved {lava_signatures} far-distance material signatures"
         );
+    }
+
+    #[test]
+    fn repeating_swatches_have_wrap_mips_and_no_tile_grout() {
+        let swatches = bake_all_block_swatches(128);
+        let red = swatch_for(&swatches, BlockType::RedStone);
+        let w = red.width as usize;
+        let corner = luma(&red.rgba[0..4]);
+        let inner = luma(&red.rgba[(64 * w + 64) * 4..(64 * w + 64) * 4 + 4]);
+        assert!(
+            (corner as i16 - inner as i16).unsigned_abs() < 70,
+            "tile grout still darkens the swatch edge (corner={corner} inner={inner})"
+        );
+
+        let (mips, count) = build_wrap_mip_chain(red.width, red.height, red.rgba.clone());
+        assert!(count >= 8, "128² should chain down to 1×1, got {count}");
+        let mip0 = w * w * 4;
+        assert!(mips.len() > mip0);
+        // Last mip is 1×1 — the linear-light mean of the tile.
+        let last = &mips[mips.len() - 4..];
+        assert!(last[0] > 40 && last[0] < 220);
     }
 
     #[test]
@@ -1079,6 +1174,9 @@ mod tests {
             "plasma emissive still has dusk-warming red ({plasma:?})"
         );
         let lava = emissive_for_block(BlockType::Lava);
-        assert!(lava.red > lava.blue * 8.0, "lava emissive went cream ({lava:?})");
+        assert!(
+            lava.red > lava.blue * 8.0,
+            "lava emissive went cream ({lava:?})"
+        );
     }
 }
