@@ -952,9 +952,13 @@ mod tests {
         let mut tel = telemetry(60.0, 0.1, RuntimeIntent::Explore);
         tel.stream_elapsed = 8.0;
         let mut held = 0i32;
-        for _ in 0..10 {
-            let budget = core.update_budget(&settings, tel.clone(), 0.6);
-            held = budget.render_distance;
+        // Climb to the horizon, then sit there long enough for the
+        // hold counter to arm.
+        for _ in 0..40 {
+            held = core.update_budget(&settings, tel.clone(), 0.6).render_distance;
+        }
+        for _ in 0..8 {
+            held = core.update_budget(&settings, tel.clone(), 0.6).render_distance;
         }
         tel.fps = 50.0;
         tel.frame_pressure = (60.0 - 50.0) / 60.0;
