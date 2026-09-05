@@ -959,7 +959,11 @@ fn film_spawn_silhouettes(
                         transform: Transform::from_translation(
                             deck + Vec3::new(x, underside_y + dy, z + 2.0),
                         )
-                        .with_scale(Vec3::new(step * 0.95, 0.55, step * 0.95)),
+                        .with_scale(Vec3::new(
+                            step * 0.95,
+                            0.55,
+                            step * 0.95,
+                        )),
                         ..default()
                     },
                     FilmSilhouette,
@@ -982,11 +986,9 @@ fn film_spawn_silhouettes(
         PbrBundle {
             mesh: cube.clone(),
             material: body,
-            transform: Transform::from_translation(
-                deck + Vec3::new(4.0, underside_y * 0.55, 10.0),
-            )
-            .with_scale(Vec3::new(rx * 1.35, keel.max(7.0) * 0.75, rz * 0.55))
-            .with_rotation(Quat::from_rotation_x(-0.12)),
+            transform: Transform::from_translation(deck + Vec3::new(4.0, underside_y * 0.55, 10.0))
+                .with_scale(Vec3::new(rx * 1.35, keel.max(7.0) * 0.75, rz * 0.55))
+                .with_rotation(Quat::from_rotation_x(-0.12)),
             ..default()
         },
         FilmSilhouette,
@@ -997,7 +999,7 @@ fn film_spawn_silhouettes(
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
-            material: luminite_plate,
+            material: luminite_plate.clone(),
             transform: Transform::from_translation(
                 deck + Vec3::new(2.0, underside_y + 1.2, rz * 0.75),
             )
@@ -1008,6 +1010,55 @@ fn film_spawn_silhouettes(
         FilmKeelHelper,
         Name::new("FilmKeelCyanLip"),
     ));
+
+    // Cheap painting density: unlit underside plates on nearby satellites
+    // so wide-hero keels also read color (not ink black silhouettes).
+    for (si, (sx, sz, srx, srz, lift)) in [
+        (28.0_f32, 18.0, 14.0, 11.0, -1.0),
+        (-22.0, 28.0, 13.0, 10.0, 1.0),
+        (22.0, 32.0, 12.0, 10.0, 0.0),
+        (-18.0, 40.0, 11.0, 9.0, -1.0),
+        (36.0, 48.0, 10.0, 9.0, 1.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sat_deck = deck + Vec3::new(sx, lift, sz);
+        let sat_uy = underside_y;
+        let mut k = 0usize;
+        let mut px = -srx;
+        while px <= srx {
+            let mut pz = -srz;
+            while pz <= srz {
+                let nx = px / srx;
+                let nz = pz / srz;
+                if nx * nx + nz * nz <= 1.0 {
+                    let mat = if k % 2 == 0 {
+                        luminite_plate.clone()
+                    } else {
+                        alloy_plate.clone()
+                    };
+                    commands.spawn((
+                        PbrBundle {
+                            mesh: cube.clone(),
+                            material: mat,
+                            transform: Transform::from_translation(
+                                sat_deck + Vec3::new(px, sat_uy, pz),
+                            )
+                            .with_scale(Vec3::new(4.2, 0.5, 4.2)),
+                            ..default()
+                        },
+                        FilmSilhouette,
+                        FilmKeelHelper,
+                        Name::new(format!("FilmSatKeel{si}_{k}")),
+                    ));
+                    k += 1;
+                }
+                pz += 5.0;
+            }
+            px += 5.0;
+        }
+    }
 
     // Film-only hanging crystal spikes (cyan/verdant only — no magenta/pink).
     let crystal_a = materials.add(sil_mat(
@@ -1850,16 +1901,16 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Grass deck rim AND colored unlit keel undersides in one frame.
+            // Below the island looking up: grass rim on top edge + colored
+            // unlit underside plates filling the keel (no black slab).
             let keel = island.keel_depth as f32;
             let pos = deck
                 + Vec3::new(
-                    island.radius_x as f32 * 0.55 + 22.0,
-                    1.5 - keel * 0.15,
-                    island.radius_z as f32 * 0.45 + 26.0,
+                    island.radius_x as f32 * 0.55 + 20.0,
+                    -(keel * 1.25).max(10.0) - 3.0,
+                    island.radius_z as f32 * 0.5 + 24.0,
                 );
-            // Look at the lip where grass meets crystal underside plates.
-            let look = deck + Vec3::new(2.0, -keel * 0.35, 8.0);
+            let look = deck + Vec3::new(1.0, -keel * 0.25, 6.0);
             (pos, look)
         }
         2 => {
