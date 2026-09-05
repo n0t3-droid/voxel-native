@@ -472,19 +472,17 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
     let oz = island.cz + 14;
     let mut cleared = 0usize;
     let mut stamped = 0usize;
-    for dx in -10..=10 {
-        for dz in -7..=7 {
+    // Wide/tall clear so tunnel pylons + skyway stubs cannot cage the two-shot.
+    for dx in -14..=14 {
+        for dz in -10..=12 {
             let x = ox + dx;
             let z = oz + dz;
-            // Suppress tall grass / props in the combat frustum.
-            for dy in 1..=12 {
+            for dy in 1..=22 {
                 if world.edit_set_voxel(x, oy + dy, z, AIR) {
                     cleared += 1;
                 }
             }
-            // Also clear any leftover vegetation on the slab layer.
             let _ = world.edit_set_voxel(x, oy + 2, z, AIR);
-            // Clean dark pad slab (two layers) for silhouette feet.
             if world.edit_set_voxel(x, oy, z, BlockType::ShipHullDark.into()) {
                 stamped += 1;
             }
@@ -962,13 +960,16 @@ fn film_spawn_silhouettes(
         LinearRgba::rgb(1.0, 5.5, 6.5),
     ));
     let alien_body = materials.add(sil_mat(
-        Color::srgb(0.98, 0.84, 0.42),
-        LinearRgba::rgb(0.18, 0.10, 0.02),
+        Color::srgb(1.0, 0.78, 0.28),
+        LinearRgba::rgb(0.55, 0.28, 0.04),
     ));
-    let alien_leg = materials.add(sil_mat(Color::srgb(0.58, 0.36, 0.16), LinearRgba::BLACK));
+    let alien_leg = materials.add(sil_mat(
+        Color::srgb(0.72, 0.42, 0.12),
+        LinearRgba::rgb(0.12, 0.05, 0.01),
+    ));
     let alien_crest = materials.add(sil_mat(
-        Color::srgb(1.0, 0.05, 0.85),
-        LinearRgba::rgb(5.0, 0.25, 4.0),
+        Color::srgb(1.0, 0.35, 0.85),
+        LinearRgba::rgb(4.0, 0.8, 3.5),
     ));
     let crew_body = materials.add(sil_mat(
         Color::srgb(0.55, 0.62, 0.72),
@@ -1580,16 +1581,16 @@ fn film_spawn_silhouettes(
     // Film planet sphere+ring — painting backup; hidden on dedicated sky shot.
     let planet_sphere = meshes.add(Sphere::new(1.0).mesh().ico(3).expect("ico 3"));
     let planet_body = materials.add(sil_mat(
-        Color::srgb(0.95, 0.50, 0.95),
-        LinearRgba::rgb(7.0, 2.5, 9.0),
+        Color::srgb(0.98, 0.55, 0.98),
+        LinearRgba::rgb(9.0, 3.5, 11.0),
     ));
     let planet_ring = materials.add(sil_mat(
-        Color::srgb(1.0, 0.90, 0.75),
-        LinearRgba::rgb(8.0, 6.0, 4.0),
+        Color::srgb(1.0, 0.92, 0.78),
+        LinearRgba::rgb(10.0, 7.5, 5.0),
     ));
     let planet_dark = materials.add(sil_mat(
-        Color::srgb(0.25, 0.08, 0.28),
-        LinearRgba::rgb(0.4, 0.1, 0.5),
+        Color::srgb(0.22, 0.06, 0.26),
+        LinearRgba::rgb(0.5, 0.12, 0.6),
     ));
     spawn_film_planet_proxy(
         &mut commands,
@@ -2312,13 +2313,13 @@ fn spawn_film_planet_proxy(
 ) {
     // Large sphere + tilted ring in painting upper frustum (sky path backup).
     let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-    let center = deck + planet_dir * 95.0 + Vec3::new(20.0, 48.0, -15.0);
+    let center = deck + planet_dir * 88.0 + Vec3::new(18.0, 55.0, -12.0);
     let tilt = Quat::from_rotation_x(0.95) * Quat::from_rotation_z(-0.22);
     commands.spawn((
         PbrBundle {
             mesh: sphere.clone(),
             material: body.clone(),
-            transform: Transform::from_translation(center).with_scale(Vec3::splat(38.0)),
+            transform: Transform::from_translation(center).with_scale(Vec3::splat(48.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2331,7 +2332,7 @@ fn spawn_film_planet_proxy(
             mesh: sphere.clone(),
             material: dark.clone(),
             transform: Transform::from_translation(center - planet_dir * 2.0)
-                .with_scale(Vec3::splat(39.5)),
+                .with_scale(Vec3::splat(50.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2345,7 +2346,7 @@ fn spawn_film_planet_proxy(
             material: ring.clone(),
             transform: Transform::from_translation(center)
                 .with_rotation(tilt)
-                .with_scale(Vec3::new(95.0, 1.8, 95.0)),
+                .with_scale(Vec3::new(118.0, 2.2, 118.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2358,7 +2359,7 @@ fn spawn_film_planet_proxy(
             material: dark.clone(),
             transform: Transform::from_translation(center)
                 .with_rotation(tilt)
-                .with_scale(Vec3::new(58.0, 2.4, 58.0)),
+                .with_scale(Vec3::new(72.0, 2.8, 72.0)),
             ..default()
         },
         FilmSilhouette,
@@ -3374,7 +3375,7 @@ fn film_drive_camera(
         let target: f32 = match film.shot_index {
             0 => 50.0,  // grass lawn stand-off
             1 => 54.0,  // deck + keel profile
-            2 => 48.0,  // full-body combat two-shot
+            2 => 52.0,  // full-body combat two-shot (slightly wider after declutter)
             3 => 46.0,  // along-axis turret beams + yellow muzzles
             4 => 48.0,  // crew pair
             5 => 55.0,  // tunnel portal + cyan rails
@@ -3726,9 +3727,9 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         2 => {
-            // Southwest two-shot — biped vs multi-leg; fighters/turrets/vista hidden.
-            let look = deck + Vec3::new(0.5, 5.2, 15.0);
-            let pos = look + Vec3::new(-17.0, 4.0, 15.0);
+            // Side-on two-shot above cleared pad — biped vs multi-leg, no rail cage.
+            let look = deck + Vec3::new(0.8, 7.5, 16.5);
+            let pos = look + Vec3::new(-21.0, 5.0, 9.0);
             (pos, look)
         }
         3 => {
