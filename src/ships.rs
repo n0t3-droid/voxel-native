@@ -2157,10 +2157,10 @@ fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     // ~18 blocks ahead the hull must sit around origin.y+12 (~33° up),
     // not +20 (~48°, clipped). Travel stays west of the mesa so the
     // white/orange ship reads against open canyon sky, not the cliff.
-    let x = origin.x + 18.0 + u * 22.0;
-    let z = origin.z + 4.0 + u * 6.0;
-    let y = origin.y + 12.0 + (u * std::f32::consts::PI).sin() * 2.0;
-    let yaw = 22.0_f32.atan2(-6.0);
+    let x = origin.x + 26.0 + u * 18.0;
+    let z = origin.z + 2.0 + u * 8.0;
+    let y = origin.y + 9.0 + (u * std::f32::consts::PI).sin() * 1.5;
+    let yaw = 18.0_f32.atan2(-8.0);
     let roll = -0.42 + (u * std::f32::consts::TAU).sin() * 0.30;
     (Vec3::new(x, y, z), yaw, roll)
 }
@@ -2179,7 +2179,7 @@ fn update_hero_flyby(
         let (pos, yaw, roll) = hero_flyby_pose(fly.origin, fly.t);
         tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(7.0);
+        tf.scale = Vec3::splat(4.2);
         motion.yaw = yaw;
         motion.pitch = -0.10;
         motion.roll = roll;
@@ -4718,12 +4718,12 @@ mod tests {
                 pos.x
             );
             assert!(
-                pos.y > origin.y + 8.0,
+                pos.y > origin.y + 6.0,
                 "flyby at u={u} is not in the sky (y={})",
                 pos.y
             );
             assert!(
-                pos.y < origin.y + 18.0,
+                pos.y < origin.y + 14.0,
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );
