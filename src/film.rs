@@ -569,6 +569,12 @@ fn film_stamp_vista_archipelago(mut world: ResMut<VoxelWorld>, mut film: ResMut<
         (island.cx + 38, island.cz + 72, 10, 9, -2),
         (island.cx - 30, island.cz + 18, 11, 9, 0),
         (island.cx + 95, island.cz + 18, 9, 10, 1),
+        // Extra near-frustum islands for painting_hero density.
+        (island.cx + 22, island.cz + 32, 14, 11, 0),
+        (island.cx - 18, island.cz + 40, 12, 10, -1),
+        (island.cx + 36, island.cz + 48, 11, 10, 1),
+        (island.cx + 8, island.cz + 55, 10, 9, -2),
+        (island.cx + 50, island.cz + 38, 9, 9, 0),
     ];
     let mut sat_centers = Vec::with_capacity(satellites.len());
     for &(ox, oz, rx, rz, lift) in satellites {
@@ -902,159 +908,105 @@ fn film_spawn_silhouettes(
         Color::srgb(0.05, 1.0, 1.0),
         LinearRgba::rgb(0.6, 4.0, 5.0),
     ));
-    let bounce = materials.add(sil_mat(
-        Color::srgb(0.75, 0.95, 1.0),
-        LinearRgba::rgb(2.5, 4.5, 5.5),
-    ));
-
-    // Staged on the cleared combat slab (z≈+14) — staggered in Z so a
-    // southwest camera sees BOTH figures (not marine occluding alien).
-    spawn_film_marine(
-        &mut commands,
-        &cube,
-        &marine_body,
-        &marine_dark,
-        &marine_visor,
-        deck + Vec3::new(-5.5, 0.25, 12.5),
-        2.55,
-    );
-    spawn_film_alien(
-        &mut commands,
-        &cube,
-        &alien_body,
-        &alien_leg,
-        &alien_crest,
-        deck + Vec3::new(5.5, 0.25, 15.5),
-        2.85,
-    );
-    spawn_film_crew(
-        &mut commands,
-        &cube,
-        &crew_body,
-        &crew_visor,
-        deck + Vec3::new(-6.0, 1.0, -10.0),
-    );
-    spawn_film_crew(
-        &mut commands,
-        &cube,
-        &crew_body,
-        &crew_visor,
-        deck + Vec3::new(-4.0, 1.0, -10.0),
-    );
-
-    // Upward bounce card under the island so voxel keel faces aren't crushed.
+    // Unlit underside plates REPLACE downward keel faces in screenshots.
+    // Lavapipe PBR crushes voxel bottom faces to ink — these thin unlit
+    // crystal/alloy cards sit flush under the keel footprint so the camera
+    // reads color instead of a black slab (shot 1 hero + painting vista).
     let keel = island.keel_depth as f32;
-    let bounce_hi = materials.add(sil_mat(
-        Color::srgb(0.85, 1.0, 1.0),
-        LinearRgba::rgb(6.5, 10.0, 11.0),
+    let underside_y = -(keel.max(6.0) + 0.35);
+    let crystal_plate = materials.add(sil_mat(
+        Color::srgb(0.45, 0.95, 1.0),
+        LinearRgba::rgb(1.8, 5.5, 6.5),
     ));
-    let keel_shell = materials.add(sil_mat(
-        Color::srgb(0.72, 0.68, 0.58),
-        LinearRgba::rgb(0.55, 0.48, 0.35),
+    let verdant_plate = materials.add(sil_mat(
+        Color::srgb(0.35, 0.92, 0.55),
+        LinearRgba::rgb(0.6, 4.2, 1.8),
     ));
-    let keel_rim = materials.add(sil_mat(
-        Color::srgb(0.35, 0.95, 1.0),
-        LinearRgba::rgb(2.2, 7.5, 8.0),
+    let alloy_plate = materials.add(sil_mat(
+        Color::srgb(0.78, 0.74, 0.62),
+        LinearRgba::rgb(0.45, 0.40, 0.28),
     ));
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: bounce_hi,
-            transform: Transform::from_translation(
-                deck + Vec3::new(0.0, -(keel * 1.05).max(9.0), 4.0),
-            )
-            .with_scale(Vec3::new(
-                (island.radius_x as f32 * 2.2).max(40.0),
-                0.55,
-                (island.radius_z as f32 * 2.2).max(36.0),
-            )),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmKeelHelper,
-        Name::new("FilmKeelBounceCard"),
+    let luminite_plate = materials.add(sil_mat(
+        Color::srgb(0.55, 1.0, 0.98),
+        LinearRgba::rgb(2.5, 7.0, 7.5),
     ));
-    // Second angled bounce for side-facing keel voxels.
-    commands.spawn((
-        PbrBundle {
-            mesh: cube.clone(),
-            material: bounce,
-            transform: Transform::from_translation(
-                deck + Vec3::new(18.0, -(keel * 0.55).max(5.0), 16.0),
-            )
-            .with_rotation(Quat::from_rotation_x(-0.55) * Quat::from_rotation_y(0.4))
-            .with_scale(Vec3::new(26.0, 0.35, 32.0)),
-            ..default()
-        },
-        FilmSilhouette,
-        FilmKeelHelper,
-        Name::new("FilmKeelBounceCardB"),
-    ));
-    // Unlit keel-face shell: wraps underside silhouette so faces never crush
-    // to pure black even when voxel PBR lighting fails on lavapipe.
-    let shell_y = -(keel * 0.62).max(5.5);
-    for (ox, oz, sx, sz, ry) in [
-        (
-            0.0_f32,
-            6.0,
-            island.radius_x as f32 * 1.7,
-            island.radius_z as f32 * 0.55,
-            0.0,
-        ),
-        (
-            island.radius_x as f32 * 0.85,
-            2.0,
-            0.7,
-            island.radius_z as f32 * 1.4,
-            0.0,
-        ),
-        (
-            -island.radius_x as f32 * 0.85,
-            2.0,
-            0.7,
-            island.radius_z as f32 * 1.4,
-            0.0,
-        ),
-        (
-            8.0,
-            island.radius_z as f32 * 0.7,
-            island.radius_x as f32 * 1.2,
-            0.65,
-            -0.35,
-        ),
-    ] {
-        commands.spawn((
-            PbrBundle {
-                mesh: cube.clone(),
-                material: keel_shell.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, shell_y, oz))
-                    .with_rotation(Quat::from_rotation_x(ry))
-                    .with_scale(Vec3::new(sx.max(14.0), keel.max(7.0) * 0.85, sz.max(10.0))),
-                ..default()
-            },
-            FilmSilhouette,
-            FilmKeelHelper,
-            Name::new("FilmKeelFaceShell"),
-        ));
+    // Tile thin horizontal plates across the island ellipse — each tile is
+    // the visible underside face (no reliance on voxel lighting).
+    let rx = (island.radius_x as f32).max(18.0);
+    let rz = (island.radius_z as f32).max(16.0);
+    let step = 4.5_f32;
+    let mut plate_i = 0usize;
+    let mut x = -rx;
+    while x <= rx {
+        let mut z = -rz;
+        while z <= rz {
+            let nx = x / rx;
+            let nz = z / rz;
+            if nx * nx + nz * nz <= 1.05 {
+                let mat = match plate_i % 4 {
+                    0 => &crystal_plate,
+                    1 => &alloy_plate,
+                    2 => &luminite_plate,
+                    _ => &verdant_plate,
+                };
+                // Edge tiles get a slight drop so the keel reads as a dome.
+                let edge = (nx * nx + nz * nz).sqrt();
+                let dy = -edge * 1.6;
+                commands.spawn((
+                    PbrBundle {
+                        mesh: cube.clone(),
+                        material: mat.clone(),
+                        transform: Transform::from_translation(
+                            deck + Vec3::new(x, underside_y + dy, z + 2.0),
+                        )
+                        .with_scale(Vec3::new(step * 0.95, 0.55, step * 0.95)),
+                        ..default()
+                    },
+                    FilmSilhouette,
+                    FilmKeelHelper,
+                    Name::new(format!("FilmKeelUnderside{plate_i}")),
+                ));
+                plate_i += 1;
+            }
+            z += step;
+        }
+        x += step;
     }
-    // Cyan rim band under the outer edge — readable keel crystal without pink.
+    // Camera-facing keel body slab: thick unlit alloy+crystal so the
+    // island_deck_keel SE camera sees a colored keel mass under the grass.
+    let body = materials.add(sil_mat(
+        Color::srgb(0.62, 0.88, 0.95),
+        LinearRgba::rgb(1.2, 3.8, 4.5),
+    ));
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
-            material: keel_rim,
+            material: body,
             transform: Transform::from_translation(
-                deck + Vec3::new(0.0, shell_y - keel * 0.15, island.radius_z as f32 * 0.55),
+                deck + Vec3::new(4.0, underside_y * 0.55, 10.0),
             )
-            .with_scale(Vec3::new(
-                (island.radius_x as f32 * 1.9).max(30.0),
-                1.2,
-                1.4,
-            )),
+            .with_scale(Vec3::new(rx * 1.35, keel.max(7.0) * 0.75, rz * 0.55))
+            .with_rotation(Quat::from_rotation_x(-0.12)),
             ..default()
         },
         FilmSilhouette,
         FilmKeelHelper,
-        Name::new("FilmKeelCyanRim"),
+        Name::new("FilmKeelBodySlab"),
+    ));
+    // Cyan crystal lip along the near rim (camera side of deck_keel).
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: luminite_plate,
+            transform: Transform::from_translation(
+                deck + Vec3::new(2.0, underside_y + 1.2, rz * 0.75),
+            )
+            .with_scale(Vec3::new(rx * 1.5, 1.4, 2.2)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmKeelHelper,
+        Name::new("FilmKeelCyanLip"),
     ));
 
     // Film-only hanging crystal spikes (cyan/verdant only — no magenta/pink).
@@ -1066,7 +1018,7 @@ fn film_spawn_silhouettes(
         Color::srgb(0.25, 0.95, 0.55),
         LinearRgba::rgb(0.8, 5.5, 2.2),
     ));
-    let keel_y = -(keel * 0.55).max(4.0);
+    let keel_y = underside_y - 1.5;
     for (i, (ox, oz, mat)) in [
         (-10.0_f32, 8.0, &crystal_a),
         (0.0, 12.0, &crystal_b),
@@ -1087,8 +1039,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, keel_y - h * 0.4, oz))
-                    .with_scale(Vec3::new(0.75, h, 0.75))
+                transform: Transform::from_translation(deck + Vec3::new(ox, keel_y - h * 0.35, oz))
+                    .with_scale(Vec3::new(0.85, h, 0.85))
                     .with_rotation(Quat::from_rotation_z(
                         0.18 * if i % 2 == 0 { 1.0 } else { -1.0 },
                     )),
@@ -1146,7 +1098,7 @@ fn film_spawn_silhouettes(
     }
 
     info!(
-        "FILM: spawned mesh silhouettes on combat slab ({}, {})",
+        "FILM: spawned mesh silhouettes + keel underside plates on combat slab ({}, {})",
         island.cx, island.cz
     );
 }
@@ -1471,7 +1423,7 @@ fn film_toggle_helpers(
     if !film.enabled || film.finished {
         return;
     }
-    let show_keel = film.shot_index == 1;
+    let show_keel = matches!(film.shot_index, 1 | 7);
     for mut vis in keel_helpers.iter_mut() {
         *vis = if show_keel {
             Visibility::Visible
@@ -1898,15 +1850,16 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Single hero: grass deck rim AND crystal keel undersides.
+            // Grass deck rim AND colored unlit keel undersides in one frame.
             let keel = island.keel_depth as f32;
             let pos = deck
                 + Vec3::new(
-                    island.radius_x as f32 * 0.5 + 24.0,
-                    0.5 - keel * 0.28,
-                    island.radius_z as f32 * 0.4 + 28.0,
+                    island.radius_x as f32 * 0.55 + 22.0,
+                    1.5 - keel * 0.15,
+                    island.radius_z as f32 * 0.45 + 26.0,
                 );
-            let look = deck + Vec3::new(0.0, -keel * 0.55, 2.0);
+            // Look at the lip where grass meets crystal underside plates.
+            let look = deck + Vec3::new(2.0, -keel * 0.35, 8.0);
             (pos, look)
         }
         2 => {
