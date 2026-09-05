@@ -274,8 +274,8 @@ fn film_spawn_lights(
         PointLightBundle {
             point_light: PointLight {
                 color: Color::srgb(0.78, 0.98, 1.0),
-                intensity: 12_000_000.0,
-                range: 260.0,
+                intensity: 22_000_000.0,
+                range: 320.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -290,8 +290,8 @@ fn film_spawn_lights(
         PointLightBundle {
             point_light: PointLight {
                 color: Color::srgb(0.65, 1.0, 0.88),
-                intensity: 9_000_000.0,
-                range: 200.0,
+                intensity: 16_000_000.0,
+                range: 260.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -305,9 +305,9 @@ fn film_spawn_lights(
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
-                color: Color::srgb(0.95, 0.88, 1.0),
-                intensity: 8_500_000.0,
-                range: 180.0,
+                color: Color::srgb(1.0, 0.95, 0.85),
+                intensity: 14_000_000.0,
+                range: 220.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -321,11 +321,11 @@ fn film_spawn_lights(
     commands.spawn((
         SpotLightBundle {
             spot_light: SpotLight {
-                color: Color::srgb(0.7, 0.95, 1.0),
-                intensity: 18_000_000.0,
-                range: 120.0,
-                outer_angle: 1.15,
-                inner_angle: 0.55,
+                color: Color::srgb(0.85, 0.98, 1.0),
+                intensity: 32_000_000.0,
+                range: 160.0,
+                outer_angle: 1.25,
+                inner_angle: 0.65,
                 shadows_enabled: false,
                 ..default()
             },
@@ -429,11 +429,11 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             }
         }
     }
-    // Paint crystal / luminite across the main island underside so keel
-    // faces bounce even when ambient crush is high on lavapipe.
+    // Paint cyan/verdant luminite across the underside — never magenta, so
+    // thin crystal spikes cannot read as pink cockpit HUD streaks.
     let mut keel_lit = 0usize;
-    let rx = island.radius_x.min(26);
-    let rz = island.radius_z.min(24);
+    let rx = island.radius_x.min(28);
+    let rz = island.radius_z.min(26);
     for dx in -rx..=rx {
         for dz in -rz..=rz {
             let nx = dx as f32 / rx.max(1) as f32;
@@ -444,20 +444,28 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             }
             let x = island.cx + dx;
             let z = island.cz + dz;
-            let thickness = ((island.keel_depth as f32) * (0.4 + 0.6 * (1.0 - d2.sqrt()).max(0.0)))
-                .round() as i32;
-            let bottom = island.deck_y - thickness.max(4);
-            let crystal = if ((dx + dz) & 1) == 0 {
-                BlockType::LuminiteCrystal
-            } else {
-                island.crystal
-            };
-            // Full underside carpet of emissive crystal so faces never crush.
+            let thickness = ((island.keel_depth as f32)
+                * (0.45 + 0.55 * (1.0 - d2.sqrt()).max(0.0)))
+            .round() as i32;
+            let bottom = island.deck_y - thickness.max(5);
+            let edge = d2.sqrt();
+            // Full keel body: light alloy mid-faces + emissive cyan/verdant rim
+            // so lavapipe ambient crush cannot ink the silhouette black.
             for y in bottom..=(island.deck_y - 1).max(bottom) {
-                let block = if y == bottom || y == bottom + 1 {
-                    crystal
-                } else if d2 > 0.45 {
-                    BlockType::Crystal
+                let near_bottom = y <= bottom + 2;
+                let near_rim = edge > 0.42;
+                let block = if near_bottom && ((dx + dz + y) & 1) == 0 {
+                    BlockType::LuminiteCrystal
+                } else if near_bottom {
+                    BlockType::CrystalVerdant
+                } else if near_rim {
+                    if ((dx + dz) & 1) == 0 {
+                        BlockType::NeonCyan
+                    } else {
+                        BlockType::Crystal
+                    }
+                } else if edge > 0.22 {
+                    BlockType::ShipHullAlloy
                 } else {
                     continue;
                 };
@@ -470,6 +478,36 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
     info!(
         "FILM: combat slab at ({ox},{oy},{oz}) cleared={cleared} stamped={stamped} keel_lit={keel_lit}"
     );
+    // Scrub procedural magenta keel crystals near the hero island — thin
+    // pink columns bloom into fake cockpit-HUD streaks in shuttle frames.
+    let mut scrubbed = 0usize;
+    let scrub_r = island.radius_x.max(island.radius_z) + 8;
+    for dx in -scrub_r..=scrub_r {
+        for dz in -scrub_r..=scrub_r {
+            let x = island.cx + dx;
+            let z = island.cz + dz;
+            for dy in 1..=(island.keel_depth + 4) {
+                let y = island.deck_y - dy;
+                let v = world.voxel_at(x, y, z);
+                if matches!(
+                    BlockType::from_voxel(v),
+                    BlockType::CrystalMagenta | BlockType::NeonMagenta
+                ) {
+                    let repl = if (dx + dz + dy) & 1 == 0 {
+                        BlockType::LuminiteCrystal
+                    } else {
+                        BlockType::CrystalVerdant
+                    };
+                    if world.edit_set_voxel(x, y, z, repl.into()) {
+                        scrubbed += 1;
+                    }
+                }
+            }
+        }
+    }
+    if scrubbed > 0 {
+        info!("FILM: scrubbed magenta keel voxels={scrubbed}");
+    }
 }
 
 /// Stamp extra floating islands near the hero station so a wide painting
@@ -486,41 +524,59 @@ fn film_stamp_vista_archipelago(mut world: ResMut<VoxelWorld>, mut film: ResMut<
     }
     film.vista_stamped = true;
     let mut written = 0usize;
-    // Dense archipelago ring around the station island for painting_hero.
+    // Dense archipelago filling the painting_hero frustum (cam SW looking NE).
+    // Never stamp magenta crystal — thin magenta columns read as HUD streaks.
+    let film_crystal = BlockType::CrystalVerdant;
     let satellites: &[(i32, i32, i32, i32, i32)] = &[
+        (island.cx + 28, island.cz + 18, 16, 13, -1),
+        (island.cx - 22, island.cz + 28, 15, 12, 1),
         (island.cx + 42, island.cz + 22, 14, 11, -1),
-        (island.cx - 38, island.cz + 36, 13, 10, 2),
-        (island.cx + 58, island.cz - 12, 12, 12, -3),
+        (island.cx - 38, island.cz + 36, 14, 11, 2),
+        (island.cx + 58, island.cz - 12, 13, 12, -3),
         (island.cx - 24, island.cz - 48, 15, 11, 1),
-        (island.cx + 32, island.cz + 58, 11, 10, 0),
-        (island.cx + 78, island.cz + 34, 10, 9, -2),
-        (island.cx - 62, island.cz + 12, 12, 9, 1),
-        (island.cx + 18, island.cz + 78, 11, 8, -1),
-        (island.cx - 52, island.cz - 28, 10, 10, -2),
-        (island.cx + 88, island.cz - 35, 9, 11, 0),
-        (island.cx - 78, island.cz + 48, 10, 8, -3),
-        (island.cx + 48, island.cz + 88, 9, 9, 2),
-        (island.cx - 15, island.cz + 62, 12, 9, -1),
-        (island.cx + 65, island.cz + 55, 8, 8, 1),
-        (island.cx - 40, island.cz + 75, 9, 10, 0),
+        (island.cx + 32, island.cz + 58, 13, 11, 0),
+        (island.cx + 78, island.cz + 34, 12, 10, -2),
+        (island.cx - 62, island.cz + 12, 13, 10, 1),
+        (island.cx + 18, island.cz + 78, 12, 9, -1),
+        (island.cx - 52, island.cz - 28, 11, 11, -2),
+        (island.cx + 88, island.cz - 35, 10, 12, 0),
+        (island.cx - 78, island.cz + 48, 11, 9, -3),
+        (island.cx + 48, island.cz + 88, 11, 10, 2),
+        (island.cx - 15, island.cz + 62, 13, 10, -1),
+        (island.cx + 65, island.cz + 55, 10, 9, 1),
+        (island.cx - 40, island.cz + 75, 11, 11, 0),
+        (island.cx + 12, island.cz + 42, 12, 10, -2),
+        (island.cx - 8, island.cz + 48, 11, 9, 1),
+        (island.cx + 55, island.cz + 12, 10, 9, 0),
+        (island.cx + 72, island.cz + 68, 9, 9, -1),
+        (island.cx - 55, island.cz + 58, 10, 8, 2),
+        (island.cx + 38, island.cz + 72, 10, 9, -2),
+        (island.cx - 30, island.cz + 18, 11, 9, 0),
+        (island.cx + 95, island.cz + 18, 9, 10, 1),
     ];
     let mut sat_centers = Vec::with_capacity(satellites.len());
     for &(ox, oz, rx, rz, lift) in satellites {
         let deck_y = island.deck_y + lift;
-        written += stamp_film_vista_island(&mut world, ox, oz, deck_y, rx, rz, island.crystal);
+        written += stamp_film_vista_island(&mut world, ox, oz, deck_y, rx, rz, film_crystal);
         sat_centers.push((ox, oz, deck_y));
     }
-    // Skyway web: station → several satellites + cross-links.
+    // Skyway web: station → many satellites + cross-links for station mass.
     let hub = (island.cx, island.cz, island.deck_y + 1);
-    for &(tx, tz, ty) in &sat_centers[..sat_centers.len().min(8)] {
+    for &(tx, tz, ty) in &sat_centers[..sat_centers.len().min(14)] {
         written += stamp_film_skyway_stub(&mut world, hub.0, hub.1, hub.2, tx, tz, ty + 1);
     }
-    for window in sat_centers.windows(2).take(6) {
+    for window in sat_centers.windows(2).take(12) {
         let (a, b) = (window[0], window[1]);
         written += stamp_film_skyway_stub(&mut world, a.0, a.1, a.2 + 1, b.0, b.1, b.2 + 1);
     }
-    // Station-mass towers on two satellites so the wide hero reads "base".
-    for &(sx, sz, sy) in sat_centers.iter().take(2) {
+    // Cross links every 3rd pair for denser skyway lattice.
+    for i in (0..sat_centers.len().saturating_sub(3)).step_by(3) {
+        let a = sat_centers[i];
+        let b = sat_centers[i + 3];
+        written += stamp_film_skyway_stub(&mut world, a.0, a.1, a.2 + 1, b.0, b.1, b.2 + 1);
+    }
+    // Station-mass towers on several satellites so the wide hero reads "base".
+    for &(sx, sz, sy) in sat_centers.iter().take(5) {
         written += stamp_film_station_mass(&mut world, sx, sy + 1, sz);
     }
     // Dual plasma + lava ribbons on the terrain shelf below the archipelago.
@@ -530,18 +586,23 @@ fn film_stamp_vista_archipelago(mut world: ResMut<VoxelWorld>, mut film: ResMut<
 
 fn stamp_film_station_mass(world: &mut VoxelWorld, cx: i32, oy: i32, cz: i32) -> usize {
     let mut n = 0usize;
-    for dy in 0i32..8 {
-        for dx in -2i32..=2 {
-            for dz in -2i32..=2 {
-                if dx.abs() == 2 && dz.abs() == 2 {
+    for dy in 0i32..12 {
+        for dx in -3i32..=3 {
+            for dz in -3i32..=3 {
+                if dx.abs() == 3 && dz.abs() == 3 {
                     continue;
                 }
-                let block = if dy >= 6 {
+                if dx.abs() + dz.abs() > 4 && dy < 4 {
+                    continue;
+                }
+                let block = if dy >= 9 {
                     BlockType::NeonCyan
                 } else if dx.abs() + dz.abs() == 0 {
                     BlockType::EngineCore
-                } else {
+                } else if dy >= 6 {
                     BlockType::ShipHullAlloy
+                } else {
+                    BlockType::ShipHullDark
                 };
                 if world.edit_set_voxel(cx + dx, oy + dy, cz + dz, block.into()) {
                     n += 1;
@@ -560,41 +621,61 @@ fn stamp_film_dual_rivers(world: &mut VoxelWorld, island: IslandSpec) -> usize {
     let base_y = (island.deck_y - 28).max(crate::terrain::WATER_LEVEL + 4);
     let ax = island.cx - 20;
     let az = island.cz + 35;
-    for i in 0..90 {
+    for i in 0..110 {
         let t = i as f32 * 0.12;
-        // Plasma filament (cyan) — meandering +X/+Z.
+        // Plasma filament (cyan) — meandering +X/+Z, 3-wide for bloom read.
         let px = ax + (i as f32 * 0.9 + t.sin() * 3.0).round() as i32;
         let pz = az + (i as f32 * 0.55 + (t * 1.3).cos() * 4.0).round() as i32;
-        for dy in 0..3 {
-            if world.edit_set_voxel(px, base_y + dy, pz, BlockType::PlasmaFlow.into()) {
-                n += 1;
-            }
-            if world.edit_set_voxel(px + 1, base_y + dy, pz, BlockType::PlasmaFlow.into()) {
-                n += 1;
+        for dy in 0..4 {
+            for ox in 0..3 {
+                if world.edit_set_voxel(px + ox, base_y + dy, pz, BlockType::PlasmaFlow.into()) {
+                    n += 1;
+                }
             }
         }
-        // Parallel lava ribbon (~4 blocks offset).
-        let lx = px + 4 + (t * 0.7).cos().round() as i32;
-        let lz = pz - 3 + (t * 0.9).sin().round() as i32;
-        for dy in 0..3 {
-            if world.edit_set_voxel(lx, base_y + dy, lz, BlockType::Lava.into()) {
-                n += 1;
+        // Parallel lava ribbon — thicker/hotter so it survives lavapipe crush.
+        let lx = px + 5 + (t * 0.7).cos().round() as i32;
+        let lz = pz - 4 + (t * 0.9).sin().round() as i32;
+        for dy in 0..4 {
+            for oz in 0..3 {
+                if world.edit_set_voxel(lx, base_y + dy, lz + oz, BlockType::Lava.into()) {
+                    n += 1;
+                }
             }
-            if world.edit_set_voxel(lx, base_y + dy, lz + 1, BlockType::Lava.into()) {
+            // Amber neon core so the lava channel stays orange under bloom.
+            if world.edit_set_voxel(lx + 1, base_y + dy, lz + 1, BlockType::NeonAmber.into()) {
                 n += 1;
             }
         }
     }
-    // Second dual pair crossing the vista for density.
+    // Second dual pair crossing the vista for density (painting mid-ground).
     let bx = island.cx + 25;
     let bz = island.cz + 50;
-    for i in 0..55 {
+    for i in 0..70 {
         let t = i as f32 * 0.15;
         let px = bx + (i as f32 * 0.7 - t.sin() * 2.5).round() as i32;
         let pz = bz + (i as f32 * 0.85).round() as i32;
-        for dy in 0..2 {
-            let _ = world.edit_set_voxel(px, base_y + dy, pz, BlockType::PlasmaFlow.into());
-            let _ = world.edit_set_voxel(px + 3, base_y + dy, pz - 2, BlockType::Lava.into());
+        for dy in 0..3 {
+            for ox in 0..2 {
+                if world.edit_set_voxel(px + ox, base_y + dy, pz, BlockType::PlasmaFlow.into()) {
+                    n += 1;
+                }
+                if world.edit_set_voxel(px + 4 + ox, base_y + dy, pz - 2, BlockType::Lava.into()) {
+                    n += 1;
+                }
+            }
+        }
+    }
+    // Third short pair under painting_hero look target (cx+22, cz+25 shelf).
+    let cx = island.cx + 10;
+    let cz = island.cz + 20;
+    for i in 0..40 {
+        let t = i as f32 * 0.18;
+        let px = cx + (i as f32 * 0.85).round() as i32;
+        let pz = cz + (t.sin() * 3.0).round() as i32;
+        for dy in 0..3 {
+            let _ = world.edit_set_voxel(px, base_y + dy + 2, pz, BlockType::PlasmaFlow.into());
+            let _ = world.edit_set_voxel(px + 3, base_y + dy + 2, pz + 2, BlockType::Lava.into());
             n += 2;
         }
     }
@@ -611,7 +692,12 @@ fn stamp_film_vista_island(
     crystal: BlockType,
 ) -> usize {
     let mut n = 0usize;
-    let keel = 7i32;
+    let keel = 9i32;
+    // Film-safe keel accents: never magenta (reads as pink HUD streaks).
+    let accent = match crystal {
+        BlockType::CrystalMagenta | BlockType::NeonMagenta => BlockType::CrystalVerdant,
+        other => other,
+    };
     for dx in -rx..=rx {
         for dz in -rz..=rz {
             let nx = dx as f32 / rx.max(1) as f32;
@@ -633,9 +719,15 @@ fn stamp_film_vista_island(
             for dy in 1..=thickness.max(2) {
                 let y = deck_y - dy;
                 let block = if dy == thickness {
-                    crystal
+                    if ((dx + dz) & 1) == 0 {
+                        BlockType::LuminiteCrystal
+                    } else {
+                        accent
+                    }
                 } else if dy + 1 == thickness {
                     BlockType::Crystal
+                } else if edge > 0.55 {
+                    BlockType::ShipHullAlloy
                 } else {
                     BlockType::Stone
                 };
@@ -658,17 +750,21 @@ fn stamp_film_skyway_stub(
     by: i32,
 ) -> usize {
     let mut n = 0usize;
-    let steps = 28i32;
+    let steps = 36i32;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let x = (ax as f32 + (bx - ax) as f32 * t).round() as i32;
         let z = (az as f32 + (bz - az) as f32 * t).round() as i32;
         let y = (ay as f32 + (by - ay) as f32 * t).round() as i32;
-        if world.edit_set_voxel(x, y, z, BlockType::SkywayDeck.into()) {
-            n += 1;
-        }
-        if world.edit_set_voxel(x, y + 1, z, BlockType::NeonCyan.into()) {
-            n += 1;
+        for ox in 0..2 {
+            for oz in 0..2 {
+                if world.edit_set_voxel(x + ox, y, z + oz, BlockType::SkywayDeck.into()) {
+                    n += 1;
+                }
+                if world.edit_set_voxel(x + ox, y + 1, z + oz, BlockType::NeonCyan.into()) {
+                    n += 1;
+                }
+            }
         }
     }
     n
@@ -805,7 +901,15 @@ fn film_spawn_silhouettes(
     let keel = island.keel_depth as f32;
     let bounce_hi = materials.add(sil_mat(
         Color::srgb(0.85, 1.0, 1.0),
-        LinearRgba::rgb(4.5, 7.5, 8.5),
+        LinearRgba::rgb(6.5, 10.0, 11.0),
+    ));
+    let keel_shell = materials.add(sil_mat(
+        Color::srgb(0.72, 0.68, 0.58),
+        LinearRgba::rgb(0.55, 0.48, 0.35),
+    ));
+    let keel_rim = materials.add(sil_mat(
+        Color::srgb(0.35, 0.95, 1.0),
+        LinearRgba::rgb(2.2, 7.5, 8.0),
     ));
     commands.spawn((
         PbrBundle {
@@ -815,9 +919,9 @@ fn film_spawn_silhouettes(
                 deck + Vec3::new(0.0, -(keel * 1.05).max(9.0), 4.0),
             )
             .with_scale(Vec3::new(
-                (island.radius_x as f32 * 2.0).max(36.0),
-                0.45,
-                (island.radius_z as f32 * 2.0).max(32.0),
+                (island.radius_x as f32 * 2.2).max(40.0),
+                0.55,
+                (island.radius_z as f32 * 2.2).max(36.0),
             )),
             ..default()
         },
@@ -833,21 +937,85 @@ fn film_spawn_silhouettes(
                 deck + Vec3::new(18.0, -(keel * 0.55).max(5.0), 16.0),
             )
             .with_rotation(Quat::from_rotation_x(-0.55) * Quat::from_rotation_y(0.4))
-            .with_scale(Vec3::new(22.0, 0.3, 28.0)),
+            .with_scale(Vec3::new(26.0, 0.35, 32.0)),
             ..default()
         },
         FilmSilhouette,
         Name::new("FilmKeelBounceCardB"),
     ));
+    // Unlit keel-face shell: wraps underside silhouette so faces never crush
+    // to pure black even when voxel PBR lighting fails on lavapipe.
+    let shell_y = -(keel * 0.62).max(5.5);
+    for (ox, oz, sx, sz, ry) in [
+        (
+            0.0_f32,
+            6.0,
+            island.radius_x as f32 * 1.7,
+            island.radius_z as f32 * 0.55,
+            0.0,
+        ),
+        (
+            island.radius_x as f32 * 0.85,
+            2.0,
+            0.7,
+            island.radius_z as f32 * 1.4,
+            0.0,
+        ),
+        (
+            -island.radius_x as f32 * 0.85,
+            2.0,
+            0.7,
+            island.radius_z as f32 * 1.4,
+            0.0,
+        ),
+        (
+            8.0,
+            island.radius_z as f32 * 0.7,
+            island.radius_x as f32 * 1.2,
+            0.65,
+            -0.35,
+        ),
+    ] {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: keel_shell.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, shell_y, oz))
+                    .with_rotation(Quat::from_rotation_x(ry))
+                    .with_scale(Vec3::new(sx.max(14.0), keel.max(7.0) * 0.85, sz.max(10.0))),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new("FilmKeelFaceShell"),
+        ));
+    }
+    // Cyan rim band under the outer edge — readable keel crystal without pink.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: keel_rim,
+            transform: Transform::from_translation(
+                deck + Vec3::new(0.0, shell_y - keel * 0.15, island.radius_z as f32 * 0.55),
+            )
+            .with_scale(Vec3::new(
+                (island.radius_x as f32 * 1.9).max(30.0),
+                1.2,
+                1.4,
+            )),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmKeelCyanRim"),
+    ));
 
-    // Film-only hanging crystal spikes so underside reads with the grass deck.
+    // Film-only hanging crystal spikes (cyan/verdant only — no magenta/pink).
     let crystal_a = materials.add(sil_mat(
         Color::srgb(0.55, 1.0, 0.95),
         LinearRgba::rgb(1.6, 6.5, 6.0),
     ));
     let crystal_b = materials.add(sil_mat(
-        Color::srgb(0.95, 0.35, 1.0),
-        LinearRgba::rgb(4.0, 0.7, 5.0),
+        Color::srgb(0.25, 0.95, 0.55),
+        LinearRgba::rgb(0.8, 5.5, 2.2),
     ));
     let keel_y = -(keel * 0.55).max(4.0);
     for (i, (ox, oz, mat)) in [
@@ -859,17 +1027,19 @@ fn film_spawn_silhouettes(
         (3.0, 1.0, &crystal_b),
         (-2.0, 14.0, &crystal_a),
         (5.0, 16.0, &crystal_b),
+        (14.0, 10.0, &crystal_a),
+        (-12.0, 4.0, &crystal_b),
     ]
     .into_iter()
     .enumerate()
     {
-        let h = 3.8 + (i as f32) * 0.4;
+        let h = 3.8 + (i as f32) * 0.35;
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: mat.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox, keel_y - h * 0.4, oz))
-                    .with_scale(Vec3::new(0.65, h, 0.65))
+                    .with_scale(Vec3::new(0.75, h, 0.75))
                     .with_rotation(Quat::from_rotation_z(
                         0.18 * if i % 2 == 0 { 1.0 } else { -1.0 },
                     )),
@@ -1289,12 +1459,13 @@ fn film_drive_camera(
 
     // Extra ambient bounce on deck+keel / dual-river so undersides aren't crushed.
     ambient.brightness = match film.shot_index {
-        1 | 8 => ambient.brightness.max(4_200.0),
-        7 => ambient.brightness.max(2_400.0),
+        1 => ambient.brightness.max(6_800.0),
+        8 => ambient.brightness.max(4_800.0),
+        7 => ambient.brightness.max(2_800.0),
         _ => ambient.brightness.max(2_050.0),
     };
     ambient.color = match film.shot_index {
-        1 => Color::srgb(0.72, 0.92, 1.0),
+        1 => Color::srgb(0.78, 0.94, 1.0),
         8 => Color::srgb(0.9, 0.82, 0.7),
         _ => Color::srgb(0.82, 0.88, 0.78),
     };
@@ -1617,21 +1788,21 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         7 => {
-            // Painting-scale: archipelago fills lower 2/3, planet/nebula upper sky.
+            // Painting-scale: denser archipelago fills lower 2/3, planet/nebula upper.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-55.0, 16.0, 95.0);
-            let look = deck + Vec3::new(22.0, 10.0, 25.0) + planet_dir * 32.0;
+            let pos = deck + Vec3::new(-48.0, 12.0, 88.0);
+            let look = deck + Vec3::new(28.0, 6.0, 30.0) + planet_dir * 28.0;
             (pos, look)
         }
         8 => {
             // Dual plasma (cyan) + lava (orange) filaments on the shelf below.
             let base_y = (island.deck_y - 28).max(crate::terrain::WATER_LEVEL + 4) as f32;
             let look = Vec3::new(
-                island.cx as f32 + 15.0,
-                base_y + 3.0,
-                island.cz as f32 + 55.0,
+                island.cx as f32 + 10.0,
+                base_y + 4.0,
+                island.cz as f32 + 48.0,
             );
-            let pos = look + Vec3::new(-18.0, 14.0, 22.0);
+            let pos = look + Vec3::new(-14.0, 11.0, 16.0);
             (pos, look)
         }
         _ => {
