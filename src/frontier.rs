@@ -1290,13 +1290,12 @@ fn hero_skyway_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 /// lonely skyway. Stops at the look-cone butte so the deck docks
 /// instead of punching a tunnel through the terraces.
 fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
-    const RAIL_Z: i32 = -88;
+    const RAIL_Z: i32 = -20;
     const HALF: f64 = 2.4;
-    // Stop west of the canyon so the deck does not cross the opening look.
     if in_opening_look(wx, wz) {
         return None;
     }
-    if wx < 16 || wx > 52 {
+    if wx < 148 || wx > 196 {
         return None;
     }
     let dist = (wz - RAIL_Z).abs() as f64;
@@ -1315,9 +1314,9 @@ fn hero_mesa_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 
 /// Lower cliff walk hugging the mesa rim, still postcard-AABB only.
 fn hero_cliff_walk(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
-    const RAIL_Z: i32 = -112;
+    const RAIL_Z: i32 = -20;
     const HALF: f64 = 2.0;
-    if wx < 32 || wx > 128 {
+    if wx < 128 || wx > 188 {
         return None;
     }
     if in_opening_look(wx, wz) {
@@ -1370,12 +1369,12 @@ fn hero_terrace_spur(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 /// Lower face rail stepping down the mesa wall so habs hanging on the
 /// cliff stay connected to the mesa-top colony.
 fn hero_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
-    const RAIL_Z: i32 = -152;
+    const RAIL_Z: i32 = -16;
     const HALF: f64 = 2.0;
     if in_opening_look(wx, wz) {
         return None;
     }
-    if wx < 48 || wx > 160 {
+    if wx < 128 || wx > 188 {
         return None;
     }
     let dist = (wz - RAIL_Z).abs() as f64;
@@ -1395,9 +1394,12 @@ fn hero_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 /// Camera-facing west rail so terraced habs on the look-cone cliff stay
 /// tied to the mesa-top colony. Postcard AABB only.
 fn hero_west_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
-    const RAIL_X: i32 = 32;
+    const RAIL_X: i32 = 172;
     const HALF: f64 = 2.0;
-    if wz < -112 || wz > -48 {
+    if wz < -48 || wz > 8 {
+        return None;
+    }
+    if in_opening_look(wx, wz) || in_spawn_left_sky(wx, wz) {
         return None;
     }
     let dist = (wx - RAIL_X).abs() as f64;
@@ -2451,9 +2453,9 @@ mod tests {
             sky.column(80, -80, 70.0).is_none(),
             "opening look should not be crossed by a skyway deck"
         );
-        let rail = sky.column(32, -88, 70.0).expect("mesa rail missing west of the canyon");
+        let rail = sky.column(168, -20, 70.0).expect("mesa rail missing east of the canyon");
         assert!(rail.half < SKYWAY_HALF_WIDTH, "mesa rail should be a thin ribbon");
-        let walk = sky.column(32, -112, 70.0).expect("cliff walk missing west of the canyon");
+        let walk = sky.column(152, -20, 70.0).expect("cliff walk missing east of the canyon");
         assert!(walk.half < SKYWAY_HALF_WIDTH);
         let terrace = sky
             .column(118, -36, 70.0)
@@ -2469,10 +2471,10 @@ mod tests {
                 }
             }
         }
-        let face = sky.column(80, -152, 70.0).expect("face rail missing south of the opening look");
+        let face = sky.column(160, -16, 70.0).expect("face rail missing east of the opening look");
         assert!(face.half < SKYWAY_HALF_WIDTH);
         assert!(face.deck_y < rail.deck_y, "face rail should sit below the mesa rail");
-        let west = sky.column(32, -80, 70.0).expect("west face rail missing on postcard");
+        let west = sky.column(172, -24, 70.0).expect("west face rail missing on postcard");
         assert!(west.half < SKYWAY_HALF_WIDTH);
         assert!(west.deck_y < rail.deck_y, "west rail should sit below the mesa rail");
         let look_west = sky
