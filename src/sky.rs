@@ -881,7 +881,7 @@ fn film_tame_sky_bloom(
         return;
     };
     // Sky-camera OLD_SCHOOL bloom washes nebula filaments to grey haze.
-    if matches!(film.shot_index, 6 | 7 | 8) {
+    if matches!(film.shot_index, 7 | 8 | 9) {
         bloom.intensity = 0.04;
         bloom.prefilter_settings.threshold = 0.85;
     }

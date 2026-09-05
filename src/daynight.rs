@@ -313,10 +313,10 @@ fn update_sun(
         .as_ref()
         .filter(|f| f.enabled && f.ready_to_roll)
         .map(|f| f.shot_index);
-    let film_nebula_shot = matches!(film_sky, Some(6) | Some(7) | Some(8));
+    let film_nebula_shot = matches!(film_sky, Some(7) | Some(8) | Some(9));
     if film_nebula_shot {
         clear_color.0 = match film_sky {
-            Some(8) => Color::srgb(0.18, 0.14, 0.24),
+            Some(9) => Color::srgb(0.18, 0.14, 0.24),
             _ => Color::srgb(0.08, 0.05, 0.16),
         };
         light.illuminance = light.illuminance.min(5_000.0);

@@ -1325,8 +1325,8 @@ fn film_spawn_silhouettes(
         &marine_body,
         &marine_dark,
         &marine_visor,
-        pad + Vec3::new(-4.5, 0.0, 1.0),
-        2.4,
+        pad + Vec3::new(-5.0, 0.0, 1.5),
+        3.2,
     );
     spawn_film_alien(
         &mut commands,
@@ -1334,19 +1334,18 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        pad + Vec3::new(5.5, 0.0, 2.0),
-        2.6,
+        pad + Vec3::new(6.0, 0.0, 2.5),
+        3.4,
     );
-    // Painting-scale combat pair on a near-frustum satellite so monsters
-    // read in the wide hero (goal-painting miss after dual rivers).
+    // Painting-scale giants inside the painting_hero look frustum (z≈48–52).
     spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(20.0, 1.0, 30.0),
-        6.5,
+        deck + Vec3::new(12.0, 2.0, 48.0),
+        8.0,
     );
     spawn_film_alien(
         &mut commands,
@@ -1354,8 +1353,8 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(30.0, 1.0, 33.0),
-        7.0,
+        deck + Vec3::new(24.0, 2.0, 50.0),
+        8.5,
     );
     spawn_film_crew(
         &mut commands,
@@ -1364,6 +1363,61 @@ fn film_spawn_silhouettes(
         &crew_visor,
         deck + Vec3::new(-6.0, 0.0, -10.0),
     );
+
+    // Oversized mountain tunnel portal (−Z) — glowing cyan mouth into dark bore.
+    let tunnel_rock = materials.add(sil_mat(
+        Color::srgb(0.40, 0.34, 0.28),
+        LinearRgba::rgb(0.05, 0.04, 0.03),
+    ));
+    let tunnel_cyan = materials.add(sil_mat(
+        Color::srgb(0.25, 0.95, 1.0),
+        LinearRgba::rgb(1.5, 7.0, 8.0),
+    ));
+    let tunnel_dark = materials.add(sil_mat(Color::srgb(0.04, 0.04, 0.06), LinearRgba::BLACK));
+    let tunnel_glow = materials.add(sil_mat(
+        Color::srgb(0.45, 1.0, 0.95),
+        LinearRgba::rgb(2.5, 8.0, 7.5),
+    ));
+    spawn_film_tunnel_portal(
+        &mut commands,
+        &cube,
+        &tunnel_rock,
+        &tunnel_cyan,
+        &tunnel_dark,
+        &tunnel_glow,
+        deck,
+    );
+
+    // Pad turrets with muzzle flashes + tracers aimed at the alien.
+    let alien_world = pad + Vec3::new(6.0, 4.0, 2.5);
+    let turret_hull = materials.add(sil_mat(
+        Color::srgb(0.55, 0.58, 0.62),
+        LinearRgba::rgb(0.15, 0.16, 0.18),
+    ));
+    let turret_muzzle = materials.add(sil_mat(
+        Color::srgb(1.0, 0.92, 0.35),
+        LinearRgba::rgb(12.0, 9.0, 1.5),
+    ));
+    let turret_tracer = materials.add(sil_mat(
+        Color::srgb(1.0, 0.55, 0.08),
+        LinearRgba::rgb(10.0, 3.5, 0.2),
+    ));
+    spawn_film_turrets_firing(
+        &mut commands,
+        &cube,
+        &turret_hull,
+        &turret_muzzle,
+        &turret_tracer,
+        pad,
+        alien_world,
+    );
+
+    // Cheap docked-fighter swarm (+X) with cyan plumes for painting density.
+    let fighter_hull = materials.add(sil_mat(
+        Color::srgb(0.72, 0.76, 0.82),
+        LinearRgba::rgb(0.2, 0.22, 0.28),
+    ));
+    spawn_film_fighter_swarm(&mut commands, &cube, &fighter_hull, &tunnel_cyan, deck);
 
     info!(
         "FILM: spawned mesh silhouettes + keel underside plates on combat slab ({}, {})",
@@ -1645,6 +1699,184 @@ fn spawn_film_crew(
     });
 }
 
+fn spawn_film_tunnel_portal(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    rock: &Handle<StandardMaterial>,
+    cyan: &Handle<StandardMaterial>,
+    dark: &Handle<StandardMaterial>,
+    glow: &Handle<StandardMaterial>,
+    deck: Vec3,
+) {
+    // Mountain face on −Z of the station — oversized so the portal reads
+    // in a dedicated hero frame (voxel portal alone is tiny).
+    let mouth = deck + Vec3::new(0.0, 5.0, -16.0);
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: rock.clone(),
+            transform: Transform::from_translation(mouth + Vec3::new(0.0, 2.0, -4.0))
+                .with_scale(Vec3::new(28.0, 22.0, 14.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmTunnelMountain"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: dark.clone(),
+            transform: Transform::from_translation(mouth + Vec3::new(0.0, 1.5, -1.0))
+                .with_scale(Vec3::new(10.0, 12.0, 8.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmTunnelBore"),
+    ));
+    for (ox, oy, sx, sy) in [
+        (-6.0_f32, 1.5, 1.4, 14.0),
+        (6.0, 1.5, 1.4, 14.0),
+        (0.0, 9.0, 14.0, 1.6),
+        (0.0, -5.0, 14.0, 1.6),
+    ] {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: cyan.clone(),
+                transform: Transform::from_translation(mouth + Vec3::new(ox, oy, 1.5))
+                    .with_scale(Vec3::new(sx, sy, 1.8)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new("FilmTunnelArch"),
+        ));
+    }
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: glow.clone(),
+            transform: Transform::from_translation(mouth + Vec3::new(0.0, 1.5, 0.2))
+                .with_scale(Vec3::new(7.5, 9.0, 1.2)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmTunnelGlow"),
+    ));
+}
+
+fn spawn_film_turrets_firing(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    hull: &Handle<StandardMaterial>,
+    muzzle: &Handle<StandardMaterial>,
+    tracer: &Handle<StandardMaterial>,
+    pad: Vec3,
+    alien: Vec3,
+) {
+    for (i, origin) in [
+        pad + Vec3::new(-9.0, 0.0, 8.0),
+        pad + Vec3::new(9.5, 0.0, 7.5),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: hull.clone(),
+                transform: Transform::from_translation(origin + Vec3::new(0.0, 1.2, 0.0))
+                    .with_scale(Vec3::new(2.2, 2.4, 2.2)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmTurretBase{i}")),
+        ));
+        let to_alien = (alien - (origin + Vec3::new(0.0, 3.0, 0.0))).normalize_or_zero();
+        let barrel_mid = origin + Vec3::new(0.0, 3.0, 0.0) + to_alien * 2.5;
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: hull.clone(),
+                transform: Transform::from_translation(barrel_mid)
+                    .looking_at(alien, Vec3::Y)
+                    .with_scale(Vec3::new(0.7, 0.7, 4.5)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmTurretBarrel{i}")),
+        ));
+        let flash = origin + Vec3::new(0.0, 3.0, 0.0) + to_alien * 5.0;
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: muzzle.clone(),
+                transform: Transform::from_translation(flash).with_scale(Vec3::new(2.2, 2.2, 2.2)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmTurretMuzzle{i}")),
+        ));
+        for s in 1..10 {
+            let t = s as f32 / 10.0;
+            let p = flash.lerp(alien, t);
+            let size = 0.9 - t * 0.35;
+            commands.spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: tracer.clone(),
+                    transform: Transform::from_translation(p).with_scale(Vec3::splat(size)),
+                    ..default()
+                },
+                FilmSilhouette,
+                Name::new(format!("FilmTurretTracer{i}_{s}")),
+            ));
+        }
+    }
+}
+
+fn spawn_film_fighter_swarm(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    hull: &Handle<StandardMaterial>,
+    cyan: &Handle<StandardMaterial>,
+    deck: Vec3,
+) {
+    for (i, (ox, oy, oz)) in [
+        (18.0_f32, 6.0, 4.0),
+        (22.0, 8.0, -2.0),
+        (26.0, 5.0, 8.0),
+        (30.0, 9.0, 1.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let p = deck + Vec3::new(ox, oy, oz);
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: hull.clone(),
+                transform: Transform::from_translation(p)
+                    .with_scale(Vec3::new(3.2, 1.1, 1.6))
+                    .with_rotation(Quat::from_rotation_y(-0.4)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmFighter{i}")),
+        ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: cyan.clone(),
+                transform: Transform::from_translation(p + Vec3::new(-3.5, 0.0, 0.0))
+                    .with_scale(Vec3::new(4.5, 0.9, 0.9)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmFighterPlume{i}")),
+        ));
+    }
+}
+
 #[derive(Clone, Copy)]
 struct FilmShot {
     name: &'static str,
@@ -1659,6 +1891,9 @@ const SHOTS: &[FilmShot] = &[
     },
     FilmShot {
         name: "combat_pad_silhouettes",
+    },
+    FilmShot {
+        name: "turrets_firing",
     },
     FilmShot {
         name: "pad_rail_crew",
@@ -1699,7 +1934,7 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    let show_rivers = matches!(film.shot_index, 7 | 8);
+    let show_rivers = matches!(film.shot_index, 8 | 9);
     for mut vis in river_ribbons.iter_mut() {
         *vis = if show_rivers {
             Visibility::Visible
@@ -1715,10 +1950,10 @@ fn film_override_sky_clear(film: Res<FilmRuntime>, mut clear_color: ResMut<Clear
     }
     // Must win against daynight::update_sun (Update) so nebula volume reads.
     match film.shot_index {
-        6 | 7 => {
+        7 | 8 => {
             clear_color.0 = Color::srgb(0.10, 0.06, 0.18);
         }
-        8 => {
+        9 => {
             clear_color.0 = Color::srgb(0.22, 0.20, 0.28);
         }
         _ => {}
@@ -1791,12 +2026,14 @@ fn film_drive_camera(
     if let Projection::Perspective(ref mut persp) = *projection {
         let target: f32 = match film.shot_index {
             1 => 54.0, // deck + keel profile
-            2 => 50.0, // full-body combat two-shot
-            3 => 48.0, // crew pair
-            5 => 46.0, // shuttle rear-quarter
-            6 => 40.0, // planet close
-            7 => 58.0, // painting-scale wide hero
-            8 => 52.0, // dual plasma + lava rivers
+            2 => 48.0, // full-body combat two-shot
+            3 => 46.0, // turrets firing at alien
+            4 => 48.0, // crew pair
+            5 => 50.0, // tunnel portal mouth
+            6 => 46.0, // shuttle rear-quarter
+            7 => 40.0, // planet close
+            8 => 58.0, // painting-scale wide hero
+            9 => 52.0, // dual plasma + lava rivers
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -1804,15 +2041,17 @@ fn film_drive_camera(
     if let Ok(mut bloom) = bloom_q.get_single_mut() {
         // Keep bloom low so non-emissive limbs / grass survive lavapipe.
         bloom.intensity = match film.shot_index {
-            5 => 0.10, // shuttle wakes — cyan, not washed
-            6 => 0.12,
-            7 => 0.08, // painting: tame skyway white-out so grass/rivers read
-            8 => 0.14, // dual rivers emissives
+            3 => 0.16, // muzzle flashes / tracers
+            6 => 0.10, // shuttle wakes — cyan, not washed
+            7 => 0.12,
+            8 => 0.08, // painting: tame skyway white-out so grass/rivers read
+            9 => 0.14, // dual rivers emissives
             _ => 0.05,
         };
         bloom.prefilter_settings.threshold = match film.shot_index {
-            5 => 0.62, // tame pink/white bloom around nozzles
-            7 => 0.70,
+            3 => 0.50,
+            6 => 0.62, // tame pink/white bloom around nozzles
+            8 => 0.70,
             _ => 0.55,
         };
     }
@@ -1822,30 +2061,31 @@ fn film_drive_camera(
     // Darken ClearColor on planet/painting so additive nebula isn't crushed
     // by noon sky wash (daytime pad shots keep the normal daynight clear).
     // Final write also happens in PostUpdate — see film_override_sky_clear.
-    if matches!(film.shot_index, 6 | 7) {
+    if matches!(film.shot_index, 7 | 8) {
         clear_color.0 = Color::srgb(0.10, 0.06, 0.18);
         if let Ok(mut sun) = sun_q.get_single_mut() {
             sun.illuminance = 4_500.0; // tame noon wash so nebula chroma survives
         }
-    } else if film.shot_index == 8 {
+    } else if film.shot_index == 9 {
         clear_color.0 = Color::srgb(0.22, 0.20, 0.28);
     }
 
     // Extra ambient bounce on deck+keel / dual-river so undersides aren't crushed.
     ambient.brightness = match film.shot_index {
         1 => ambient.brightness.max(6_800.0),
-        8 => ambient.brightness.max(4_800.0),
-        7 => ambient.brightness.max(2_200.0),
+        2 | 3 => ambient.brightness.max(3_800.0),
+        9 => ambient.brightness.max(4_800.0),
+        8 => ambient.brightness.max(2_200.0),
         _ => ambient.brightness.max(2_050.0),
     };
     ambient.color = match film.shot_index {
         1 => Color::srgb(0.78, 0.94, 1.0),
-        8 => Color::srgb(0.9, 0.82, 0.7),
-        7 => Color::srgb(0.7, 0.72, 0.85),
+        9 => Color::srgb(0.9, 0.82, 0.7),
+        8 => Color::srgb(0.7, 0.72, 0.85),
         _ => Color::srgb(0.82, 0.88, 0.78),
     };
     if let Ok(mut sun) = sun_q.get_single_mut() {
-        if matches!(film.shot_index, 6 | 7) {
+        if matches!(film.shot_index, 7 | 8) {
             sun.illuminance = 4_500.0;
         } else {
             sun.illuminance = sun.illuminance.max(28_000.0);
@@ -2127,24 +2367,31 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // Southwest two-shot pulled back so full biped + multi-leg limbs read.
-            let look = station + Vec3::new(0.2, 3.6, 14.0);
-            let pos = look + Vec3::new(-16.0, 4.8, 14.0);
+            // Southwest two-shot — full biped + multi-leg limbs unmistakable.
+            let look = station + Vec3::new(0.5, 5.0, 15.0);
+            let pos = look + Vec3::new(-15.0, 3.2, 13.0);
             (pos, look)
         }
         3 => {
+            // Turrets on +Z rim firing tracers into the alien.
+            let look = station + Vec3::new(3.0, 4.0, 16.5);
+            let pos = station + Vec3::new(-11.0, 6.0, 24.0);
+            (pos, look)
+        }
+        4 => {
             // Crew pair — pull back so both bipeds read as twin figures.
             let look = station + Vec3::new(-5.1, 2.4, -10.0);
             let pos = look + Vec3::new(-11.0, 3.0, 10.0);
             (pos, look)
         }
-        4 => {
-            // Tunnel portal (−Z) + fighter plume (+X) from a clear stand-off.
-            let pos = station + Vec3::new(14.0, 6.0, -12.0);
-            let look = station + Vec3::new(6.5, 2.4, -1.0);
+        5 => {
+            // Face the oversized film tunnel portal mouth (−Z mountain).
+            let mouth = station + Vec3::new(0.0, 6.0, -14.0);
+            let pos = mouth + Vec3::new(14.0, 3.0, 12.0);
+            let look = mouth + Vec3::new(0.0, 0.5, -1.0);
             (pos, look)
         }
-        5 => {
+        6 => {
             // Hero shuttle REAR-QUARTER: behind and off-axis so cyan wakes
             // stream toward camera (nose yaw = +π/2 → forward −X).
             let shuttle = Vec3::new(
@@ -2156,14 +2403,14 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             let look = shuttle + Vec3::new(-4.0, 0.5, 0.0);
             (pos, look)
         }
-        6 => {
+        7 => {
             // Ringed planet — match sky.rs planet_dir so the giant fills frame.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
             let pos = deck + Vec3::new(-6.0, 14.0, 12.0);
             let look = pos + planet_dir * 120.0;
             (pos, look)
         }
-        7 => {
+        8 => {
             // Painting-scale: archipelago + nebula, with dual-river shelf
             // (z≈60 relative) filling the lower third clear of keel volumes.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
@@ -2171,7 +2418,7 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             let look = deck + Vec3::new(10.0, -6.0, 64.0) + planet_dir * 5.0;
             (pos, look)
         }
-        8 => {
+        9 => {
             // Dual plasma + lava shelf — stand off so both filaments read
             // (too-close cam was filling the frame with two solid slabs).
             let look = deck + Vec3::new(20.0, -16.0, 60.0);
@@ -2357,10 +2604,11 @@ mod tests {
             .iter()
             .any(|n| n.contains("deck_keel") || n.contains("keel")));
         assert!(names.iter().any(|n| n.contains("combat")));
+        assert!(names.iter().any(|n| n.contains("turret")));
         assert!(names.iter().any(|n| n.contains("shuttle")));
         assert!(names
             .iter()
-            .any(|n| n.contains("portal") || n.contains("fighter")));
+            .any(|n| n.contains("portal") || n.contains("tunnel") || n.contains("fighter")));
         assert!(names.iter().any(|n| n.contains("planet")));
         assert!(names.iter().any(|n| n.contains("painting")));
         assert!(names
