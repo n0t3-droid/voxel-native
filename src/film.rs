@@ -583,6 +583,9 @@ fn film_stamp_vista_archipelago(mut world: ResMut<VoxelWorld>, mut film: ResMut<
         (island.cx + 36, island.cz + 48, 11, 10, 1),
         (island.cx + 8, island.cz + 55, 10, 9, -2),
         (island.cx + 50, island.cz + 38, 9, 9, 0),
+        // One more near-frustum beat (finish5 density notch).
+        (island.cx + 28, island.cz + 44, 12, 10, -1),
+        (island.cx - 12, island.cz + 52, 11, 9, 1),
     ];
     let mut sat_centers = Vec::with_capacity(satellites.len());
     for &(ox, oz, rx, rz, lift) in satellites {
@@ -592,10 +595,10 @@ fn film_stamp_vista_archipelago(mut world: ResMut<VoxelWorld>, mut film: ResMut<
     }
     // Skyway web: station → many satellites + cross-links for station mass.
     let hub = (island.cx, island.cz, island.deck_y + 1);
-    for &(tx, tz, ty) in &sat_centers[..sat_centers.len().min(14)] {
+    for &(tx, tz, ty) in &sat_centers[..sat_centers.len().min(16)] {
         written += stamp_film_skyway_stub(&mut world, hub.0, hub.1, hub.2, tx, tz, ty + 1);
     }
-    for window in sat_centers.windows(2).take(12) {
+    for window in sat_centers.windows(2).take(14) {
         let (a, b) = (window[0], window[1]);
         written += stamp_film_skyway_stub(&mut world, a.0, a.1, a.2 + 1, b.0, b.1, b.2 + 1);
     }
@@ -917,11 +920,13 @@ fn film_spawn_silhouettes(
         LinearRgba::rgb(0.6, 4.0, 5.0),
     ));
     // Unlit underside plates REPLACE downward keel faces in screenshots.
-    // Lavapipe PBR crushes voxel bottom faces to ink — these thin unlit
-    // crystal/alloy cards sit flush under the keel footprint so the camera
-    // reads color instead of a black slab (shot 1 hero + painting vista).
+    // Combat-slab keeps only top-2 solid layers under grass; lavapipe still
+    // inks those bottoms black unless an opaque unlit plate sits FLUSH under
+    // them (plates deep in the hollow sit *behind* the black faces).
+    // `deck` is at deck_y+1; kept solids end ~deck_y-2 → relative y ≈ -3.
     let keel = island.keel_depth as f32;
-    let underside_y = -(keel.max(6.0) + 0.05);
+    let flush_y = -3.35_f32; // flush under kept solid bottoms
+    let deep_y = -(keel.max(8.0) * 0.55); // hanging crystal accents only
     let crystal_plate = materials.add(sil_mat(
         Color::srgb(0.55, 0.98, 1.0),
         LinearRgba::rgb(3.5, 8.5, 9.5),
@@ -940,20 +945,33 @@ fn film_spawn_silhouettes(
     ));
     let rx = (island.radius_x as f32).max(18.0);
     let rz = (island.radius_z as f32).max(16.0);
-    // Continuous underside deck kills black-slab silhouette between tiles.
+    // Primary face-replacement deck: thick, oversized, flush under solids.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: crystal_plate.clone(),
-            transform: Transform::from_translation(deck + Vec3::new(0.0, underside_y - 0.4, 2.0))
-                .with_scale(Vec3::new(rx * 2.05, 1.6, rz * 2.05)),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, flush_y, 1.0))
+                .with_scale(Vec3::new(rx * 2.15, 2.4, rz * 2.15)),
             ..default()
         },
         FilmSilhouette,
         FilmKeelHelper,
         Name::new("FilmKeelUndersideDeck"),
     ));
-    // Tile accent plates across the island ellipse for crystal/alloy variety.
+    // Alloy under-layer slightly lower so rim profile shows crystal→alloy depth.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: alloy_plate.clone(),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, flush_y - 1.5, 1.0))
+                .with_scale(Vec3::new(rx * 1.95, 1.8, rz * 1.95)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmKeelHelper,
+        Name::new("FilmKeelUndersideAlloy"),
+    ));
+    // Tile accent plates across the flush deck for crystal/alloy variety.
     let step = 4.5_f32;
     let mut plate_i = 0usize;
     let mut x = -rx;
@@ -970,17 +988,17 @@ fn film_spawn_silhouettes(
                     _ => &verdant_plate,
                 };
                 let edge = (nx * nx + nz * nz).sqrt();
-                let dy = -edge * 1.2;
+                let dy = -edge * 0.35;
                 commands.spawn((
                     PbrBundle {
                         mesh: cube.clone(),
                         material: mat.clone(),
                         transform: Transform::from_translation(
-                            deck + Vec3::new(x, underside_y + dy, z + 2.0),
+                            deck + Vec3::new(x, flush_y - 0.2 + dy, z + 1.0),
                         )
                         .with_scale(Vec3::new(
                             step * 1.08,
-                            1.15,
+                            1.35,
                             step * 1.08,
                         )),
                         ..default()
@@ -995,8 +1013,7 @@ fn film_spawn_silhouettes(
         }
         x += step;
     }
-    // Camera-facing keel body slab: thick unlit alloy+crystal so the
-    // island_deck_keel SE camera sees a colored keel mass under the grass.
+    // Camera-facing keel body slab under the near rim (deck_keel SE cam).
     let body = materials.add(sil_mat(
         Color::srgb(0.62, 0.88, 0.95),
         LinearRgba::rgb(1.2, 3.8, 4.5),
@@ -1005,9 +1022,9 @@ fn film_spawn_silhouettes(
         PbrBundle {
             mesh: cube.clone(),
             material: body,
-            transform: Transform::from_translation(deck + Vec3::new(4.0, underside_y * 0.55, 10.0))
-                .with_scale(Vec3::new(rx * 1.35, keel.max(7.0) * 0.75, rz * 0.55))
-                .with_rotation(Quat::from_rotation_x(-0.12)),
+            transform: Transform::from_translation(deck + Vec3::new(6.0, flush_y - 3.5, 12.0))
+                .with_scale(Vec3::new(rx * 1.15, keel.max(7.0) * 0.55, rz * 0.45))
+                .with_rotation(Quat::from_rotation_x(-0.08)),
             ..default()
         },
         FilmSilhouette,
@@ -1030,8 +1047,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: skirt.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, underside_y * 0.5, oz))
-                    .with_scale(Vec3::new(sx, keel.max(7.0) * 0.9, sz)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, flush_y - 2.5, oz))
+                    .with_scale(Vec3::new(sx, keel.max(7.0) * 0.55, sz)),
                 ..default()
             },
             FilmSilhouette,
@@ -1045,10 +1062,8 @@ fn film_spawn_silhouettes(
         PbrBundle {
             mesh: cube.clone(),
             material: luminite_plate.clone(),
-            transform: Transform::from_translation(
-                deck + Vec3::new(2.0, underside_y + 1.2, rz * 0.75),
-            )
-            .with_scale(Vec3::new(rx * 1.5, 1.4, 2.2)),
+            transform: Transform::from_translation(deck + Vec3::new(2.0, flush_y + 0.6, rz * 0.85))
+                .with_scale(Vec3::new(rx * 1.5, 1.6, 2.4)),
             ..default()
         },
         FilmSilhouette,
@@ -1056,53 +1071,56 @@ fn film_spawn_silhouettes(
         Name::new("FilmKeelCyanLip"),
     ));
 
-    // Cheap painting density: unlit underside plates on nearby satellites
-    // so wide-hero keels also read color (not ink black silhouettes).
+    // Satellite continuous underside decks (painting_hero) — flush under each
+    // stamped vista island so wide cams don't read ink-black keels.
     for (si, (sx, sz, srx, srz, lift)) in [
-        (28.0_f32, 18.0, 14.0, 11.0, -1.0),
-        (-22.0, 28.0, 13.0, 10.0, 1.0),
-        (22.0, 32.0, 12.0, 10.0, 0.0),
-        (-18.0, 40.0, 11.0, 9.0, -1.0),
-        (36.0, 48.0, 10.0, 9.0, 1.0),
+        (28.0_f32, 18.0, 16.0, 13.0, -1.0),
+        (-22.0, 28.0, 15.0, 12.0, 1.0),
+        (42.0, 22.0, 14.0, 11.0, -1.0),
+        (-38.0, 36.0, 14.0, 11.0, 2.0),
+        (22.0, 32.0, 14.0, 11.0, 0.0),
+        (-18.0, 40.0, 12.0, 10.0, -1.0),
+        (36.0, 48.0, 11.0, 10.0, 1.0),
+        (8.0, 55.0, 10.0, 9.0, -2.0),
+        (50.0, 38.0, 9.0, 9.0, 0.0),
+        (65.0, 55.0, 10.0, 9.0, 1.0),
     ]
     .into_iter()
     .enumerate()
     {
         let sat_deck = deck + Vec3::new(sx, lift, sz);
-        let sat_uy = underside_y;
-        let mut k = 0usize;
-        let mut px = -srx;
-        while px <= srx {
-            let mut pz = -srz;
-            while pz <= srz {
-                let nx = px / srx;
-                let nz = pz / srz;
-                if nx * nx + nz * nz <= 1.0 {
-                    let mat = if k % 2 == 0 {
-                        luminite_plate.clone()
-                    } else {
-                        alloy_plate.clone()
-                    };
-                    commands.spawn((
-                        PbrBundle {
-                            mesh: cube.clone(),
-                            material: mat,
-                            transform: Transform::from_translation(
-                                sat_deck + Vec3::new(px, sat_uy, pz),
-                            )
-                            .with_scale(Vec3::new(4.2, 0.5, 4.2)),
-                            ..default()
-                        },
-                        FilmSilhouette,
-                        FilmKeelHelper,
-                        Name::new(format!("FilmSatKeel{si}_{k}")),
-                    ));
-                    k += 1;
-                }
-                pz += 5.0;
-            }
-            px += 5.0;
-        }
+        let mat = if si % 2 == 0 {
+            luminite_plate.clone()
+        } else {
+            alloy_plate.clone()
+        };
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: mat,
+                transform: Transform::from_translation(sat_deck + Vec3::new(0.0, flush_y, 0.0))
+                    .with_scale(Vec3::new(srx * 2.1, 1.8, srz * 2.1)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmKeelHelper,
+            Name::new(format!("FilmSatKeelDeck{si}")),
+        ));
+        // Skirt strip on the camera-facing side for painting side-read.
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: crystal_plate.clone(),
+                transform: Transform::from_translation(
+                    sat_deck + Vec3::new(0.0, flush_y - 2.0, srz * 0.9),
+                )
+                .with_scale(Vec3::new(srx * 1.8, 3.2, 0.7)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmKeelHelper,
+            Name::new(format!("FilmSatKeelSkirt{si}")),
+        ));
     }
 
     // Film-only hanging crystal spikes (cyan/verdant only — no magenta/pink).
@@ -1114,7 +1132,7 @@ fn film_spawn_silhouettes(
         Color::srgb(0.25, 0.95, 0.55),
         LinearRgba::rgb(0.8, 5.5, 2.2),
     ));
-    let keel_y = underside_y - 1.5;
+    let keel_y = deep_y - 1.0;
     for (i, (ox, oz, mat)) in [
         (-10.0_f32, 8.0, &crystal_a),
         (0.0, 12.0, &crystal_b),
@@ -1946,16 +1964,12 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Rim profile: grass deck on the upper lip + continuous unlit
-            // crystal underside below (hollowed keel — no black slab).
-            let keel = island.keel_depth as f32;
-            let pos = deck
-                + Vec3::new(
-                    island.radius_x as f32 * 0.55 + 22.0,
-                    -(keel * 0.65).max(5.5),
-                    island.radius_z as f32 * 0.55 + 24.0,
-                );
-            let look = deck + Vec3::new(-1.0, 1.2, 3.0);
+            // Rim profile: eye just outside/below the lip so grass reads on
+            // the upper deck while flush unlit underside plates fill below.
+            let rx = island.radius_x as f32;
+            let rz = island.radius_z as f32;
+            let pos = deck + Vec3::new(rx * 0.75 + 14.0, -3.2, rz * 0.85 + 16.0);
+            let look = deck + Vec3::new(-3.0, 1.0, -1.0);
             (pos, look)
         }
         2 => {
