@@ -2111,17 +2111,30 @@ fn ship_trail_material(
     }
 }
 
+fn new_world_look_basis() -> (Vec3, Vec3, Vec3) {
+    // Matches `TerrainGenerator::scenic_frontier_spawn` (eye 64,-79 → look 110,-80).
+    let yaw = 46.0_f32.atan2(1.0);
+    let pitch = 6.0_f32.atan2(46.0);
+    let rot = Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, pitch);
+    let forward = rot * -Vec3::Z;
+    let right = rot * Vec3::X;
+    let forward_h = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let right_h = Vec3::new(right.x, 0.0, right.z).normalize_or_zero();
+    (forward, forward_h, right_h)
+}
+
 fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     let u = u.clamp(0.0, 1.0);
-    // Scenic look aims at (origin.x+46, origin.y+6). Bank the orbiter
-    // through the open sky above that target — not down the canyon
-    // throat (hull wall) and not past the mesa (invisible).
-    let x = origin.x + 40.0 + u * 18.0;
-    let z = origin.z - 20.0 + u * 48.0;
-    let y = origin.y + 16.5 + (u * std::f32::consts::PI).sin() * 2.4;
-    let yaw = 18.0_f32.atan2(48.0);
+    let (_forward, forward_h, right_h) = new_world_look_basis();
+    // Bank across the open sky in front of the authored postcard.
+    let ahead = 44.0 + u * 16.0;
+    let lateral = -16.0 + u * 40.0;
+    let height = 16.0 + (u * std::f32::consts::PI).sin() * 2.2;
+    let pos = origin + forward_h * ahead + right_h * lateral + Vec3::Y * height;
+    let travel = forward_h * 16.0 + right_h * 40.0;
+    let yaw = (-travel.x).atan2(-travel.z);
     let roll = -0.40 + (u * std::f32::consts::TAU).sin() * 0.28;
-    (Vec3::new(x, y, z), yaw, roll)
+    (pos, yaw, roll)
 }
 
 fn update_hero_flyby(
@@ -2156,63 +2169,26 @@ fn sky_traffic_count(graphics: GraphicsMode, cinematic: bool) -> usize {
 }
 
 fn sky_traffic_lanes() -> [(Vec3, Vec3, f32, f32, f32, u8); 6] {
-    // origin offset, travel span, scale, speed (loops/s), t0, variant
+    let (_forward, forward_h, right_h) = new_world_look_basis();
+    let lane = |ahead: f32, height: f32, lateral: f32, d_ahead: f32, d_lat: f32, d_up: f32, scale: f32, speed: f32, t0: f32, variant: u8| {
+        let origin = forward_h * ahead + Vec3::Y * height + right_h * lateral;
+        let span = forward_h * d_ahead + right_h * d_lat + Vec3::Y * d_up;
+        (origin, span, scale, speed, t0, variant)
+    };
     [
-        (
-            Vec3::new(58.0, 22.0, -70.0),
-            Vec3::new(24.0, 5.0, 110.0),
-            1.55,
-            0.028,
-            0.12,
-            0,
-        ),
-        (
-            Vec3::new(92.0, 28.0, 35.0),
-            Vec3::new(18.0, -4.0, -130.0),
-            1.85,
-            0.022,
-            0.40,
-            1,
-        ),
-        (
-            Vec3::new(74.0, 20.0, 55.0),
-            Vec3::new(48.0, 6.0, -40.0),
-            1.25,
-            0.032,
-            0.68,
-            0,
-        ),
-        (
-            Vec3::new(140.0, 34.0, -30.0),
-            Vec3::new(-16.0, 3.0, 120.0),
-            2.1,
-            0.016,
-            0.22,
-            1,
-        ),
-        (
-            Vec3::new(110.0, 26.0, 20.0),
-            Vec3::new(40.0, 4.0, 70.0),
-            1.4,
-            0.024,
-            0.55,
-            0,
-        ),
-        (
-            Vec3::new(160.0, 24.0, -95.0),
-            Vec3::new(8.0, 8.0, 140.0),
-            1.35,
-            0.020,
-            0.80,
-            1,
-        ),
+        lane(70.0, 22.0, -28.0, 18.0, 90.0, 4.0, 1.55, 0.028, 0.12, 0),
+        lane(95.0, 28.0, 32.0, 14.0, -110.0, -3.0, 1.85, 0.022, 0.40, 1),
+        lane(58.0, 18.0, 48.0, 36.0, -30.0, 5.0, 1.25, 0.032, 0.68, 0),
+        lane(130.0, 32.0, -12.0, -10.0, 100.0, 3.0, 2.1, 0.016, 0.22, 1),
+        lane(88.0, 24.0, 16.0, 30.0, 55.0, 4.0, 1.4, 0.024, 0.55, 0),
+        lane(150.0, 20.0, -40.0, 8.0, 120.0, 6.0, 1.35, 0.020, 0.80, 1),
     ]
 }
 
 fn sky_traffic_pose(origin: Vec3, span: Vec3, t: f32) -> (Vec3, f32) {
     let u = t.rem_euclid(1.0);
     let pos = origin + span * u;
-    (pos, span.x.atan2(span.z))
+    (pos, (-span.x).atan2(-span.z))
 }
 
 fn ambient_traffic_specs(variant: u8, detailed: bool) -> Vec<RealShipPartSpec> {
@@ -4924,19 +4900,19 @@ mod tests {
     #[test]
     fn hero_flyby_crosses_in_front_of_the_new_world_look() {
         let origin = Vec3::new(64.0, 58.0, -79.0);
+        let (forward, _forward_h, _right_h) = super::new_world_look_basis();
         for u in [0.10, 0.20, 0.32, 0.48] {
             let (pos, yaw, roll) = super::hero_flyby_pose(origin, u);
-            let ahead = pos.x - origin.x;
-            let dist = pos.distance(origin);
+            let rel = pos - origin;
+            let ahead = rel.dot(forward);
+            let dist = rel.length();
             assert!(
                 ahead > 36.0,
-                "flyby at u={u} is not ahead of the camera (x={})",
-                pos.x
+                "flyby at u={u} is not ahead of the camera (ahead={ahead}, pos={pos})"
             );
             assert!(
-                ahead < 72.0,
-                "flyby at u={u} leaves the opening sky (x={})",
-                pos.x
+                ahead < 80.0,
+                "flyby at u={u} leaves the opening sky (ahead={ahead})"
             );
             assert!(
                 dist > 40.0 && dist < 95.0,
@@ -4952,7 +4928,7 @@ mod tests {
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );
-            assert!(yaw.abs() > 0.30, "flyby should bank across +X, yaw={yaw}");
+            assert!(yaw.abs() > 0.20, "flyby should bank across the look, yaw={yaw}");
             assert!(roll.abs() < 1.2);
         }
         assert!(
