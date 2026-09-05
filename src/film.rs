@@ -3223,10 +3223,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
 
     match index {
         0 => {
-            // Grass lawn: stand off across the deck so tufts read as a green cliff top.
-            let lawn = deck + Vec3::new(2.0, 0.5, 4.0);
-            let pos = lawn + Vec3::new(-22.0, 10.0, 28.0);
-            let look = lawn + Vec3::new(10.0, -0.5, -6.0);
+            // Satellite grass cap (film lids) — not buried in main-deck tufts.
+            let lawn = deck + Vec3::new(8.0, 1.5, 36.0);
+            let pos = lawn + Vec3::new(-24.0, 16.0, 26.0);
+            let look = lawn + Vec3::new(2.0, -1.0, -4.0);
             (pos, look)
         }
         1 => {
