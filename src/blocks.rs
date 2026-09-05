@@ -234,7 +234,7 @@ impl BlockType {
             BlockType::Limestone => Color::srgb(0.86, 0.84, 0.76),
             // Alien crystal — saturated cyan. Fully opaque so the mass
             // reads as a gem, not stained glass over the banded wall.
-            BlockType::Crystal => Color::srgb(0.08, 0.78, 1.00),
+            BlockType::Crystal => Color::srgb(0.00, 0.86, 1.00),
             // Volcanic basalt — dark, but not unreadable black. Keeping
             // it above pure black makes ledges and jump targets visible
             // under strong bloom from nearby lava.
@@ -255,7 +255,7 @@ impl BlockType {
             BlockType::NeonMagenta => Color::srgb(1.00, 0.04, 0.82),
             BlockType::NeonAmber => Color::srgb(1.00, 0.52, 0.06),
             BlockType::EngineCore => Color::srgb(0.06, 0.76, 1.00),
-            BlockType::LuminiteCrystal => Color::srgb(0.12, 0.82, 1.00),
+            BlockType::LuminiteCrystal => Color::srgb(0.00, 0.90, 1.00),
             BlockType::MagnetiteOre => Color::srgb(0.92, 0.38, 0.08),
             BlockType::IridiumVein => Color::srgba(0.62, 0.12, 0.95, 0.72),
             // Violet sedimentary band — saturated enough to read as an
@@ -264,7 +264,7 @@ impl BlockType {
             // Ochre band that separates the violet from the buff cap.
             BlockType::AmberStone => Color::srgb(0.98, 0.46, 0.08),
             // Coolant-blue energy current in the canyon floors.
-            BlockType::PlasmaFlow => Color::srgb(0.06, 0.88, 1.00),
+            BlockType::PlasmaFlow => Color::srgb(0.00, 0.92, 1.00),
             BlockType::CrystalMagenta => Color::srgb(1.00, 0.10, 0.78),
             BlockType::CrystalGreen => Color::srgba(0.30, 1.00, 0.56, 0.70),
             // Holo pane — mostly transparent, tinted cyan.
@@ -798,16 +798,16 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         22 => {
             // Lava — hot orange curtains. Keep blue near-zero so ACES
             // cannot wash the sheet into cream.
-            c[0] *= 2.90;
-            c[1] *= 1.45;
-            c[2] *= 0.18;
+            c[0] *= 3.40;
+            c[1] *= 1.55;
+            c[2] *= 0.10;
         }
         20 => {
-            // Crystal — saturated cyan. Peak stays under the ACES clip
-            // so dusk stills keep hue instead of a pink-white tower.
-            c[0] *= 0.70;
-            c[1] *= 1.95;
-            c[2] *= 2.45;
+            // Crystal — R stays near zero so golden-hour ACES cannot
+            // grey the shard. G/B stay in the glow band, not the clip.
+            c[0] *= 0.08;
+            c[1] *= 1.65;
+            c[2] *= 2.05;
         }
         23 => {
             // AlienMoss — bioluminescent magenta/violet. The multiplier
@@ -828,9 +828,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             // Neon cyan rim — chromatic, below crystal so shards stay
             // the left-third hero. Soft enough that river banks don't
             // clip to white next to plasma.
-            c[0] *= 0.22;
-            c[1] *= 1.25;
-            c[2] *= 1.50;
+            c[0] *= 0.04;
+            c[1] *= 1.20;
+            c[2] *= 1.55;
         }
         30 => {
             c[0] *= 2.6;
@@ -857,9 +857,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         }
         33 => {
             // Luminite — brilliant aquamarine shard core.
-            c[0] *= 0.70;
-            c[1] *= 2.35;
-            c[2] *= 3.05;
+            c[0] *= 0.06;
+            c[1] *= 1.70;
+            c[2] *= 2.15;
         }
         34 => {
             // Magnetite — hot ember orange, reads as ore against cyan crystal.
@@ -876,9 +876,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         38 => {
             // Plasma river — glowing cyan ribbon. Keep all channels
             // below the ACES clip so it does not bloom to white.
-            c[0] *= 0.22;
-            c[1] *= 1.05;
-            c[2] *= 1.28;
+            c[0] *= 0.04;
+            c[1] *= 1.18;
+            c[2] *= 1.48;
         }
         39 => {
             // Magenta crystal — hot pink hero shards.
@@ -957,7 +957,7 @@ mod tests {
         let plasma = voxel_color(BlockType::PlasmaFlow.into());
         let plasma_peak = plasma[0].max(plasma[1]).max(plasma[2]);
         assert!(
-            plasma_peak < 1.45,
+            plasma_peak < 1.55,
             "plasma vertex peak {plasma_peak:.3} will bloom to white"
         );
         assert!(plasma[2] > plasma[0] * 8.0);

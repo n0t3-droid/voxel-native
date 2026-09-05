@@ -78,7 +78,7 @@ impl MaterialLibrary {
             let alpha = swatch.block.color().to_srgba().alpha;
             let emissive = emissive_for_block(swatch.block);
             let handle = materials.add(StandardMaterial {
-                base_color: Color::WHITE.with_alpha(alpha),
+                base_color: albedo_for_block(swatch.block, alpha),
                 base_color_texture: Some(image),
                 emissive,
                 perceptual_roughness: roughness_for_block(swatch.block),
@@ -733,6 +733,20 @@ fn bake_block_swatch(
 // Helpers -------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 
+/// Dark albedo on hero emissives so dusk sunlight cannot add orange
+/// into the cyan/magenta. Colour lives in `emissive` + vertex HDR.
+fn albedo_for_block(block: BlockType, alpha: f32) -> Color {
+    match block {
+        BlockType::Crystal
+        | BlockType::LuminiteCrystal
+        | BlockType::PlasmaFlow
+        | BlockType::NeonCyan => Color::srgba(0.02, 0.07, 0.09, alpha),
+        BlockType::CrystalMagenta => Color::srgba(0.09, 0.02, 0.07, alpha),
+        BlockType::Lava => Color::srgba(0.10, 0.03, 0.01, alpha),
+        _ => Color::WHITE.with_alpha(alpha),
+    }
+}
+
 /// Per-block HDR emissive. Fast has bloom intensity 0, so this is the
 /// only glow those voxels get; Cinematic adds bloom on top, so plasma
 /// stays chromatic and below the ACES clip while crystals stay saturated.
@@ -742,22 +756,10 @@ fn emissive_for_block(block: BlockType) -> LinearRgba {
     }
     let lin = block.color().to_linear();
     match block {
-        BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(
-            lin.red * 0.55,
-            lin.green * 3.40,
-            lin.blue * 4.10,
-        ),
-        BlockType::CrystalMagenta => LinearRgba::rgb(
-            lin.red * 3.60,
-            lin.green * 0.45,
-            lin.blue * 3.10,
-        ),
-        BlockType::PlasmaFlow | BlockType::NeonCyan => LinearRgba::rgb(
-            lin.red * 0.70 + 0.01,
-            lin.green * 1.05 + 0.04,
-            lin.blue * 1.20 + 0.05,
-        ),
-        BlockType::Lava => LinearRgba::rgb(lin.red * 3.80, lin.green * 1.55, lin.blue * 0.05),
+        BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(0.00, 1.55, 2.05),
+        BlockType::CrystalMagenta => LinearRgba::rgb(1.85, 0.12, 1.45),
+        BlockType::PlasmaFlow | BlockType::NeonCyan => LinearRgba::rgb(0.00, 1.22, 1.58),
+        BlockType::Lava => LinearRgba::rgb(lin.red * 4.40, lin.green * 1.70, 0.02),
         _ => LinearRgba::rgb(
             lin.red * 3.2 + 0.35,
             lin.green * 3.2 + 0.35,
@@ -1066,6 +1068,14 @@ mod tests {
             "plasma emissive peak {peak:.3} will ACES-clip to white"
         );
         assert!(plasma.blue > plasma.red * 3.0);
+        assert!(
+            crystal.red < 0.05,
+            "crystal emissive still has dusk-warming red ({crystal:?})"
+        );
+        assert!(
+            plasma.red < 0.05,
+            "plasma emissive still has dusk-warming red ({plasma:?})"
+        );
         let lava = emissive_for_block(BlockType::Lava);
         assert!(lava.red > lava.blue * 8.0, "lava emissive went cream ({lava:?})");
     }
