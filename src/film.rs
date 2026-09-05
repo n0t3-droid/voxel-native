@@ -995,6 +995,32 @@ fn film_spawn_silhouettes(
         FilmKeelHelper,
         Name::new("FilmKeelBodySlab"),
     ));
+    // Vertical keel skirt — high painting cams see SIDE faces as black
+    // silhouettes; unlit vertical panels give those faces readable color.
+    let skirt = materials.add(sil_mat(
+        Color::srgb(0.55, 0.90, 0.95),
+        LinearRgba::rgb(1.0, 3.5, 4.0),
+    ));
+    for (ox, oz, sx, sz) in [
+        (0.0_f32, rz * 0.95, rx * 1.7, 0.7),
+        (0.0, -rz * 0.95, rx * 1.7, 0.7),
+        (rx * 0.95, 0.0, 0.7, rz * 1.7),
+        (-rx * 0.95, 0.0, 0.7, rz * 1.7),
+    ] {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: skirt.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, underside_y * 0.5, oz))
+                    .with_scale(Vec3::new(sx, keel.max(7.0) * 0.9, sz)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmKeelHelper,
+            Name::new("FilmKeelSkirt"),
+        ));
+    }
+
     // Cyan crystal lip along the near rim (camera side of deck_keel).
     commands.spawn((
         PbrBundle {
@@ -1901,16 +1927,16 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Below the island looking up: grass rim on top edge + colored
-            // unlit underside plates filling the keel (no black slab).
+            // Profile the rim: grass deck on the upper edge + colored unlit
+            // underside plates filling the keel below (no black slab).
             let keel = island.keel_depth as f32;
             let pos = deck
                 + Vec3::new(
-                    island.radius_x as f32 * 0.55 + 20.0,
-                    -(keel * 1.25).max(10.0) - 3.0,
-                    island.radius_z as f32 * 0.5 + 24.0,
+                    island.radius_x as f32 * 0.7 + 18.0,
+                    -(keel * 0.55).max(5.0),
+                    island.radius_z as f32 * 0.65 + 22.0,
                 );
-            let look = deck + Vec3::new(1.0, -keel * 0.25, 6.0);
+            let look = deck + Vec3::new(-2.0, -keel * 0.15, 4.0);
             (pos, look)
         }
         2 => {
