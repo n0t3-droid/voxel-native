@@ -70,7 +70,7 @@ pub struct FilmRuntime {
     settle_secs: f32,
     /// Seconds to keep holding after the capture is queued (blit lag).
     hold_after_secs: f32,
-    shot_index: usize,
+    pub shot_index: usize,
     shot_entered_at: f32,
     capture_queued_at: Option<f32>,
     last_captured_shot: i32,
@@ -80,7 +80,7 @@ pub struct FilmRuntime {
     combat_slab_staged: bool,
     vista_stamped: bool,
     station_forced: bool,
-    ready_to_roll: bool,
+    pub ready_to_roll: bool,
     island: Option<IslandSpec>,
     #[cfg(not(target_arch = "wasm32"))]
     out_dir: PathBuf,
@@ -480,10 +480,10 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
                     } else {
                         BlockType::Crystal
                     }
-                } else if edge > 0.22 {
-                    BlockType::ShipHullAlloy
                 } else {
-                    continue;
+                    // Never leave procedural dark stone — center keel faces
+                    // must stay readable alloy even under ambient crush.
+                    BlockType::ShipHullAlloy
                 };
                 if world.edit_set_voxel(x, y, z, block.into()) {
                     keel_lit += 1;

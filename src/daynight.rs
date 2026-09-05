@@ -6,6 +6,7 @@
 use bevy::pbr::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::prelude::*;
 
+use crate::film::FilmRuntime;
 use crate::player::Player;
 use crate::settings::{GraphicsMode, TimeMode, WorldSettings};
 use crate::terrain::Biome;
@@ -237,6 +238,7 @@ fn advance_time(
 fn update_sun(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
+    film: Option<Res<FilmRuntime>>,
     mut clear_color: ResMut<ClearColor>,
     mut ambient: ResMut<AmbientLight>,
     mut sun: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
@@ -305,23 +307,44 @@ fn update_sun(
     };
     clear_color.0 = Color::LinearRgba(sky);
 
+    // Film painting / planet / dual-river: darken clear + fog so additive
+    // nebula chroma isn't crushed by noon sky wash (pad shots unchanged).
+    let film_sky = film
+        .as_ref()
+        .filter(|f| f.enabled && f.ready_to_roll)
+        .map(|f| f.shot_index);
+    let film_nebula_shot = matches!(film_sky, Some(6) | Some(7) | Some(8));
+    if film_nebula_shot {
+        clear_color.0 = match film_sky {
+            Some(8) => Color::srgb(0.18, 0.14, 0.24),
+            _ => Color::srgb(0.08, 0.05, 0.16),
+        };
+        light.illuminance = light.illuminance.min(5_000.0);
+    }
+
     // Drive fog colour from the same sky interpolation so the horizon
     // haze always matches the actual sky. This is THE trick that hides
     // the chunk-streaming edge for free. Uses a slightly brighter tint
     // near the horizon for atmospheric scattering feel.
     if let Ok(mut fog_settings) = fog.get_single_mut() {
-        let horizon = sky
+        let fog_sky = if film_nebula_shot {
+            clear_color.0.to_linear()
+        } else {
+            sky
+        };
+        let horizon = fog_sky
             .mix(&Color::srgb(1.0, 1.0, 1.0).to_linear(), 0.15)
             .mix(&sunset_color, sunset * 0.25);
-        fog_settings.color = Color::LinearRgba(sky);
+        fog_settings.color = Color::LinearRgba(fog_sky);
         if let FogFalloff::ExponentialSquared { density } = &mut fog_settings.falloff {
             // Fog thins at clear noon for epic long-distance vistas of
             // alien spires and mountain ranges, thickens dramatically
             // at sunset/sunrise for fiery god-ray haze.
             let base_density = 0.00055;
-            *density = base_density
+            let dens = base_density
                 * (1.0 + sunset * 1.4 + (1.0 - day) * 0.25)
                 * intel.profile.fog_density_mul;
+            *density = if film_nebula_shot { dens * 0.35 } else { dens };
         }
         // Directional light scattering — makes god-ray / atmospheric
         // tints at sunset and during the night. Much stronger sunset
