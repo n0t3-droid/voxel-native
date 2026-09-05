@@ -1323,14 +1323,14 @@ fn film_spawn_silhouettes(
             Name::new(format!("FilmLavaRibbon{i}")),
         ));
     }
-    // Painting lower-left dual lanes — beside grass crowns (z≈100), not under them.
+    // Painting lower-left dual lanes — beside grass crowns; punch orange lava.
     for (i, ox) in [-36.0_f32, -24.0, -12.0, 0.0, 12.0].into_iter().enumerate() {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: plasma_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, 8.0, 102.0))
-                    .with_scale(Vec3::new(16.0, 4.5, 6.0))
+                transform: Transform::from_translation(deck + Vec3::new(ox, 7.0, 104.0))
+                    .with_scale(Vec3::new(14.0, 4.0, 5.5))
                     .with_rotation(Quat::from_rotation_y(0.5)),
                 ..default()
             },
@@ -1342,8 +1342,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox + 10.0, 7.0, 96.0))
-                    .with_scale(Vec3::new(18.0, 5.5, 7.0))
+                transform: Transform::from_translation(deck + Vec3::new(ox + 10.0, 6.0, 98.0))
+                    .with_scale(Vec3::new(20.0, 7.0, 8.0))
                     .with_rotation(Quat::from_rotation_y(0.5)),
                 ..default()
             },
@@ -1441,15 +1441,15 @@ fn film_spawn_silhouettes(
         3.8,
     );
     commands.entity(arena_alien).insert(FilmCombatArena);
-    // Painting-scale giants — low on verdant lip, readable but below mountain crest.
+    // Painting-scale giants — low on verdant lip; brighter so gold/white read.
     let vista_marine = spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(-22.0, 5.0, 102.0),
-        8.0,
+        deck + Vec3::new(-20.0, 4.5, 112.0),
+        9.0,
     );
     commands.entity(vista_marine).insert(FilmCombatVista);
     let vista_alien = spawn_film_alien(
@@ -1458,8 +1458,8 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(-10.0, 5.0, 106.0),
-        8.5,
+        deck + Vec3::new(-8.0, 4.5, 116.0),
+        9.5,
     );
     commands.entity(vista_alien).insert(FilmCombatVista);
     spawn_film_crew(
@@ -2916,10 +2916,12 @@ fn spawn_film_grass_caps(
         (28.0, 86.0, 28.0, 22.0, 4.0),
         (-6.0, 76.0, 26.0, 20.0, 3.0),
         (40.0, 80.0, 24.0, 20.0, 3.5),
-        // Extra lower-left verdant shelf so grass isn't only a right corner chip.
         (-40.0, 112.0, 36.0, 28.0, 5.5),
         (-22.0, 114.0, 30.0, 24.0, 6.0),
         (18.0, 110.0, 28.0, 22.0, 5.0),
+        // Extra lower-right verdant pad so green survives cyan skyway.
+        (24.0, 118.0, 34.0, 26.0, 5.5),
+        (-6.0, 120.0, 32.0, 24.0, 6.0),
     ]
     .into_iter()
     .enumerate()
