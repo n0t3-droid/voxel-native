@@ -470,9 +470,9 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             for y in bottom..=(island.deck_y - 1).max(bottom) {
                 let near_bottom = y <= bottom + 2;
                 let near_rim = edge > 0.42;
-                // Keep only the top 2 solid layers under grass; carve the rest
-                // so unlit underside plates fully own the keel silhouette.
-                if y < island.deck_y - 2 {
+                // Keep only the top 4 solid layers under grass; carve the rest
+                // so unlit underside volumes fully own the keel silhouette.
+                if y < island.deck_y - 4 {
                     if world.edit_set_voxel(x, y, z, AIR) {
                         keel_lit += 1;
                     }
@@ -950,8 +950,8 @@ fn film_spawn_silhouettes(
         PbrBundle {
             mesh: cube.clone(),
             material: crystal_plate.clone(),
-            transform: Transform::from_translation(deck + Vec3::new(0.0, -5.2, 1.0))
-                .with_scale(Vec3::new(rx * 2.05, 9.5, rz * 2.05)),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, -5.5, 1.0))
+                .with_scale(Vec3::new(rx * 2.35, 11.0, rz * 2.35)),
             ..default()
         },
         FilmSilhouette,
@@ -1100,8 +1100,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: mat,
-                transform: Transform::from_translation(sat_deck + Vec3::new(0.0, -4.5, 0.0))
-                    .with_scale(Vec3::new(srx * 2.05, 7.5, srz * 2.05)),
+                transform: Transform::from_translation(sat_deck + Vec3::new(0.0, -4.8, 0.0))
+                    .with_scale(Vec3::new(srx * 2.35, 9.0, srz * 2.35)),
                 ..default()
             },
             FilmSilhouette,
@@ -1536,7 +1536,7 @@ fn film_toggle_helpers(
     if !film.enabled || film.finished {
         return;
     }
-    let show_keel = matches!(film.shot_index, 1 | 7 | 0 | 8);
+    let show_keel = true; // film-only helpers: always on so every beat's keels read
     for mut vis in keel_helpers.iter_mut() {
         *vis = if show_keel {
             Visibility::Visible
