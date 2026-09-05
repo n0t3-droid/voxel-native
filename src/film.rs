@@ -441,7 +441,7 @@ fn film_spawn_silhouettes(
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(-5.5, 1.2, 11.0),
+        deck + Vec3::new(-3.2, 1.4, 12.0),
     );
     spawn_film_alien(
         &mut commands,
@@ -449,7 +449,7 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(5.5, 1.2, 11.0),
+        deck + Vec3::new(3.2, 1.4, 12.0),
     );
     spawn_film_crew(
         &mut commands,
@@ -536,7 +536,7 @@ fn spawn_film_marine(
     let root = commands
         .spawn((
             SpatialBundle {
-                transform: Transform::from_translation(origin).with_scale(Vec3::splat(1.35)),
+                transform: Transform::from_translation(origin).with_scale(Vec3::splat(1.85)),
                 ..default()
             },
             FilmSilhouette,
@@ -644,7 +644,7 @@ fn spawn_film_alien(
     let root = commands
         .spawn((
             SpatialBundle {
-                transform: Transform::from_translation(origin).with_scale(Vec3::splat(1.45)),
+                transform: Transform::from_translation(origin).with_scale(Vec3::splat(2.05)),
                 ..default()
             },
             FilmSilhouette,
@@ -1167,9 +1167,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // True side-on two-shot: marine (−X) vs alien (+X) equally distant.
-            let look = station + Vec3::new(0.0, 3.2, 11.0);
-            let pos = look + Vec3::new(-22.0, 3.8, 1.5);
+            // Tight side-on two-shot: oversized biped vs multi-leg, equal distance.
+            let look = station + Vec3::new(0.0, 3.6, 12.0);
+            let pos = look + Vec3::new(-14.0, 2.8, 0.8);
             (pos, look)
         }
         3 => {
