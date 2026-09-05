@@ -470,9 +470,9 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             for y in bottom..=(island.deck_y - 1).max(bottom) {
                 let near_bottom = y <= bottom + 2;
                 let near_rim = edge > 0.42;
-                // Carve the absolute bottom layer to Air — unlit mesh plates
+                // Carve the absolute bottom 2 layers to Air — unlit mesh plates
                 // replace those downward faces so screenshots never show ink.
-                if y == bottom {
+                if y <= bottom + 1 {
                     if world.edit_set_voxel(x, y, z, AIR) {
                         keel_lit += 1;
                     }
@@ -938,10 +938,22 @@ fn film_spawn_silhouettes(
         Color::srgb(0.55, 1.0, 0.98),
         LinearRgba::rgb(2.5, 7.0, 7.5),
     ));
-    // Tile thin horizontal plates across the island ellipse — each tile is
-    // the visible underside face (no reliance on voxel lighting).
     let rx = (island.radius_x as f32).max(18.0);
     let rz = (island.radius_z as f32).max(16.0);
+    // Continuous underside deck kills black-slab silhouette between tiles.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: crystal_plate.clone(),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, underside_y - 0.25, 2.0))
+                .with_scale(Vec3::new(rx * 2.1, 1.5, rz * 2.1)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmKeelHelper,
+        Name::new("FilmKeelUndersideDeck"),
+    ));
+    // Tile accent plates across the island ellipse for crystal/alloy variety.
     let step = 4.5_f32;
     let mut plate_i = 0usize;
     let mut x = -rx;
@@ -957,9 +969,8 @@ fn film_spawn_silhouettes(
                     2 => &luminite_plate,
                     _ => &verdant_plate,
                 };
-                // Edge tiles get a slight drop so the keel reads as a dome.
                 let edge = (nx * nx + nz * nz).sqrt();
-                let dy = -edge * 1.6;
+                let dy = -edge * 1.2;
                 commands.spawn((
                     PbrBundle {
                         mesh: cube.clone(),
@@ -968,9 +979,9 @@ fn film_spawn_silhouettes(
                             deck + Vec3::new(x, underside_y + dy, z + 2.0),
                         )
                         .with_scale(Vec3::new(
-                            step * 0.95,
-                            0.55,
-                            step * 0.95,
+                            step * 1.08,
+                            1.15,
+                            step * 1.08,
                         )),
                         ..default()
                     },
