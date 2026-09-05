@@ -1646,8 +1646,10 @@ impl CliffFace {
                 // Hero west mesa: a real banded rock wall tens of blocks
                 // tall filling the New World look, not a stack of colony
                 // pylons. Habs / skyway stay rim accents on/near it.
+                // z0 stays right of the far-left sky so the butte's
+                // south face cannot silhouette as a T-ridge from spawn.
                 face_x: 108,
-                z0: -128,
+                z0: -156,
                 z1: -36,
                 levels: 4,
                 depth: 24,
@@ -1718,14 +1720,26 @@ impl CliffFace {
                     carve(chunk, origin, wx, wy, z);
                 }
             }
-            for dx in 0..=(self.depth + 2) {
-                let wx = face + dx;
-                for wy in pit..=crest_y {
-                    place_over_unless_glow(chunk, origin, wx, wy, z, strata_block(wy));
+            // Leave the far-left third as sky behind the shards: do not
+            // build a banded butte tail that reads as a T-ridge.
+            let build_wall = z >= -104;
+            if build_wall {
+                for dx in 0..=(self.depth + 2) {
+                    let wx = face + dx;
+                    for wy in pit..=crest_y {
+                        place_over_unless_glow(chunk, origin, wx, wy, z, strata_block(wy));
+                    }
+                }
+            } else {
+                for dx in 0..=(self.depth + 2) {
+                    let wx = face + dx;
+                    for wy in (pit + 4)..=(crest_y + 8) {
+                        carve(chunk, origin, wx, wy, z);
+                    }
                 }
             }
             // Sparse pueblo bites so the wall stays rock, not a pylon stack.
-            let dwelling = z.rem_euclid(10) == 0;
+            let dwelling = build_wall && z.rem_euclid(10) == 0;
             if dwelling {
                 let top_floor = crest_y - 6;
                 for level in 0..self.levels {
