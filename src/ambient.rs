@@ -366,7 +366,6 @@ fn spawn_colony_life_once(
         &mut commands,
         &mut materials,
         &cube,
-        &generator,
         anchor,
         settings.graphics,
         cinematic,
@@ -382,19 +381,14 @@ fn postcard_pad_anchor(origin: Vec3) -> (Vec3, Vec3, Vec3) {
     (pos, fwd_h, right_h)
 }
 
-/// Visible left skyway stretch: hero deck at z = -48, x just west of the
-/// opening-look gap, so the car rides the dark T instead of empty air.
-fn postcard_tram_lane(generator: &crate::terrain::TerrainGenerator) -> (Vec3, Vec3) {
-    let z = crate::frontier::HERO_SKYWAY_Z as f32;
-    let x0 = 38.0;
-    let x1 = 16.0;
-    let mid_x = (x0 + x1) * 0.5;
-    let macro_h = generator.macro_height(mid_x as f64, z as f64);
-    let deck_y = (macro_h + 24.0).round() as f32 + 1.35 + TRAM_HULL.y * 0.5;
-    (
-        Vec3::new(x0, deck_y, z),
-        Vec3::new(x1 - x0, 0.0, 0.0),
-    )
+/// Side-on tram on the dark left T. The hero deck runs along look (-X),
+/// so a car on that rail is end-on and reads as a cyan streak; slide
+/// along camera-right instead so the 9 m hull is a visible boxcar.
+fn postcard_tram_lane(origin: Vec3) -> (Vec3, Vec3) {
+    let (_fwd, fwd_h, right_h) = new_world_look_basis();
+    let lane_origin = origin + fwd_h * 18.0 + right_h * (-19.0) + Vec3::Y * 15.0;
+    let span = right_h * -18.0;
+    (lane_origin, span)
 }
 
 fn spawn_colony_figures(
@@ -567,8 +561,7 @@ fn spawn_skyway_trams(
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
     cube: &Handle<Mesh>,
-    generator: &crate::terrain::TerrainGenerator,
-    _origin: Vec3,
+    origin: Vec3,
     graphics: GraphicsMode,
     cinematic: bool,
 ) {
@@ -596,7 +589,7 @@ fn spawn_skyway_trams(
         perceptual_roughness: 0.16,
         ..default()
     });
-    let (lane_origin, span) = postcard_tram_lane(generator);
+    let (lane_origin, span) = postcard_tram_lane(origin);
     let t0 = 0.22;
     let pos = lane_origin + span * ping_pong(t0);
     let yaw = (-span.x).atan2(-span.z);
@@ -793,16 +786,12 @@ mod tests {
         assert!(TRAM_HULL.z > 8.0, "tram car must be a short visible box, not a streak");
         assert!(TRAM_HULL.y > 2.2, "tram must be tall enough to read against the dark T");
 
-        let gen = crate::terrain::TerrainGenerator::new(12345);
-        let (tram_o, tram_span) = postcard_tram_lane(&gen);
-        assert!(
-            (tram_o.z - crate::frontier::HERO_SKYWAY_Z as f32).abs() < 0.6,
-            "tram must ride the dark left skyway, z={}",
-            tram_o.z
-        );
-        assert!(tram_o.x < origin.x, "tram should be ahead of the -X look");
-        assert!(tram_span.length() > 12.0 && tram_span.length() < 40.0);
+        let (tram_o, tram_span) = postcard_tram_lane(origin);
+        assert!(tram_o.y > origin.y + 8.0, "tram should sit on the upper-left T");
+        assert!(tram_span.length() > 12.0 && tram_span.length() < 28.0);
         let left = (tram_o - origin).dot(right_h);
         assert!(left < -8.0, "tram should sit on the left of the spawn look, lat={left}");
+        let along = tram_span.normalize_or_zero().dot(right_h).abs();
+        assert!(along > 0.9, "tram travel must be side-on, not end-on along look");
     }
 }
