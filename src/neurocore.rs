@@ -303,6 +303,7 @@ pub struct NeuroCore {
     effective_render_distance: i32,
     sample_timer: f32,
     stable_samples: u8,
+    hold_samples: u8,
 }
 
 impl Default for NeuroCore {
@@ -317,6 +318,7 @@ impl Default for NeuroCore {
             effective_render_distance: 0,
             sample_timer: 0.0,
             stable_samples: 0,
+            hold_samples: 0,
         }
     }
 }
@@ -385,10 +387,14 @@ impl NeuroCore {
             quality,
             status,
         ) = match self.profile {
-            RuntimeProfile::LowSpec => (
-                // Honor FastLaptop's 24-chunk horizon. The streamer ramps
-                // the live disc from a spawn ring; this only sets the cap.
-                target.min(24).max(6),
+            RuntimeProfile::LowSpec => {
+                let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
+                // Fast keeps a 16-chunk settled horizon so Vega isn't
+                // drawing the Cinematic 24-chunk disc. Spawn fill still
+                // ramps 5→8→16 via the streamer; this is only the cap.
+                let rd_cap = if fast { 16 } else { 24 };
+                (
+                target.min(rd_cap).max(6),
                 if startup_fill { 1.0 } else { 0.52 },
                 if startup_fill { 1.0 } else { 0.55 },
                 0.25,
@@ -400,10 +406,13 @@ impl NeuroCore {
                 },
                 String::from(if startup_fill {
                     "low-spec spawn fill"
+                } else if fast {
+                    "low-spec settled horizon"
                 } else {
                     "low-spec fixed budget"
                 }),
-            ),
+            )
+            },
             RuntimeProfile::Balanced => (
                 target.min(32).max(6),
                 0.75,
@@ -581,6 +590,7 @@ impl NeuroCore {
         let hard = (fps > 0.0 && fps < target_fps * 0.70) || pressure >= 0.90;
         let soft = (fps > 0.0 && fps < target_fps * 0.86) || pressure >= 0.65;
         let stable = (fps <= 0.0 || fps >= target_fps * 0.94) && pressure < 0.35;
+        let held = self.effective_render_distance;
 
         if hard {
             self.stable_samples = 0;
@@ -614,6 +624,25 @@ impl NeuroCore {
             }
         } else {
             self.stable_samples = 0;
+        }
+
+        // After the spawn ramp, a loaded disc that keeps hunting RD
+        // re-streams rings and hitchs. Hold unless FPS is critically low
+        // or clearly has headroom to grow.
+        if self.telemetry.stream_elapsed > 6.0 && self.hold_samples >= 4 {
+            let critical = fps > 0.0 && fps < target_fps * 0.55 && hard;
+            let grow = stable
+                && pressure < 0.18
+                && (fps <= 0.0 || fps >= target_fps * 1.05)
+                && self.effective_render_distance > held;
+            if !critical && !grow {
+                self.effective_render_distance = held;
+            }
+        }
+        if self.effective_render_distance == held {
+            self.hold_samples = self.hold_samples.saturating_add(1);
+        } else {
+            self.hold_samples = 0;
         }
 
         self.effective_render_distance.clamp(floor, target)
@@ -910,6 +939,30 @@ mod tests {
             steady.chunks_per_frame < settings.chunks_per_frame,
             "steady LowSpec should stay below the Fast card ceiling"
         );
-        assert!(steady.render_distance <= 24);
+        assert!(steady.render_distance <= 16);
+        assert_eq!(steady.render_distance, 16);
+    }
+
+    #[test]
+    fn auto_settled_horizon_ignores_soft_throttle() {
+        let mut settings = WorldSettings::default();
+        settings.render_distance = 40;
+        settings.runtime_profile = RuntimeProfile::Auto;
+        let mut core = NeuroCore::default();
+        let mut tel = telemetry(60.0, 0.1, RuntimeIntent::Explore);
+        tel.stream_elapsed = 8.0;
+        let mut held = 0i32;
+        for _ in 0..10 {
+            let budget = core.update_budget(&settings, tel.clone(), 0.6);
+            held = budget.render_distance;
+        }
+        tel.fps = 50.0;
+        tel.frame_pressure = (60.0 - 50.0) / 60.0;
+        tel.queue_pressure = 0.20;
+        let after = core.update_budget(&settings, tel, 0.6);
+        assert_eq!(
+            after.render_distance, held,
+            "soft throttle after settle must not re-stream"
+        );
     }
 }
