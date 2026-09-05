@@ -2906,8 +2906,9 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Grass crowns: painting + grass closeup + dual_rivers (hide on fighter sky V).
-    let show_grass = matches!(film.shot_index, 0 | 8 | 9 | 10 | 13);
+    // Grass crowns: painting + grass closeup + waterfall (hide on dual_rivers —
+    // verdant lids were flooding the plasma/lava shelf beat).
+    let show_grass = matches!(film.shot_index, 0 | 8 | 10 | 13);
     for mut vis in grass_fx.iter_mut() {
         *vis = if show_grass {
             Visibility::Visible
@@ -3404,10 +3405,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         9 => {
-            // Dual plasma + lava shelf — stand off so both filaments read
-            // (too-close cam was filling the frame with two solid slabs).
-            let look = deck + Vec3::new(20.0, -16.0, 60.0);
-            let pos = deck + Vec3::new(-28.0, 20.0, 98.0);
+            // Dual plasma + lava shelf — high enough to clear verdant lids.
+            let look = deck + Vec3::new(18.0, -4.0, 72.0);
+            let pos = deck + Vec3::new(-32.0, 32.0, 115.0);
             (pos, look)
         }
         10 => {
@@ -3418,10 +3418,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         11 => {
-            // Fighter swarm: horizontal look at high V against sky (no island floor).
+            // Fighter swarm: closer horizontal look at high V (sky craft only).
             let form = deck + Vec3::new(40.0, 60.0, 18.0);
-            let pos = form + Vec3::new(32.0, 6.0, 42.0);
-            let look = form + Vec3::new(-14.0, 4.0, -2.0);
+            let pos = form + Vec3::new(20.0, 3.0, 26.0);
+            let look = form + Vec3::new(-12.0, 3.0, -1.0);
             (pos, look)
         }
         12 => {
