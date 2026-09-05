@@ -1323,7 +1323,7 @@ fn film_spawn_silhouettes(
             Name::new(format!("FilmLavaRibbon{i}")),
         ));
     }
-    // Painting lower dual lanes — fat cyan + orange beside grass crowns.
+    // Painting lower dual lanes — fat cyan + unmistakable orange lava ABOVE grass.
     for (i, ox) in [-40.0_f32, -26.0, -12.0, 2.0, 16.0, 28.0]
         .into_iter()
         .enumerate()
@@ -1332,8 +1332,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: plasma_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, 6.0, 108.0))
-                    .with_scale(Vec3::new(20.0, 5.5, 8.0))
+                transform: Transform::from_translation(deck + Vec3::new(ox, 12.0, 112.0))
+                    .with_scale(Vec3::new(24.0, 7.0, 10.0))
                     .with_rotation(Quat::from_rotation_y(0.55)),
                 ..default()
             },
@@ -1345,8 +1345,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox + 12.0, 5.0, 100.0))
-                    .with_scale(Vec3::new(22.0, 7.0, 9.0))
+                transform: Transform::from_translation(deck + Vec3::new(ox + 14.0, 11.0, 106.0))
+                    .with_scale(Vec3::new(28.0, 10.0, 12.0))
                     .with_rotation(Quat::from_rotation_y(0.52)),
                 ..default()
             },
@@ -1355,14 +1355,14 @@ fn film_spawn_silhouettes(
             Name::new(format!("FilmLavaPaint{i}")),
         ));
     }
-    // Tall dual sheets for upward painting look (left of green crown).
-    for (i, ox) in [-34.0_f32, -18.0, -2.0, 14.0].into_iter().enumerate() {
+    // Tall dual sheets for upward painting look — rise above crown.
+    for (i, ox) in [-34.0_f32, -18.0, -2.0, 14.0, 30.0].into_iter().enumerate() {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: plasma_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, 8.0, 92.0))
-                    .with_scale(Vec3::new(7.0, 16.0, 22.0)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, 14.0, 98.0))
+                    .with_scale(Vec3::new(9.0, 22.0, 26.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -1373,8 +1373,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox + 10.0, 7.0, 86.0))
-                    .with_scale(Vec3::new(8.0, 18.0, 20.0)),
+                transform: Transform::from_translation(deck + Vec3::new(ox + 12.0, 13.0, 92.0))
+                    .with_scale(Vec3::new(11.0, 26.0, 28.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -3853,19 +3853,20 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         8 => {
-            // Coherent hero: planet upper; mountain mid-right; grass+rivers+skyway+portal left/lower.
+            // Coherent hero: planet upper; mountain mid-right; grass+rivers+skyway left/lower.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-60.0, 42.0, 140.0);
-            let station_mid = deck + Vec3::new(22.0, 30.0, 82.0);
-            let green_crown = deck + Vec3::new(-14.0, 4.0, 108.0);
-            let skyway_mid = deck + Vec3::new(-20.0, 26.0, 98.0);
-            let rivers = deck + Vec3::new(-8.0, 6.0, 100.0);
+            let pos = deck + Vec3::new(-56.0, 40.0, 138.0);
+            let station_mid = deck + Vec3::new(22.0, 32.0, 82.0);
+            let green_crown = deck + Vec3::new(-14.0, 4.0, 110.0);
+            let skyway_mid = deck + Vec3::new(-22.0, 24.0, 100.0);
+            let rivers = deck + Vec3::new(0.0, 12.0, 104.0);
             let planet = pos + planet_dir * 155.0;
+            // Station owns mid-frame; rivers/grass share the lower third.
             let ground = green_crown
-                .lerp(rivers, 0.35)
-                .lerp(skyway_mid, 0.25)
-                .lerp(station_mid, 0.35);
-            let look = ground.lerp(planet, 0.17);
+                .lerp(rivers, 0.4)
+                .lerp(skyway_mid, 0.15)
+                .lerp(station_mid, 0.5);
+            let look = ground.lerp(planet, 0.16);
             (pos, look)
         }
         9 => {
