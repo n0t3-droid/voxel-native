@@ -987,7 +987,12 @@ fn biome_stream_bonus(generator: &TerrainGenerator, cx: i32, cz: i32) -> i32 {
 /// Fast keeps a 6-chunk near field at full materials. Beyond that, opaque
 /// terrain collapses to one draw call. Balanced only collapses the outer
 /// third. Cinematic/High keep the rich far geometry.
-fn chunk_wants_far_lod(graphics: crate::settings::GraphicsMode, render_distance: i32, dx: i32, dz: i32) -> bool {
+fn chunk_wants_far_lod(
+    graphics: crate::settings::GraphicsMode,
+    render_distance: i32,
+    dx: i32,
+    dz: i32,
+) -> bool {
     let d2 = dx * dx + dz * dz;
     match graphics {
         crate::settings::GraphicsMode::Fast => d2 > 6 * 6,
@@ -996,6 +1001,27 @@ fn chunk_wants_far_lod(graphics: crate::settings::GraphicsMode, render_distance:
             d2 > r * r
         }
         crate::settings::GraphicsMode::High => false,
+    }
+}
+
+/// Per-corner AO is what makes nearby voxels read as cubes. Past a short
+/// radius those same dark corners become the flying-distance waffle on
+/// every cliff face. Fast skips AO entirely; cinematic keeps it only in
+/// the near 8 chunks (128 m) so spawn colony detail survives.
+fn chunk_uses_vertex_ao(
+    graphics: crate::settings::GraphicsMode,
+    render_distance: i32,
+    dx: i32,
+    dz: i32,
+) -> bool {
+    let d2 = dx * dx + dz * dz;
+    match graphics {
+        crate::settings::GraphicsMode::Fast => false,
+        crate::settings::GraphicsMode::Balanced => {
+            let r = (render_distance / 2).max(4);
+            d2 <= r * r
+        }
+        crate::settings::GraphicsMode::High => d2 <= 8 * 8,
     }
 }
 
@@ -1410,9 +1436,7 @@ fn stream_chunks(
                     .get(&n)
                     .and_then(|group| group.first())
                     .is_some_and(|entry| entry.far_lod);
-                if already_far
-                    && chunk_wants_far_lod(settings.graphics, rd, n.x - pcx, n.z - pcz)
-                {
+                if already_far && chunk_wants_far_lod(settings.graphics, rd, n.x - pcx, n.z - pcz) {
                     continue;
                 }
             }
@@ -1812,83 +1836,81 @@ fn mesh_dirty_chunks(
         }
         streamer.mesh_candidates_scratch = candidates;
     } else {
-    #[cfg(not(target_arch = "wasm32"))]
-    let pool = AsyncComputeTaskPool::get();
-    let mut slots = max_in_flight - streamer.pending_meshes.len();
-    let mut scheduled_this_frame = 0usize;
+        #[cfg(not(target_arch = "wasm32"))]
+        let pool = AsyncComputeTaskPool::get();
+        let mut slots = max_in_flight - streamer.pending_meshes.len();
+        let mut scheduled_this_frame = 0usize;
 
-    for (_s, pos) in candidates.drain(..) {
-        let dx = pos.x - pcx;
-        let dz = pos.z - pcz;
-        let far_collapse = chunk_wants_far_lod(graphics, rd, dx, dz);
-        if slots == 0 || scheduled_this_frame >= schedule_budget {
-            streamer.dirty_queue.insert(pos);
-            continue;
-        }
-        let fast_skip = uniform_chunk_is_trivially_invisible(&mut world, pos, vertical_chunks);
-        if fast_skip {
-            despawn_streamer_chunk_meshes(&mut commands, &mut meshes, &mut streamer, pos);
+        for (_s, pos) in candidates.drain(..) {
+            let dx = pos.x - pcx;
+            let dz = pos.z - pcz;
+            let far_collapse = chunk_wants_far_lod(graphics, rd, dx, dz);
+            if slots == 0 || scheduled_this_frame >= schedule_budget {
+                streamer.dirty_queue.insert(pos);
+                continue;
+            }
+            let fast_skip = uniform_chunk_is_trivially_invisible(&mut world, pos, vertical_chunks);
+            if fast_skip {
+                despawn_streamer_chunk_meshes(&mut commands, &mut meshes, &mut streamer, pos);
+                if let Some(c) = world.chunks.get_mut(&pos) {
+                    c.dirty = false;
+                }
+                continue;
+            }
+
+            let snap = ChunkSnapshot::build(&world, pos);
+
+            // Mark clean BEFORE the task starts so a second mutation during
+            // meshing will still re-flag the chunk as dirty.
             if let Some(c) = world.chunks.get_mut(&pos) {
                 c.dirty = false;
             }
-            continue;
-        }
 
-        let snap = ChunkSnapshot::build(&world, pos);
+            // LOD: skip per-corner AO past `lod_radius`. Fast also collapses
+            // opaque far chunks to one draw call (vertex-tinted + emissives).
+            let use_ao = chunk_uses_vertex_ao(graphics, rd, dx, dz);
 
-        // Mark clean BEFORE the task starts so a second mutation during
-        // meshing will still re-flag the chunk as dirty.
-        if let Some(c) = world.chunks.get_mut(&pos) {
-            c.dirty = false;
-        }
-
-        // LOD: skip per-corner AO past `lod_radius`. Fast also collapses
-        // opaque far chunks to one draw call (vertex-tinted + emissives).
-        let lod_radius = (rd / 2).max(4);
-        let use_ao = graphics != crate::settings::GraphicsMode::Fast
-            && dx * dx + dz * dz <= lod_radius * lod_radius;
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let buckets = build_mesh_buckets_ex(
-                pos,
-                |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
-                use_ao,
-                far_collapse,
-            );
-            apply_mesh_buckets_now(
-                &mut commands,
-                &mut meshes,
-                &mut streamer,
-                &material_library,
-                &budget,
-                pcx,
-                pcz,
-                pos,
-                buckets,
-                far_collapse,
-            );
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let task = pool.spawn(async move {
+            #[cfg(target_arch = "wasm32")]
+            {
                 let buckets = build_mesh_buckets_ex(
                     pos,
                     |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
                     use_ao,
                     far_collapse,
                 );
-                (pos, buckets, far_collapse)
-            });
-            streamer.pending_meshes.insert(pos, task);
+                apply_mesh_buckets_now(
+                    &mut commands,
+                    &mut meshes,
+                    &mut streamer,
+                    &material_library,
+                    &budget,
+                    pcx,
+                    pcz,
+                    pos,
+                    buckets,
+                    far_collapse,
+                );
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let task = pool.spawn(async move {
+                    let buckets = build_mesh_buckets_ex(
+                        pos,
+                        |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
+                        use_ao,
+                        far_collapse,
+                    );
+                    (pos, buckets, far_collapse)
+                });
+                streamer.pending_meshes.insert(pos, task);
+            }
+            slots -= 1;
+            scheduled_this_frame += 1;
         }
-        slots -= 1;
-        scheduled_this_frame += 1;
-    }
 
-    // Return the scratch buffer to the resource so it keeps its
-    // allocated capacity for next frame.
-    streamer.mesh_candidates_scratch = candidates;
+        // Return the scratch buffer to the resource so it keeps its
+        // allocated capacity for next frame.
+        streamer.mesh_candidates_scratch = candidates;
     }
 
     // 3. Clean up orphaned mesh entities whose chunk has streamed out.
@@ -2343,6 +2365,22 @@ mod tests {
             20,
             0
         ));
+        assert!(!chunk_uses_vertex_ao(
+            crate::settings::GraphicsMode::Fast,
+            16,
+            2,
+            0
+        ));
+        assert!(chunk_uses_vertex_ao(
+            crate::settings::GraphicsMode::High,
+            32,
+            4,
+            0
+        ));
+        assert!(
+            !chunk_uses_vertex_ao(crate::settings::GraphicsMode::High, 32, 12, 0),
+            "cinematic far cliffs must drop vertex AO or they waffle"
+        );
         assert!(skip_fast_deep_far(true, true, 0, 6));
         assert!(!skip_fast_deep_far(true, true, 4, 6));
         assert!(!skip_fast_deep_far(true, false, 0, 6));

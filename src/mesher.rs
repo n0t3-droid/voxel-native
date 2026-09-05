@@ -631,21 +631,35 @@ fn emit_quad(
 
     // UVs: emit in block-space, matching the position order. The sampler
     // wraps (Repeat), so a W×H greedy-merged quad tiles the grain
-    // texture W×H times — one copy per block. This is the trick that
-    // lets us keep greedy meshing AND get per-block texture detail
-    // without a custom shader.
+    // texture W×H times — one copy per block. Half-texel inset keeps
+    // bilinear taps off the wrap seam so neighbours cannot bleed a
+    // dark lip back into the face (the atlas-waffle that anisotropy
+    // alone did not kill).
     let wf = w as f32;
     let hf = h as f32;
+    let pad = 0.5 / 128.0;
     if positive {
-        uvs.extend_from_slice(&[[0.0, 0.0], [wf, 0.0], [wf, hf], [0.0, hf]]);
+        uvs.extend_from_slice(&[
+            [pad, pad],
+            [wf - pad, pad],
+            [wf - pad, hf - pad],
+            [pad, hf - pad],
+        ]);
     } else {
-        uvs.extend_from_slice(&[[0.0, 0.0], [0.0, hf], [wf, hf], [wf, 0.0]]);
+        uvs.extend_from_slice(&[
+            [pad, pad],
+            [pad, hf - pad],
+            [wf - pad, hf - pad],
+            [wf - pad, pad],
+        ]);
     }
 
     // AO -> brightness multiplier. 0 (deeply occluded) → dim; 3 (open
     // air) → full colour. Combined with a face-light term below so
     // chunky voxel silhouettes read like shaped objects, not flat tiles.
-    const AO_MUL: [f32; 4] = [0.42, 0.64, 0.84, 1.04];
+    // Darkest corner used to be 0.42 — that read as grout around every
+    // voxel once the face was a few pixels wide.
+    const AO_MUL: [f32; 4] = [0.58, 0.74, 0.90, 1.04];
     let emissive = voxel_is_emissive(voxel);
     let base_color = if material_is_custom(material) {
         [1.0, 1.0, 1.0, 1.0]
@@ -728,7 +742,10 @@ mod tests {
         let cyan = neighbor_glow(&sample, 0, 0, 0, stone);
         assert_eq!(cyan, 3, "crystal + lava should set both bits, got {cyan}");
         let diag = neighbor_glow(&sample, 2, 0, 1, stone);
-        assert_eq!(diag, 1, "xz-diagonal crystal should still paint cyan, got {diag}");
+        assert_eq!(
+            diag, 1,
+            "xz-diagonal crystal should still paint cyan, got {diag}"
+        );
         let none = neighbor_glow(&sample, 8, 8, 8, stone);
         assert_eq!(none, 0);
         let skip = neighbor_glow(&sample, 0, 0, 0, crystal);
