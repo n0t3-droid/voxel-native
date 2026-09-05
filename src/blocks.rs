@@ -798,16 +798,17 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         22 => {
             // Lava — hot orange curtains. Keep blue near-zero so ACES
             // cannot wash the sheet into cream.
-            c[0] *= 3.40;
-            c[1] *= 1.55;
-            c[2] *= 0.10;
+            c[0] *= 4.10;
+            c[1] *= 1.85;
+            c[2] *= 0.04;
         }
         20 => {
-            // Crystal — R stays near zero so golden-hour ACES cannot
-            // grey the shard. G/B stay in the glow band, not the clip.
-            c[0] *= 0.08;
-            c[1] *= 1.65;
-            c[2] *= 2.05;
+            // Crystal — R stays at zero so golden-hour ACES cannot
+            // grey the shard. G/B sit below the ACES clip so dusk
+            // does not crush the pair toward white (which reintroduces R).
+            c[0] *= 0.00;
+            c[1] *= 1.18;
+            c[2] *= 1.52;
         }
         23 => {
             // AlienMoss — bioluminescent magenta/violet. The multiplier
@@ -828,9 +829,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             // Neon cyan rim — chromatic, below crystal so shards stay
             // the left-third hero. Soft enough that river banks don't
             // clip to white next to plasma.
-            c[0] *= 0.04;
-            c[1] *= 1.20;
-            c[2] *= 1.55;
+            c[0] *= 0.00;
+            c[1] *= 0.92;
+            c[2] *= 1.22;
         }
         30 => {
             c[0] *= 2.6;
@@ -856,10 +857,11 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 1.25;
         }
         33 => {
-            // Luminite — brilliant aquamarine shard core.
-            c[0] *= 0.06;
-            c[1] *= 1.70;
-            c[2] *= 2.15;
+            // Luminite — aquamarine shard core, same dusk-cyan budget
+            // as Crystal so mixed shards stay one hue family.
+            c[0] *= 0.00;
+            c[1] *= 1.22;
+            c[2] *= 1.58;
         }
         34 => {
             // Magnetite — hot ember orange, reads as ore against cyan crystal.
@@ -874,11 +876,11 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             c[2] *= 4.6;
         }
         38 => {
-            // Plasma river — glowing cyan ribbon. Keep all channels
-            // below the ACES clip so it does not bloom to white.
-            c[0] *= 0.04;
-            c[1] *= 1.18;
-            c[2] *= 1.48;
+            // Plasma river — glowing cyan ribbon. Peak stays well below
+            // the ACES clip so dusk cannot crush it to pale grey-white.
+            c[0] *= 0.00;
+            c[1] *= 0.82;
+            c[2] *= 1.12;
         }
         39 => {
             // Magenta crystal — hot pink hero shards.
@@ -957,10 +959,14 @@ mod tests {
         let plasma = voxel_color(BlockType::PlasmaFlow.into());
         let plasma_peak = plasma[0].max(plasma[1]).max(plasma[2]);
         assert!(
-            plasma_peak < 1.55,
+            plasma_peak < 1.25,
             "plasma vertex peak {plasma_peak:.3} will bloom to white"
         );
         assert!(plasma[2] > plasma[0] * 8.0);
+        assert!(
+            cyan[0] < 0.02,
+            "crystal vertex still has dusk-warming red ({cyan:?})"
+        );
     }
 
     #[test]

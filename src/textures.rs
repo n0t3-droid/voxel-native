@@ -740,9 +740,9 @@ fn albedo_for_block(block: BlockType, alpha: f32) -> Color {
         BlockType::Crystal
         | BlockType::LuminiteCrystal
         | BlockType::PlasmaFlow
-        | BlockType::NeonCyan => Color::srgba(0.02, 0.07, 0.09, alpha),
-        BlockType::CrystalMagenta => Color::srgba(0.09, 0.02, 0.07, alpha),
-        BlockType::Lava => Color::srgba(0.10, 0.03, 0.01, alpha),
+        | BlockType::NeonCyan => Color::srgba(0.01, 0.05, 0.07, alpha),
+        BlockType::CrystalMagenta => Color::srgba(0.08, 0.01, 0.06, alpha),
+        BlockType::Lava => Color::srgba(0.12, 0.03, 0.00, alpha),
         _ => Color::WHITE.with_alpha(alpha),
     }
 }
@@ -756,10 +756,10 @@ fn emissive_for_block(block: BlockType) -> LinearRgba {
     }
     let lin = block.color().to_linear();
     match block {
-        BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(0.00, 1.55, 2.05),
-        BlockType::CrystalMagenta => LinearRgba::rgb(1.85, 0.12, 1.45),
-        BlockType::PlasmaFlow | BlockType::NeonCyan => LinearRgba::rgb(0.00, 1.22, 1.58),
-        BlockType::Lava => LinearRgba::rgb(lin.red * 4.40, lin.green * 1.70, 0.02),
+        BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(0.00, 0.92, 1.22),
+        BlockType::CrystalMagenta => LinearRgba::rgb(1.75, 0.10, 1.35),
+        BlockType::PlasmaFlow | BlockType::NeonCyan => LinearRgba::rgb(0.00, 0.68, 0.94),
+        BlockType::Lava => LinearRgba::rgb(lin.red * 5.20, lin.green * 2.05, 0.00),
         _ => LinearRgba::rgb(
             lin.red * 3.2 + 0.35,
             lin.green * 3.2 + 0.35,
@@ -1064,7 +1064,7 @@ mod tests {
         let plasma = emissive_for_block(BlockType::PlasmaFlow);
         let peak = plasma.red.max(plasma.green).max(plasma.blue);
         assert!(
-            peak < 1.6,
+            peak < 1.15,
             "plasma emissive peak {peak:.3} will ACES-clip to white"
         );
         assert!(plasma.blue > plasma.red * 3.0);
