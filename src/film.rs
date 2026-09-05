@@ -875,7 +875,20 @@ fn stamp_film_vista_island(
                 }
             }
             // Sparse hanging tip spikes for organic read (not a flat slab).
-            if edge < 0.35 && ((dx + dz * 2) % 5 == 0) {
+            if edge < 0.42 && ((dx + dz * 2) % 3 == 0) {
+                for extra in 1..=3 {
+                    let y = deck_y - thickness - extra;
+                    let tip = if (extra + dx.abs()) % 2 == 0 {
+                        accent
+                    } else {
+                        BlockType::Crystal
+                    };
+                    let _ = world.edit_set_voxel(x, y, z, tip.into());
+                    n += 1;
+                }
+            }
+            // Rim cluster hangers — denser organic keel silhouette.
+            if edge > 0.55 && edge < 0.92 && ((dx * 2 + dz * 3) % 4 == 0) {
                 for extra in 1..=2 {
                     let y = deck_y - thickness - extra;
                     let _ = world.edit_set_voxel(x, y, z, accent.into());
@@ -1397,20 +1410,31 @@ fn film_spawn_silhouettes(
         }
     }
     // Extra multi-spike clusters under mid-right island rims (organic keel read).
-    for (ci, (cx, cz)) in [(26.0_f32, 76.0), (38.0, 68.0), (16.0, 84.0), (44.0, 78.0)]
-        .into_iter()
-        .enumerate()
+    for (ci, (cx, cz)) in [
+        (26.0_f32, 76.0),
+        (38.0, 68.0),
+        (16.0, 84.0),
+        (44.0, 78.0),
+        (30.0, 88.0),
+        (20.0, 70.0),
+        (50.0, 72.0),
+        (12.0, 80.0),
+    ]
+    .into_iter()
+    .enumerate()
     {
         for (si, (ox, oz, lean)) in [
             (0.0_f32, 0.0, 0.4),
             (2.2, 1.4, -0.55),
             (-1.8, 1.8, 0.7),
             (1.2, -2.0, -0.45),
+            (-2.4, -1.2, 0.5),
+            (2.8, 0.6, -0.6),
         ]
         .into_iter()
         .enumerate()
         {
-            let h = 6.0 + si as f32 * 1.4;
+            let h = 7.0 + si as f32 * 1.5;
             commands.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
@@ -1420,9 +1444,9 @@ fn film_spawn_silhouettes(
                         crystal_b.clone()
                     },
                     transform: Transform::from_translation(
-                        deck + Vec3::new(cx + ox, -5.0 - h * 0.5, cz + oz),
+                        deck + Vec3::new(cx + ox, -5.5 - h * 0.5, cz + oz),
                     )
-                    .with_scale(Vec3::new(0.7, h, 0.7))
+                    .with_scale(Vec3::new(0.85, h, 0.85))
                     .with_rotation(Quat::from_euler(
                         EulerRot::ZYX,
                         lean,
@@ -1907,18 +1931,18 @@ fn film_spawn_silhouettes(
         Color::srgb(0.55, 0.58, 0.65),
         LinearRgba::rgb(0.4, 0.45, 0.55),
     ));
-    // Dimmer skyway cyan — keep left-mid PASS without washing other planes.
+    // Dimmer skyway cyan — thinner glow so other planes compete (still PASS).
     let skyway_cyan = materials.add(sil_mat(
-        Color::srgb(0.28, 0.82, 0.90),
-        LinearRgba::rgb(0.7, 3.2, 3.8),
+        Color::srgb(0.32, 0.78, 0.86),
+        LinearRgba::rgb(0.45, 2.2, 2.6),
     ));
     let shuttle_hull = materials.add(sil_mat(
-        Color::srgb(0.92, 0.94, 0.97),
-        LinearRgba::rgb(1.1, 1.2, 1.4),
+        Color::srgb(0.94, 0.96, 0.98),
+        LinearRgba::rgb(1.4, 1.5, 1.7),
     ));
     let shuttle_canopy = materials.add(sil_mat(
-        Color::srgb(0.45, 0.98, 1.0),
-        LinearRgba::rgb(2.0, 5.5, 6.5),
+        Color::srgb(0.40, 0.98, 1.0),
+        LinearRgba::rgb(2.4, 6.5, 7.5),
     ));
     spawn_film_skyway_and_shuttle_proxy(
         &mut commands,
@@ -2615,13 +2639,18 @@ fn spawn_film_fighter_swarm(
         (45.0, 57.0, 30.0, -0.35, 1.2, true),
         (35.0, 58.0, 16.0, -0.48, 1.3, true),
         (55.0, 55.0, 26.0, -0.42, 1.15, true),
-        // Painting wing — upper mid-right sky above mountain shoulder (not left cyan).
-        (18.0_f32, 52.0, 78.0, -0.55, 2.35, false),
-        (28.0, 56.0, 72.0, -0.45, 2.45, false),
-        (38.0, 54.0, 82.0, -0.50, 2.30, false),
-        (12.0, 50.0, 68.0, -0.60, 2.25, false),
-        (46.0, 58.0, 76.0, -0.40, 2.40, false),
-        (22.0, 48.0, 88.0, -0.52, 2.20, false),
+        // Painting wing — larger + nearer cam so silhouettes survive hero distance.
+        (8.0_f32, 38.0, 118.0, -0.55, 3.6, false),
+        (20.0, 42.0, 112.0, -0.45, 3.8, false),
+        (32.0, 40.0, 122.0, -0.50, 3.5, false),
+        (-4.0, 36.0, 108.0, -0.60, 3.4, false),
+        (40.0, 46.0, 104.0, -0.40, 3.3, false),
+        (14.0, 34.0, 126.0, -0.52, 3.7, false),
+        // Mid painting wing (still upper mid-right, clearer than skyway).
+        (18.0_f32, 52.0, 78.0, -0.55, 2.6, false),
+        (28.0, 56.0, 72.0, -0.45, 2.7, false),
+        (38.0, 54.0, 82.0, -0.50, 2.55, false),
+        (46.0, 58.0, 76.0, -0.40, 2.65, false),
     ]
     .into_iter()
     .enumerate()
@@ -3066,18 +3095,18 @@ fn spawn_film_skyway_and_shuttle_proxy(
     canopy: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Four thinner left-mid spans — keep skyway PASS without crushing other planes.
+    // Four Y-spaced thin spans — readable skyway without a solid left cyan wall.
     for (i, (ax, az, bx, bz, y)) in [
-        (-34.0_f32, 106.0, -4.0, 92.0, 18.0),
-        (-26.0, 114.0, 0.0, 98.0, 28.0),
-        (-18.0, 98.0, -6.0, 88.0, 38.0),
-        (-38.0, 94.0, -10.0, 104.0, 48.0),
+        (-36.0_f32, 108.0, -8.0, 94.0, 14.0),
+        (-28.0, 116.0, -2.0, 100.0, 30.0),
+        (-20.0, 100.0, -10.0, 90.0, 46.0),
+        (-40.0, 92.0, -12.0, 106.0, 62.0),
     ]
     .into_iter()
     .enumerate()
     {
         let a = deck + Vec3::new(ax, y, az);
-        let b = deck + Vec3::new(bx, y + 1.5, bz);
+        let b = deck + Vec3::new(bx, y + 1.2, bz);
         let mid = a.lerp(b, 0.5);
         let len = a.distance(b).max(10.0);
         let dir = (b - a).normalize_or_zero();
@@ -3087,7 +3116,7 @@ fn spawn_film_skyway_and_shuttle_proxy(
                 material: deck_mat.clone(),
                 transform: Transform::from_translation(mid)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(3.4, 1.4, len)),
+                    .with_scale(Vec3::new(2.6, 1.1, len)),
                 ..default()
             },
             FilmSilhouette,
@@ -3098,9 +3127,9 @@ fn spawn_film_skyway_and_shuttle_proxy(
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mid + Vec3::Y * 1.1)
+                transform: Transform::from_translation(mid + Vec3::Y * 0.9)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(1.15, 1.6, len * 0.98)),
+                    .with_scale(Vec3::new(0.85, 1.2, len * 0.98)),
                 ..default()
             },
             FilmSilhouette,
@@ -3108,59 +3137,60 @@ fn spawn_film_skyway_and_shuttle_proxy(
             Name::new(format!("FilmSkywayRail{i}")),
         ));
     }
-    // Articulated shuttle — hull + nose + canopy + wing + fin + short plumes.
-    let shuttle = deck + Vec3::new(-18.0, 28.0, 98.0);
+    // Near-cam articulated shuttle — larger so hero-distance silhouette survives.
+    let shuttle = deck + Vec3::new(-34.0, 30.0, 120.0);
     let yaw = -0.55_f32;
     let rot = Quat::from_rotation_y(yaw);
     let plume_dir = rot * Vec3::new(-1.0, 0.0, 0.0);
     let fwd = rot * Vec3::new(1.0, 0.0, 0.0);
+    let s = 1.55_f32;
     for (mat, tf, name) in [
         (
             hull.clone(),
             Transform::from_translation(shuttle)
-                .with_scale(Vec3::new(22.0, 7.0, 9.0))
+                .with_scale(Vec3::new(24.0 * s, 7.5 * s, 10.0 * s))
                 .with_rotation(rot),
             "FilmShuttleProxyHull",
         ),
         (
             hull.clone(),
-            Transform::from_translation(shuttle + fwd * 14.0 + Vec3::Y * 0.5)
-                .with_scale(Vec3::new(10.0, 4.5, 5.5))
+            Transform::from_translation(shuttle + fwd * (16.0 * s) + Vec3::Y * 0.6)
+                .with_scale(Vec3::new(11.0 * s, 5.0 * s, 6.0 * s))
                 .with_rotation(rot),
             "FilmShuttleProxyNose",
         ),
         (
             canopy.clone(),
-            Transform::from_translation(shuttle + fwd * 4.0 + Vec3::Y * 4.2)
-                .with_scale(Vec3::new(8.0, 3.2, 5.0))
+            Transform::from_translation(shuttle + fwd * (5.0 * s) + Vec3::Y * (4.8 * s))
+                .with_scale(Vec3::new(9.0 * s, 3.6 * s, 5.5 * s))
                 .with_rotation(rot),
             "FilmShuttleProxyCanopy",
         ),
         (
             hull.clone(),
             Transform::from_translation(shuttle)
-                .with_scale(Vec3::new(8.0, 1.8, 22.0))
+                .with_scale(Vec3::new(9.0 * s, 2.0 * s, 26.0 * s))
                 .with_rotation(rot),
             "FilmShuttleProxyWing",
         ),
         (
             hull.clone(),
-            Transform::from_translation(shuttle + plume_dir * 4.0 + Vec3::Y * 5.5)
-                .with_scale(Vec3::new(1.2, 6.5, 4.0))
+            Transform::from_translation(shuttle + plume_dir * (5.0 * s) + Vec3::Y * (6.5 * s))
+                .with_scale(Vec3::new(1.4 * s, 7.5 * s, 4.5 * s))
                 .with_rotation(rot),
             "FilmShuttleProxyFin",
         ),
         (
             cyan.clone(),
-            Transform::from_translation(shuttle + plume_dir * 18.0)
-                .with_scale(Vec3::new(22.0, 3.8, 3.8))
+            Transform::from_translation(shuttle + plume_dir * (20.0 * s))
+                .with_scale(Vec3::new(20.0 * s, 3.2 * s, 3.2 * s))
                 .with_rotation(rot),
             "FilmShuttleProxyPlume",
         ),
         (
             cyan.clone(),
-            Transform::from_translation(shuttle + plume_dir * 12.0 + Vec3::Y * 2.5)
-                .with_scale(Vec3::new(14.0, 2.4, 2.4))
+            Transform::from_translation(shuttle + plume_dir * (14.0 * s) + Vec3::Y * (2.8 * s))
+                .with_scale(Vec3::new(12.0 * s, 2.2 * s, 2.2 * s))
                 .with_rotation(rot),
             "FilmShuttleProxyPlumeB",
         ),
@@ -3179,7 +3209,6 @@ fn spawn_film_skyway_and_shuttle_proxy(
         ));
     }
 }
-
 fn spawn_film_grass_caps(
     commands: &mut Commands,
     cube: &Handle<Mesh>,
@@ -3447,6 +3476,12 @@ const SHOTS: &[FilmShot] = &[
     FilmShot {
         name: "skyway_shuttle",
     },
+    FilmShot {
+        name: "craft_closeup",
+    },
+    FilmShot {
+        name: "keel_closeup",
+    },
 ];
 
 fn film_toggle_helpers(
@@ -3701,8 +3736,8 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Organic tapers/spikes visible on keel beat + painting (not solid slabs).
-    let show_keel_organic = matches!(film.shot_index, 1 | 8);
+    // Organic tapers/spikes visible on keel beat + painting + closeup.
+    let show_keel_organic = matches!(film.shot_index, 1 | 8 | 16);
     for mut vis in keel_organic.iter_mut() {
         *vis = if show_keel_organic {
             Visibility::Visible
@@ -3743,10 +3778,10 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Fighters: painting wing + dedicated sky — NOT combat_pad.
+    // Fighters: painting wing + dedicated sky + craft closeup — NOT combat_pad.
     for (mut vis, sky) in fighter_fx.iter_mut() {
         let show = match film.shot_index {
-            8 => true,
+            8 | 15 => true,
             11 => sky.is_some(),
             _ => false,
         };
@@ -3795,8 +3830,8 @@ fn film_toggle_helpers(
             Visibility::Hidden
         };
     }
-    // Skyway spans + cyan-plume shuttle proxy: painting, shuttle perch, dedicated.
-    let show_skyway = matches!(film.shot_index, 6 | 8 | 14);
+    // Skyway spans + cyan-plume shuttle proxy: painting, shuttle perch, dedicated, closeup.
+    let show_skyway = matches!(film.shot_index, 6 | 8 | 14 | 15);
     for mut vis in skyway_fx.iter_mut() {
         *vis = if show_skyway {
             Visibility::Visible
@@ -3911,6 +3946,8 @@ fn film_drive_camera(
             12 => 44.0, // crystal tower side elevation
             13 => 50.0, // station mountain stand-off
             14 => 48.0, // skyway span + cyan plume shuttle
+            15 => 40.0, // craft closeup — shuttle/fighter silhouette
+            16 => 42.0, // keel closeup — organic hanging clusters
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -3928,6 +3965,8 @@ fn film_drive_camera(
             12 => 0.14, // crystal emissives
             13 => 0.12, // station neon crown
             14 => 0.14, // skyway cyan plumes
+            15 => 0.12, // craft closeup
+            16 => 0.10, // keel crystal emissives
             _ => 0.05,
         };
         bloom.prefilter_settings.threshold = match film.shot_index {
@@ -3935,6 +3974,7 @@ fn film_drive_camera(
             6 => 0.62, // tame pink/white bloom around nozzles
             8 => 0.70,
             14 => 0.58,
+            15 => 0.60,
             _ => 0.55,
         };
     }
@@ -4279,10 +4319,10 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         6 => {
-            // Hero shuttle REAR-QUARTER on elevated left-mid painting perch.
-            let shuttle = deck + Vec3::new(-18.0, 28.0, 98.0);
-            let pos = shuttle + Vec3::new(18.0, 6.0, 16.0);
-            let look = shuttle + Vec3::new(-8.0, 1.0, -2.0);
+            // Hero shuttle REAR-QUARTER — near-cam perch for silhouette read.
+            let shuttle = deck + Vec3::new(-34.0, 30.0, 120.0);
+            let pos = shuttle + Vec3::new(22.0, 8.0, 18.0);
+            let look = shuttle + Vec3::new(-10.0, 1.0, -2.0);
             (pos, look)
         }
         7 => {
@@ -4299,11 +4339,11 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             let pos = deck + Vec3::new(-58.0, 40.0, 142.0);
             let station_mid = deck + Vec3::new(28.0, 28.0, 74.0);
             let green_crown = deck + Vec3::new(-16.0, 5.0, 108.0);
-            let skyway_mid = deck + Vec3::new(-22.0, 26.0, 96.0);
+            let skyway_mid = deck + Vec3::new(-30.0, 30.0, 118.0);
             let rivers = deck + Vec3::new(-22.0, 8.0, 100.0);
             let portal = deck + Vec3::new(10.0, 22.0, 95.0);
             let fall = deck + Vec3::new(52.0, 10.0, 130.0);
-            let fighters = deck + Vec3::new(28.0, 54.0, 76.0);
+            let fighters = deck + Vec3::new(14.0, 40.0, 118.0);
             let planet = pos + planet_dir * 155.0;
             let ground = green_crown
                 .lerp(skyway_mid, 0.10)
@@ -4349,11 +4389,25 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             let look = station;
             (pos, look)
         }
+        14 => {
+            // Skyway + shuttle — rear-quarter of near-cam cyan-plume craft.
+            let shuttle = deck + Vec3::new(-34.0, 30.0, 120.0);
+            let pos = shuttle + Vec3::new(36.0, 16.0, 38.0);
+            let look = shuttle + Vec3::new(-8.0, 2.0, -10.0);
+            (pos, look)
+        }
+        15 => {
+            // Craft closeup — shuttle + near fighters for silhouette proof.
+            let shuttle = deck + Vec3::new(-34.0, 30.0, 120.0);
+            let pos = shuttle + Vec3::new(28.0, 10.0, 24.0);
+            let look = shuttle + Vec3::new(-4.0, 2.0, -2.0);
+            (pos, look)
+        }
         _ => {
-            // Skyway + shuttle — rear-quarter of cyan-plume craft over spans.
-            let shuttle = deck + Vec3::new(-18.0, 28.0, 98.0);
-            let pos = shuttle + Vec3::new(32.0, 14.0, 34.0);
-            let look = shuttle + Vec3::new(-6.0, 2.0, -8.0);
+            // Keel closeup — organic hanging clusters under mid-right island rim.
+            let keel = deck + Vec3::new(26.0, -2.0, 76.0);
+            let pos = deck + Vec3::new(8.0, 6.0, 98.0);
+            let look = keel;
             (pos, look)
         }
     }
@@ -4539,6 +4593,8 @@ mod tests {
         assert!(names.iter().any(|n| n.contains("waterfall")));
         assert!(names.iter().any(|n| n.contains("crystal")));
         assert!(names.iter().any(|n| n.contains("rail")));
+        assert!(names.iter().any(|n| n.contains("craft_closeup")));
+        assert!(names.iter().any(|n| n.contains("keel_closeup")));
     }
 
     #[test]
