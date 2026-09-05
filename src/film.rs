@@ -928,20 +928,20 @@ fn film_spawn_silhouettes(
     let flush_y = -2.4_f32; // just under grass / kept solids
     let deep_y = -(keel.max(8.0) * 0.85);
     let crystal_plate = materials.add(sil_mat(
-        Color::srgb(0.55, 0.98, 1.0),
-        LinearRgba::rgb(3.5, 8.5, 9.5),
+        Color::srgb(0.42, 0.88, 0.95),
+        LinearRgba::rgb(1.0, 3.2, 3.8),
     ));
     let verdant_plate = materials.add(sil_mat(
-        Color::srgb(0.35, 0.92, 0.55),
-        LinearRgba::rgb(0.6, 4.2, 1.8),
+        Color::srgb(0.32, 0.85, 0.48),
+        LinearRgba::rgb(0.4, 2.8, 1.2),
     ));
     let alloy_plate = materials.add(sil_mat(
-        Color::srgb(0.78, 0.74, 0.62),
-        LinearRgba::rgb(0.45, 0.40, 0.28),
+        Color::srgb(0.82, 0.78, 0.58),
+        LinearRgba::rgb(1.1, 0.95, 0.55),
     ));
     let luminite_plate = materials.add(sil_mat(
-        Color::srgb(0.55, 1.0, 0.98),
-        LinearRgba::rgb(2.5, 7.0, 7.5),
+        Color::srgb(0.48, 0.95, 0.92),
+        LinearRgba::rgb(1.2, 3.5, 3.6),
     ));
     let rx = (island.radius_x as f32).max(18.0);
     let rz = (island.radius_z as f32).max(16.0);
@@ -1536,7 +1536,7 @@ fn film_toggle_helpers(
     if !film.enabled || film.finished {
         return;
     }
-    let show_keel = matches!(film.shot_index, 1 | 7);
+    let show_keel = matches!(film.shot_index, 1 | 7 | 0 | 8);
     for mut vis in keel_helpers.iter_mut() {
         *vis = if show_keel {
             Visibility::Visible
@@ -1963,12 +1963,12 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Three-quarter rim: eye just outside at deck height so grass lawn
-            // reads on top while the unlit keel volume drops away below.
+            // Three-quarter rim pulled back: grass lawn + cyan keel volume
+            // without stuffing the lens into a neighboring black silhouette.
             let rx = island.radius_x as f32;
             let rz = island.radius_z as f32;
-            let pos = deck + Vec3::new(rx * 0.55 + 16.0, 4.5, rz * 0.65 + 18.0);
-            let look = deck + Vec3::new(-2.0, -3.5, 2.0);
+            let pos = deck + Vec3::new(rx + 20.0, 7.0, rz + 26.0);
+            let look = deck + Vec3::new(-1.0, -2.5, 4.0);
             (pos, look)
         }
         2 => {
