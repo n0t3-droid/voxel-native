@@ -2781,17 +2781,17 @@ fn spawn_film_grass_caps(
     // Thick verdant crowns — lids + cliff faces toward painting cam (SW looking NE).
     // Flat lids alone foreshorten under the upward planet look.
     for (i, (ox, oz, w, d, lift)) in [
-        // Near-cam mega crown (painting pos z≈128) — fill lower third green
-        (-8.0_f32, 96.0, 42.0, 32.0, 8.0),
-        (18.0, 92.0, 36.0, 28.0, 7.0),
-        (-30.0, 90.0, 30.0, 24.0, 6.0),
-        (8.0, 84.0, 34.0, 26.0, 7.5),
-        (32.0, 88.0, 28.0, 22.0, 6.5),
-        (-18.0, 80.0, 26.0, 22.0, 5.0),
-        (10.0, 72.0, 24.0, 20.0, 4.0),
-        (28.0, 76.0, 22.0, 18.0, 4.5),
-        (-6.0, 68.0, 20.0, 16.0, 3.0),
-        (40.0, 70.0, 18.0, 16.0, 3.5),
+        // Near-cam mega crown (painting pos z≈138) — fill lower third green
+        (-12.0_f32, 108.0, 52.0, 40.0, 6.0),
+        (10.0, 104.0, 46.0, 36.0, 5.5),
+        (-32.0, 100.0, 40.0, 32.0, 5.0),
+        (8.0, 94.0, 42.0, 34.0, 6.0),
+        (28.0, 98.0, 36.0, 28.0, 5.0),
+        (-18.0, 90.0, 34.0, 28.0, 4.5),
+        (10.0, 82.0, 30.0, 24.0, 4.0),
+        (28.0, 86.0, 28.0, 22.0, 4.0),
+        (-6.0, 76.0, 26.0, 20.0, 3.0),
+        (40.0, 80.0, 24.0, 20.0, 3.5),
     ]
     .into_iter()
     .enumerate()
@@ -3837,13 +3837,14 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         8 => {
             // Painting: planet upper; wide mountain station mid-right; grass+skyway left.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-58.0, 44.0, 135.0);
-            let station_mid = deck + Vec3::new(34.0, 32.0, 70.0);
-            let green_crown = deck + Vec3::new(-10.0, 6.0, 102.0);
+            let pos = deck + Vec3::new(-58.0, 40.0, 138.0);
+            let station_mid = deck + Vec3::new(34.0, 30.0, 70.0);
+            let green_crown = deck + Vec3::new(-12.0, 4.0, 105.0);
             let skyway_mid = deck + Vec3::new(-18.0, 26.0, 96.0);
             let planet = pos + planet_dir * 155.0;
-            let ground = green_crown.lerp(skyway_mid, 0.35).lerp(station_mid, 0.4);
-            let look = ground.lerp(planet, 0.2);
+            // Weight grass a bit more so verdant crown survives mid-frame mountain.
+            let ground = green_crown.lerp(skyway_mid, 0.28).lerp(station_mid, 0.32);
+            let look = ground.lerp(planet, 0.18);
             (pos, look)
         }
         9 => {
