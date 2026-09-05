@@ -775,7 +775,7 @@ mod tests {
         let grass: Voxel = BlockType::Grass.into();
         let stone: Voxel = BlockType::Stone.into();
         let crystal: Voxel = BlockType::Crystal.into();
-        let sample = |wx: i32, wy: i32, wz: i32| -> (Voxel, MaterialId) {
+        let sample = |_wx: i32, wy: i32, wz: i32| -> (Voxel, MaterialId) {
             let v = if wy == 0 && wz == 0 {
                 grass
             } else if wy == 0 && wz == 1 {
