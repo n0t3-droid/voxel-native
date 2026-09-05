@@ -304,6 +304,7 @@ pub fn build_mesh_ex<F: Fn(i32, i32, i32) -> Voxel>(
                             current.positive,
                             current.ao,
                             current.glow,
+                            false,
                         );
 
                         // Clear the consumed rectangle.
@@ -368,6 +369,7 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
     pos: ChunkPos,
     sample: F,
     compute_ao: bool,
+    far_collapse: bool,
 ) -> Vec<(MaterialId, Mesh)> {
     let (ox, oy, oz) = pos.origin();
 
@@ -430,6 +432,15 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
                     };
 
                     let mask_cell = cell.map(|(voxel, material, positive)| {
+                        // Fast/far LOD: pack opaque terrain into one
+                        // bucket so a distant chunk is one draw call.
+                        // Emissives keep their material so cyan/lava
+                        // still glow; vertex tint carries the albedo.
+                        let material = if far_collapse && !voxel_is_emissive(voxel) {
+                            DEFAULT_MATERIAL
+                        } else {
+                            material
+                        };
                         let ao_side = if positive { d } else { d - 1 };
                         let mut ao = [3u8; 4];
                         if compute_ao {
@@ -531,6 +542,7 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
                             current.positive,
                             current.ao,
                             current.glow,
+                            far_collapse,
                         );
 
                         for dv in 0..h {
@@ -579,6 +591,7 @@ fn emit_quad(
     positive: bool,
     ao: [u8; 4],
     glow: u8,
+    vertex_albedo: bool,
 ) {
     // Four corners of the quad in chunk-local coordinates.
     let mut p00 = [0i32; 3];
@@ -637,7 +650,7 @@ fn emit_quad(
     let emissive = voxel_is_emissive(voxel);
     let base_color = if material_is_custom(material) {
         [1.0, 1.0, 1.0, 1.0]
-    } else if emissive {
+    } else if emissive || vertex_albedo {
         voxel_color(voxel)
     } else {
         // Albedo lives in the repeating swatch. Vertex colour is AO +
@@ -754,6 +767,41 @@ mod tests {
         assert!(
             mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some(),
             "textured path needs UVs"
+        );
+    }
+
+    #[test]
+    fn far_collapse_packs_opaque_terrain_into_one_bucket() {
+        let grass: Voxel = BlockType::Grass.into();
+        let stone: Voxel = BlockType::Stone.into();
+        let crystal: Voxel = BlockType::Crystal.into();
+        let sample = |wx: i32, wy: i32, wz: i32| -> (Voxel, MaterialId) {
+            let v = if wy == 0 && wz == 0 {
+                grass
+            } else if wy == 0 && wz == 1 {
+                stone
+            } else if wy == 1 && wz == 0 {
+                crystal
+            } else {
+                AIR
+            };
+            (v, DEFAULT_MATERIAL)
+        };
+        let near = build_mesh_buckets_ex(ChunkPos::new(0, 0, 0), sample, false, false);
+        let far = build_mesh_buckets_ex(ChunkPos::new(0, 0, 0), sample, false, true);
+        assert!(
+            near.len() >= 3,
+            "near field should keep grass/stone/crystal separate, got {}",
+            near.len()
+        );
+        assert!(
+            far.len() <= 2,
+            "far LOD should pack opaque into one bucket plus emissive, got {}",
+            far.len()
+        );
+        assert!(
+            far.iter().any(|(id, _)| *id == crystal as MaterialId),
+            "far LOD must keep the emissive crystal bucket"
         );
     }
 }

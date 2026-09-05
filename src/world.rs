@@ -853,7 +853,7 @@ pub struct ChunkStreamer {
     pub pending_terrain: AHashMap<ChunkPos, Task<(ChunkPos, SharedVoxels)>>,
     /// In-flight meshing tasks (one per chunk position). `None` mesh =
     /// chunk is empty / uniform-solid and needs no geometry.
-    pub pending_meshes: AHashMap<ChunkPos, Task<(ChunkPos, Vec<(MaterialId, Mesh)>)>>,
+    pub pending_meshes: AHashMap<ChunkPos, Task<(ChunkPos, Vec<(MaterialId, Mesh)>, bool)>>,
     /// Dirty-chunk set so the mesh scheduler doesn't walk the entire
     /// chunk hashmap every frame AND so a given chunk cannot end up in
     /// the work list 20× per frame. Before this was a `Vec<ChunkPos>`
@@ -906,6 +906,7 @@ pub struct ChunkMeshEntity {
     pub entity: Entity,
     pub handle: Handle<Mesh>,
     pub material: MaterialId,
+    pub far_lod: bool,
 }
 
 fn init_world(
@@ -975,6 +976,21 @@ fn biome_stream_bonus(generator: &TerrainGenerator, cx: i32, cz: i32) -> i32 {
     let wx = cx * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
     let wz = cz * CHUNK_SIZE_I + CHUNK_SIZE_I / 2;
     crate::daynight::BiomeArtProfile::for_biome(generator.biome_at(wx, wz)).streaming_bonus
+}
+
+/// Fast keeps a 6-chunk near field at full materials. Beyond that, opaque
+/// terrain collapses to one draw call. Balanced only collapses the outer
+/// third. Cinematic/High keep the rich far geometry.
+fn chunk_wants_far_lod(graphics: crate::settings::GraphicsMode, render_distance: i32, dx: i32, dz: i32) -> bool {
+    let d2 = dx * dx + dz * dz;
+    match graphics {
+        crate::settings::GraphicsMode::Fast => d2 > 6 * 6,
+        crate::settings::GraphicsMode::Balanced => {
+            let r = (render_distance * 2 / 3).max(10);
+            d2 > r * r
+        }
+        crate::settings::GraphicsMode::High => false,
+    }
 }
 
 fn rebuild_load_offsets(streamer: &mut ChunkStreamer, rd: i32) {
@@ -1117,8 +1133,10 @@ fn stream_chunks(
         (if fast { 5 } else { 6 }, true)
     } else if elapsed < 2.20 {
         (if fast { 8 } else { 10 }, true)
-    } else if elapsed < 4.0 {
-        (rd.min(if fast { 16 } else { 18 }), elapsed < 3.0)
+    } else if elapsed < 3.40 {
+        (rd.min(if fast { 12 } else { 16 }), elapsed < 3.0)
+    } else if elapsed < 5.0 {
+        (rd.min(if fast { 16 } else { 18 }), false)
     } else {
         (rd, false)
     };
@@ -1379,14 +1397,14 @@ fn mesh_dirty_chunks(
     };
     let mut applied = 0usize;
     let mut done_keys: Vec<ChunkPos> = Vec::new();
-    let mut finished: Vec<(ChunkPos, Vec<(MaterialId, Mesh)>)> = Vec::new();
+    let mut finished: Vec<(ChunkPos, Vec<(MaterialId, Mesh)>, bool)> = Vec::new();
 
     for (pos, task) in streamer.pending_meshes.iter_mut() {
         if applied >= spawn_cap {
             break;
         }
-        if let Some((cp, mesh)) = future::block_on(future::poll_once(task)) {
-            finished.push((cp, mesh));
+        if let Some((cp, mesh, far_lod)) = future::block_on(future::poll_once(task)) {
+            finished.push((cp, mesh, far_lod));
             done_keys.push(*pos);
             applied += 1;
         }
@@ -1394,7 +1412,7 @@ fn mesh_dirty_chunks(
     for p in done_keys {
         streamer.pending_meshes.remove(&p);
     }
-    for (pos, buckets) in finished {
+    for (pos, buckets, far_lod) in finished {
         let mut previous = streamer.entities.remove(&pos).unwrap_or_default();
         if buckets.is_empty() {
             for entry in previous {
@@ -1441,6 +1459,7 @@ fn mesh_dirty_chunks(
                     }
                     entry.handle = new_handle;
                 }
+                entry.far_lod = far_lod;
                 next_entries.push(entry);
                 continue;
             }
@@ -1476,6 +1495,7 @@ fn mesh_dirty_chunks(
                 entity,
                 handle,
                 material: material_id,
+                far_lod,
             });
         }
 
@@ -1560,6 +1580,24 @@ fn mesh_dirty_chunks(
     let mut scheduled_this_frame = 0usize;
 
     for (_s, pos) in candidates.drain(..) {
+        let dx = pos.x - pcx;
+        let dz = pos.z - pcz;
+        let far_collapse = chunk_wants_far_lod(settings.graphics, budget.render_distance, dx, dz);
+        let already_far_lod = streamer
+            .entities
+            .get(&pos)
+            .and_then(|group| group.first())
+            .is_some_and(|entry| entry.far_lod);
+        // Fast/Balanced far meshes are one (plus emissive) draw call.
+        // Neighbour-seam remeshes at that distance are fog-hidden and
+        // were the post-fill hitch source. Remesh only when LOD level
+        // changes (player flew closer) or the chunk has no mesh yet.
+        if far_collapse && already_far_lod {
+            if let Some(c) = world.chunks.get_mut(&pos) {
+                c.dirty = false;
+            }
+            continue;
+        }
         if slots == 0 || scheduled_this_frame >= schedule_budget {
             // Put back into the dirty set for next frame.
             streamer.dirty_queue.insert(pos);
@@ -1620,15 +1658,9 @@ fn mesh_dirty_chunks(
             c.dirty = false;
         }
 
-        // LOD: chunks further than `lod_radius` from the player skip
-        // per-corner ambient occlusion. Visually indistinguishable
-        // through fog at that distance; mesher runs ~3× faster and
-        // emits ~40% fewer triangles (greedy merge no longer breaks
-        // on AO seams). Threshold chosen so the nearest ~60% of the
-        // visible disc keeps full-quality AO.
+        // LOD: skip per-corner AO past `lod_radius`. Fast also collapses
+        // opaque far chunks to one draw call (vertex-tinted + emissives).
         let lod_radius = (budget.render_distance / 2).max(4);
-        let dx = pos.x - pcx;
-        let dz = pos.z - pcz;
         let use_ao = settings.graphics != crate::settings::GraphicsMode::Fast
             && dx * dx + dz * dz <= lod_radius * lod_radius;
 
@@ -1638,6 +1670,7 @@ fn mesh_dirty_chunks(
                 pos,
                 |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
                 use_ao,
+                far_collapse,
             );
             apply_mesh_buckets_now(
                 &mut commands,
@@ -1649,6 +1682,7 @@ fn mesh_dirty_chunks(
                 pcz,
                 pos,
                 buckets,
+                far_collapse,
             );
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1658,8 +1692,9 @@ fn mesh_dirty_chunks(
                     pos,
                     |wx, wy, wz| snap.sample_with_material(wx, wy, wz),
                     use_ao,
+                    far_collapse,
                 );
-                (pos, buckets)
+                (pos, buckets, far_collapse)
             });
             streamer.pending_meshes.insert(pos, task);
         }
@@ -1757,6 +1792,7 @@ fn apply_mesh_buckets_now(
     pcz: i32,
     pos: ChunkPos,
     buckets: Vec<(MaterialId, Mesh)>,
+    far_lod: bool,
 ) {
     let mut previous = streamer.entities.remove(&pos).unwrap_or_default();
     if buckets.is_empty() {
@@ -1802,6 +1838,7 @@ fn apply_mesh_buckets_now(
                 }
                 entry.handle = new_handle;
             }
+            entry.far_lod = far_lod;
             next_entries.push(entry);
             continue;
         }
@@ -1837,6 +1874,7 @@ fn apply_mesh_buckets_now(
             entity,
             handle,
             material: material_id,
+            far_lod,
         });
     }
 
@@ -2097,5 +2135,27 @@ mod tests {
             );
             assert!(world.edited_overrides.contains_key(&pos));
         }
+    }
+
+    #[test]
+    fn fast_collapses_far_chunks_and_cinematic_does_not() {
+        assert!(chunk_wants_far_lod(
+            crate::settings::GraphicsMode::Fast,
+            16,
+            8,
+            0
+        ));
+        assert!(!chunk_wants_far_lod(
+            crate::settings::GraphicsMode::Fast,
+            16,
+            4,
+            0
+        ));
+        assert!(!chunk_wants_far_lod(
+            crate::settings::GraphicsMode::High,
+            40,
+            20,
+            0
+        ));
     }
 }
