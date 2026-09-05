@@ -837,10 +837,11 @@ fn follow_and_animate_sky(
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
             let film_on = film.as_ref().map(|f| f.enabled).unwrap_or(false);
             let (base_day, base_night, base_sunset) = if film_on {
+                // Mid emissive — too-high values ACES to white and kill chroma.
                 (
-                    Vec3::new(28.0, 14.0, 38.0),
-                    Vec3::new(22.0, 14.0, 30.0),
-                    Vec3::new(26.0, 12.0, 10.0),
+                    Vec3::new(6.5, 3.2, 9.5),
+                    Vec3::new(7.5, 4.0, 10.0),
+                    Vec3::new(8.0, 3.5, 3.0),
                 )
             } else {
                 (
@@ -1158,14 +1159,15 @@ fn build_nebula_image(size: u32, seed: u64, dense: bool) -> Image {
             // and only a few filaments glow strongly — exactly like
             // real nebulae. Film mode widens/saturates the cloud mass.
             let amp = if dense {
-                (mask + 0.72).max(0.0).powf(0.88)
+                // More cloud mass but keep dark gaps so Additive chroma survives.
+                (mask + 0.55).max(0.0).powf(1.15)
             } else {
                 (mask + 0.2).max(0.0).powf(1.6)
             };
-            let sat = if dense { 1.55 } else { 1.0 };
+            let sat = if dense { 1.85 } else { 1.0 };
             let rr = ((r * 0.5 + 0.5) * amp * sat).clamp(0.0, 1.0);
-            let gg = ((g * 0.5 + 0.5) * amp * 0.9 * sat).clamp(0.0, 1.0);
-            let bb = ((b * 0.5 + 0.5) * amp * 1.15 * sat).clamp(0.0, 1.0);
+            let gg = ((g * 0.5 + 0.5) * amp * 0.75 * sat).clamp(0.0, 1.0);
+            let bb = ((b * 0.5 + 0.5) * amp * 1.25 * sat).clamp(0.0, 1.0);
 
             // Colour palette skewed toward magenta / cyan / warm orange
             // highlights. Mix the raw channels with fixed biases so the

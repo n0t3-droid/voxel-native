@@ -43,6 +43,7 @@ impl Plugin for FilmPlugin {
                 film_spawn_silhouettes.run_if(in_state(GameState::InGame)),
                 film_ensure_station_pad.run_if(in_state(GameState::InGame)),
                 film_drive_camera.run_if(in_state(GameState::InGame)),
+                film_toggle_helpers.run_if(in_state(GameState::InGame)),
                 film_capture.run_if(in_state(GameState::InGame)),
                 film_finish.run_if(in_state(GameState::InGame)),
             )
@@ -105,6 +106,10 @@ struct FilmSilhouette;
 /// don't white-out the wide painting_hero frame.
 #[derive(Component)]
 struct FilmKeelHelper;
+
+/// Unlit plasma/lava mesh ribbons — visible on painting_hero + dual_rivers.
+#[derive(Component)]
+struct FilmRiverRibbon;
 
 #[derive(Component)]
 struct FilmShuttleMarker;
@@ -1095,6 +1100,51 @@ fn film_spawn_silhouettes(
         ));
     }
 
+    // Unlit dual-river ribbons for painting_hero / dual_rivers — survive
+    // terrain occlusion and lavapipe remesh lag that bury voxel filaments.
+    let plasma_mat = materials.add(sil_mat(
+        Color::srgb(0.15, 0.75, 1.0),
+        LinearRgba::rgb(0.8, 5.5, 8.0),
+    ));
+    let lava_mat = materials.add(sil_mat(
+        Color::srgb(1.0, 0.42, 0.08),
+        LinearRgba::rgb(7.5, 2.2, 0.2),
+    ));
+    let river_y = -13.0_f32;
+    for i in 0..12 {
+        let t = i as f32;
+        let ox = 14.0 + t * 5.5;
+        let oz = 28.0 + (t * 0.7).sin() * 6.0;
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: plasma_mat.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, river_y, oz))
+                    .with_scale(Vec3::new(5.5, 2.2, 2.4))
+                    .with_rotation(Quat::from_rotation_y(0.35)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmRiverRibbon,
+            Name::new(format!("FilmPlasmaRibbon{i}")),
+        ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: lava_mat.clone(),
+                transform: Transform::from_translation(
+                    deck + Vec3::new(ox + 7.0, river_y, oz - 5.0),
+                )
+                .with_scale(Vec3::new(5.0, 2.0, 2.6))
+                .with_rotation(Quat::from_rotation_y(0.28)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmRiverRibbon,
+            Name::new(format!("FilmLavaRibbon{i}")),
+        ));
+    }
+
     info!(
         "FILM: spawned mesh silhouettes on combat slab ({}, {})",
         island.cx, island.cz
@@ -1413,6 +1463,32 @@ const SHOTS: &[FilmShot] = &[
     },
 ];
 
+fn film_toggle_helpers(
+    film: Res<FilmRuntime>,
+    mut keel_helpers: Query<&mut Visibility, (With<FilmKeelHelper>, Without<FilmRiverRibbon>)>,
+    mut river_ribbons: Query<&mut Visibility, (With<FilmRiverRibbon>, Without<FilmKeelHelper>)>,
+) {
+    if !film.enabled || film.finished {
+        return;
+    }
+    let show_keel = film.shot_index == 1;
+    for mut vis in keel_helpers.iter_mut() {
+        *vis = if show_keel {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    let show_rivers = matches!(film.shot_index, 7 | 8);
+    for mut vis in river_ribbons.iter_mut() {
+        *vis = if show_rivers {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
 fn film_override_sky_clear(film: Res<FilmRuntime>, mut clear_color: ResMut<ClearColor>) {
     if !film.enabled || film.finished || !film.ready_to_roll {
         return;
@@ -1420,11 +1496,10 @@ fn film_override_sky_clear(film: Res<FilmRuntime>, mut clear_color: ResMut<Clear
     // Must win against daynight::update_sun (Update) so nebula volume reads.
     match film.shot_index {
         6 | 7 => {
-            clear_color.0 = Color::srgb(0.12, 0.08, 0.20);
+            clear_color.0 = Color::srgb(0.10, 0.06, 0.18);
         }
         8 => {
-            // Dual rivers: slightly cooler dusk so cyan/lava pop off grey wash.
-            clear_color.0 = Color::srgb(0.28, 0.26, 0.34);
+            clear_color.0 = Color::srgb(0.22, 0.20, 0.28);
         }
         _ => {}
     }
@@ -1482,7 +1557,6 @@ fn film_drive_camera(
             Without<FilmUnderKeelLight>,
         ),
     >,
-    mut keel_helpers: Query<&mut Visibility, With<FilmKeelHelper>>,
 ) {
     if !film.enabled || film.finished {
         return;
@@ -1523,22 +1597,18 @@ fn film_drive_camera(
         };
     }
 
-    // Keel bounce shells only for the deck+keel beat — otherwise they flood
-    // painting_hero / dual_rivers with unlit white planes.
-    let show_keel_helpers = film.shot_index == 1;
-    for mut vis in keel_helpers.iter_mut() {
-        *vis = if show_keel_helpers {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
+    // Keel bounce / river ribbons toggled in film_toggle_helpers (param budget).
 
     // Darken ClearColor on planet/painting so additive nebula isn't crushed
     // by noon sky wash (daytime pad shots keep the normal daynight clear).
     // Final write also happens in PostUpdate — see film_override_sky_clear.
     if matches!(film.shot_index, 6 | 7) {
-        clear_color.0 = Color::srgb(0.14, 0.10, 0.22);
+        clear_color.0 = Color::srgb(0.10, 0.06, 0.18);
+        if let Ok(mut sun) = sun_q.get_single_mut() {
+            sun.illuminance = 4_500.0; // tame noon wash so nebula chroma survives
+        }
+    } else if film.shot_index == 8 {
+        clear_color.0 = Color::srgb(0.22, 0.20, 0.28);
     }
 
     // Extra ambient bounce on deck+keel / dual-river so undersides aren't crushed.
@@ -1555,7 +1625,11 @@ fn film_drive_camera(
         _ => Color::srgb(0.82, 0.88, 0.78),
     };
     if let Ok(mut sun) = sun_q.get_single_mut() {
-        sun.illuminance = sun.illuminance.max(28_000.0);
+        if matches!(film.shot_index, 6 | 7) {
+            sun.illuminance = 4_500.0;
+        } else {
+            sun.illuminance = sun.illuminance.max(28_000.0);
+        }
     }
     if !matches!(mode.mode, ActiveMode::Combat) {
         mode.set(ActiveMode::Combat, "Film recorder: HUD-off combat framing.");
