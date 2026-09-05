@@ -1376,19 +1376,25 @@ fn film_spawn_silhouettes(
         ));
     }
 
-    // Combat pad mesh figures — biped marine vs multi-leg alien (shot 2).
-    let pad = deck + Vec3::new(0.0, 1.2, 18.0);
+    // Combat figures on floating sky arena (no island keel/lattice in frustum).
+    let combat_pad = deck + Vec3::new(8.0, 48.0, 130.0);
+    // Deck pad for turrets / fire-lane (shot 3) — separate from floating arena.
+    let pad = deck + Vec3::new(0.0, 0.0, 14.0);
     let stage_mat = materials.add(sil_mat(
-        Color::srgb(0.78, 0.82, 0.88),
-        LinearRgba::rgb(0.35, 0.4, 0.5),
+        Color::srgb(0.82, 0.86, 0.92),
+        LinearRgba::rgb(0.45, 0.5, 0.6),
     ));
-    // Bright unlit stage covers residual voxel lattice under the two-shot.
+    let stage_edge = materials.add(sil_mat(
+        Color::srgb(0.25, 0.85, 0.95),
+        LinearRgba::rgb(1.0, 4.0, 5.0),
+    ));
+    // Bright unlit stage — isolated from island voxels.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: stage_mat,
-            transform: Transform::from_translation(pad + Vec3::new(0.5, -0.6, 1.0))
-                .with_scale(Vec3::new(32.0, 1.4, 22.0)),
+            transform: Transform::from_translation(combat_pad + Vec3::new(0.5, -0.7, 1.0))
+                .with_scale(Vec3::new(36.0, 1.6, 24.0)),
             ..default()
         },
         FilmSilhouette,
@@ -1396,14 +1402,27 @@ fn film_spawn_silhouettes(
         FilmCombatStage,
         Name::new("FilmCombatStageFloor"),
     ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: stage_edge,
+            transform: Transform::from_translation(combat_pad + Vec3::new(0.5, -0.1, 1.0))
+                .with_scale(Vec3::new(37.0, 0.4, 25.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmCombatFx,
+        FilmCombatStage,
+        Name::new("FilmCombatStageRim"),
+    ));
     spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
         &marine_dark,
         &marine_visor,
-        pad + Vec3::new(-5.0, 0.0, 1.5),
-        3.4,
+        combat_pad + Vec3::new(-5.5, 0.0, 1.5),
+        3.6,
     );
     spawn_film_alien(
         &mut commands,
@@ -1411,18 +1430,18 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        pad + Vec3::new(6.0, 0.0, 2.5),
-        3.6,
+        combat_pad + Vec3::new(6.5, 0.0, 2.5),
+        3.8,
     );
-    // Painting-scale giants on the verdant crown — must read in painting_hero.
+    // Painting-scale giants on the verdant crown — low/left so station mid-right owns the mass.
     let vista_marine = spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(-10.0, 14.0, 90.0),
-        14.0,
+        deck + Vec3::new(-22.0, 10.0, 98.0),
+        9.0,
     );
     commands.entity(vista_marine).insert(FilmCombatVista);
     let vista_alien = spawn_film_alien(
@@ -1431,8 +1450,8 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(6.0, 14.0, 94.0),
-        15.0,
+        deck + Vec3::new(-8.0, 10.0, 102.0),
+        10.0,
     );
     commands.entity(vista_alien).insert(FilmCombatVista);
     spawn_film_crew(
@@ -1540,13 +1559,14 @@ fn film_spawn_silhouettes(
     spawn_film_grass_caps(&mut commands, &cube, &grass_mat, &grass_dark, deck);
 
     // Mountain station mass — mesh mountain for painting + dedicated station beat.
+    // Dark rock mountain — wider base, shorter crown (installation, not white tower).
     let station_dark = materials.add(sil_mat(
-        Color::srgb(0.28, 0.26, 0.30),
-        LinearRgba::rgb(0.15, 0.12, 0.18),
+        Color::srgb(0.22, 0.20, 0.24),
+        LinearRgba::rgb(0.08, 0.06, 0.1),
     ));
     let station_alloy = materials.add(sil_mat(
-        Color::srgb(0.72, 0.68, 0.58),
-        LinearRgba::rgb(1.2, 1.0, 0.6),
+        Color::srgb(0.55, 0.50, 0.42),
+        LinearRgba::rgb(0.5, 0.4, 0.25),
     ));
     let station_neon = materials.add(sil_mat(
         Color::srgb(0.30, 1.0, 0.95),
@@ -3772,9 +3792,9 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         2 => {
-            // South elevated two-shot — camera corridor cleared; stage underfoot.
-            let look = deck + Vec3::new(0.5, 6.5, 19.5);
-            let pos = deck + Vec3::new(-6.0, 10.0, 42.0);
+            // Floating sky arena — pure figure two-shot, no island lattice.
+            let look = deck + Vec3::new(8.5, 52.0, 132.0);
+            let pos = look + Vec3::new(-18.0, 5.0, 16.0);
             (pos, look)
         }
         3 => {
@@ -3815,15 +3835,15 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         8 => {
-            // Painting: planet upper; mountain station mid-right; grass/skyway lower-left.
+            // Painting: planet upper; wide mountain station mid-right; grass+skyway left.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-55.0, 42.0, 132.0);
-            let station_mid = deck + Vec3::new(34.0, 36.0, 70.0);
-            let green_crown = deck + Vec3::new(-8.0, 8.0, 100.0);
-            let skyway_mid = deck + Vec3::new(-12.0, 28.0, 94.0);
+            let pos = deck + Vec3::new(-58.0, 44.0, 135.0);
+            let station_mid = deck + Vec3::new(34.0, 32.0, 70.0);
+            let green_crown = deck + Vec3::new(-10.0, 6.0, 102.0);
+            let skyway_mid = deck + Vec3::new(-18.0, 26.0, 96.0);
             let planet = pos + planet_dir * 155.0;
-            let ground = green_crown.lerp(station_mid, 0.38).lerp(skyway_mid, 0.25);
-            let look = ground.lerp(planet, 0.18);
+            let ground = green_crown.lerp(skyway_mid, 0.35).lerp(station_mid, 0.4);
+            let look = ground.lerp(planet, 0.2);
             (pos, look)
         }
         9 => {
