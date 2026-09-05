@@ -485,9 +485,9 @@ pub fn crystal_tint(seed: u32, wx: i32, wz: i32, k: i32) -> BlockType {
 /// Hero cluster stays cyan / magenta so it reads against the ochre wall.
 fn hero_crystal_tint(seed: u32, wx: i32, wz: i32, k: i32) -> BlockType {
     let mix = cell_rand(seed, 0x0C_17_5C, wx, wz + k * 17);
-    if mix < 0.48 {
+    if mix < 0.38 {
         BlockType::Crystal
-    } else if mix < 0.88 {
+    } else if mix < 0.78 {
         BlockType::CrystalMagenta
     } else {
         BlockType::LuminiteCrystal
@@ -546,7 +546,7 @@ impl CrystalCluster {
         Self {
             cx: 92,
             cz: -98,
-            shards: 14,
+            shards: 16,
             scale: 52,
         }
     }
@@ -599,8 +599,8 @@ impl CrystalCluster {
     pub fn stamp(&self, seed: u32, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
         let origin = chunk.pos.origin();
         let (ox, _, oz) = origin;
-        // Widest possible footprint: shard offsets plus lean plus radius.
-        let reach = 16 + self.scale / 2;
+        // Widest possible footprint: shard offsets plus lean plus air halo.
+        let reach = 22 + self.scale / 2;
         if (ox + CHUNK_SIZE_I <= self.cx - reach)
             || (ox > self.cx + reach)
             || (oz + CHUNK_SIZE_I <= self.cz - reach)
@@ -611,26 +611,33 @@ impl CrystalCluster {
 
         // Hero masses stay tight so they occupy the left third instead of
         // spraying shards into the mesa or out of the frustum.
-        let spread = if self.scale >= 48 {
-            7.0 + self.scale as f64 * 0.14
+        let spread = if self.scale >= 40 {
+            8.0 + self.scale as f64 * 0.14
         } else {
             10.0 + self.scale as f64 * 0.22
         };
-        let punch = self.scale >= 48;
+        let punch = self.scale >= 40;
         for s in 0..self.shards {
             let salt = 0x0C_20_00 + s * 7919;
             let bx = self.cx + ((cell_rand(seed, salt, self.cx, self.cz) - 0.5) * spread) as i32;
-            let bz = self.cz + ((cell_rand(seed, salt + 1, self.cx, self.cz) - 0.5) * spread) as i32;
+            // Bias hero shards toward +Z (camera left of a +X look) so the
+            // thinned, aired mass still crosses the opening left look-ray
+            // instead of sitting as a far-left pylon the ray misses.
+            let bz = self.cz
+                + ((cell_rand(seed, salt + 1, self.cx, self.cz) - 0.5) * spread) as i32
+                + if punch { 4 } else { 0 };
             let height =
                 (self.scale as f64 * (0.55 + cell_rand(seed, salt + 2, bx, bz) * 0.85)) as i32;
             if height < 4 {
                 continue;
             }
-            let thick = 3;
-            let base_radius = 1 + (height / 8).min(thick);
+            let thick = if punch { 2 } else { 3 };
+            let base_radius = 1 + (height / if punch { 12 } else { 8 }).min(thick);
             // Lean, expressed as horizontal drift per block of height.
-            let lean_x = (cell_rand(seed, salt + 3, bx, bz) - 0.5) * if punch { 0.22 } else { 0.5 };
-            let lean_z = (cell_rand(seed, salt + 4, bx, bz) - 0.5) * if punch { 0.22 } else { 0.5 };
+            // Hero shards lean harder so they silhouette against sky/wall
+            // instead of packing into a brown stone pylon.
+            let lean_x = (cell_rand(seed, salt + 3, bx, bz) - 0.5) * if punch { 0.24 } else { 0.5 };
+            let lean_z = (cell_rand(seed, salt + 4, bx, bz) - 0.5) * if punch { 0.24 } else { 0.5 };
             let base_y = ground(bx, bz);
 
             for k in 0..height {
@@ -639,11 +646,25 @@ impl CrystalCluster {
                 let radius = (base_radius as f64 * taper).round() as i32;
                 let cx = bx + (lean_x * k as f64).round() as i32;
                 let cz = bz + (lean_z * k as f64).round() as i32;
-                let tint = if self.scale >= 48 {
+                let tint = if self.scale >= 40 {
                     hero_crystal_tint(seed, bx, bz, k)
                 } else {
                     crystal_tint(seed, bx, bz, k)
                 };
+                if punch && k > 1 {
+                    let halo = radius + 2;
+                    for dz in -halo..=halo {
+                        for dx in -halo..=halo {
+                            if dx.abs() + dz.abs() > halo {
+                                continue;
+                            }
+                            if dx.abs() + dz.abs() <= radius {
+                                continue;
+                            }
+                            carve(chunk, origin, cx + dx, wy, cz + dz);
+                        }
+                    }
+                }
                 for dz in -radius..=radius {
                     for dx in -radius..=radius {
                         // Diamond cross-section — voxel crystals need
@@ -677,6 +698,45 @@ impl CrystalCluster {
                     BlockType::LuminiteCrystal,
                 );
             }
+        }
+        if punch && self.scale >= 48 {
+            // A thick spine on the opening left look-ray so the left third
+            // still samples many crystal voxels after shards get an air halo.
+            let spine_x = self.cx - 2;
+            let spine_z = self.cz + 8;
+            let base_y = ground(spine_x, spine_z);
+            let height = (self.scale as f64 * 0.92) as i32;
+            for k in 2..height {
+                let wy = base_y + k;
+                for dz in -3i32..=3 {
+                    for dx in -3i32..=3 {
+                        if dx.abs() + dz.abs() > 3 {
+                            continue;
+                        }
+                        if dx.abs() + dz.abs() <= 1 {
+                            continue;
+                        }
+                        carve(chunk, origin, spine_x + dx, wy, spine_z + dz);
+                    }
+                }
+                let tint = hero_crystal_tint(seed, spine_x, spine_z, k);
+                for dz in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx.abs() + dz.abs() > 1 {
+                            continue;
+                        }
+                        place_over(chunk, origin, spine_x + dx, wy, spine_z + dz, tint);
+                    }
+                }
+            }
+            place_over(
+                chunk,
+                origin,
+                spine_x,
+                base_y + height,
+                spine_z,
+                BlockType::LuminiteCrystal,
+            );
         }
     }
 }
@@ -1708,8 +1768,8 @@ impl CliffFace {
             return;
         }
         let origin = chunk.pos.origin();
-        const SITES: [i32; 4] = [-92, -84, -76, -68];
-        let half = 8i32;
+        const SITES: [i32; 5] = [-88, -80, -72, -64, -56];
+        let half = 11i32;
         for &cz in &SITES {
             if cz < self.z0 + 4 || cz > self.z1 - 4 {
                 continue;
@@ -1729,14 +1789,16 @@ impl CliffFace {
                     if edge > half - taper {
                         continue;
                     }
+                    place_over(chunk, origin, face - 8, wy, z, BlockType::Lava);
+                    place_over(chunk, origin, face - 7, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 6, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 5, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 4, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 3, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 2, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 1, wy, z, BlockType::Lava);
-                    if edge <= 3 {
-                        place_over(chunk, origin, face, wy, z, BlockType::PlasmaFlow);
+                    if edge <= 4 {
+                        place_over(chunk, origin, face, wy, z, BlockType::Lava);
                     }
                 }
             }
@@ -1764,15 +1826,12 @@ impl CliffFace {
                 let rim = ground(self.face_x + self.depth, z);
                 let pit = rim - self.drop;
                 let dist = (z - cz).abs();
-                let fluid = if dist <= 2 {
-                    BlockType::NeonCyan
-                } else {
-                    BlockType::PlasmaFlow
-                };
                 place_over(chunk, origin, wx, pit, z, BlockType::PlasmaFlow);
-                place_over(chunk, origin, wx, pit + 1, z, fluid);
-                if dist <= 1 {
-                    place_over(chunk, origin, wx, pit + 2, z, BlockType::NeonCyan);
+                place_over(chunk, origin, wx, pit + 1, z, BlockType::PlasmaFlow);
+                // Neon banks, not a third emissive layer: a 3-high
+                // NeonCyan stack clipped to white through bloom+ACES.
+                if dist >= 3 {
+                    place_over(chunk, origin, wx, pit + 1, z, BlockType::NeonCyan);
                 }
             }
         }
@@ -2225,7 +2284,7 @@ mod tests {
         assert!(hero_d.shards >= 14, "hero crystal cluster is still a sprinkle ({})", hero_d.shards);
         assert!(hero_d.scale >= 48, "hero crystal cluster is still too short ({})", hero_d.scale);
         assert!(hero_d.cx >= 86 && hero_d.cx <= 100, "hero crystals should sit in the left third (cx={})", hero_d.cx);
-        assert!(hero_d.cz <= -90 && hero_d.cz >= -108, "hero crystals should sit in the left third of the +X look");
+        assert!(hero_d.cz <= -86 && hero_d.cz >= -108, "hero crystals should sit in the left third of the +X look");
         assert!(in_hero_postcard(CrystalCluster::hero_e().cx, CrystalCluster::hero_e().cz));
     }
 
@@ -2314,7 +2373,7 @@ mod tests {
         assert!(holo > 4, "carved terrace has no lit windows ({holo})");
         assert!(neon > 0, "carved terrace has no rail lights");
         assert!(deck > 8, "carved terrace has no floor ({deck})");
-        assert!(lava > 40, "look-cone west face has no lava/energy curtain ({lava})");
+        assert!(lava > 80, "look-cone west face has no lava/energy curtain ({lava})");
         assert!(
             stone > plating * 4,
             "west face should read as banded rock, not colony pylons (stone={stone} plating={plating})"
@@ -2417,6 +2476,75 @@ mod tests {
         assert!(
             solid > 20,
             "cluster only wrote {solid} voxels into its chunk"
+        );
+    }
+
+    #[test]
+    fn hero_crystal_mass_carves_air_so_shards_silhouette() {
+        let cluster = CrystalCluster::hero_d();
+        let cx = cluster.cx.div_euclid(CHUNK_SIZE_I);
+        let cz = cluster.cz.div_euclid(CHUNK_SIZE_I);
+        let mut crystal = 0usize;
+        let mut with_air = 0usize;
+        let mut air = 0usize;
+        for cy in 4..9 {
+            for dx in -2..=2 {
+                for dz in -2..=2 {
+                    let mut chunk = Chunk::new(ChunkPos::new(cx + dx, cy, cz + dz));
+                    for ly in 0..CHUNK_SIZE {
+                        for lz in 0..CHUNK_SIZE {
+                            for lx in 0..CHUNK_SIZE {
+                                chunk.set(lx, ly, lz, BlockType::RedStone.into());
+                            }
+                        }
+                    }
+                    cluster.stamp(12345, &mut chunk, |_, _| 64);
+                    for ly in 0..CHUNK_SIZE {
+                        for lz in 0..CHUNK_SIZE {
+                            for lx in 0..CHUNK_SIZE {
+                                let v = chunk.get(lx, ly, lz);
+                            if v == AIR {
+                                air += 1;
+                                continue;
+                            }
+                            let kind = BlockType::from_voxel(v);
+                                if !matches!(
+                                    kind,
+                                    BlockType::Crystal
+                                        | BlockType::CrystalMagenta
+                                        | BlockType::LuminiteCrystal
+                                ) {
+                                    continue;
+                                }
+                                crystal += 1;
+                                let neighbors = [
+                                    (lx as i32 - 1, ly as i32, lz as i32),
+                                    (lx as i32 + 1, ly as i32, lz as i32),
+                                    (lx as i32, ly as i32, lz as i32 - 1),
+                                    (lx as i32, ly as i32, lz as i32 + 1),
+                                ];
+                                if neighbors.iter().any(|&(x, y, z)| {
+                                    x >= 0
+                                        && y >= 0
+                                        && z >= 0
+                                        && (x as usize) < CHUNK_SIZE
+                                        && (y as usize) < CHUNK_SIZE
+                                        && (z as usize) < CHUNK_SIZE
+                                        && chunk.get(x as usize, y as usize, z as usize) == AIR
+                                }) {
+                                    with_air += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(crystal > 80, "hero crystal mass missing ({crystal})");
+        assert!(air > 400, "hero shards have no air halo ({air} air around {crystal} crystal)");
+        assert!(
+            with_air > 1500,
+            "hero shards are still embedded in stone (crystal={crystal} with_air={with_air})"
         );
     }
 
