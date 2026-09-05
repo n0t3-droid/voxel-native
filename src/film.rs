@@ -1313,8 +1313,7 @@ fn film_spawn_silhouettes(
             Name::new(format!("FilmLavaHero{i}")),
         ));
     }
-    // Painting-cam nose cards: sit just under the painting eye so cyan+orange
-    // own the lower third even if shelf ribbons are partly occluded.
+    // Painting-cam nose cards: dual rivers under the eye / beside grass crowns.
     for (i, ox) in [-28.0_f32, -16.0, -4.0, 8.0, 20.0, 32.0]
         .into_iter()
         .enumerate()
@@ -1323,8 +1322,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: plasma_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, 8.0, 88.0))
-                    .with_scale(Vec3::new(12.0, 3.0, 4.0))
+                transform: Transform::from_translation(deck + Vec3::new(ox, 10.0, 100.0))
+                    .with_scale(Vec3::new(14.0, 3.5, 4.5))
                     .with_rotation(Quat::from_rotation_y(0.55)),
                 ..default()
             },
@@ -1336,14 +1335,41 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox + 7.0, 7.0, 84.0))
-                    .with_scale(Vec3::new(12.0, 3.2, 4.0))
+                transform: Transform::from_translation(deck + Vec3::new(ox + 8.0, 9.0, 96.0))
+                    .with_scale(Vec3::new(14.0, 3.8, 4.5))
                     .with_rotation(Quat::from_rotation_y(0.55)),
                 ..default()
             },
             FilmSilhouette,
             FilmRiverRibbon,
             Name::new(format!("FilmLavaNose{i}")),
+        ));
+    }
+    // Vertical dual-river sheets flanking the near grass crown (painting lower-left).
+    for (i, ox) in [-20.0_f32, -6.0, 8.0].into_iter().enumerate() {
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: plasma_mat.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, 6.0, 86.0))
+                    .with_scale(Vec3::new(5.0, 10.0, 16.0)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmRiverRibbon,
+            Name::new(format!("FilmPlasmaSheet{i}")),
+        ));
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: lava_mat.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox + 10.0, 5.5, 82.0))
+                    .with_scale(Vec3::new(5.0, 10.0, 16.0)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmRiverRibbon,
+            Name::new(format!("FilmLavaSheet{i}")),
         ));
     }
 
@@ -2452,17 +2478,18 @@ fn spawn_film_grass_caps(
     // Thick verdant crowns — lids + cliff faces toward painting cam (SW looking NE).
     // Flat lids alone foreshorten under the upward planet look.
     for (i, (ox, oz, w, d, lift)) in [
-        // Hero crown in painting lower-mid (must read as green island)
-        (10.0_f32, 62.0, 26.0, 20.0, 2.0),
+        // Near-cam hero crowns (painting pos z≈120) — must fill lower third green
+        (-12.0_f32, 92.0, 34.0, 26.0, 6.0),
+        (10.0, 88.0, 30.0, 24.0, 5.0),
+        (28.0, 94.0, 26.0, 22.0, 7.0),
+        (-28.0, 86.0, 24.0, 20.0, 4.0),
+        (6.0, 78.0, 28.0, 22.0, 5.5),
+        (22.0, 80.0, 22.0, 18.0, 4.5),
+        // Mid archipelago
+        (10.0, 62.0, 26.0, 20.0, 2.0),
         (-8.0, 70.0, 22.0, 18.0, 1.5),
         (28.0, 68.0, 20.0, 16.0, 2.5),
-        (18.0, 54.0, 18.0, 14.0, 1.0),
-        (-18.0, 56.0, 16.0, 14.0, 2.0),
         (40.0, 60.0, 16.0, 13.0, 1.5),
-        (8.0, 36.0, 18.0, 14.0, 0.5),
-        (-14.0, 44.0, 16.0, 12.0, 1.0),
-        (24.0, 48.0, 15.0, 12.0, 1.5),
-        (48.0, 52.0, 14.0, 12.0, 2.0),
     ]
     .into_iter()
     .enumerate()
@@ -2474,7 +2501,7 @@ fn spawn_film_grass_caps(
                 mesh: cube.clone(),
                 material: soil.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox, y0, oz))
-                    .with_scale(Vec3::new(w + 2.0, 3.5, d + 2.0)),
+                    .with_scale(Vec3::new(w + 2.0, 4.0, d + 2.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -2486,28 +2513,43 @@ fn spawn_film_grass_caps(
             PbrBundle {
                 mesh: cube.clone(),
                 material: grass.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, y0 + 2.4, oz))
-                    .with_scale(Vec3::new(w, 2.6, d)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, y0 + 3.0, oz))
+                    .with_scale(Vec3::new(w, 3.2, d)),
                 ..default()
             },
             FilmSilhouette,
             FilmGrassFx,
             Name::new(format!("FilmGrassCap{i}")),
         ));
-        // Cliff face toward painting cam (−Z / −X side) so upward look still sees green.
+        // Cliff face toward painting cam (+Z) so green reads even looking up.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: grass.clone(),
                 transform: Transform::from_translation(
-                    deck + Vec3::new(ox - w * 0.15, y0 + 1.0, oz + d * 0.42),
+                    deck + Vec3::new(ox, y0 + 2.0, oz + d * 0.45),
                 )
-                .with_scale(Vec3::new(w * 0.85, 6.5, 2.8)),
+                .with_scale(Vec3::new(w * 0.9, 9.0, 3.5)),
                 ..default()
             },
             FilmSilhouette,
             FilmGrassFx,
             Name::new(format!("FilmGrassCliff{i}")),
+        ));
+        // Side face (−X) for three-quarter readability.
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: grass.clone(),
+                transform: Transform::from_translation(
+                    deck + Vec3::new(ox - w * 0.42, y0 + 2.0, oz),
+                )
+                .with_scale(Vec3::new(3.2, 8.5, d * 0.85)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmGrassFx,
+            Name::new(format!("FilmGrassSide{i}")),
         ));
         // Rim tufts.
         for (j, (tx, tz)) in [
@@ -2524,9 +2566,9 @@ fn spawn_film_grass_caps(
                     mesh: cube.clone(),
                     material: grass.clone(),
                     transform: Transform::from_translation(
-                        deck + Vec3::new(ox + tx, y0 + 5.0, oz + tz),
+                        deck + Vec3::new(ox + tx, y0 + 6.5, oz + tz),
                     )
-                    .with_scale(Vec3::new(2.6, 4.5, 2.6)),
+                    .with_scale(Vec3::new(3.0, 5.5, 3.0)),
                     ..default()
                 },
                 FilmSilhouette,
@@ -3350,13 +3392,12 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         8 => {
-            // Painting: planet upper + verdant island crown mid-low + crystals.
+            // Painting: high cam so verdant crowns read as tops; planet still upper.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-34.0, 26.0, 108.0);
-            let green_crown = deck + Vec3::new(12.0, 6.0, 62.0);
-            let planet = pos + planet_dir * 140.0;
-            // Less sky-bias than 0.50 so grass cliff faces enter the lower third.
-            let look = green_crown.lerp(planet, 0.38);
+            let pos = deck + Vec3::new(-42.0, 44.0, 120.0);
+            let green_crown = deck + Vec3::new(6.0, 10.0, 82.0);
+            let planet = pos + planet_dir * 150.0;
+            let look = green_crown.lerp(planet, 0.30);
             (pos, look)
         }
         9 => {
@@ -3374,10 +3415,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         11 => {
-            // Fighter swarm: pure open-sky look at high V (no island/tunnel soup).
-            let form = deck + Vec3::new(38.0, 55.0, 24.0);
-            let pos = form + Vec3::new(48.0, 22.0, 36.0);
-            let look = form + Vec3::new(-8.0, -1.0, -2.0);
+            // Fighter swarm: horizontal look at high V against sky (no island floor).
+            let form = deck + Vec3::new(40.0, 60.0, 18.0);
+            let pos = form + Vec3::new(32.0, 6.0, 42.0);
+            let look = form + Vec3::new(-14.0, 4.0, -2.0);
             (pos, look)
         }
         12 => {
