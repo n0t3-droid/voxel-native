@@ -2153,14 +2153,14 @@ fn ship_trail_material(
 
 fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     let u = u.clamp(0.0, 1.0);
-    // Cross the +X New World look left-to-right, above the canyon, so
-    // the white/orange shuttle is in frame from spawn through the first
-    // ~10s of streaming — large enough to read as the illustration's
-    // hero ship, west of the mesa face.
-    let x = origin.x + 16.0 + u * 24.0;
-    let z = origin.z + 2.0 + u * 14.0;
-    let y = origin.y + 20.0 + (u * std::f32::consts::TAU).sin() * 3.0;
-    let yaw = 24.0_f32.atan2(-14.0);
+    // Keep the shuttle *in the spawn frustum*. Half-FOV is ~39°, so at
+    // ~18 blocks ahead the hull must sit around origin.y+12 (~33° up),
+    // not +20 (~48°, clipped). Travel stays west of the mesa so the
+    // white/orange ship reads against open canyon sky, not the cliff.
+    let x = origin.x + 18.0 + u * 22.0;
+    let z = origin.z + 4.0 + u * 6.0;
+    let y = origin.y + 12.0 + (u * std::f32::consts::PI).sin() * 2.0;
+    let yaw = 22.0_f32.atan2(-6.0);
     let roll = -0.42 + (u * std::f32::consts::TAU).sin() * 0.30;
     (Vec3::new(x, y, z), yaw, roll)
 }
@@ -2179,7 +2179,7 @@ fn update_hero_flyby(
         let (pos, yaw, roll) = hero_flyby_pose(fly.origin, fly.t);
         tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(6.2);
+        tf.scale = Vec3::splat(7.0);
         motion.yaw = yaw;
         motion.pitch = -0.10;
         motion.roll = roll;
@@ -2640,7 +2640,7 @@ fn spawn_saved_ships_once(
             false,
             None,
         );
-        let t0 = 0.10;
+        let t0 = 0.08;
         let (fly_pos, fly_yaw, _) = hero_flyby_pose(player_anchor, t0);
         let fly = spawn_ship_entity(
             &mut commands,
@@ -4718,12 +4718,12 @@ mod tests {
                 pos.x
             );
             assert!(
-                pos.y > origin.y + 16.0,
+                pos.y > origin.y + 8.0,
                 "flyby at u={u} is not in the sky (y={})",
                 pos.y
             );
             assert!(
-                pos.y < origin.y + 32.0,
+                pos.y < origin.y + 18.0,
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );
