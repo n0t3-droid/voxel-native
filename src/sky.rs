@@ -39,6 +39,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::daynight::WorldIntelRuntime;
+use crate::film::FilmRuntime;
 use crate::settings::WorldSettings;
 
 /// Render layer used exclusively by the sky pass. The world camera stays
@@ -50,6 +51,107 @@ pub const SKY_LAYER: usize = 1;
 /// shell are placed. Far enough that parallax is invisible during
 /// normal play, close enough that floating-point precision is fine.
 const SKY_DISTANCE: f32 = 950.0;
+
+/// Saturn equatorial radius (km). NASA Saturn Fact Sheet.
+pub const SATURN_EQUATORIAL_RADIUS_KM: f64 = 60_268.0;
+/// Inner edge of Saturn's C ring (km). NASA Saturn Fact Sheet.
+pub const SATURN_C_RING_INNER_KM: f64 = 74_658.0;
+/// Outer edge of Saturn's A ring (km). NASA Saturn Fact Sheet.
+pub const SATURN_A_RING_OUTER_KM: f64 = 136_775.0;
+/// Cassini Division centre (km). NASA Saturn Fact Sheet.
+pub const SATURN_CASSINI_DIVISION_KM: f64 = 117_580.0;
+/// Mean synodic month (days). Meeus, Astronomical Algorithms.
+/// Physical reference for `VISUAL_LUNAR_MONTH_DAYS` compression.
+pub const SYNODIC_MONTH_DAYS: f64 = 29.530_588_853;
+/// Compressed in-game month so a full phase cycle is visible across a
+/// short play session (8 in-game days ≈ one visual month).
+pub const VISUAL_LUNAR_MONTH_DAYS: f64 = 8.0;
+/// Secondary moon semi-major axis as a fraction of the primary moon.
+pub const MOON_B_SEMI_MAJOR: f64 = 0.85;
+/// Outer tertiary moon semi-major axis (fraction of primary). Slower by Kepler.
+pub const MOON_C_SEMI_MAJOR: f64 = 1.25;
+/// Visual ring half-height as a fraction of planet radius.
+///
+/// Real Saturn rings are only ~10 m thick (NASA Saturn Fact Sheet) against
+/// an equatorial radius of 60 268 km — invisible at sky-dome scale. We
+/// exaggerate to 8 % of the disc radius so the annulus reads as a true
+/// 3D volume when viewed near edge-on, while radial proportions stay
+/// NASA-true (C-inner / A-outer / Cassini).
+pub const SATURN_RING_VISUAL_HALF_HEIGHT_FRAC: f32 = 0.12;
+
+const _: () = assert!(SATURN_C_RING_INNER_KM > SATURN_EQUATORIAL_RADIUS_KM);
+const _: () = assert!(SATURN_A_RING_OUTER_KM > SATURN_CASSINI_DIVISION_KM);
+const _: () = assert!(SYNODIC_MONTH_DAYS > VISUAL_LUNAR_MONTH_DAYS);
+
+/// Inner/outer sky radii of a Saturn-proportioned ring around a disc of
+/// `planet_radius` world units.
+pub fn saturn_ring_radii(planet_radius: f32) -> (f32, f32) {
+    let inner = planet_radius * (SATURN_C_RING_INNER_KM / SATURN_EQUATORIAL_RADIUS_KM) as f32;
+    let outer = planet_radius * (SATURN_A_RING_OUTER_KM / SATURN_EQUATORIAL_RADIUS_KM) as f32;
+    (inner, outer)
+}
+
+/// Visual half-height of the 3D ring volume for a planet of the given radius.
+pub fn saturn_ring_half_height(planet_radius: f32) -> f32 {
+    planet_radius * SATURN_RING_VISUAL_HALF_HEIGHT_FRAC
+}
+
+/// Cassini Division as a 0..1 coordinate across the C-inner → A-outer span.
+pub fn cassini_division_norm() -> f32 {
+    let inner = SATURN_C_RING_INNER_KM / SATURN_EQUATORIAL_RADIUS_KM;
+    let outer = SATURN_A_RING_OUTER_KM / SATURN_EQUATORIAL_RADIUS_KM;
+    let gap = SATURN_CASSINI_DIVISION_KM / SATURN_EQUATORIAL_RADIUS_KM;
+    ((gap - inner) / (outer - inner)) as f32
+}
+
+/// Illuminated fraction of a spherical Lambert moon. `phase_angle_rad` is
+/// the Sun–Moon–observer angle: 0 = full, π = new.
+pub fn moon_illuminated_fraction(phase_angle_rad: f64) -> f64 {
+    (1.0 + phase_angle_rad.cos()) * 0.5
+}
+
+/// Phase angle in radians for the in-game visual month. Seeded so two
+/// worlds with different seeds do not share the same sky calendar.
+pub fn lunar_phase_angle(time_of_day_hours: f64, seed: u32) -> f64 {
+    let seed_day = (seed as f64 % 1024.0) / 1024.0 * VISUAL_LUNAR_MONTH_DAYS;
+    let days = time_of_day_hours / 24.0 + seed_day;
+    (days / VISUAL_LUNAR_MONTH_DAYS) * std::f64::consts::TAU
+}
+
+/// Kepler's third law for circular orbits around the same primary:
+/// `T / T_ref = (a / a_ref)^{3/2}`.
+pub fn kepler_period_ratio(semi_major: f64, semi_major_ref: f64) -> f64 {
+    (semi_major / semi_major_ref).powf(1.5)
+}
+
+/// Mean-motion ratio n / n_ref = (a_ref / a)^{3/2} = 1 / period_ratio.
+pub fn kepler_mean_motion_ratio(semi_major: f64, semi_major_ref: f64) -> f64 {
+    1.0 / kepler_period_ratio(semi_major, semi_major_ref)
+}
+
+/// Unit direction of a moon that has drifted `phase_angle` ahead of the
+/// anti-sun point, with a small orbital inclination.
+///
+/// Phase 0 (full) sits at `-sun_dir`; phase π (new) sits at `+sun_dir`.
+/// The rotation axis is perpendicular to the sun so Y-up sun vectors still
+/// reach opposition.
+pub fn moon_orbit_dir(sun_dir: Vec3, phase_angle: f32, inclination: f32) -> Vec3 {
+    let sun_dir = sun_dir.normalize();
+    let helper = if sun_dir.z.abs() < 0.9 {
+        Vec3::Z
+    } else {
+        Vec3::X
+    };
+    let axis = sun_dir.cross(helper).normalize();
+    let mut dir = Quat::from_axis_angle(axis, phase_angle) * -sun_dir;
+    if inclination.abs() > 1e-5 {
+        let incl_axis = dir.cross(axis);
+        if incl_axis.length_squared() > 1e-8 {
+            dir = Quat::from_axis_angle(incl_axis.normalize(), inclination) * dir;
+        }
+    }
+    dir.normalize()
+}
 
 pub struct SkyPlugin;
 
@@ -65,7 +167,11 @@ impl Plugin for SkyPlugin {
             // world view by exactly one frame).
             .add_systems(
                 PostUpdate,
-                follow_and_animate_sky.before(bevy::transform::TransformSystem::TransformPropagate),
+                (
+                    follow_and_animate_sky
+                        .before(bevy::transform::TransformSystem::TransformPropagate),
+                    film_tame_sky_bloom,
+                ),
             );
     }
 }
@@ -83,6 +189,10 @@ struct MoonDisc;
 /// moon system (see reference image 1 with its crescent pair).
 #[derive(Component)]
 struct MoonDiscB;
+
+/// Outer tertiary moon — slower Kepler companion for the three-moon sky.
+#[derive(Component)]
+struct MoonDiscC;
 
 /// Distant ringed gas giant parked high in the sky for epic framing.
 /// Stays fixed on the celestial dome and rotates slowly for parallax.
@@ -109,6 +219,7 @@ struct SkyMaterials {
     sun: Handle<StandardMaterial>,
     moon: Handle<StandardMaterial>,
     moon_b: Handle<StandardMaterial>,
+    moon_c: Handle<StandardMaterial>,
     planet: Handle<StandardMaterial>,
     ring: Handle<StandardMaterial>,
     planet_b: Handle<StandardMaterial>,
@@ -122,6 +233,7 @@ fn setup_sky(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     settings: Res<WorldSettings>,
+    film: Res<FilmRuntime>,
 ) {
     let sky_layer = RenderLayers::layer(SKY_LAYER);
 
@@ -270,7 +382,11 @@ fn setup_sky(
     // Multi-channel Perlin produces billowing magenta/cyan/orange clouds
     // exactly like the reference art. Cull front-face so we only see it
     // from the inside, and keep it fully unlit/emissive.
-    let nebula_image = images.add(build_nebula_image(nebula_res, settings.seed as u64));
+    let nebula_image = images.add(build_nebula_image(
+        nebula_res,
+        settings.seed as u64,
+        film.enabled,
+    ));
     let nebula_mesh = meshes.add(
         Sphere::new(SKY_DISTANCE * 2.6)
             .mesh()
@@ -336,11 +452,39 @@ fn setup_sky(
         Name::new("MoonDiscB"),
     ));
 
+    // ----- Third (outer) moon ----------------------------------------
+    let moon_c_mesh = meshes.add(
+        Sphere::new(9.0)
+            .mesh()
+            .ico(3)
+            .expect("subdivision 3 is within ico limits"),
+    );
+    let moon_c_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.78, 0.86, 0.95),
+        emissive: LinearRgba::rgb(2.5, 3.5, 5.5),
+        unlit: true,
+        ..default()
+    });
+    commands.spawn((
+        PbrBundle {
+            mesh: moon_c_mesh,
+            material: moon_c_mat.clone(),
+            ..default()
+        },
+        NotShadowCaster,
+        sky_layer.clone(),
+        MoonDiscC,
+        Name::new("MoonDiscC"),
+    ));
+
     // ----- Ringed gas-giant planet ------------------------------------
     // Parked in a fixed sky direction; doesn't track the sun. Serves as
     // a dramatic backdrop feature like in reference image 2.
+    let planet_radius = 110.0;
+    let (ring_inner, ring_outer) = saturn_ring_radii(planet_radius);
+    let ring_half_h = saturn_ring_half_height(planet_radius);
     let planet_mesh = meshes.add(
-        Sphere::new(78.0)
+        Sphere::new(planet_radius)
             .mesh()
             .ico(4)
             .expect("subdivision 4 is within ico limits"),
@@ -354,9 +498,8 @@ fn setup_sky(
         unlit: true,
         ..default()
     });
-    // Ring: wide rainbow annulus with strong saturation and per-band
-    // colour variation (painted via vertex colours in build_ring_mesh).
-    let ring_mesh = meshes.add(build_ring_mesh(160.0, 270.0, 160));
+    // Ring: extruded 3D annulus (top + bottom + walls) with Cassini density.
+    let ring_mesh = meshes.add(build_ring_mesh(ring_inner, ring_outer, ring_half_h, 192));
     let ring_mat = materials.add(StandardMaterial {
         base_color: Color::srgba(1.0, 0.9, 0.8, 1.0),
         emissive: LinearRgba::rgb(5.5, 4.5, 6.5),
@@ -375,9 +518,9 @@ fn setup_sky(
                 mesh: planet_mesh,
                 material: planet_mat.clone(),
                 transform: Transform::from_translation(planet_pos)
-                    // Fixed tilt — ring plane tipped toward the viewer.
-                    // Never rotates (planets are stationary landmarks).
-                    .with_rotation(Quat::from_rotation_x(0.55) * Quat::from_rotation_z(-0.18)),
+                    // Steeper tilt so film hero frames catch a thick
+                    // ring silhouette instead of a face-on disc.
+                    .with_rotation(Quat::from_rotation_x(0.95) * Quat::from_rotation_z(-0.22)),
                 ..default()
             },
             NotShadowCaster,
@@ -390,9 +533,9 @@ fn setup_sky(
                 PbrBundle {
                     mesh: ring_mesh,
                     material: ring_mat.clone(),
-                    transform: Transform::from_rotation(Quat::from_rotation_x(
-                        std::f32::consts::FRAC_PI_2,
-                    )),
+                    // Identity — the extruded mesh already spans ±Y, so a
+                    // 90° X flip would tip the volume on edge incorrectly.
+                    transform: Transform::IDENTITY,
                     ..default()
                 },
                 NotShadowCaster,
@@ -435,6 +578,7 @@ fn setup_sky(
         sun: sun_mat,
         moon: moon_mat,
         moon_b: moon_b_mat,
+        moon_c: moon_c_mat,
         planet: planet_mat,
         ring: ring_mat,
         planet_b: planet_b_mat,
@@ -450,6 +594,7 @@ fn setup_sky(
 fn follow_and_animate_sky(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
+    film: Option<Res<FilmRuntime>>,
     main_cam: Query<&GlobalTransform, (With<Camera3d>, Without<SkyCamera>)>,
     mut sky_cam: Query<&mut Transform, With<SkyCamera>>,
     mut sun_q: Query<
@@ -459,6 +604,7 @@ fn follow_and_animate_sky(
             Without<SkyCamera>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<PlanetB>,
@@ -472,6 +618,7 @@ fn follow_and_animate_sky(
             Without<SkyCamera>,
             Without<SunDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<PlanetB>,
@@ -485,6 +632,21 @@ fn follow_and_animate_sky(
             Without<SkyCamera>,
             Without<SunDisc>,
             Without<MoonDisc>,
+            Without<MoonDiscC>,
+            Without<StarField>,
+            Without<RingedPlanet>,
+            Without<PlanetB>,
+            Without<Nebula>,
+        ),
+    >,
+    mut moon_c_q: Query<
+        &mut Transform,
+        (
+            With<MoonDiscC>,
+            Without<SkyCamera>,
+            Without<SunDisc>,
+            Without<MoonDisc>,
+            Without<MoonDiscB>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<PlanetB>,
@@ -499,6 +661,7 @@ fn follow_and_animate_sky(
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<RingedPlanet>,
             Without<PlanetB>,
             Without<Nebula>,
@@ -512,6 +675,7 @@ fn follow_and_animate_sky(
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<PlanetB>,
             Without<Nebula>,
@@ -525,6 +689,7 @@ fn follow_and_animate_sky(
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<Nebula>,
@@ -538,6 +703,7 @@ fn follow_and_animate_sky(
             Without<SunDisc>,
             Without<MoonDisc>,
             Without<MoonDiscB>,
+            Without<MoonDiscC>,
             Without<StarField>,
             Without<RingedPlanet>,
             Without<PlanetB>,
@@ -563,19 +729,25 @@ fn follow_and_animate_sky(
     // formulas in sync; they share the same `time_of_day` resource.
     let t = (settings.time_of_day / 24.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
     let sun_dir = Vec3::new(t.cos(), t.sin(), 0.3).normalize();
+    let phase = lunar_phase_angle(settings.time_of_day as f64, settings.seed);
+    let illum = moon_illuminated_fraction(phase) as f32;
+    let moon_dir = moon_orbit_dir(sun_dir, phase as f32, 0.09);
+    let phase_b = phase * kepler_mean_motion_ratio(MOON_B_SEMI_MAJOR, 1.0);
+    let moon_b_dir = moon_orbit_dir(sun_dir, phase_b as f32, 0.22);
+    let phase_c = phase * kepler_mean_motion_ratio(MOON_C_SEMI_MAJOR, 1.0);
+    let moon_c_dir = moon_orbit_dir(sun_dir, phase_c as f32, -0.14);
 
     if let Ok(mut sun_tf) = sun_q.get_single_mut() {
         sun_tf.translation = trans + sun_dir * SKY_DISTANCE;
     }
     if let Ok(mut moon_tf) = moon_q.get_single_mut() {
-        moon_tf.translation = trans - sun_dir * SKY_DISTANCE;
+        moon_tf.translation = trans + moon_dir * SKY_DISTANCE;
     }
     if let Ok(mut moon_b_tf) = moon_b_q.get_single_mut() {
-        // Second moon: 25° leading the main moon with a slight vertical
-        // offset so the pair reads as a binary system.
-        let lead = Quat::from_rotation_z(0.42) * Quat::from_rotation_y(0.18);
-        let dir_b = (lead * -sun_dir).normalize();
-        moon_b_tf.translation = trans + dir_b * SKY_DISTANCE * 0.92 + Vec3::new(0.0, 35.0, 0.0);
+        moon_b_tf.translation = trans + moon_b_dir * (SKY_DISTANCE * MOON_B_SEMI_MAJOR as f32);
+    }
+    if let Ok(mut moon_c_tf) = moon_c_q.get_single_mut() {
+        moon_c_tf.translation = trans + moon_c_dir * (SKY_DISTANCE * MOON_C_SEMI_MAJOR as f32);
     }
     if let Ok(mut stars_tf) = stars_q.get_single_mut() {
         stars_tf.translation = trans;
@@ -587,6 +759,17 @@ fn follow_and_animate_sky(
         // Fixed direction, NEVER rotates — stationary landmark.
         let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
         planet_tf.translation = trans + planet_dir * SKY_DISTANCE * 0.9;
+        // Film planet/painting: enlarge so the giant dominates the upper third.
+        let film_giant = film
+            .as_ref()
+            .filter(|f| f.enabled && f.ready_to_roll)
+            .map(|f| matches!(f.shot_index, 7 | 8))
+            .unwrap_or(false);
+        planet_tf.scale = if film_giant {
+            Vec3::splat(3.2)
+        } else {
+            Vec3::ONE
+        };
     }
     if let Ok(mut planet_b_tf) = planet_b_q.get_single_mut() {
         // Fixed direction on the opposite horizon, NEVER rotates.
@@ -614,17 +797,27 @@ fn follow_and_animate_sky(
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
         }
 
-        // Moon: cool blue, brightens slightly at night for a clearer disc.
+        // Moon: cool blue, scaled by the Lambert illuminated fraction so
+        // a new moon is a dim disc and a full moon blooms.
         if let Some(mat) = materials.get_mut(&sky_mats.moon) {
             let base = Vec3::new(6.0, 7.0, 11.0);
-            let scaled = base * (0.6 + 0.6 * night);
+            let scaled = base * (0.22 + 0.90 * illum) * (0.6 + 0.6 * night);
             mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
         }
 
-        // Second moon — cool violet, slightly dimmer.
+        // Second moon — cool violet, Kepler-faster orbit, slightly dimmer.
         if let Some(mat) = materials.get_mut(&sky_mats.moon_b) {
+            let illum_b = moon_illuminated_fraction(phase_b) as f32;
             let base = Vec3::new(4.0, 3.0, 8.0);
-            let scaled = base * (0.55 + 0.55 * night);
+            let scaled = base * (0.22 + 0.90 * illum_b) * (0.55 + 0.55 * night);
+            mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
+        }
+
+        // Third moon — ice-teal, Kepler-slower outer companion.
+        if let Some(mat) = materials.get_mut(&sky_mats.moon_c) {
+            let illum_c = moon_illuminated_fraction(phase_c) as f32;
+            let base = Vec3::new(2.5, 3.5, 5.5);
+            let scaled = base * (0.20 + 0.85 * illum_c) * (0.50 + 0.55 * night);
             mat.emissive = LinearRgba::rgb(scaled.x, scaled.y, scaled.z);
         }
 
@@ -632,7 +825,16 @@ fn follow_and_animate_sky(
         // magenta disc and rainbow rings stay breathtaking at noon too,
         // just like in the reference art. Slight extra glow at
         // night/sunset for the cinematic payoff.
-        let planet_scale = 1.8 + 0.8 * night + sunset * 0.5;
+        let film_planet = film
+            .as_ref()
+            .filter(|f| f.enabled && f.ready_to_roll)
+            .map(|f| matches!(f.shot_index, 7 | 8))
+            .unwrap_or(false);
+        let planet_scale = if film_planet {
+            4.5 + 0.5 * night
+        } else {
+            1.8 + 0.8 * night + sunset * 0.5
+        };
         if let Some(mat) = materials.get_mut(&sky_mats.planet) {
             let base = Vec3::new(8.0, 3.0, 11.0);
             let s = base * planet_scale;
@@ -654,10 +856,35 @@ fn follow_and_animate_sky(
         // are pushed HARD so the cosmic backdrop reads clearly even
         // against the bright blue noon sky, just like in the reference
         // art where planets and nebulae are visible in broad daylight.
+        // Film mode pushes saturation further for painting-hero frames
+        // without changing the daytime pad lighting path.
         if let Some(mat) = materials.get_mut(&sky_mats.nebula) {
-            let base_day = Vec3::new(9.0, 5.0, 13.0); // rich purple/magenta at noon
-            let base_night = Vec3::new(8.0, 5.5, 10.0); // full nebula glow at night
-            let base_sunset = Vec3::new(12.0, 5.0, 4.5); // warm dusk glow
+            let film_on = film.as_ref().map(|f| f.enabled).unwrap_or(false);
+            let film_hero = film
+                .as_ref()
+                .filter(|f| f.enabled && f.ready_to_roll)
+                .map(|f| matches!(f.shot_index, 7 | 8 | 9))
+                .unwrap_or(false);
+            let (base_day, base_night, base_sunset) = if film_hero {
+                // Soft depth: violet filaments with room for subject chroma.
+                (
+                    Vec3::new(11.0, 3.5, 18.0),
+                    Vec3::new(12.0, 4.0, 20.0),
+                    Vec3::new(13.0, 4.0, 5.5),
+                )
+            } else if film_on {
+                (
+                    Vec3::new(9.0, 3.5, 14.0),
+                    Vec3::new(10.0, 4.5, 15.0),
+                    Vec3::new(11.0, 4.0, 4.0),
+                )
+            } else {
+                (
+                    Vec3::new(9.0, 5.0, 13.0),
+                    Vec3::new(8.0, 5.5, 10.0),
+                    Vec3::new(12.0, 5.0, 4.5),
+                )
+            };
             let e = (base_day * day + base_night * night + base_sunset * sunset * 0.9)
                 * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(e.x, e.y, e.z);
@@ -668,6 +895,26 @@ fn follow_and_animate_sky(
             let intensity = 14.0 * night * intel.profile.sky_saturation.max(0.7);
             mat.emissive = LinearRgba::rgb(intensity, intensity, intensity * 1.15);
         }
+    }
+}
+
+fn film_tame_sky_bloom(
+    film: Option<Res<FilmRuntime>>,
+    mut sky_bloom: Query<&mut BloomSettings, With<SkyCamera>>,
+) {
+    let Some(film) = film else {
+        return;
+    };
+    if !film.enabled || !film.ready_to_roll {
+        return;
+    }
+    let Ok(mut bloom) = sky_bloom.get_single_mut() else {
+        return;
+    };
+    // Sky-camera OLD_SCHOOL bloom washes nebula filaments to grey haze.
+    if matches!(film.shot_index, 7 | 8 | 9 | 10) {
+        bloom.intensity = 0.04;
+        bloom.prefilter_settings.threshold = 0.85;
     }
 }
 
@@ -787,63 +1034,108 @@ fn build_star_mesh(count: usize, seed: u64, radius: f32) -> Mesh {
     mesh
 }
 
-/// Build a flat annulus (ring) mesh for the gas-giant. Two-sided via
-/// material `cull_mode = None`. `inner`/`outer` are world radii, `segs`
-/// is the number of radial slices.
-fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(segs * 2);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(segs * 2);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(segs * 2);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(segs * 2);
-    let mut indices: Vec<u32> = Vec::with_capacity(segs * 6);
+/// Optical depth of the Saturn-proportioned ring at radial coordinate
+/// `t` in [0, 1] from C-inner to A-outer. Cassini Division is a Gaussian
+/// density drop around [`cassini_division_norm`].
+pub fn saturn_ring_density(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let cassini = cassini_division_norm();
+    let gap = 1.0 - (-((t - cassini) * 28.0).powi(2)).exp() * 0.82;
+    (0.55 + 0.45 * (1.0 - (t - 0.35).abs())).clamp(0.22, 1.0) * gap
+}
+
+/// Build an extruded Saturn-proportioned ring volume.
+///
+/// Top + bottom discs plus inner/outer cylindrical walls give a readable
+/// 3D silhouette (not a flat billboard). `half_height` is the ±Y extent;
+/// radial samples carry Cassini Division density via vertex colour.
+fn build_ring_mesh(inner: f32, outer: f32, half_height: f32, segs: usize) -> Mesh {
+    const RINGS: usize = 8;
+    let verts_per_seg = (RINGS + 1) * 2; // top + bottom per radial sample
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(segs * verts_per_seg + segs * 4);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(segs * verts_per_seg + segs * 4);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(segs * verts_per_seg + segs * 4);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(segs * verts_per_seg + segs * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(segs * RINGS * 12 + segs * 24);
+
+    let warm = Vec3::new(0.95, 0.78, 0.58);
+    let ice = Vec3::new(0.72, 0.80, 0.95);
+    let h = half_height.max(0.05);
 
     for i in 0..segs {
         let a = (i as f32 / segs as f32) * std::f32::consts::TAU;
         let (sa, ca) = a.sin_cos();
-        positions.push([ca * inner, 0.0, sa * inner]);
-        positions.push([ca * outer, 0.0, sa * outer]);
-        normals.push([0.0, 1.0, 0.0]);
-        normals.push([0.0, 1.0, 0.0]);
-        let u = i as f32 / segs as f32;
-        uvs.push([u, 0.0]);
-        uvs.push([u, 1.0]);
-        // Rainbow ring: hue sweeps across the annulus radius so the
-        // disc reads as a prismatic Saturn-meets-nebula band. Density
-        // bands modulate alpha to give the classic Cassini-gap feel.
-        // Colour = HSV-ish rotation through magenta → teal → amber.
-        let hue = (u * 3.0).fract();
-        let (r, g, b) = if hue < 0.333 {
-            let k = hue / 0.333;
-            (1.0, 0.45 + 0.5 * k, 0.95 - 0.7 * k)
-        } else if hue < 0.666 {
-            let k = (hue - 0.333) / 0.333;
-            (1.0 - 0.7 * k, 0.95 - 0.2 * k, 0.25 + 0.65 * k)
-        } else {
-            let k = (hue - 0.666) / 0.334;
-            (0.3 + 0.7 * k, 0.75 - 0.25 * k, 0.9 - 0.6 * k)
-        };
-        // Alternating density bands (bright/dim/dark gap).
-        let band = ((i / 4) % 4) as f32;
-        let density = match band as i32 {
-            0 => 1.0,
-            1 => 0.85,
-            2 => 0.45,
-            _ => 0.75,
-        };
-        colors.push([r * density, g * density, b * density, 0.95 * density]);
-        colors.push([
-            r * density * 0.85,
-            g * density * 0.85,
-            b * density * 0.85,
-            0.55 * density,
-        ]);
+        for r in 0..=RINGS {
+            let t = r as f32 / RINGS as f32;
+            let rad = inner + (outer - inner) * t;
+            let density = saturn_ring_density(t);
+            let c = warm.lerp(ice, t) * density;
+            let col = [c.x, c.y, c.z, 0.88 * density];
+            // Top
+            positions.push([ca * rad, h, sa * rad]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([i as f32 / segs as f32, t]);
+            colors.push(col);
+            // Bottom
+            positions.push([ca * rad, -h, sa * rad]);
+            normals.push([0.0, -1.0, 0.0]);
+            uvs.push([i as f32 / segs as f32, t]);
+            colors.push(col);
+        }
+    }
+
+    let disc_vert_count = (segs * verts_per_seg) as u32;
+    for i in 0..segs {
+        let i0 = (i * verts_per_seg) as u32;
+        let i1 = (((i + 1) % segs) * verts_per_seg) as u32;
+        for r in 0..RINGS {
+            let base = (r * 2) as u32;
+            // Top face (even indices)
+            let a = i0 + base;
+            let b = a + 2;
+            let c = i1 + base;
+            let d = c + 2;
+            indices.extend_from_slice(&[a, b, d, a, d, c]);
+            // Bottom face (odd indices) — winding flipped for −Y normals
+            let a = i0 + base + 1;
+            let b = a + 2;
+            let c = i1 + base + 1;
+            let d = c + 2;
+            indices.extend_from_slice(&[a, d, b, a, c, d]);
+        }
+    }
+
+    // Outer + inner walls
+    let wall_start = disc_vert_count;
+    for i in 0..segs {
+        let a = (i as f32 / segs as f32) * std::f32::consts::TAU;
+        let (sa, ca) = a.sin_cos();
+        // Outer wall verts
+        positions.push([ca * outer, h, sa * outer]);
+        normals.push([ca, 0.0, sa]);
+        uvs.push([i as f32 / segs as f32, 1.0]);
+        colors.push([0.85, 0.78, 0.70, 0.75]);
+        positions.push([ca * outer, -h, sa * outer]);
+        normals.push([ca, 0.0, sa]);
+        uvs.push([i as f32 / segs as f32, 0.0]);
+        colors.push([0.85, 0.78, 0.70, 0.75]);
+        // Inner wall verts
+        positions.push([ca * inner, h, sa * inner]);
+        normals.push([-ca, 0.0, -sa]);
+        uvs.push([i as f32 / segs as f32, 1.0]);
+        colors.push([0.70, 0.72, 0.85, 0.55]);
+        positions.push([ca * inner, -h, sa * inner]);
+        normals.push([-ca, 0.0, -sa]);
+        uvs.push([i as f32 / segs as f32, 0.0]);
+        colors.push([0.70, 0.72, 0.85, 0.55]);
     }
     for i in 0..segs {
-        let a = (i * 2) as u32;
-        let b = (i * 2 + 1) as u32;
-        let c = (((i + 1) % segs) * 2) as u32;
-        let d = (((i + 1) % segs) * 2 + 1) as u32;
-        indices.extend_from_slice(&[a, b, d, a, d, c]);
+        let i0 = wall_start + (i * 4) as u32;
+        let i1 = wall_start + (((i + 1) % segs) * 4) as u32;
+        // Outer wall
+        indices.extend_from_slice(&[i0, i0 + 1, i1 + 1, i0, i1 + 1, i1]);
+        // Inner wall
+        indices.extend_from_slice(&[i0 + 2, i1 + 2, i1 + 3, i0 + 2, i1 + 3, i0 + 3]);
     }
 
     let mut mesh = Mesh::new(
@@ -858,11 +1150,29 @@ fn build_ring_mesh(inner: f32, outer: f32, segs: usize) -> Mesh {
     mesh
 }
 
+/// Axis-aligned Y extent of a ring mesh built by [`build_ring_mesh`].
+#[cfg(test)]
+fn ring_mesh_y_extent(mesh: &Mesh) -> f32 {
+    let Some(attr) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+        return 0.0;
+    };
+    let Some(positions) = attr.as_float3() else {
+        return 0.0;
+    };
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for p in positions {
+        min_y = min_y.min(p[1]);
+        max_y = max_y.max(p[1]);
+    }
+    max_y - min_y
+}
+
 /// Build a procedural nebula image — multi-octave 3D Perlin on a
 /// spherical projection, three colour channels sampled at different
 /// frequencies. Produces billowing magenta / cyan / orange clouds
 /// reminiscent of Hubble field backdrops. Deterministic by seed.
-fn build_nebula_image(size: u32, seed: u64) -> Image {
+fn build_nebula_image(size: u32, seed: u64, dense: bool) -> Image {
     let n_r = Perlin::new(seed as u32 ^ 0x7777_7777);
     let n_g = Perlin::new(seed as u32 ^ 0x3333_3333);
     let n_b = Perlin::new(seed as u32 ^ 0xBBBB_BBBB);
@@ -902,11 +1212,17 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
             let mask = fbm(&n_mask, 0.6, 3);
             // Soft mask so large regions of the sphere are near-black,
             // and only a few filaments glow strongly — exactly like
-            // real nebulae.
-            let amp = (mask + 0.2).max(0.0).powf(1.6);
-            let rr = ((r * 0.5 + 0.5) * amp).clamp(0.0, 1.0);
-            let gg = ((g * 0.5 + 0.5) * amp * 0.85).clamp(0.0, 1.0);
-            let bb = ((b * 0.5 + 0.5) * amp * 1.05).clamp(0.0, 1.0);
+            // real nebulae. Film mode widens/saturates the cloud mass.
+            let amp = if dense {
+                // Filamentary: keep large black voids so Additive chroma survives ACES.
+                (mask + 0.28).max(0.0).powf(2.05)
+            } else {
+                (mask + 0.2).max(0.0).powf(1.6)
+            };
+            let sat = if dense { 2.15 } else { 1.0 };
+            let rr = ((r * 0.5 + 0.5) * amp * sat).clamp(0.0, 1.0);
+            let gg = ((g * 0.5 + 0.5) * amp * 0.55 * sat).clamp(0.0, 1.0);
+            let bb = ((b * 0.5 + 0.5) * amp * 1.35 * sat).clamp(0.0, 1.0);
 
             // Colour palette skewed toward magenta / cyan / warm orange
             // highlights. Mix the raw channels with fixed biases so the
@@ -942,4 +1258,92 @@ fn build_nebula_image(size: u32, seed: u64) -> Image {
         ..ImageSamplerDescriptor::linear()
     });
     image
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saturn_ring_proportions_match_nasa_fact_sheet() {
+        let (inner, outer) = saturn_ring_radii(100.0);
+        let inner_ratio = inner / 100.0;
+        let outer_ratio = outer / 100.0;
+        assert!((inner_ratio - 1.2388).abs() < 0.002);
+        assert!((outer_ratio - 2.2694).abs() < 0.002);
+        assert!(inner < outer);
+        let cassini = cassini_division_norm();
+        assert!(cassini > 0.6 && cassini < 0.75);
+        assert!(
+            saturn_ring_density(cassini) < saturn_ring_density(0.35) * 0.5,
+            "Cassini Division should be a real density drop"
+        );
+        let half_h = saturn_ring_half_height(100.0);
+        assert!((half_h - 12.0).abs() < 1e-4);
+        let mesh = build_ring_mesh(inner, outer, half_h, 48);
+        let y_extent = ring_mesh_y_extent(&mesh);
+        assert!(
+            y_extent > half_h * 1.9,
+            "ring mesh must be a 3D volume, got Y extent {y_extent}"
+        );
+    }
+
+    #[test]
+    fn kepler_three_moon_hierarchy_and_opposition() {
+        let inner = kepler_mean_motion_ratio(MOON_B_SEMI_MAJOR, 1.0);
+        let outer = kepler_mean_motion_ratio(MOON_C_SEMI_MAJOR, 1.0);
+        assert!(inner > 1.0, "inner moon should orbit faster than primary");
+        assert!(outer < 1.0, "outer moon should orbit slower than primary");
+        assert!(inner > outer);
+        let period_b = kepler_period_ratio(MOON_B_SEMI_MAJOR, 1.0);
+        let period_c = kepler_period_ratio(MOON_C_SEMI_MAJOR, 1.0);
+        assert!((period_b - MOON_B_SEMI_MAJOR.powf(1.5)).abs() < 1e-9);
+        assert!((period_c - MOON_C_SEMI_MAJOR.powf(1.5)).abs() < 1e-9);
+        assert!((inner * period_b - 1.0).abs() < 1e-12);
+        let sun = Vec3::new(0.0, 1.0, 0.3).normalize();
+        let full = moon_orbit_dir(sun, 0.0, 0.0);
+        let new = moon_orbit_dir(sun, std::f32::consts::PI, 0.0);
+        assert!(full.dot(-sun) > 0.95);
+        assert!(new.dot(sun) > 0.95);
+    }
+
+    #[test]
+    fn lambert_moon_phase_hits_full_quarter_and_new() {
+        assert!((moon_illuminated_fraction(0.0) - 1.0).abs() < 1e-9);
+        assert!((moon_illuminated_fraction(std::f64::consts::PI) - 0.0).abs() < 1e-9);
+        assert!((moon_illuminated_fraction(std::f64::consts::FRAC_PI_2) - 0.5).abs() < 1e-9);
+        let a = lunar_phase_angle(12.0, 12345);
+        let b = lunar_phase_angle(12.0, 12345);
+        let c = lunar_phase_angle(12.0, 99);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let wrap = lunar_phase_angle(24.0 * VISUAL_LUNAR_MONTH_DAYS, 0);
+        assert!(wrap.abs() < 1e-9 || (wrap - std::f64::consts::TAU).abs() < 1e-9);
+        let artifact_dir = std::path::Path::new("/opt/cursor/artifacts");
+        if artifact_dir.is_dir() {
+            let (inner, outer) = saturn_ring_radii(100.0);
+            let _ = std::fs::write(
+                artifact_dir.join("aether_celestial_sky.txt"),
+                format!(
+                    "saturn_req_km={}\nsaturn_c_inner_km={}\nsaturn_a_outer_km={}\ncassini_km={}\nring_inner_per_100={:.4}\nring_outer_per_100={:.4}\ncassini_norm={:.4}\nsynodic_month_days={}\nvisual_month_days={}\nmoon_b_semi_major={}\nkepler_period_ratio={:.6}\nkepler_mean_motion={:.6}\nlambert_full={:.3}\nlambert_quarter={:.3}\nlambert_new={:.3}\nphase_seed_12345_noon={:.6}\n",
+                    SATURN_EQUATORIAL_RADIUS_KM,
+                    SATURN_C_RING_INNER_KM,
+                    SATURN_A_RING_OUTER_KM,
+                    SATURN_CASSINI_DIVISION_KM,
+                    inner / 100.0,
+                    outer / 100.0,
+                    cassini_division_norm(),
+                    SYNODIC_MONTH_DAYS,
+                    VISUAL_LUNAR_MONTH_DAYS,
+                    MOON_B_SEMI_MAJOR,
+                    kepler_period_ratio(MOON_B_SEMI_MAJOR, 1.0),
+                    kepler_mean_motion_ratio(MOON_B_SEMI_MAJOR, 1.0),
+                    moon_illuminated_fraction(0.0),
+                    moon_illuminated_fraction(std::f64::consts::FRAC_PI_2),
+                    moon_illuminated_fraction(std::f64::consts::PI),
+                    lunar_phase_angle(12.0, 12345)
+                ),
+            );
+        }
+    }
 }

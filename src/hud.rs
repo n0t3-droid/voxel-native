@@ -91,6 +91,7 @@ fn toggle_hud_visibility(
     state: Res<State<crate::menu::GameState>>,
     overlay: Res<DebugOverlay>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
     mut crosshair_q: Query<
         &mut Visibility,
         (
@@ -131,23 +132,24 @@ fn toggle_hud_visibility(
     >,
 ) {
     let in_game = *state.get() == crate::menu::GameState::InGame;
+    let film_hide = film.as_ref().map(|f| f.hide_hud).unwrap_or(false);
     let build_mode = mode.as_deref().map(|m| m.is_build()).unwrap_or(false);
     let ship_mode = mode.as_deref().map(|m| m.is_ship()).unwrap_or(false);
     let build_picker = mode
         .as_deref()
         .map(|m| m.is_build_picker())
         .unwrap_or(false);
-    let stats_vis = if in_game && overlay.visible {
+    let stats_vis = if in_game && overlay.visible && !film_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    let crosshair_vis = if in_game && !build_picker {
+    let crosshair_vis = if in_game && !build_picker && !film_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
-    let hotbar_vis = if in_game && !build_mode && !ship_mode {
+    let hotbar_vis = if in_game && !build_mode && !ship_mode && !film_hide {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -356,7 +358,7 @@ fn update_stats_text(
     buf.clear();
     let _ = write!(
         buf,
-        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nOBJ  {}\nSKETCH LMB draw face  RMB cut  G push/pull  Tab tools  F1 deck  ESC pause",
+        "NEUROCORE {sim_mode}  {} {} {}  FPS {fps:>3.0}/{:>3.0}  P {:>2.0}%  Q {:>2.0}%\nNAV  X {:>7.1}  Y {:>6.1}  Z {:>7.1}  // {:?}\nWORLD {hour:02}:{minute:02} {:?}  //  {}  //  FOV {:.0}\nBUDGET RD {}/{}  TERR {}/{}  MESH {}/{}  UP {}  SHADOW {}  {}\n{}\nAETHER  Shift+F10 island  Shift+F11 station  SKYWAY workflow\nOBJ  {}\nSKETCH LMB draw face  RMB cut  G push/pull  Tab tools  F1 deck  ESC pause",
         governor.profile.label(),
         governor.intent.label(),
         governor.quality.label(),
@@ -386,6 +388,7 @@ fn draw_neon_combat_hud(
     mut contexts: EguiContexts,
     state: Res<State<crate::menu::GameState>>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
     settings: Res<WorldSettings>,
     world: Res<VoxelWorld>,
     governor: Res<StreamingGovernor>,
@@ -397,6 +400,9 @@ fn draw_neon_combat_hud(
     suit: Res<SuitVitals>,
 ) {
     if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if film.as_ref().map(|f| f.hide_hud).unwrap_or(false) {
         return;
     }
     if mode
@@ -865,8 +871,12 @@ fn draw_workflow_rail(
     state: Res<State<crate::menu::GameState>>,
     settings: Res<WorldSettings>,
     mode: Option<Res<crate::mode::ModeContext>>,
+    film: Option<Res<crate::film::FilmRuntime>>,
 ) {
     if *state.get() != crate::menu::GameState::InGame {
+        return;
+    }
+    if film.as_ref().map(|f| f.hide_hud).unwrap_or(false) {
         return;
     }
     let steps = workflow_steps_for_profile(settings.hud_profile);

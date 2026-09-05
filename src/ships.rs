@@ -469,7 +469,7 @@ impl CockpitTransition {
 }
 
 #[derive(Default, Resource)]
-struct ShipFxCache {
+pub(crate) struct ShipFxCache {
     cube: Option<Handle<Mesh>>,
     real_sphere: Option<Handle<Mesh>>,
     real_cylinder: Option<Handle<Mesh>>,
@@ -1713,6 +1713,46 @@ fn push_real_part(
     });
 }
 
+/// Spawn a Scout Shuttle for Aether film hero frames. Returns the root
+/// entity. Writes a cruise `ShipMotion::speed` so cyan energy wakes pulse
+/// hotter than the unmanned floor intensity.
+pub fn spawn_aether_film_shuttle(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    fx: &mut ShipFxCache,
+    pos: Vec3,
+    yaw: f32,
+) -> Entity {
+    let entity = spawn_ship_entity(
+        commands,
+        meshes,
+        materials,
+        images,
+        fx,
+        ShipKind::ScoutShuttle,
+        pos,
+        yaw,
+        false,
+        None,
+        true, // cyan wakes only — amber bloom washes the painting cue
+        true, // remaps stern AmberHeat + MagentaSignal → CyanEmission for film
+        true, // hide cockpit HUD/chrome so pink streaks don't leak into film
+    );
+    // Replace the default parked motion with a cruise so trails bloom.
+    commands.entity(entity).insert(ShipMotion {
+        yaw,
+        pitch: -0.08,
+        roll: 0.0,
+        speed: blueprint(ShipKind::ScoutShuttle).max_speed * 0.72,
+        yaw_rate: 0.0,
+        pitch_rate: 0.0,
+        lateral_speed: 0.0,
+    });
+    entity
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_ship_entity(
     commands: &mut Commands,
@@ -1725,6 +1765,9 @@ fn spawn_ship_entity(
     yaw: f32,
     preview: bool,
     shield_override: Option<f32>,
+    cyan_trails_only: bool,
+    film_cyan_nozzles: bool,
+    hide_cockpit_chrome: bool,
 ) -> Entity {
     let bp = blueprint(kind);
     let root = commands
@@ -1767,23 +1810,29 @@ fn spawn_ship_entity(
         .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
         .clone();
     commands.entity(root).with_children(|p| {
-        spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview);
+        spawn_realistic_ship_exterior(p, meshes, materials, fx, kind, preview, film_cyan_nozzles);
         if !preview {
-            spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp);
-            spawn_ship_energy_trails(p, materials, fx, &cube, kind);
-            p.spawn(PointLightBundle {
-                point_light: PointLight {
-                    color: Color::srgb(0.64, 0.92, 1.0),
-                    intensity: 130_000.0,
-                    range: 18.0,
-                    shadows_enabled: false,
+            // Film hero shuttle: skip cockpit HUD panels — Magenta/Amber
+            // holograms leak pink bloom into rear-quarter nozzle frames.
+            if !hide_cockpit_chrome {
+                spawn_cockpit_holograms(p, meshes, materials, fx, &cube, kind, &bp);
+            }
+            spawn_ship_energy_trails(p, materials, fx, &cube, kind, cyan_trails_only);
+            if !hide_cockpit_chrome {
+                p.spawn(PointLightBundle {
+                    point_light: PointLight {
+                        color: Color::srgb(0.64, 0.92, 1.0),
+                        intensity: 130_000.0,
+                        range: 18.0,
+                        shadows_enabled: false,
+                        ..default()
+                    },
+                    transform: Transform::from_translation(
+                        bp.cockpit_offset + Vec3::new(0.0, 1.0, 0.6),
+                    ),
                     ..default()
-                },
-                transform: Transform::from_translation(
-                    bp.cockpit_offset + Vec3::new(0.0, 1.0, 0.6),
-                ),
-                ..default()
-            });
+                });
+            }
             p.spawn(PointLightBundle {
                 point_light: PointLight {
                     color: Color::srgb(0.25, 0.90, 1.0),
@@ -1807,8 +1856,19 @@ fn spawn_realistic_ship_exterior(
     fx: &mut ShipFxCache,
     kind: ShipKind,
     preview: bool,
+    film_cyan_nozzles: bool,
 ) {
-    for part in realistic_ship_exterior_specs(kind) {
+    for mut part in realistic_ship_exterior_specs(kind) {
+        if film_cyan_nozzles {
+            match part.tone {
+                // Film hero shuttle: stern heat + pink signal accents must
+                // read cyan so nozzles dominate (no amber/magenta bloom).
+                RealShipTone::AmberHeat | RealShipTone::MagentaSignal => {
+                    part.tone = RealShipTone::CyanEmission;
+                }
+                _ => {}
+            }
+        }
         spawn_real_ship_part(
             parent,
             meshes,
@@ -2062,8 +2122,18 @@ fn spawn_ship_energy_trails(
     fx: &mut ShipFxCache,
     cube: &Handle<Mesh>,
     kind: ShipKind,
+    cyan_trails_only: bool,
 ) {
-    for spec in ship_trail_specs(kind) {
+    for mut spec in ship_trail_specs(kind) {
+        if cyan_trails_only && spec.tone == ShipTrailTone::Amber {
+            continue;
+        }
+        if cyan_trails_only {
+            // Longer / thicker cyan plumes for the film rear-quarter beat.
+            spec.base_scale.x *= 1.55;
+            spec.base_scale.y *= 1.45;
+            spec.base_scale.z *= 1.35;
+        }
         let material = ship_trail_material(fx, materials, spec.tone);
         parent.spawn((
             PbrBundle {
@@ -2117,18 +2187,30 @@ fn update_ship_energy_trails(
     time: Res<Time>,
     pilot: Res<PilotState>,
     ship_q: Query<(&ShipInstance, &ShipMotion)>,
-    mut trails: Query<(&ShipEnergyTrail, &mut Transform)>,
+    parents: Query<&Parent>,
+    mut trails: Query<(Entity, &ShipEnergyTrail, &mut Transform)>,
 ) {
-    let intensity = pilot
+    let piloted_intensity = pilot
         .active_ship
         .and_then(|ship| ship_q.get(ship).ok())
         .map(|(ship, motion)| {
             let bp = blueprint(ship.kind);
             (motion.speed / bp.max_speed.max(1.0)).clamp(0.0, 1.0)
-        })
-        .unwrap_or(0.18);
+        });
     let seconds = time.elapsed_seconds_wrapped();
-    for (trail, mut tf) in trails.iter_mut() {
+    for (entity, trail, mut tf) in trails.iter_mut() {
+        // Prefer the parent ship's cruise speed so unpiloted film hero
+        // shuttles still bloom cyan wakes instead of the parked floor.
+        let intensity = parents
+            .get(entity)
+            .ok()
+            .and_then(|parent| ship_q.get(parent.get()).ok())
+            .map(|(ship, motion)| {
+                let bp = blueprint(ship.kind);
+                (motion.speed / bp.max_speed.max(1.0)).clamp(0.0, 1.0)
+            })
+            .or(piloted_intensity)
+            .unwrap_or(0.18);
         let wave = (seconds * 7.4 + trail.phase).sin();
         let pulse = 0.72 + intensity * 0.55 + wave.abs() * 0.22;
         tf.translation = trail.base_translation + Vec3::new(0.0, wave * 0.08, wave * 0.28);
@@ -2543,6 +2625,9 @@ fn spawn_saved_ships_once(
             saved.yaw,
             false,
             Some(saved.shield),
+            false,
+            false,
+            false,
         );
     }
 
@@ -2565,6 +2650,9 @@ fn spawn_saved_ships_once(
             player_yaw + std::f32::consts::PI,
             false,
             None,
+            false,
+            false,
+            false,
         );
     }
 }
@@ -2676,6 +2764,9 @@ fn ship_placement_input(
                 placement.yaw,
                 true,
                 None,
+                false,
+                false,
+                false,
             );
             placement.preview = Some(e);
             e
@@ -2715,6 +2806,9 @@ fn ship_placement_input(
             placement.yaw,
             false,
             None,
+            false,
+            false,
+            false,
         );
         placement.active = false;
         mode.set(
@@ -2916,7 +3010,11 @@ fn draw_ship_boarding_hud(
     boarding: Res<ShipBoardingState>,
     pilot: Res<PilotState>,
     mode: Res<ModeContext>,
+    film: Option<Res<crate::film::FilmRuntime>>,
 ) {
+    if film.as_ref().map(|f| f.hide_hud).unwrap_or(false) {
+        return;
+    }
     if pilot.active_ship.is_some() || !matches!(mode.mode, ActiveMode::Combat) {
         return;
     }

@@ -13,6 +13,8 @@ mod commands;
 mod daynight;
 mod director;
 mod editor;
+mod film;
+mod frontier;
 mod hud;
 mod icons;
 mod menu;
@@ -132,6 +134,7 @@ fn main() {
         .add_plugins(mode::ModePlugin)
         .add_plugins(neurocore::NeuroCorePlugin)
         .add_plugins(qa::QaPlugin)
+        .add_plugins(film::FilmPlugin)
         .add_plugins(toolbelt::ToolbeltPlugin)
         .add_plugins(commands::CommandDeckPlugin)
         .add_plugins(sculpt::SculptPlugin)
@@ -212,6 +215,8 @@ fn print_controls() {
     info!("  Inventar     : Shuttle KI-Gefecht optional (Drohnen aus bis du es einschaltest)");
     info!("  ESC          : pause menu / close overlay");
     info!("  Shift+F3     : toggle debug overlay");
+    info!("  Shift+F10    : warp to nearest Aether sky island");
+    info!("  Shift+F11    : stamp an orbital landing pad at the player");
     info!("  F2           : screenshot");
     info!("  F5           : save world + settings");
     info!("  LMB          : capture mouse");

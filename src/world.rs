@@ -777,18 +777,25 @@ impl VoxelWorld {
         // old 5-point probe missed.
         let step = s / 4;
         let mut max_block_y = crate::terrain::WATER_LEVEL;
+        let seed = self.generator.seed;
         for iz in 0..=4 {
             for ix in 0..=4 {
                 let wx = wx0 + (ix * step).min(s - 1);
                 let wz = wz0 + (iz * step).min(s - 1);
-                let h = self.generator.surface_height_at(wx, wz);
+                let h = crate::frontier::overlay_column_top(
+                    seed,
+                    wx,
+                    wz,
+                    |x, z| self.generator.surface_height_at(x, z),
+                    |x, z| self.generator.biome_at(x, z),
+                );
                 if h > max_block_y {
                     max_block_y = h;
                 }
             }
         }
         // +2 chunks of safety: covers trees (+6 blocks), tall features,
-        // and mountain peaks that might still fall between samples.
+        // sky-island keels that fall between samples, and station masts.
         let top_cy = (max_block_y / s) + 2;
         self.column_top_cy.insert((cx, cz), top_cy);
         top_cy
