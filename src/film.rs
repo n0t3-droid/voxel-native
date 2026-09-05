@@ -266,9 +266,9 @@ fn film_spawn_lights(
     commands.spawn((
         PointLightBundle {
             point_light: PointLight {
-                color: Color::srgb(0.65, 0.95, 1.0),
-                intensity: 3_600_000.0,
-                range: 140.0,
+                color: Color::srgb(0.75, 0.98, 1.0),
+                intensity: 6_500_000.0,
+                range: 180.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -277,6 +277,22 @@ fn film_spawn_lights(
         },
         FilmUnderKeelLight,
         Name::new("FilmUnderKeelLight"),
+    ));
+    // Second under fill offset toward camera side of island_deck_keel.
+    commands.spawn((
+        PointLightBundle {
+            point_light: PointLight {
+                color: Color::srgb(0.55, 1.0, 0.85),
+                intensity: 4_200_000.0,
+                range: 120.0,
+                shadows_enabled: false,
+                ..default()
+            },
+            transform: Transform::from_xyz(0.0, -20.0, 0.0),
+            ..default()
+        },
+        FilmUnderKeelLight,
+        Name::new("FilmUnderKeelLightB"),
     ));
     // Hard side key so mesh silhouettes cast readable limb edges on lavapipe.
     commands.spawn((
@@ -490,13 +506,13 @@ fn spawn_film_marine(
         ))
         .id();
     commands.entity(root).with_children(|p| {
-        // Legs
+        // Legs — wide stance so biped reads (not a pedestal).
         p.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: dark.clone(),
-                transform: Transform::from_translation(Vec3::new(-0.38, 0.75, 0.0))
-                    .with_scale(Vec3::new(0.42, 1.5, 0.48)),
+                transform: Transform::from_translation(Vec3::new(-0.55, 0.75, 0.0))
+                    .with_scale(Vec3::new(0.38, 1.5, 0.42)),
                 ..default()
             },
             Name::new("MarineLegL"),
@@ -505,11 +521,22 @@ fn spawn_film_marine(
             PbrBundle {
                 mesh: cube.clone(),
                 material: dark.clone(),
-                transform: Transform::from_translation(Vec3::new(0.38, 0.75, 0.0))
-                    .with_scale(Vec3::new(0.42, 1.5, 0.48)),
+                transform: Transform::from_translation(Vec3::new(0.55, 0.75, 0.0))
+                    .with_scale(Vec3::new(0.38, 1.5, 0.42)),
                 ..default()
             },
             Name::new("MarineLegR"),
+        ));
+        // Hip gap marker (dark) so legs don't fuse into one column.
+        p.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: dark.clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 1.45, 0.0))
+                    .with_scale(Vec3::new(0.95, 0.22, 0.4)),
+                ..default()
+            },
+            Name::new("MarineHips"),
         ));
         // Torso
         p.spawn((
@@ -610,21 +637,21 @@ fn spawn_film_alien(
         ));
         // Six splayed legs — unmistakable multi-leg vs biped marine.
         let legs = [
-            Vec3::new(-1.55, 0.7, -1.35),
-            Vec3::new(1.55, 0.7, -1.35),
-            Vec3::new(-1.75, 0.7, 0.15),
-            Vec3::new(1.75, 0.7, 0.15),
-            Vec3::new(-1.35, 0.7, 1.45),
-            Vec3::new(1.35, 0.7, 1.45),
+            Vec3::new(-2.05, 0.55, -1.75),
+            Vec3::new(2.05, 0.55, -1.75),
+            Vec3::new(-2.35, 0.55, 0.05),
+            Vec3::new(2.35, 0.55, 0.05),
+            Vec3::new(-1.85, 0.55, 1.85),
+            Vec3::new(1.85, 0.55, 1.85),
         ];
         for (i, offset) in legs.iter().enumerate() {
-            let mid = Vec3::new(offset.x * 0.55, 1.25, offset.z * 0.55);
+            let mid = Vec3::new(offset.x * 0.5, 1.35, offset.z * 0.5);
             p.spawn((
                 PbrBundle {
                     mesh: cube.clone(),
                     material: leg.clone(),
                     transform: Transform::from_translation(*offset)
-                        .with_scale(Vec3::new(0.32, 1.4, 0.32)),
+                        .with_scale(Vec3::new(0.28, 1.55, 0.28)),
                     ..default()
                 },
                 Name::new(format!("AlienLeg{i}")),
@@ -634,7 +661,7 @@ fn spawn_film_alien(
                     mesh: cube.clone(),
                     material: leg.clone(),
                     transform: Transform::from_translation(mid)
-                        .with_scale(Vec3::new(0.38, 0.55, 0.38)),
+                        .with_scale(Vec3::new(0.42, 0.5, 0.42)),
                     ..default()
                 },
                 Name::new(format!("AlienJoint{i}")),
@@ -810,10 +837,11 @@ fn film_drive_camera(
     // Tighter hero FOV so pad figures and grass fill the frame.
     if let Projection::Perspective(ref mut persp) = *projection {
         let target: f32 = match film.shot_index {
-            1 => 50.0,     // deck + keel profile
-            2 | 3 => 42.0, // closer full-body combat / crew silhouettes
-            5 => 46.0,     // shuttle rear-quarter
-            6 => 40.0,     // planet
+            1 => 50.0, // deck + keel profile
+            2 => 58.0, // wide enough for biped + multi-leg pair
+            3 => 48.0, // crew pair
+            5 => 46.0, // shuttle rear-quarter
+            6 => 40.0, // planet
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -1050,8 +1078,21 @@ fn park_island_lights(
         island.deck_y as f32 + 1.0,
         island.cz as f32 + 0.5,
     );
-    if let Ok(mut under) = under_q.get_single_mut() {
-        under.translation = deck + Vec3::new(6.0, -(island.keel_depth as f32 * 0.85).max(7.0), 8.0);
+    if let Ok(_) = under_q.get_single() {
+        // handled below via iter
+    }
+    let mut under_i = 0usize;
+    for mut under in under_q.iter_mut() {
+        under.translation = if under_i == 0 {
+            deck + Vec3::new(8.0, -(island.keel_depth as f32 * 0.9).max(8.0), 10.0)
+        } else {
+            deck + Vec3::new(
+                island.radius_x as f32 * 0.35,
+                -(island.keel_depth as f32 * 0.55).max(5.0),
+                island.radius_z as f32 * 0.4,
+            )
+        };
+        under_i += 1;
     }
     if let Ok(mut figure) = figure_q.get_single_mut() {
         // Side-lit combat pair on the open south deck.
@@ -1088,15 +1129,15 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // Combat pair on open south deck — biped vs six-leg mesh silhouettes.
-            let look = station + Vec3::new(0.0, 2.6, 11.0);
-            let pos = look + Vec3::new(-12.0, 3.0, 9.0);
+            // Combat pair — stand far enough that biped AND six-leg fill frame.
+            let look = station + Vec3::new(0.0, 2.8, 11.0);
+            let pos = look + Vec3::new(-16.0, 4.5, 14.0);
             (pos, look)
         }
         3 => {
-            // Pad rail-crew pair — mesh crew on open −Z deck.
-            let look = station + Vec3::new(-5.0, 2.2, -10.0);
-            let pos = look + Vec3::new(-8.0, 2.0, 6.5);
+            // Crew pair — pull back so both bipeds read as twin figures.
+            let look = station + Vec3::new(-5.1, 2.4, -10.0);
+            let pos = look + Vec3::new(-11.0, 3.0, 10.0);
             (pos, look)
         }
         4 => {
