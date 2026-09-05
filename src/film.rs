@@ -448,8 +448,8 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
     // Paint cyan/verdant luminite across the underside — never magenta, so
     // thin crystal spikes cannot read as pink cockpit HUD streaks.
     let mut keel_lit = 0usize;
-    let rx = island.radius_x.min(28);
-    let rz = island.radius_z.min(26);
+    let rx = island.radius_x; // full island — don't leave outer keel bottoms inked
+    let rz = island.radius_z;
     for dx in -rx..=rx {
         for dz in -rz..=rz {
             let nx = dx as f32 / rx.max(1) as f32;
@@ -470,9 +470,9 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             for y in bottom..=(island.deck_y - 1).max(bottom) {
                 let near_bottom = y <= bottom + 2;
                 let near_rim = edge > 0.42;
-                // Carve the absolute bottom 2 layers to Air — unlit mesh plates
+                // Carve the absolute bottom 3 layers to Air — unlit mesh plates
                 // replace those downward faces so screenshots never show ink.
-                if y <= bottom + 1 {
+                if y <= bottom + 2 {
                     if world.edit_set_voxel(x, y, z, AIR) {
                         keel_lit += 1;
                     }
@@ -945,8 +945,8 @@ fn film_spawn_silhouettes(
         PbrBundle {
             mesh: cube.clone(),
             material: crystal_plate.clone(),
-            transform: Transform::from_translation(deck + Vec3::new(0.0, underside_y - 0.25, 2.0))
-                .with_scale(Vec3::new(rx * 2.1, 1.5, rz * 2.1)),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, underside_y - 0.4, 2.0))
+                .with_scale(Vec3::new(rx * 2.35, 2.2, rz * 2.35)),
             ..default()
         },
         FilmSilhouette,
@@ -1946,16 +1946,16 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Outside the island, below-and-SE: grass deck rim on the far
-            // edge + unlit crystal/alloy underside plates in the near field.
+            // Tight on the plated main island: grass rim + continuous
+            // crystal underside (avoid distant black satellite keels).
             let keel = island.keel_depth as f32;
             let pos = deck
                 + Vec3::new(
-                    island.radius_x as f32 + 28.0,
-                    -(keel * 0.95).max(8.0) - 1.5,
-                    island.radius_z as f32 + 30.0,
+                    island.radius_x as f32 * 0.85 + 16.0,
+                    -(keel * 0.85).max(7.0),
+                    island.radius_z as f32 * 0.85 + 18.0,
                 );
-            let look = deck + Vec3::new(-4.0, 0.8, -2.0);
+            let look = deck + Vec3::new(-2.0, -keel * 0.1, 2.0);
             (pos, look)
         }
         2 => {
