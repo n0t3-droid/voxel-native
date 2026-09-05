@@ -73,6 +73,8 @@ impl Plugin for AmbientPlugin {
                     update_butterfly_wings,
                     update_colony_walkers,
                     update_skyway_trams,
+                    update_frontier_outposts,
+                    update_frontier_drones,
                 )
                     .run_if(in_state(GameState::InGame)),
             );
@@ -285,6 +287,21 @@ struct SkywayTram {
 #[derive(Component)]
 struct ColonyPad;
 
+#[derive(Component)]
+struct FrontierOutpost {
+    index: usize,
+    cell: IVec2,
+}
+
+#[derive(Component)]
+struct FrontierDrone {
+    index: usize,
+    t: f32,
+    speed: f32,
+    origin: Vec3,
+    span: Vec3,
+}
+
 /// Postcard-readable suit: ~3.1 m tall, ~1.05 m at the shoulders.
 /// NASA EMU standing height is ~1.88 m (ISS EVA); these are staged larger
 /// so 2–3 figures still read at ~9 m in the 78° vertical spawn look
@@ -294,6 +311,13 @@ const FIGURE_HEAD: Vec3 = Vec3::new(0.78, 0.72, 0.78);
 const FIGURE_LEG: Vec3 = Vec3::new(0.90, 0.70, 0.58);
 const FIGURE_VISOR: Vec3 = Vec3::new(0.62, 0.32, 0.18);
 const TRAM_HULL: Vec3 = Vec3::new(3.40, 2.55, 9.20);
+const OUTPOST_POOL: usize = 8;
+/// World lattice — one candidate landing every this many metres, then a
+/// hash keeps occupancy sparse. 144 m sits inside Fast RD 12 (192 m)
+/// for the nearest neighbour and inside cinematic RD 32 for the ring.
+const OUTPOST_CELL: f32 = 144.0;
+const OUTPOST_SEARCH: i32 = 3;
+const OUTPOST_OCCUPANCY: f32 = 0.40;
 
 fn colony_figure_count(graphics: GraphicsMode, cinematic: bool) -> usize {
     match graphics {
@@ -309,6 +333,32 @@ fn skyway_tram_count(graphics: GraphicsMode, _cinematic: bool) -> usize {
     // reads as noise at postcard scale; Fast still keeps the single car.
     match graphics {
         GraphicsMode::Fast | GraphicsMode::Balanced | GraphicsMode::High => 1,
+    }
+}
+
+fn frontier_outpost_count(graphics: GraphicsMode, cinematic: bool) -> usize {
+    match graphics {
+        GraphicsMode::Fast => 2,
+        GraphicsMode::Balanced => 4,
+        GraphicsMode::High if cinematic => 6,
+        GraphicsMode::High => 5,
+    }
+}
+
+fn frontier_outpost_figures(graphics: GraphicsMode) -> usize {
+    match graphics {
+        GraphicsMode::Fast => 0,
+        GraphicsMode::Balanced => 1,
+        GraphicsMode::High => 2,
+    }
+}
+
+fn frontier_drone_count(graphics: GraphicsMode, cinematic: bool) -> usize {
+    match graphics {
+        GraphicsMode::Fast => 1,
+        GraphicsMode::Balanced => 2,
+        GraphicsMode::High if cinematic => 3,
+        GraphicsMode::High => 2,
     }
 }
 
@@ -328,7 +378,16 @@ fn spawn_colony_life_once(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    existing: Query<Entity, Or<(With<ColonyWalker>, With<SkywayTram>, With<ColonyPad>)>>,
+    existing: Query<
+        Entity,
+        Or<(
+            With<ColonyWalker>,
+            With<SkywayTram>,
+            With<ColonyPad>,
+            With<FrontierOutpost>,
+            With<FrontierDrone>,
+        )>,
+    >,
 ) {
     if !pending.0 {
         return;
@@ -367,6 +426,13 @@ fn spawn_colony_life_once(
         &mut materials,
         &cube,
         anchor,
+        settings.graphics,
+        cinematic,
+    );
+    spawn_frontier_outposts(
+        &mut commands,
+        &mut materials,
+        &cube,
         settings.graphics,
         cinematic,
     );
@@ -409,8 +475,7 @@ fn spawn_colony_figures(
     let mut best_score = f32::INFINITY;
     for lat in [2.4, 0.8, -0.6, 3.6] {
         let xz = origin + fwd_h * 8.5 + right_h * lat;
-        let ground =
-            generator.surface_height_at(xz.x.round() as i32, xz.z.round() as i32) as f32;
+        let ground = generator.surface_height_at(xz.x.round() as i32, xz.z.round() as i32) as f32;
         // Keep the pad in the open canyon volume, never on a mesa that
         // would hide the suits or drop them under the 78° frame.
         let score = if ground > origin.y - 4.0 {
@@ -520,8 +585,7 @@ fn spawn_colony_figures(
             p.spawn(PbrBundle {
                 mesh: cube.clone(),
                 material: suit.clone(),
-                transform: Transform::from_xyz(0.0, FIGURE_LEG.y * 0.5, 0.0)
-                    .with_scale(FIGURE_LEG),
+                transform: Transform::from_xyz(0.0, FIGURE_LEG.y * 0.5, 0.0).with_scale(FIGURE_LEG),
                 ..default()
             });
             p.spawn(PbrBundle {
@@ -619,15 +683,21 @@ fn spawn_skyway_trams(
         p.spawn(PbrBundle {
             mesh: cube.clone(),
             material: stripe,
-            transform: Transform::from_xyz(0.0, 0.15, 0.0)
-                .with_scale(Vec3::new(TRAM_HULL.x + 0.12, 0.42, TRAM_HULL.z * 0.92)),
+            transform: Transform::from_xyz(0.0, 0.15, 0.0).with_scale(Vec3::new(
+                TRAM_HULL.x + 0.12,
+                0.42,
+                TRAM_HULL.z * 0.92,
+            )),
             ..default()
         });
         p.spawn(PbrBundle {
             mesh: cube.clone(),
             material: glow.clone(),
-            transform: Transform::from_xyz(0.0, 0.35, 0.0)
-                .with_scale(Vec3::new(TRAM_HULL.x * 0.72, 0.85, TRAM_HULL.z * 0.78)),
+            transform: Transform::from_xyz(0.0, 0.35, 0.0).with_scale(Vec3::new(
+                TRAM_HULL.x * 0.72,
+                0.85,
+                TRAM_HULL.z * 0.78,
+            )),
             ..default()
         });
         p.spawn(PbrBundle {
@@ -638,6 +708,328 @@ fn spawn_skyway_trams(
             ..default()
         });
     });
+}
+
+fn outpost_cell_center(cx: i32, cz: i32) -> Vec2 {
+    let jitter_x = (hash01(cx, cz, 0x0B05_701) - 0.5) * OUTPOST_CELL * 0.30;
+    let jitter_z = (hash01(cz, cx, 0x0B05_702) - 0.5) * OUTPOST_CELL * 0.30;
+    Vec2::new(
+        (cx as f32 + 0.5) * OUTPOST_CELL + jitter_x,
+        (cz as f32 + 0.5) * OUTPOST_CELL + jitter_z,
+    )
+}
+
+fn cell_hosts_outpost(cx: i32, cz: i32) -> bool {
+    hash01(cx, cz, 0x0B05_700) < OUTPOST_OCCUPANCY
+}
+
+/// Nearest world-lattice outpost cells to the player. Occupancy is a
+/// pure hash of the cell so flying into a new area shows the same pad
+/// that was already "there"; the pool just retargets, it never grows.
+fn nearest_outpost_cells(player_pos: Vec3, count: usize) -> Vec<IVec2> {
+    let base_x = (player_pos.x / OUTPOST_CELL).floor() as i32;
+    let base_z = (player_pos.z / OUTPOST_CELL).floor() as i32;
+    let mut ranked: Vec<(f32, IVec2)> = Vec::new();
+    for dz in -OUTPOST_SEARCH..=OUTPOST_SEARCH {
+        for dx in -OUTPOST_SEARCH..=OUTPOST_SEARCH {
+            let cx = base_x + dx;
+            let cz = base_z + dz;
+            if !cell_hosts_outpost(cx, cz) {
+                continue;
+            }
+            let xz = outpost_cell_center(cx, cz);
+            let wx = xz.x.round() as i32;
+            let wz = xz.y.round() as i32;
+            if crate::frontier::in_hero_postcard(wx, wz) {
+                continue;
+            }
+            let dist = (xz - player_pos.xz()).length();
+            ranked.push((dist, IVec2::new(cx, cz)));
+        }
+    }
+    ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    ranked
+        .into_iter()
+        .take(count.max(1))
+        .map(|(_, cell)| cell)
+        .collect()
+}
+
+fn spawn_frontier_outposts(
+    commands: &mut Commands,
+    materials: &mut Assets<StandardMaterial>,
+    cube: &Handle<Mesh>,
+    graphics: GraphicsMode,
+    cinematic: bool,
+) {
+    let pads = frontier_outpost_count(graphics, cinematic);
+    let figures = frontier_outpost_figures(graphics);
+    let drones = frontier_drone_count(graphics, cinematic);
+    let deck = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.16, 0.18, 0.22),
+        perceptual_roughness: 0.55,
+        metallic: 0.16,
+        emissive: LinearRgba::rgb(0.04, 0.05, 0.06),
+        ..default()
+    });
+    let rim = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.06, 0.78, 1.0),
+        emissive: LinearRgba::rgb(0.08, 1.20, 1.65),
+        perceptual_roughness: 0.22,
+        ..default()
+    });
+    let suits = [Color::srgb(0.18, 0.46, 0.70), Color::srgb(0.78, 0.76, 0.72)];
+    let visor = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.08, 0.78, 0.96),
+        emissive: LinearRgba::rgb(0.16, 1.35, 1.80),
+        perceptual_roughness: 0.12,
+        ..default()
+    });
+    let hull = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.72, 0.74, 0.80),
+        metallic: 0.20,
+        perceptual_roughness: 0.40,
+        emissive: LinearRgba::rgb(0.08, 0.09, 0.11),
+        ..default()
+    });
+    let glow = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.06, 0.82, 1.0),
+        emissive: LinearRgba::rgb(0.10, 1.40, 1.85),
+        perceptual_roughness: 0.16,
+        ..default()
+    });
+    for i in 0..pads {
+        let root = commands
+            .spawn((
+                SpatialBundle {
+                    transform: Transform::from_translation(Vec3::new(0.0, -10_000.0, 0.0)),
+                    visibility: Visibility::Hidden,
+                    ..default()
+                },
+                FrontierOutpost {
+                    index: i,
+                    cell: IVec2::new(i32::MIN, i32::MIN),
+                },
+                Name::new("FrontierOutpost"),
+            ))
+            .id();
+        commands.entity(root).with_children(|p| {
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: deck.clone(),
+                transform: Transform::from_scale(Vec3::new(6.2, 0.34, 6.2)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: rim.clone(),
+                transform: Transform::from_xyz(0.0, 0.22, 3.05)
+                    .with_scale(Vec3::new(6.2, 0.10, 0.18)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: rim.clone(),
+                transform: Transform::from_xyz(0.0, 0.22, -3.05)
+                    .with_scale(Vec3::new(6.2, 0.10, 0.18)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: deck.clone(),
+                transform: Transform::from_xyz(-2.4, 2.4, -2.4)
+                    .with_scale(Vec3::new(0.28, 4.8, 0.28)),
+                ..default()
+            });
+            p.spawn(PbrBundle {
+                mesh: cube.clone(),
+                material: rim.clone(),
+                transform: Transform::from_xyz(-2.4, 4.95, -2.4)
+                    .with_scale(Vec3::new(0.55, 0.40, 0.55)),
+                ..default()
+            });
+            for f in 0..figures {
+                let lat = if f == 0 { -1.1 } else { 1.15 };
+                let suit = materials.add(StandardMaterial {
+                    base_color: suits[f % suits.len()],
+                    perceptual_roughness: 0.55,
+                    metallic: 0.14,
+                    emissive: LinearRgba::rgb(0.05, 0.06, 0.07),
+                    ..default()
+                });
+                let figure_s = 0.72;
+                let stand = Vec3::new(lat, 0.20, 0.4 - f as f32 * 0.8);
+                p.spawn((
+                    SpatialBundle {
+                        transform: Transform::from_translation(stand),
+                        ..default()
+                    },
+                    ColonyWalker {
+                        t: f as f32 * 0.31 + i as f32 * 0.07,
+                        speed: 0.018 + f as f32 * 0.004,
+                        origin: stand,
+                        span: Vec3::X * 1.4,
+                    },
+                ))
+                .with_children(|body| {
+                    body.spawn(PbrBundle {
+                        mesh: cube.clone(),
+                        material: suit.clone(),
+                        transform: Transform::from_xyz(0.0, FIGURE_LEG.y * 0.5 * figure_s, 0.0)
+                            .with_scale(FIGURE_LEG * figure_s),
+                        ..default()
+                    });
+                    body.spawn(PbrBundle {
+                        mesh: cube.clone(),
+                        material: suit.clone(),
+                        transform: Transform::from_xyz(
+                            0.0,
+                            (FIGURE_LEG.y + FIGURE_TORSO.y * 0.5) * figure_s,
+                            0.0,
+                        )
+                        .with_scale(FIGURE_TORSO * figure_s),
+                        ..default()
+                    });
+                    body.spawn(PbrBundle {
+                        mesh: cube.clone(),
+                        material: visor.clone(),
+                        transform: Transform::from_xyz(
+                            0.0,
+                            (FIGURE_LEG.y + FIGURE_TORSO.y + FIGURE_HEAD.y * 0.52) * figure_s,
+                            -FIGURE_HEAD.z * 0.42 * figure_s,
+                        )
+                        .with_scale(FIGURE_VISOR * figure_s),
+                        ..default()
+                    });
+                });
+            }
+        });
+    }
+    for i in 0..drones {
+        commands
+            .spawn((
+                PbrBundle {
+                    mesh: cube.clone(),
+                    material: hull.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, -10_000.0, 0.0))
+                        .with_scale(Vec3::new(1.6, 0.55, 3.4)),
+                    visibility: Visibility::Hidden,
+                    ..default()
+                },
+                FrontierDrone {
+                    index: i,
+                    t: i as f32 * 0.27,
+                    speed: 0.030 + i as f32 * 0.006,
+                    origin: Vec3::ZERO,
+                    span: Vec3::X * 22.0,
+                },
+                Name::new("FrontierDrone"),
+            ))
+            .with_children(|d| {
+                d.spawn(PbrBundle {
+                    mesh: cube.clone(),
+                    material: glow.clone(),
+                    transform: Transform::from_xyz(0.0, 0.12, 0.0)
+                        .with_scale(Vec3::new(0.55, 0.22, 0.72)),
+                    ..default()
+                });
+            });
+    }
+}
+
+fn place_outpost_at(
+    tf: &mut Transform,
+    visibility: &mut Visibility,
+    outpost: &mut FrontierOutpost,
+    world: &VoxelWorld,
+    want: IVec2,
+) {
+    if want.x == i32::MIN {
+        *visibility = Visibility::Hidden;
+        return;
+    }
+    let xz = outpost_cell_center(want.x, want.y);
+    let wx = xz.x.round() as i32;
+    let wz = xz.y.round() as i32;
+    if crate::frontier::in_hero_postcard(wx, wz) {
+        *visibility = Visibility::Hidden;
+        return;
+    }
+    let surface = world.surface_height_at(wx, wz);
+    if surface <= WATER_LEVEL + 4 {
+        *visibility = Visibility::Hidden;
+        return;
+    }
+    let biome = world.biome_at(wx, wz);
+    if matches!(biome, Biome::Ocean) {
+        *visibility = Visibility::Hidden;
+        return;
+    }
+    if want == outpost.cell && *visibility == Visibility::Visible {
+        return;
+    }
+    outpost.cell = want;
+    tf.translation = Vec3::new(xz.x, surface as f32 + 0.22, xz.y);
+    *visibility = Visibility::Visible;
+}
+
+fn update_frontier_outposts(
+    player_q: Query<&Transform, (With<Player>, Without<FrontierOutpost>)>,
+    world: Res<VoxelWorld>,
+    mut q: Query<(&mut Transform, &mut Visibility, &mut FrontierOutpost), Without<Player>>,
+) {
+    let Ok(player_tf) = player_q.get_single() else {
+        return;
+    };
+    let cells = nearest_outpost_cells(player_tf.translation, OUTPOST_POOL);
+    for (mut tf, mut vis, mut outpost) in q.iter_mut() {
+        let want = cells
+            .get(outpost.index)
+            .copied()
+            .unwrap_or(IVec2::new(i32::MIN, i32::MIN));
+        if want == outpost.cell && *vis == Visibility::Visible {
+            continue;
+        }
+        place_outpost_at(&mut tf, &mut vis, &mut outpost, &world, want);
+    }
+}
+
+fn update_frontier_drones(
+    time: Res<Time>,
+    player_q: Query<&Transform, (With<Player>, Without<FrontierDrone>)>,
+    world: Res<VoxelWorld>,
+    mut q: Query<(&mut Transform, &mut Visibility, &mut FrontierDrone), Without<Player>>,
+) {
+    let Ok(player_tf) = player_q.get_single() else {
+        return;
+    };
+    let dt = time.delta_seconds();
+    let cells = nearest_outpost_cells(player_tf.translation, OUTPOST_POOL);
+    for (mut tf, mut vis, mut drone) in q.iter_mut() {
+        let want = cells
+            .get(drone.index)
+            .copied()
+            .unwrap_or(IVec2::new(i32::MIN, i32::MIN));
+        if want.x == i32::MIN {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        let xz = outpost_cell_center(want.x, want.y);
+        let wx = xz.x.round() as i32;
+        let wz = xz.y.round() as i32;
+        if crate::frontier::in_hero_postcard(wx, wz) {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        let surface = world.surface_height_at(wx, wz) as f32;
+        drone.origin = Vec3::new(xz.x - 11.0, surface + 9.0, xz.y);
+        drone.span = Vec3::new(22.0, 1.5, 6.0);
+        drone.t = (drone.t + dt * drone.speed).rem_euclid(1.0);
+        let u = ping_pong(drone.t);
+        tf.translation = drone.origin + drone.span * u;
+        tf.rotation = Quat::from_rotation_y((-drone.span.x).atan2(-drone.span.z));
+        *vis = Visibility::Visible;
+    }
 }
 
 fn update_colony_walkers(time: Res<Time>, mut q: Query<(&mut Transform, &mut ColonyWalker)>) {
@@ -679,7 +1071,16 @@ fn update_skyway_trams(time: Res<Time>, mut q: Query<(&mut Transform, &mut Skywa
 
 fn cleanup_colony_life(
     mut commands: Commands,
-    entities: Query<Entity, Or<(With<ColonyWalker>, With<SkywayTram>, With<ColonyPad>)>>,
+    entities: Query<
+        Entity,
+        Or<(
+            With<ColonyWalker>,
+            With<SkywayTram>,
+            With<ColonyPad>,
+            With<FrontierOutpost>,
+            With<FrontierDrone>,
+        )>,
+    >,
 ) {
     for entity in entities.iter() {
         if let Some(entity_commands) = commands.get_entity(entity) {
@@ -775,7 +1176,10 @@ mod tests {
             pitch > -0.58 && pitch < -0.12,
             "pad pitch {pitch} should stay inside the lower third, not under the frame"
         );
-        assert!(right > 1.0, "pad should sit right of centre so the left skyway stays clear");
+        assert!(
+            right > 1.0,
+            "pad should sit right of centre so the left skyway stays clear"
+        );
 
         let figure_h = FIGURE_LEG.y + FIGURE_TORSO.y + FIGURE_HEAD.y;
         assert!(
@@ -783,15 +1187,66 @@ mod tests {
             "suited figures must be larger than a speck, height={figure_h}"
         );
         assert!(FIGURE_TORSO.x > 0.9, "shoulder width must read at 9 m");
-        assert!(TRAM_HULL.z > 8.0, "tram car must be a short visible box, not a streak");
-        assert!(TRAM_HULL.y > 2.2, "tram must be tall enough to read against the dark T");
+        assert!(
+            TRAM_HULL.z > 8.0,
+            "tram car must be a short visible box, not a streak"
+        );
+        assert!(
+            TRAM_HULL.y > 2.2,
+            "tram must be tall enough to read against the dark T"
+        );
 
         let (tram_o, tram_span) = postcard_tram_lane(origin);
-        assert!(tram_o.y > origin.y + 8.0, "tram should sit on the upper-left T");
+        assert!(
+            tram_o.y > origin.y + 8.0,
+            "tram should sit on the upper-left T"
+        );
         assert!(tram_span.length() > 12.0 && tram_span.length() < 28.0);
         let left = (tram_o - origin).dot(right_h);
-        assert!(left < -8.0, "tram should sit on the left of the spawn look, lat={left}");
+        assert!(
+            left < -8.0,
+            "tram should sit on the left of the spawn look, lat={left}"
+        );
         let along = tram_span.normalize_or_zero().dot(right_h).abs();
-        assert!(along > 0.9, "tram travel must be side-on, not end-on along look");
+        assert!(
+            along > 0.9,
+            "tram travel must be side-on, not end-on along look"
+        );
+    }
+
+    #[test]
+    fn frontier_outposts_are_sparse_and_fast_skips_figures() {
+        assert_eq!(frontier_outpost_count(GraphicsMode::Fast, false), 2);
+        assert_eq!(frontier_outpost_figures(GraphicsMode::Fast), 0);
+        assert_eq!(frontier_drone_count(GraphicsMode::Fast, false), 1);
+        assert_eq!(frontier_outpost_count(GraphicsMode::High, true), 6);
+        assert_eq!(frontier_outpost_figures(GraphicsMode::High), 2);
+        assert!(frontier_outpost_count(GraphicsMode::High, true) <= OUTPOST_POOL);
+        let player = Vec3::new(64.0, 58.0, -79.0);
+        let cells = nearest_outpost_cells(player, 6);
+        assert!(
+            !cells.is_empty(),
+            "spawn neighbourhood should host at least one non-postcard pad"
+        );
+        let a = outpost_cell_center(cells[0].x, cells[0].y);
+        assert!(
+            (a - player.xz()).length() < OUTPOST_CELL * 3.5,
+            "nearest pad must sit inside cinematic render distance, dist={}",
+            (a - player.xz()).length()
+        );
+        if cells.len() >= 2 {
+            let b = outpost_cell_center(cells[1].x, cells[1].y);
+            assert!((a - b).length() > 40.0, "outposts should not stack");
+        }
+        let wx = a.x.round() as i32;
+        let wz = a.y.round() as i32;
+        assert!(!crate::frontier::in_hero_postcard(wx, wz));
+        let elsewhere = Vec3::new(900.0, 40.0, 700.0);
+        let far = nearest_outpost_cells(elsewhere, 4);
+        assert!(!far.is_empty());
+        assert_ne!(
+            far[0], cells[0],
+            "a new area should pick a different world cell, not drag spawn pads along"
+        );
     }
 }
