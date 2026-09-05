@@ -2706,15 +2706,14 @@ fn spawn_film_waterfall(
             Name::new(format!("FilmWaterfallMist{i}")),
         ));
     }
-    // Painting-frustum fall — RIGHT foreground (near cam), white mist vertical.
-    // Must sit in front of mountain (higher Z toward cam) so it isn't occluded.
-    let lip2 = deck + Vec3::new(38.0, 16.0, 118.0);
-    let mid2 = lip2 + Vec3::new(2.0, -20.0, 2.0);
+    // Painting-frustum fall — far-right near cam, clear of grass/skyway cyan.
+    let lip2 = deck + Vec3::new(52.0, 18.0, 130.0);
+    let mid2 = lip2 + Vec3::new(0.0, -22.0, 0.0);
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: deep.clone(),
-            transform: Transform::from_translation(mid2).with_scale(Vec3::new(10.0, 38.0, 5.0)),
+            transform: Transform::from_translation(mid2).with_scale(Vec3::new(12.0, 44.0, 6.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2725,22 +2724,20 @@ fn spawn_film_waterfall(
         PbrBundle {
             mesh: cube.clone(),
             material: mist.clone(),
-            transform: Transform::from_translation(mid2 + Vec3::new(0.0, 0.0, 3.0))
-                .with_scale(Vec3::new(16.0, 42.0, 7.0)),
+            transform: Transform::from_translation(mid2 + Vec3::new(0.0, 0.0, 4.0))
+                .with_scale(Vec3::new(18.0, 48.0, 8.0)),
             ..default()
         },
         FilmSilhouette,
         FilmWaterfallFx,
         Name::new("FilmWaterfallMistColumnB"),
     ));
-    // Bright white core sheet — value hierarchy vs saturated skyway cyan.
-    let white_core = mist.clone();
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
-            material: white_core,
-            transform: Transform::from_translation(mid2 + Vec3::new(-1.0, 2.0, 5.0))
-                .with_scale(Vec3::new(6.0, 36.0, 3.0)),
+            material: mist.clone(),
+            transform: Transform::from_translation(mid2 + Vec3::new(-2.0, 2.0, 6.0))
+                .with_scale(Vec3::new(7.0, 40.0, 3.5)),
             ..default()
         },
         FilmSilhouette,
@@ -2751,7 +2748,7 @@ fn spawn_film_waterfall(
         PbrBundle {
             mesh: cube.clone(),
             material: grass.clone(),
-            transform: Transform::from_translation(lip2).with_scale(Vec3::new(18.0, 2.8, 10.0)),
+            transform: Transform::from_translation(lip2).with_scale(Vec3::new(16.0, 2.5, 8.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2762,8 +2759,8 @@ fn spawn_film_waterfall(
         PbrBundle {
             mesh: cube.clone(),
             material: mist.clone(),
-            transform: Transform::from_translation(mid2 + Vec3::new(0.0, -14.0, 6.0))
-                .with_scale(Vec3::new(20.0, 10.0, 12.0)),
+            transform: Transform::from_translation(mid2 + Vec3::new(0.0, -16.0, 5.0))
+                .with_scale(Vec3::new(22.0, 12.0, 14.0)),
             ..default()
         },
         FilmSilhouette,
@@ -4059,7 +4056,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             let skyway_mid = deck + Vec3::new(-22.0, 26.0, 96.0);
             let rivers = deck + Vec3::new(-22.0, 8.0, 100.0);
             let portal = deck + Vec3::new(10.0, 22.0, 95.0);
-            let fall = deck + Vec3::new(38.0, 8.0, 118.0);
+            let fall = deck + Vec3::new(52.0, 10.0, 130.0);
             let fighters = deck + Vec3::new(28.0, 54.0, 76.0);
             let planet = pos + planet_dir * 155.0;
             let ground = green_crown
