@@ -1940,6 +1940,7 @@ fn mark_chunk_and_neighbours_dirty(
     }
 }
 
+#[cfg(test)]
 fn dirty_mesh_candidate_scan_budget(
     dirty_total: usize,
     schedule_budget: usize,
