@@ -1356,6 +1356,20 @@ fn add_future_wave_shuttle_skin(voxels: &mut Vec<ShipVoxel>, kind: ShipKind) {
                     BlockType::ShipHullAlloy,
                 );
             }
+            // White/orange postcard silhouette so the flyby reads as the
+            // key-art shuttle, not a dark hull wall.
+            push_box(
+                voxels,
+                IVec3::new(-2, 2, -5),
+                IVec3::new(2, 3, 3),
+                BlockType::PlatingWhite,
+            );
+            push_box(
+                voxels,
+                IVec3::new(-3, 1, 6),
+                IVec3::new(3, 2, 8),
+                BlockType::NeonAmber,
+            );
         }
         ShipKind::StrikeFighter => {
             push_box(
@@ -2060,13 +2074,13 @@ fn ship_trail_specs(kind: ShipKind) -> Vec<ShipTrailSpec> {
         ShipKind::ScoutShuttle => {
             specs.push(ShipTrailSpec {
                 base_translation: Vec3::new(0.0, -0.20, 12.0),
-                base_scale: Vec3::new(0.36, 0.22, 7.4),
+                base_scale: Vec3::new(0.50, 0.32, 10.5),
                 phase: 2.8,
                 tone: ShipTrailTone::Cyan,
             });
             specs.push(ShipTrailSpec {
                 base_translation: Vec3::new(0.0, 0.10, 10.4),
-                base_scale: Vec3::new(0.55, 0.28, 4.6),
+                base_scale: Vec3::new(0.70, 0.36, 6.8),
                 phase: 1.4,
                 tone: ShipTrailTone::Amber,
             });
@@ -2153,15 +2167,13 @@ fn ship_trail_material(
 
 fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     let u = u.clamp(0.0, 1.0);
-    // Keep the shuttle *in the spawn frustum*. Half-FOV is ~39°, so at
-    // ~18 blocks ahead the hull must sit around origin.y+12 (~33° up),
-    // not +20 (~48°, clipped). Travel stays west of the mesa so the
-    // white/orange ship reads against open canyon sky, not the cliff.
-    let x = origin.x + 26.0 + u * 18.0;
-    let z = origin.z + 2.0 + u * 8.0;
-    let y = origin.y + 9.0 + (u * std::f32::consts::PI).sin() * 1.5;
-    let yaw = 18.0_f32.atan2(-8.0);
-    let roll = -0.42 + (u * std::f32::consts::TAU).sin() * 0.30;
+    // Small craft in the open canyon sky: ~30 blocks ahead, ~12 up
+    // (~22°), a few blocks left of the look so it sits in sky not cliff.
+    let x = origin.x + 30.0 + u * 14.0;
+    let z = origin.z - 8.0 + u * 10.0;
+    let y = origin.y + 12.0 + (u * std::f32::consts::PI).sin() * 1.2;
+    let yaw = 14.0_f32.atan2(8.0);
+    let roll = -0.38 + (u * std::f32::consts::TAU).sin() * 0.28;
     (Vec3::new(x, y, z), yaw, roll)
 }
 
@@ -2179,7 +2191,7 @@ fn update_hero_flyby(
         let (pos, yaw, roll) = hero_flyby_pose(fly.origin, fly.t);
         tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(4.2);
+        tf.scale = Vec3::splat(1.85);
         motion.yaw = yaw;
         motion.pitch = -0.10;
         motion.roll = roll;
@@ -2625,9 +2637,9 @@ fn spawn_saved_ships_once(
             < 260.0
     });
     if active.meta.ships.is_empty() || !has_nearby_ship {
-        let px = player_anchor.x + 22.0;
-        let pz = player_anchor.z + 22.0;
-        let py = player_anchor.y - 6.0;
+        let px = player_anchor.x + 6.0;
+        let pz = player_anchor.z + 46.0;
+        let py = player_anchor.y - 12.0;
         spawn_ship_entity(
             &mut commands,
             &mut meshes,
@@ -4718,12 +4730,12 @@ mod tests {
                 pos.x
             );
             assert!(
-                pos.y > origin.y + 6.0,
+                pos.y > origin.y + 8.0,
                 "flyby at u={u} is not in the sky (y={})",
                 pos.y
             );
             assert!(
-                pos.y < origin.y + 14.0,
+                pos.y < origin.y + 16.0,
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );
