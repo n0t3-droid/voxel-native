@@ -240,13 +240,12 @@ impl SkyIsland {
 
     /// Guaranteed islands over the spawn mesa so a New World has floating
     /// rock in the first look, not only when a lattice cell happens to roll.
-    /// Parked in the +X look-cone sky (camera left = −Z) so they read as
-    /// the illustration's hovering landmasses.
+    /// Parked right of the +X look so the left third stays crystal-against-sky.
     pub fn hero() -> Self {
         Self {
-            cx: 96,
-            cz: -146,
-            cy: 118,
+            cx: 154,
+            cz: -28,
+            cy: 112,
             radius: 6,
             phase: 1.15,
         }
@@ -254,9 +253,9 @@ impl SkyIsland {
 
     pub fn hero_b() -> Self {
         Self {
-            cx: 118,
-            cz: -158,
-            cy: 118,
+            cx: 170,
+            cz: -16,
+            cy: 108,
             radius: 5,
             phase: 2.4,
         }
@@ -485,9 +484,9 @@ pub fn crystal_tint(seed: u32, wx: i32, wz: i32, k: i32) -> BlockType {
 /// Hero cluster stays cyan / magenta so it reads against the ochre wall.
 fn hero_crystal_tint(seed: u32, wx: i32, wz: i32, k: i32) -> BlockType {
     let mix = cell_rand(seed, 0x0C_17_5C, wx, wz + k * 17);
-    if mix < 0.38 {
+    if mix < 0.62 {
         BlockType::Crystal
-    } else if mix < 0.78 {
+    } else if mix < 0.88 {
         BlockType::CrystalMagenta
     } else {
         BlockType::LuminiteCrystal
@@ -544,10 +543,10 @@ impl CrystalCluster {
     /// against the mesa, not a face-hugging pylon.
     pub fn hero_d() -> Self {
         Self {
-            cx: 92,
-            cz: -98,
-            shards: 16,
-            scale: 52,
+            cx: 84,
+            cz: -104,
+            shards: 18,
+            scale: 56,
         }
     }
 
@@ -620,9 +619,9 @@ impl CrystalCluster {
         if punch {
             // Hollow a sky chimney around the mass so spawn-left reads as
             // shards against air/sky, not a banded stone pylon.
-            let pocket = 9 + self.scale / 10;
+            let pocket = 11 + self.scale / 9;
             let base_y = ground(self.cx, self.cz);
-            for k in 3..(self.scale + 12) {
+            for k in 1..(self.scale + 16) {
                 let wy = base_y + k;
                 for dz in -pocket..=pocket {
                     for dx in -pocket..=pocket {
@@ -719,8 +718,8 @@ impl CrystalCluster {
         if punch && self.scale >= 48 {
             // A thick spine on the opening left look-ray so the left third
             // still samples many crystal voxels after shards get an air halo.
-            let spine_x = self.cx - 2;
-            let spine_z = self.cz + 8;
+            let spine_x = self.cx - 4;
+            let spine_z = self.cz + 10;
             let base_y = ground(spine_x, spine_z);
             let height = (self.scale as f64 * 0.92) as i32;
             for k in 2..height {
@@ -1227,6 +1226,12 @@ fn hero_river_column(wx: i32, wz: i32) -> Option<RiverColumn> {
 /// left third once the player banks.
 fn in_opening_look(wx: i32, wz: i32) -> bool {
     wx >= 40 && wx <= 140 && wz >= -140 && wz <= -40
+}
+
+/// Wider than the skyway gap: leftover lattice islands/crystals just
+/// off the left edge still silhouette as a T-ridge in the 117° FOV.
+fn in_spawn_left_sky(wx: i32, wz: i32) -> bool {
+    wx >= 36 && wx <= 140 && wz >= -170 && wz <= -40
 }
 
 /// Forced skyway span for the spawn postcard: a straight carriageway
@@ -1787,19 +1792,18 @@ impl CliffFace {
             return;
         }
         let origin = chunk.pos.origin();
-        for wz in -122..=-90 {
+        // Wide FOV (~117° H) puts the spawn-left third across z ≈ -160..-70
+        // and x ≈ 50..face. Carve that volume down to the pit so leftover
+        // banded stone cannot read as a T-ridge in front of the shards.
+        for wz in -156..=-70 {
             if wz < self.z0 || wz > self.z1 {
                 continue;
             }
             let face = self.face_at(wz);
             let rim = ground(self.face_x + self.depth, wz);
             let pit = rim - self.drop;
-            let outcrop = pit + 5;
-            for wx in 70..=96 {
-                if wx >= face - 6 {
-                    continue;
-                }
-                for wy in (outcrop + 2)..=(rim + self.crest + 8) {
+            for wx in 48..=(face - 2) {
+                for wy in (pit + 4)..=(rim + self.crest + 16) {
                     carve(chunk, origin, wx, wy, wz);
                 }
             }
@@ -1812,8 +1816,8 @@ impl CliffFace {
             return;
         }
         let origin = chunk.pos.origin();
-        const SITES: [i32; 6] = [-96, -88, -80, -72, -64, -56];
-        let half = 13i32;
+        const SITES: [i32; 7] = [-100, -92, -84, -76, -68, -60, -52];
+        let half = 16i32;
         for &cz in &SITES {
             if cz < self.z0 + 4 || cz > self.z1 - 4 {
                 continue;
@@ -1824,28 +1828,19 @@ impl CliffFace {
                 let extra = self.extra_crest(z);
                 let pit = rim - self.drop;
                 let edge = (z - cz).unsigned_abs() as i32;
-                // Mid-height sheet on the visible wall — not a floor pool
-                // and not a stain that climbs the crest out of the FOV.
-                let lo = pit + 8;
-                let hi = rim + 26;
-                for wy in lo..=hi.min(rim + extra + 10) {
-                    let taper = if wy > hi - 10 { 3 } else { 0 };
+                // Sheets stand WEST of the banded face so they silhouette
+                // as vertical curtains instead of blending into strata.
+                let lo = pit + 4;
+                let hi = rim + 34;
+                for wy in lo..=hi.min(rim + extra + 18) {
+                    let taper = if wy > hi - 12 { 4 } else { 0 };
                     if edge > half - taper {
                         continue;
                     }
-                    place_over(chunk, origin, face - 12, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 11, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 10, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 9, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 8, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 7, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 6, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 5, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 4, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 3, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 2, wy, z, BlockType::Lava);
-                    place_over(chunk, origin, face - 1, wy, z, BlockType::Lava);
-                    if edge <= 5 {
+                    for dx in 2..=20 {
+                        place_over(chunk, origin, face - dx, wy, z, BlockType::Lava);
+                    }
+                    if edge <= 6 {
                         place_over(chunk, origin, face, wy, z, BlockType::Lava);
                         place_over(chunk, origin, face + 1, wy, z, BlockType::MagnetiteOre);
                     }
@@ -1874,14 +1869,8 @@ impl CliffFace {
                 }
                 let rim = ground(self.face_x + self.depth, z);
                 let pit = rim - self.drop;
-                let dist = (z - cz).abs();
                 place_over(chunk, origin, wx, pit, z, BlockType::PlasmaFlow);
                 place_over(chunk, origin, wx, pit + 1, z, BlockType::PlasmaFlow);
-                // Neon banks, not a third emissive layer: a 3-high
-                // NeonCyan stack clipped to white through bloom+ACES.
-                if dist >= 3 {
-                    place_over(chunk, origin, wx, pit + 1, z, BlockType::NeonCyan);
-                }
             }
         }
     }
@@ -2014,7 +2003,7 @@ impl FrontierPlanner {
             }
         };
         for cluster in CrystalCluster::near(self.seed, wx, wz) {
-            if in_opening_look(cluster.cx, cluster.cz) {
+            if in_opening_look(cluster.cx, cluster.cz) || in_spawn_left_sky(cluster.cx, cluster.cz) {
                 continue;
             }
             cluster.stamp(self.seed, chunk, canyon_floor);
@@ -2032,7 +2021,7 @@ impl FrontierPlanner {
                 // Opening look keeps the three staged hero islands; extra
                 // lattice slabs there fight the mesa sheet. Fast streaming
                 // also stays a thin AABB of three islands in that cone.
-                if in_opening_look(island.cx, island.cz) {
+                if in_opening_look(island.cx, island.cz) || in_spawn_left_sky(island.cx, island.cz) {
                     continue;
                 }
                 island.stamp(self.seed, chunk);
@@ -2040,7 +2029,7 @@ impl FrontierPlanner {
         }
         if top_y >= STATION_MIN_Y - 6 && base_y <= STATION_MAX_Y + 28 {
             for station in SkyStation::near(self.seed, wx, wz, macro_ground) {
-                if in_opening_look(station.cx, station.cz) {
+                if in_opening_look(station.cx, station.cz) || in_spawn_left_sky(station.cx, station.cz) {
                     continue;
                 }
                 station.stamp(chunk);
@@ -2335,8 +2324,8 @@ mod tests {
         let hero_d = CrystalCluster::hero_d();
         assert!(hero_d.shards >= 14, "hero crystal cluster is still a sprinkle ({})", hero_d.shards);
         assert!(hero_d.scale >= 48, "hero crystal cluster is still too short ({})", hero_d.scale);
-        assert!(hero_d.cx >= 86 && hero_d.cx <= 100, "hero crystals should sit in the left third (cx={})", hero_d.cx);
-        assert!(hero_d.cz <= -86 && hero_d.cz >= -108, "hero crystals should sit in the left third of the +X look");
+        assert!(hero_d.cx >= 78 && hero_d.cx <= 90, "hero crystals should sit in the left third (cx={})", hero_d.cx);
+        assert!(hero_d.cz <= -96 && hero_d.cz >= -112, "hero crystals should sit in the left third of the +X look");
         assert!(in_hero_postcard(CrystalCluster::hero_e().cx, CrystalCluster::hero_e().cz));
     }
 
@@ -2438,7 +2427,7 @@ mod tests {
         assert!(in_hero_postcard(SkyIsland::hero().cx, SkyIsland::hero().cz));
         assert!(in_hero_postcard(SkyIsland::hero_b().cx, SkyIsland::hero_b().cz));
         assert!(in_hero_postcard(SkyIsland::hero_c().cx, SkyIsland::hero_c().cz));
-        assert!(SkyIsland::hero().cz < -90, "hero islands should sit in the left sky of the +X look");
+        assert!(SkyIsland::hero().cz > -50, "hero islands should sit right of the crystal-left sky");
         assert!(
             SkyIsland::hero().cy >= SKY_ISLAND_MIN_Y && SkyIsland::hero().cy <= 120,
             "look-cone islands should sit in the opening sky, not above the frustum"

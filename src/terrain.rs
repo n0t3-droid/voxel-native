@@ -3048,6 +3048,8 @@ mod tests {
         let (pos, yaw, pitch) = generator.scenic_frontier_spawn();
         eprintln!("spawn pos={pos:?} yaw={yaw:.3} pitch={pitch:.3}");
         for (label, dyaw, dpitch) in [
+            ("FL", -0.72, 0.12),
+            ("LL", -0.52, 0.10),
             ("L-up", -0.42, 0.18),
             ("L", -0.32, 0.04),
             ("L-dn", -0.32, -0.12),
@@ -3105,7 +3107,7 @@ mod tests {
                 kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], kinds[5]
             );
             match label {
-                "L" | "L-up" | "L-dn" => {
+                "FL" | "LL" | "L" | "L-up" | "L-dn" => {
                     let (t, _, _, _, kind) = first.expect("left look hit nothing");
                     assert!(
                         t >= 20,
@@ -3138,13 +3140,14 @@ mod tests {
                     assert!(
                         matches!(
                             kind,
-                            BlockType::VioletStone
+                            BlockType::Lava
+                                | BlockType::VioletStone
                                 | BlockType::RedStone
                                 | BlockType::MesaClay
                                 | BlockType::AmberStone
                                 | BlockType::RedSand
                         ),
-                        "{label} should hit the banded mesa, got {kind:?}"
+                        "{label} should hit the lava curtain or banded mesa, got {kind:?}"
                     );
                 }
                 _ => {}
