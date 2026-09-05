@@ -358,7 +358,9 @@ fn update_camera_fov(
 fn update_bloom_by_graphics(
     settings: Res<WorldSettings>,
     intel: Res<WorldIntelRuntime>,
-    mut q: Query<&mut BloomSettings, With<Player>>,
+    mut commands: Commands,
+    mut bloom_q: Query<(Entity, &mut BloomSettings), With<Player>>,
+    player_q: Query<Entity, With<Player>>,
     mut last: Local<Option<(crate::settings::GraphicsMode, RuntimeProfile, u8)>>,
 ) {
     let sun = sun_direction(settings.time_of_day);
@@ -377,23 +379,52 @@ fn update_bloom_by_graphics(
     }
     *last = Some(key);
     let cinematic = settings.runtime_profile == RuntimeProfile::Cinematic;
+    let fast = settings.graphics == crate::settings::GraphicsMode::Fast;
+    // Bloom on Fast is a full extra HDR downsample on iGPU. Intensity 0
+    // still ran the pass; strip it so Vega isn't paying for a no-op.
+    if fast {
+        if let Ok((entity, _)) = bloom_q.get_single_mut() {
+            commands.entity(entity).remove::<BloomSettings>();
+        }
+        return;
+    }
     let (mut intensity, mut threshold, lf_boost): (f32, f32, f32) = match settings.graphics {
         crate::settings::GraphicsMode::Fast => (0.0, 0.85, 0.20),
         crate::settings::GraphicsMode::Balanced => (0.10, 0.76, 0.28),
         crate::settings::GraphicsMode::High if cinematic => (0.15, 0.78, 0.28),
         crate::settings::GraphicsMode::High => (0.14, 0.70, 0.32),
     };
-    if cinematic && settings.graphics != crate::settings::GraphicsMode::Fast {
+    if cinematic {
         intensity += dusk * 0.055;
         threshold -= dusk * 0.07;
     }
     let target = (intensity * intel.profile.bloom_mul).clamp(0.0, 0.22);
-    if let Ok(mut b) = q.get_single_mut() {
+    let apply = |b: &mut BloomSettings| {
         b.intensity = target;
         b.low_frequency_boost = lf_boost;
         b.prefilter_settings.threshold = threshold.clamp(0.62, 0.88);
         b.prefilter_settings.threshold_softness = if cinematic { 0.30 } else { 0.28 };
+    };
+    if let Ok((_, mut b)) = bloom_q.get_single_mut() {
+        apply(&mut b);
+        return;
     }
+    let Ok(entity) = player_q.get_single() else {
+        return;
+    };
+    let mut bloom = BloomSettings {
+        intensity: target,
+        low_frequency_boost: lf_boost,
+        high_pass_frequency: 1.4,
+        prefilter_settings: bevy::core_pipeline::bloom::BloomPrefilterSettings {
+            threshold: threshold.clamp(0.62, 0.88),
+            threshold_softness: if cinematic { 0.30 } else { 0.28 },
+        },
+        composite_mode: BloomCompositeMode::Additive,
+        ..BloomSettings::OLD_SCHOOL
+    };
+    apply(&mut bloom);
+    commands.entity(entity).insert(bloom);
 }
 
 /// Cinematic High renders the world HDR buffer independently of the sky

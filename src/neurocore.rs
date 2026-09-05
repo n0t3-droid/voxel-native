@@ -392,7 +392,7 @@ impl NeuroCore {
                 // Fast keeps a 16-chunk settled horizon so Vega isn't
                 // drawing the Cinematic 24-chunk disc. Spawn fill still
                 // ramps 5→8→16 via the streamer; this is only the cap.
-                let rd_cap = if fast { 16 } else { 24 };
+                let rd_cap = if fast { 12 } else { 24 };
                 (
                 target.min(rd_cap).max(6),
                 if startup_fill { 1.0 } else { 0.52 },
@@ -939,8 +939,8 @@ mod tests {
             steady.chunks_per_frame < settings.chunks_per_frame,
             "steady LowSpec should stay below the Fast card ceiling"
         );
-        assert!(steady.render_distance <= 16);
-        assert_eq!(steady.render_distance, 16);
+        assert!(steady.render_distance <= 12);
+        assert_eq!(steady.render_distance, 12);
     }
 
     #[test]

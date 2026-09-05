@@ -1136,7 +1136,7 @@ fn stream_chunks(
     } else if elapsed < 3.40 {
         (rd.min(if fast { 12 } else { 16 }), elapsed < 3.0)
     } else if elapsed < 5.0 {
-        (rd.min(if fast { 16 } else { 18 }), false)
+        (rd.min(if fast { 12 } else { 18 }), false)
     } else {
         (rd, false)
     };

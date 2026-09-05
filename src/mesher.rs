@@ -432,11 +432,10 @@ pub fn build_mesh_buckets_ex<F: Fn(i32, i32, i32) -> (Voxel, MaterialId)>(
                     };
 
                     let mask_cell = cell.map(|(voxel, material, positive)| {
-                        // Fast/far LOD: pack opaque terrain into one
-                        // bucket so a distant chunk is one draw call.
-                        // Emissives keep their material so cyan/lava
-                        // still glow; vertex tint carries the albedo.
-                        let material = if far_collapse && !voxel_is_emissive(voxel) {
+                        // Fast/far LOD: one draw call. Vertex tint keeps
+                        // strata / lava / crystal hues; HDR emissive
+                        // materials stay on the near field only.
+                        let material = if far_collapse {
                             DEFAULT_MATERIAL
                         } else {
                             material
@@ -795,13 +794,9 @@ mod tests {
             near.len()
         );
         assert!(
-            far.len() <= 2,
-            "far LOD should pack opaque into one bucket plus emissive, got {}",
+            far.len() == 1,
+            "far LOD should be a single vertex-tinted bucket, got {}",
             far.len()
-        );
-        assert!(
-            far.iter().any(|(id, _)| *id == crystal as MaterialId),
-            "far LOD must keep the emissive crystal bucket"
         );
     }
 }
