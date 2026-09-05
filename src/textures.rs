@@ -740,8 +740,8 @@ fn albedo_for_block(block: BlockType, alpha: f32) -> Color {
         BlockType::Crystal
         | BlockType::LuminiteCrystal
         | BlockType::PlasmaFlow
-        | BlockType::NeonCyan => Color::srgba(0.03, 0.10, 0.13, alpha),
-        BlockType::CrystalMagenta => Color::srgba(0.14, 0.03, 0.11, alpha),
+        | BlockType::NeonCyan => Color::srgba(0.01, 0.05, 0.07, alpha),
+        BlockType::CrystalMagenta => Color::srgba(0.08, 0.01, 0.06, alpha),
         BlockType::Lava => Color::srgba(0.12, 0.03, 0.00, alpha),
         _ => Color::WHITE.with_alpha(alpha),
     }
@@ -756,8 +756,8 @@ fn emissive_for_block(block: BlockType) -> LinearRgba {
     }
     let lin = block.color().to_linear();
     match block {
-        BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(0.00, 1.42, 1.88),
-        BlockType::CrystalMagenta => LinearRgba::rgb(2.35, 0.16, 1.82),
+        BlockType::Crystal | BlockType::LuminiteCrystal => LinearRgba::rgb(0.00, 0.92, 1.22),
+        BlockType::CrystalMagenta => LinearRgba::rgb(1.75, 0.10, 1.35),
         BlockType::PlasmaFlow | BlockType::NeonCyan => LinearRgba::rgb(0.00, 0.68, 0.94),
         BlockType::Lava => LinearRgba::rgb(lin.red * 5.20, lin.green * 2.05, 0.00),
         _ => LinearRgba::rgb(
