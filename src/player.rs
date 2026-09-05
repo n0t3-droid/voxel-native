@@ -470,9 +470,17 @@ fn update_cinematic_exposure(
             gain: grade.mid_gain,
             lift: 0.0,
         };
-        // Highlights stay neutral so HDR crystals/rivers do not bloom
-        // into a white sheet when we open the shadows.
-        grading.highlights = ColorGradingSection::default();
+        // Bright emissives (cyan plasma, magenta shards, lava, neon)
+        // live in the highlight section. Golden-hour temperature adds R
+        // and would grey those hues; a highlight sat bump keeps chroma
+        // without a one-camera postcard hack.
+        grading.highlights = ColorGradingSection {
+            saturation: grade.highlight_sat,
+            contrast: 1.0,
+            gamma: 1.0,
+            gain: 1.0,
+            lift: 0.0,
+        };
     }
 }
 
@@ -485,11 +493,18 @@ struct LookPassGrade {
     shadow_gamma: f32,
     mid_gain: f32,
     mid_sat: f32,
+    highlight_sat: f32,
     temperature: f32,
 }
 
 fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> LookPassGrade {
+    let n = night_amt.clamp(0.0, 1.0);
+    let dusk = dusk.clamp(0.0, 1.0);
     if fast {
+        // Fast stays on the uncleared composite: EV / lift stay identity
+        // so the night sky does not milk. Chroma-only levers still run
+        // so dusk cyan/magenta/orange emissives survive the warm grade
+        // on the same path a 5700G player actually flies.
         return LookPassGrade {
             ev100: Exposure::EV100_BLENDER,
             exposure: 0.0,
@@ -497,11 +512,11 @@ fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> Lo
             shadow_gain: 1.0,
             shadow_gamma: 1.0,
             mid_gain: 1.0,
-            mid_sat: 1.0,
-            temperature: 0.0,
+            mid_sat: (1.0 + n * 0.05 + dusk * 0.16).min(1.28),
+            highlight_sat: (1.0 + n * 0.04 + dusk * 0.26).min(1.40),
+            temperature: dusk * 0.028,
         };
     }
-    let n = night_amt.clamp(0.0, 1.0);
     let mul = if cinematic { 1.0 } else { 0.55 };
     // Shadow lift + a mild EV drop are world-only. Fast never splits
     // the composite, so those levers stay at identity there.
@@ -515,8 +530,9 @@ fn look_pass_grade(night_amt: f32, dusk: f32, cinematic: bool, fast: bool) -> Lo
         shadow_gain: 1.0 + n * 0.16 * mul,
         shadow_gamma: 1.0 - n * 0.26 * mul,
         mid_gain: 1.0 + n * 0.12 * mul + dusk * 0.04,
-        mid_sat: 1.0 + n * 0.08 + dusk * 0.10,
-        temperature: dusk * 0.10,
+        mid_sat: 1.0 + n * 0.08 + dusk * 0.12,
+        highlight_sat: (1.0 + n * 0.04 + dusk * 0.28).min(1.36),
+        temperature: dusk * 0.035,
     }
 }
 
@@ -1238,8 +1254,18 @@ mod tests {
         assert_eq!(noon.shadow_gamma, 1.0);
         assert!(night.mid_gain > noon.mid_gain);
         assert!(dusk.mid_gain < 1.20);
+        assert!(dusk.temperature < 0.05);
+        assert!(dusk.highlight_sat > 1.15);
+        assert!(dusk.mid_sat > noon.mid_sat);
         assert_eq!(fast.ev100, Exposure::EV100_BLENDER);
         assert_eq!(fast.shadow_lift, 0.0);
         assert_eq!(fast.mid_gain, 1.0);
+        let fast_dusk = look_pass_grade(0.18, 0.70, true, true);
+        assert_eq!(fast_dusk.ev100, Exposure::EV100_BLENDER);
+        assert_eq!(fast_dusk.shadow_lift, 0.0);
+        assert_eq!(fast_dusk.mid_gain, 1.0);
+        assert!(fast_dusk.highlight_sat > 1.15);
+        assert!(fast_dusk.temperature < 0.04);
+        assert!(!world_pass_splits_from_sky(true, true));
     }
 }
