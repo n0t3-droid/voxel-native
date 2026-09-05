@@ -2790,7 +2790,7 @@ fn spawn_film_grass_caps(
     soil: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Near-cam verdant crowns — fill lower third without swallowing mid rivers.
+    // Near-cam verdant crowns — fill lower third; left lip + right island.
     for (i, (ox, oz, w, d, lift)) in [
         (-12.0_f32, 108.0, 52.0, 40.0, 6.0),
         (10.0, 104.0, 46.0, 36.0, 5.5),
@@ -2802,6 +2802,10 @@ fn spawn_film_grass_caps(
         (28.0, 86.0, 28.0, 22.0, 4.0),
         (-6.0, 76.0, 26.0, 20.0, 3.0),
         (40.0, 80.0, 24.0, 20.0, 3.5),
+        // Extra lower-left verdant shelf so grass isn't only a right corner chip.
+        (-40.0, 112.0, 36.0, 28.0, 5.5),
+        (-22.0, 114.0, 30.0, 24.0, 6.0),
+        (18.0, 110.0, 28.0, 22.0, 5.0),
     ]
     .into_iter()
     .enumerate()
@@ -3851,18 +3855,18 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         8 => {
             // Coherent hero: planet upper; mountain mid-right; grass+skyway+rivers stacked.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-58.0, 40.0, 138.0);
-            let station_mid = deck + Vec3::new(34.0, 30.0, 70.0);
-            let green_crown = deck + Vec3::new(-12.0, 4.0, 105.0);
+            let pos = deck + Vec3::new(-60.0, 38.0, 140.0);
+            let station_mid = deck + Vec3::new(34.0, 28.0, 70.0);
+            let green_crown = deck + Vec3::new(-16.0, 5.0, 108.0);
             let skyway_mid = deck + Vec3::new(-18.0, 26.0, 96.0);
-            let rivers = deck + Vec3::new(-20.0, 8.0, 100.0);
+            let rivers = deck + Vec3::new(-22.0, 8.0, 100.0);
             let planet = pos + planet_dir * 155.0;
-            // Balance grass / skyway / mountain — don't let station wall the frame.
+            // Favor verdant lip a touch more; station stays mid-right darkrock.
             let ground = green_crown
-                .lerp(skyway_mid, 0.22)
-                .lerp(rivers, 0.18)
-                .lerp(station_mid, 0.30);
-            let look = ground.lerp(planet, 0.18);
+                .lerp(skyway_mid, 0.18)
+                .lerp(rivers, 0.16)
+                .lerp(station_mid, 0.28);
+            let look = ground.lerp(planet, 0.17);
             (pos, look)
         }
         9 => {
