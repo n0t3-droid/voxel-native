@@ -2116,10 +2116,10 @@ fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     // Scenic look aims at (origin.x+46, origin.y+6). Bank the orbiter
     // through the open sky above that target — not down the canyon
     // throat (hull wall) and not past the mesa (invisible).
-    let x = origin.x + 38.0 + u * 20.0;
-    let z = origin.z - 24.0 + u * 52.0;
-    let y = origin.y + 24.0 + (u * std::f32::consts::PI).sin() * 3.0;
-    let yaw = 20.0_f32.atan2(52.0);
+    let x = origin.x + 40.0 + u * 18.0;
+    let z = origin.z - 20.0 + u * 48.0;
+    let y = origin.y + 16.5 + (u * std::f32::consts::PI).sin() * 2.4;
+    let yaw = 18.0_f32.atan2(48.0);
     let roll = -0.40 + (u * std::f32::consts::TAU).sin() * 0.28;
     (Vec3::new(x, y, z), yaw, roll)
 }
@@ -2159,7 +2159,7 @@ fn sky_traffic_lanes() -> [(Vec3, Vec3, f32, f32, f32, u8); 6] {
     // origin offset, travel span, scale, speed (loops/s), t0, variant
     [
         (
-            Vec3::new(58.0, 46.0, -70.0),
+            Vec3::new(58.0, 22.0, -70.0),
             Vec3::new(24.0, 5.0, 110.0),
             1.55,
             0.028,
@@ -2167,7 +2167,7 @@ fn sky_traffic_lanes() -> [(Vec3, Vec3, f32, f32, f32, u8); 6] {
             0,
         ),
         (
-            Vec3::new(92.0, 54.0, 35.0),
+            Vec3::new(92.0, 28.0, 35.0),
             Vec3::new(18.0, -4.0, -130.0),
             1.85,
             0.022,
@@ -2175,7 +2175,7 @@ fn sky_traffic_lanes() -> [(Vec3, Vec3, f32, f32, f32, u8); 6] {
             1,
         ),
         (
-            Vec3::new(74.0, 40.0, 55.0),
+            Vec3::new(74.0, 20.0, 55.0),
             Vec3::new(48.0, 6.0, -40.0),
             1.25,
             0.032,
@@ -2183,7 +2183,7 @@ fn sky_traffic_lanes() -> [(Vec3, Vec3, f32, f32, f32, u8); 6] {
             0,
         ),
         (
-            Vec3::new(140.0, 66.0, -30.0),
+            Vec3::new(140.0, 34.0, -30.0),
             Vec3::new(-16.0, 3.0, 120.0),
             2.1,
             0.016,
@@ -2191,7 +2191,7 @@ fn sky_traffic_lanes() -> [(Vec3, Vec3, f32, f32, f32, u8); 6] {
             1,
         ),
         (
-            Vec3::new(110.0, 50.0, 20.0),
+            Vec3::new(110.0, 26.0, 20.0),
             Vec3::new(40.0, 4.0, 70.0),
             1.4,
             0.024,
@@ -2199,7 +2199,7 @@ fn sky_traffic_lanes() -> [(Vec3, Vec3, f32, f32, f32, u8); 6] {
             0,
         ),
         (
-            Vec3::new(160.0, 42.0, -95.0),
+            Vec3::new(160.0, 24.0, -95.0),
             Vec3::new(8.0, 8.0, 140.0),
             1.35,
             0.020,
@@ -4943,12 +4943,12 @@ mod tests {
                 "flyby at u={u} should sit in the open sky above the look, dist={dist}"
             );
             assert!(
-                pos.y > origin.y + 22.0,
+                pos.y > origin.y + 14.0,
                 "flyby at u={u} is not in the open sky (y={})",
                 pos.y
             );
             assert!(
-                pos.y < origin.y + 32.0,
+                pos.y < origin.y + 22.0,
                 "flyby at u={u} sits above the opening frustum (y={})",
                 pos.y
             );
