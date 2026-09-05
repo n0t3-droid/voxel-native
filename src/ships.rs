@@ -2155,12 +2155,13 @@ fn hero_flyby_pose(origin: Vec3, u: f32) -> (Vec3, f32, f32) {
     let u = u.clamp(0.0, 1.0);
     // Cross the +X New World look left-to-right, above the canyon, so
     // the white/orange shuttle is in frame from spawn through the first
-    // 15–25s of streaming.
-    let x = origin.x + 18.0 + u * 22.0;
-    let z = origin.z - 12.0 + u * 20.0;
-    let y = origin.y + 14.0 + (u * std::f32::consts::TAU).sin() * 5.0;
-    let yaw = 22.0_f32.atan2(-20.0);
-    let roll = -0.38 + (u * std::f32::consts::TAU).sin() * 0.28;
+    // ~10s of streaming — large enough to read as the illustration's
+    // hero ship, west of the mesa face.
+    let x = origin.x + 10.0 + u * 26.0;
+    let z = origin.z - 10.0 + u * 22.0;
+    let y = origin.y + 14.0 + (u * std::f32::consts::TAU).sin() * 4.0;
+    let yaw = 26.0_f32.atan2(-22.0);
+    let roll = -0.42 + (u * std::f32::consts::TAU).sin() * 0.30;
     (Vec3::new(x, y, z), yaw, roll)
 }
 
@@ -2174,11 +2175,11 @@ fn update_hero_flyby(
         if pilot.active_ship == Some(entity) {
             continue;
         }
-        fly.t = (fly.t + dt * 0.008).rem_euclid(1.0);
+        fly.t = (fly.t + dt * 0.006).rem_euclid(1.0);
         let (pos, yaw, roll) = hero_flyby_pose(fly.origin, fly.t);
         tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_z(roll);
-        tf.scale = Vec3::splat(3.8);
+        tf.scale = Vec3::splat(5.5);
         motion.yaw = yaw;
         motion.pitch = -0.10;
         motion.roll = roll;
@@ -2625,8 +2626,8 @@ fn spawn_saved_ships_once(
     });
     if active.meta.ships.is_empty() || !has_nearby_ship {
         let px = player_anchor.x + 22.0;
-        let pz = player_anchor.z - 28.0;
-        let py = player_anchor.y + 16.0;
+        let pz = player_anchor.z + 22.0;
+        let py = player_anchor.y - 6.0;
         spawn_ship_entity(
             &mut commands,
             &mut meshes,
@@ -2639,7 +2640,7 @@ fn spawn_saved_ships_once(
             false,
             None,
         );
-        let t0 = 0.28;
+        let t0 = 0.10;
         let (fly_pos, fly_yaw, _) = hero_flyby_pose(player_anchor, t0);
         let fly = spawn_ship_entity(
             &mut commands,
@@ -4703,11 +4704,11 @@ mod tests {
 
     #[test]
     fn hero_flyby_crosses_in_front_of_the_new_world_look() {
-        let origin = Vec3::new(58.5, 62.0, -78.0);
-        for u in [0.20, 0.28, 0.40, 0.55] {
+        let origin = Vec3::new(64.0, 58.0, -79.0);
+        for u in [0.10, 0.20, 0.32, 0.48] {
             let (pos, yaw, roll) = super::hero_flyby_pose(origin, u);
             assert!(
-                pos.x > origin.x + 16.0,
+                pos.x > origin.x + 8.0,
                 "flyby at u={u} is not ahead of the camera (x={})",
                 pos.x
             );
