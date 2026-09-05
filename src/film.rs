@@ -921,12 +921,12 @@ fn film_spawn_silhouettes(
     ));
     // Unlit underside plates REPLACE downward keel faces in screenshots.
     // Combat-slab keeps only top-2 solid layers under grass; lavapipe still
-    // inks those bottoms black unless an opaque unlit plate sits FLUSH under
-    // them (plates deep in the hollow sit *behind* the black faces).
+    // inks those bottoms (and hollow cave walls) black unless an opaque
+    // unlit VOLUME fills the carved keel so no lit voxel face remains in view.
     // `deck` is at deck_y+1; kept solids end ~deck_y-2 → relative y ≈ -3.
     let keel = island.keel_depth as f32;
-    let flush_y = -3.35_f32; // flush under kept solid bottoms
-    let deep_y = -(keel.max(8.0) * 0.55); // hanging crystal accents only
+    let flush_y = -2.4_f32; // just under grass / kept solids
+    let deep_y = -(keel.max(8.0) * 0.85);
     let crystal_plate = materials.add(sil_mat(
         Color::srgb(0.55, 0.98, 1.0),
         LinearRgba::rgb(3.5, 8.5, 9.5),
@@ -945,26 +945,26 @@ fn film_spawn_silhouettes(
     ));
     let rx = (island.radius_x as f32).max(18.0);
     let rz = (island.radius_z as f32).max(16.0);
-    // Primary face-replacement deck: thick, oversized, flush under solids.
+    // Solid unlit keel volume — fills the hollow so cave walls never read ink.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: crystal_plate.clone(),
-            transform: Transform::from_translation(deck + Vec3::new(0.0, flush_y, 1.0))
-                .with_scale(Vec3::new(rx * 2.15, 2.4, rz * 2.15)),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, -5.2, 1.0))
+                .with_scale(Vec3::new(rx * 2.05, 9.5, rz * 2.05)),
             ..default()
         },
         FilmSilhouette,
         FilmKeelHelper,
         Name::new("FilmKeelUndersideDeck"),
     ));
-    // Alloy under-layer slightly lower so rim profile shows crystal→alloy depth.
+    // Alloy under-cap for crystal→alloy depth on the rim profile.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: alloy_plate.clone(),
-            transform: Transform::from_translation(deck + Vec3::new(0.0, flush_y - 1.5, 1.0))
-                .with_scale(Vec3::new(rx * 1.95, 1.8, rz * 1.95)),
+            transform: Transform::from_translation(deck + Vec3::new(0.0, deep_y - 0.5, 1.0))
+                .with_scale(Vec3::new(rx * 1.85, 2.2, rz * 1.85)),
             ..default()
         },
         FilmSilhouette,
@@ -1047,8 +1047,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: skirt.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, flush_y - 2.5, oz))
-                    .with_scale(Vec3::new(sx, keel.max(7.0) * 0.55, sz)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, -5.0, oz))
+                    .with_scale(Vec3::new(sx, 8.5, sz)),
                 ..default()
             },
             FilmSilhouette,
@@ -1084,6 +1084,8 @@ fn film_spawn_silhouettes(
         (8.0, 55.0, 10.0, 9.0, -2.0),
         (50.0, 38.0, 9.0, 9.0, 0.0),
         (65.0, 55.0, 10.0, 9.0, 1.0),
+        (28.0, 44.0, 12.0, 10.0, -1.0),
+        (-12.0, 52.0, 11.0, 9.0, 1.0),
     ]
     .into_iter()
     .enumerate()
@@ -1098,23 +1100,20 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: mat,
-                transform: Transform::from_translation(sat_deck + Vec3::new(0.0, flush_y, 0.0))
-                    .with_scale(Vec3::new(srx * 2.1, 1.8, srz * 2.1)),
+                transform: Transform::from_translation(sat_deck + Vec3::new(0.0, -4.5, 0.0))
+                    .with_scale(Vec3::new(srx * 2.05, 7.5, srz * 2.05)),
                 ..default()
             },
             FilmSilhouette,
             FilmKeelHelper,
             Name::new(format!("FilmSatKeelDeck{si}")),
         ));
-        // Skirt strip on the camera-facing side for painting side-read.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: crystal_plate.clone(),
-                transform: Transform::from_translation(
-                    sat_deck + Vec3::new(0.0, flush_y - 2.0, srz * 0.9),
-                )
-                .with_scale(Vec3::new(srx * 1.8, 3.2, 0.7)),
+                transform: Transform::from_translation(sat_deck + Vec3::new(0.0, -4.0, srz * 0.95))
+                    .with_scale(Vec3::new(srx * 1.9, 6.5, 0.8)),
                 ..default()
             },
             FilmSilhouette,
@@ -1132,7 +1131,7 @@ fn film_spawn_silhouettes(
         Color::srgb(0.25, 0.95, 0.55),
         LinearRgba::rgb(0.8, 5.5, 2.2),
     ));
-    let keel_y = deep_y - 1.0;
+    let keel_y = deep_y - 1.5;
     for (i, (ox, oz, mat)) in [
         (-10.0_f32, 8.0, &crystal_a),
         (0.0, 12.0, &crystal_b),
@@ -1964,12 +1963,12 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         1 => {
-            // Rim profile: eye just outside/below the lip so grass reads on
-            // the upper deck while flush unlit underside plates fill below.
+            // Three-quarter rim: eye just outside at deck height so grass lawn
+            // reads on top while the unlit keel volume drops away below.
             let rx = island.radius_x as f32;
             let rz = island.radius_z as f32;
-            let pos = deck + Vec3::new(rx * 0.75 + 14.0, -3.2, rz * 0.85 + 16.0);
-            let look = deck + Vec3::new(-3.0, 1.0, -1.0);
+            let pos = deck + Vec3::new(rx * 0.55 + 16.0, 4.5, rz * 0.65 + 18.0);
+            let look = deck + Vec3::new(-2.0, -3.5, 2.0);
             (pos, look)
         }
         2 => {
