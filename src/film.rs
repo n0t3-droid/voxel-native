@@ -2231,9 +2231,30 @@ const SHOTS: &[FilmShot] = &[
 
 fn film_toggle_helpers(
     film: Res<FilmRuntime>,
-    mut keel_helpers: Query<&mut Visibility, (With<FilmKeelHelper>, Without<FilmRiverRibbon>)>,
-    mut river_ribbons: Query<&mut Visibility, (With<FilmRiverRibbon>, Without<FilmKeelHelper>)>,
-    mut turret_fx: Query<&mut Visibility, (With<FilmTurretFx>, Without<FilmKeelHelper>)>,
+    mut keel_helpers: Query<
+        &mut Visibility,
+        (
+            With<FilmKeelHelper>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
+        ),
+    >,
+    mut river_ribbons: Query<
+        &mut Visibility,
+        (
+            With<FilmRiverRibbon>,
+            Without<FilmKeelHelper>,
+            Without<FilmTurretFx>,
+        ),
+    >,
+    mut turret_fx: Query<
+        &mut Visibility,
+        (
+            With<FilmTurretFx>,
+            Without<FilmKeelHelper>,
+            Without<FilmRiverRibbon>,
+        ),
+    >,
 ) {
     if !film.enabled || film.finished {
         return;
