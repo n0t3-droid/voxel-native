@@ -116,6 +116,10 @@ struct FilmRiverRibbon;
 #[derive(Component)]
 struct FilmTurretFx;
 
+/// Tunnel portal + cyan monorail — hidden on combat_pad so biped/alien read.
+#[derive(Component)]
+struct FilmTunnelFx;
+
 #[derive(Component)]
 struct FilmPlanetProxy;
 
@@ -1902,6 +1906,7 @@ fn spawn_film_tunnel_portal(
             ..default()
         },
         FilmSilhouette,
+        FilmTunnelFx,
         Name::new("FilmTunnelMountain"),
     ));
     commands.spawn((
@@ -1913,6 +1918,7 @@ fn spawn_film_tunnel_portal(
             ..default()
         },
         FilmSilhouette,
+        FilmTunnelFx,
         Name::new("FilmTunnelBore"),
     ));
     // Thick cyan arch — must dominate the mouth silhouette.
@@ -1931,6 +1937,7 @@ fn spawn_film_tunnel_portal(
                 ..default()
             },
             FilmSilhouette,
+            FilmTunnelFx,
             Name::new("FilmTunnelArch"),
         ));
     }
@@ -1943,6 +1950,7 @@ fn spawn_film_tunnel_portal(
             ..default()
         },
         FilmSilhouette,
+        FilmTunnelFx,
         Name::new("FilmTunnelGlow"),
     ));
 }
@@ -2110,6 +2118,7 @@ fn spawn_film_tunnel_rails(
             ..default()
         },
         FilmSilhouette,
+        FilmTunnelFx,
         Name::new("FilmTunnelRailDeck"),
     ));
     for (ox, name) in [(-3.2_f32, "L"), (3.2, "R")] {
@@ -2122,6 +2131,7 @@ fn spawn_film_tunnel_rails(
                 ..default()
             },
             FilmSilhouette,
+            FilmTunnelFx,
             Name::new(format!("FilmTunnelRail{name}")),
         ));
         commands.spawn((
@@ -2133,6 +2143,7 @@ fn spawn_film_tunnel_rails(
                 ..default()
             },
             FilmSilhouette,
+            FilmTunnelFx,
             Name::new(format!("FilmTunnelRailGlow{name}")),
         ));
     }
@@ -2146,6 +2157,7 @@ fn spawn_film_tunnel_rails(
             ..default()
         },
         FilmSilhouette,
+        FilmTunnelFx,
         Name::new("FilmTunnelRailCenter"),
     ));
     // Discrete cyan sleepers — unmistakable track rhythm into the bore.
@@ -2162,6 +2174,7 @@ fn spawn_film_tunnel_rails(
                 ..default()
             },
             FilmSilhouette,
+            FilmTunnelFx,
             Name::new(format!("FilmTunnelRailSleeper{i}")),
         ));
         for ox in [-5.0_f32, 5.0] {
@@ -2174,6 +2187,7 @@ fn spawn_film_tunnel_rails(
                     ..default()
                 },
                 FilmSilhouette,
+                FilmTunnelFx,
                 Name::new(format!("FilmTunnelRailPylon{i}")),
             ));
             commands.spawn((
@@ -2185,6 +2199,7 @@ fn spawn_film_tunnel_rails(
                     ..default()
                 },
                 FilmSilhouette,
+                FilmTunnelFx,
                 Name::new(format!("FilmTunnelRailCap{i}")),
             ));
         }
@@ -2199,6 +2214,7 @@ fn spawn_film_tunnel_rails(
             ..default()
         },
         FilmSilhouette,
+        FilmTunnelFx,
         Name::new("FilmTunnelRailThreshold"),
     ));
 }
@@ -2509,8 +2525,8 @@ fn spawn_film_station_mountain(
     neon: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Mountain in painting mid-frame — stepped mass + neon crown (not full-frame).
-    let base = deck + Vec3::new(28.0, 2.0, 74.0);
+    // Mountain in painting mid-right — stepped mass clear of the grass crown.
+    let base = deck + Vec3::new(36.0, 2.0, 68.0);
     for (i, (y, sx, sz)) in [
         (10.0_f32, 48.0, 40.0),
         (26.0, 40.0, 32.0),
@@ -2968,6 +2984,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut river_ribbons: Query<
@@ -2984,6 +3001,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut turret_fx: Query<
@@ -3000,6 +3018,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut planet_proxy: Query<
@@ -3016,6 +3035,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut crystal_fx: Query<
@@ -3032,6 +3052,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut fighter_fx: Query<
@@ -3048,6 +3069,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut waterfall_fx: Query<
@@ -3064,6 +3086,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut grass_fx: Query<
@@ -3080,6 +3103,7 @@ fn film_toggle_helpers(
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut combat_fx: Query<
@@ -3096,6 +3120,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmStationFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut station_fx: Query<
@@ -3112,6 +3137,7 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmSkywayFx>,
+            Without<FilmTunnelFx>,
         ),
     >,
     mut skyway_fx: Query<
@@ -3128,6 +3154,24 @@ fn film_toggle_helpers(
             Without<FilmGrassFx>,
             Without<FilmCombatFx>,
             Without<FilmStationFx>,
+            Without<FilmTunnelFx>,
+        ),
+    >,
+    mut tunnel_fx: Query<
+        &mut Visibility,
+        (
+            With<FilmTunnelFx>,
+            Without<FilmKeelHelper>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
+            Without<FilmWaterfallFx>,
+            Without<FilmGrassFx>,
+            Without<FilmCombatFx>,
+            Without<FilmStationFx>,
+            Without<FilmSkywayFx>,
         ),
     >,
 ) {
@@ -3231,6 +3275,15 @@ fn film_toggle_helpers(
     let show_skyway = matches!(film.shot_index, 6 | 8 | 14);
     for mut vis in skyway_fx.iter_mut() {
         *vis = if show_skyway {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Tunnel portal + monorail: dedicated tunnel + painting; OFF combat_pad.
+    let show_tunnel = matches!(film.shot_index, 5 | 8);
+    for mut vis in tunnel_fx.iter_mut() {
+        *vis = if show_tunnel {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -3716,15 +3769,15 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         8 => {
-            // Painting: planet upper; station mid-frame; grass/rivers/shuttle lower.
+            // Painting: planet upper; station mid-right; grass crown lower; skyway/shuttle.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-52.0, 48.0, 128.0);
-            let station_mid = deck + Vec3::new(28.0, 48.0, 74.0);
-            let green_crown = deck + Vec3::new(-6.0, 10.0, 96.0);
+            let pos = deck + Vec3::new(-55.0, 40.0, 132.0);
+            let station_mid = deck + Vec3::new(36.0, 36.0, 68.0);
+            let green_crown = deck + Vec3::new(-4.0, 6.0, 100.0);
             let planet = pos + planet_dir * 155.0;
-            // Station readable mid-frame without burying the grass crown.
-            let ground = green_crown.lerp(station_mid, 0.5);
-            let look = ground.lerp(planet, 0.24);
+            // Keep look weighted to grass so verdant crown survives mid-frame station.
+            let ground = green_crown.lerp(station_mid, 0.34);
+            let look = ground.lerp(planet, 0.18);
             (pos, look)
         }
         9 => {
@@ -3756,7 +3809,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         13 => {
             // Station mountain — stand off so full stepped mass + neon crown read.
-            let station = deck + Vec3::new(28.0, 52.0, 74.0);
+            let station = deck + Vec3::new(36.0, 50.0, 68.0);
             let pos = deck + Vec3::new(-55.0, 78.0, 155.0);
             let look = station;
             (pos, look)
