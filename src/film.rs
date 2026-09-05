@@ -687,7 +687,7 @@ fn film_stamp_vista_archipelago(mut world: ResMut<VoxelWorld>, mut film: ResMut<
 
 fn stamp_film_station_mass(world: &mut VoxelWorld, cx: i32, oy: i32, cz: i32) -> usize {
     let mut n = 0usize;
-    // Mountain-scale station: stepped pyramid with neon crown.
+    // Mountain-scale station: stepped darkrock pyramid — alloy only at tip.
     for dy in 0i32..28 {
         let half = (14 - dy / 2).max(3);
         for dx in -half..=half {
@@ -695,13 +695,13 @@ fn stamp_film_station_mass(world: &mut VoxelWorld, cx: i32, oy: i32, cz: i32) ->
                 if dx.abs() == half && dz.abs() == half && dy < 8 {
                     continue;
                 }
-                let block = if dy >= 24 {
+                let block = if dy >= 26 {
                     BlockType::NeonCyan
-                } else if dx.abs() + dz.abs() <= 1 {
+                } else if dx.abs() + dz.abs() <= 1 && dy >= 20 {
                     BlockType::EngineCore
-                } else if dy >= 16 {
-                    BlockType::ShipHullAlloy
-                } else if dy >= 8 {
+                } else if dy >= 24 {
+                    BlockType::ShipHullDark
+                } else if dy >= 12 {
                     BlockType::ShipHullDark
                 } else {
                     BlockType::Stone
@@ -1323,7 +1323,7 @@ fn film_spawn_silhouettes(
             Name::new(format!("FilmLavaRibbon{i}")),
         ));
     }
-    // Painting lower dual lanes — fat cyan + unmistakable orange lava ABOVE grass.
+    // Painting mid dual lanes — sit BEHIND near grass crowns (cam z≈138).
     for (i, ox) in [-40.0_f32, -26.0, -12.0, 2.0, 16.0, 28.0]
         .into_iter()
         .enumerate()
@@ -1332,8 +1332,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: plasma_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, 12.0, 112.0))
-                    .with_scale(Vec3::new(24.0, 7.0, 10.0))
+                transform: Transform::from_translation(deck + Vec3::new(ox, 8.0, 100.0))
+                    .with_scale(Vec3::new(22.0, 5.5, 8.0))
                     .with_rotation(Quat::from_rotation_y(0.55)),
                 ..default()
             },
@@ -1345,8 +1345,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox + 14.0, 11.0, 106.0))
-                    .with_scale(Vec3::new(28.0, 10.0, 12.0))
+                transform: Transform::from_translation(deck + Vec3::new(ox + 14.0, 7.0, 94.0))
+                    .with_scale(Vec3::new(24.0, 8.0, 10.0))
                     .with_rotation(Quat::from_rotation_y(0.52)),
                 ..default()
             },
@@ -1355,14 +1355,14 @@ fn film_spawn_silhouettes(
             Name::new(format!("FilmLavaPaint{i}")),
         ));
     }
-    // Tall dual sheets for upward painting look — rise above crown.
+    // Mid dual sheets — behind verdant lip, not burying lower-third grass.
     for (i, ox) in [-34.0_f32, -18.0, -2.0, 14.0, 30.0].into_iter().enumerate() {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: plasma_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, 14.0, 98.0))
-                    .with_scale(Vec3::new(9.0, 22.0, 26.0)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, 10.0, 88.0))
+                    .with_scale(Vec3::new(8.0, 16.0, 20.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -1373,8 +1373,8 @@ fn film_spawn_silhouettes(
             PbrBundle {
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox + 12.0, 13.0, 92.0))
-                    .with_scale(Vec3::new(11.0, 26.0, 28.0)),
+                transform: Transform::from_translation(deck + Vec3::new(ox + 12.0, 9.0, 82.0))
+                    .with_scale(Vec3::new(10.0, 18.0, 22.0)),
                 ..default()
             },
             FilmSilhouette,
@@ -1572,13 +1572,14 @@ fn film_spawn_silhouettes(
     // Mountain station mass — mesh mountain for painting + dedicated station beat.
     // Dark rock mountain — wider base, shorter crown (installation, not white tower).
     // Dark rock mountain — darkrock dominates; alloy only as faint crown lip.
+    // Carved darkrock (readable stone gray) — not void-black, not tan alloy.
     let station_dark = materials.add(sil_mat(
-        Color::srgb(0.18, 0.16, 0.20),
-        LinearRgba::rgb(0.05, 0.04, 0.06),
+        Color::srgb(0.30, 0.28, 0.32),
+        LinearRgba::rgb(0.12, 0.10, 0.14),
     ));
     let station_alloy = materials.add(sil_mat(
-        Color::srgb(0.42, 0.38, 0.32),
-        LinearRgba::rgb(0.25, 0.2, 0.12),
+        Color::srgb(0.38, 0.34, 0.30),
+        LinearRgba::rgb(0.18, 0.14, 0.10),
     ));
     let station_neon = materials.add(sil_mat(
         Color::srgb(0.25, 0.95, 0.90),
@@ -2589,15 +2590,15 @@ fn spawn_film_station_mountain(
     neon: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Wide mountain installation — closer to crown so mid-frame darkrock owns the hero.
-    let base = deck + Vec3::new(22.0, 0.0, 82.0);
+    // Wide mountain installation — mid-right darkrock mass for painting hero.
+    let base = deck + Vec3::new(14.0, 0.0, 78.0);
     for (i, (y, sx, sz, h)) in [
-        (4.0_f32, 88.0, 70.0, 14.0),
-        (16.0, 76.0, 60.0, 14.0),
-        (30.0, 62.0, 48.0, 14.0),
-        (44.0, 46.0, 36.0, 12.0),
-        (54.0, 30.0, 24.0, 10.0),
-        (62.0, 16.0, 14.0, 8.0),
+        (4.0_f32, 96.0, 76.0, 16.0),
+        (18.0, 82.0, 64.0, 16.0),
+        (34.0, 66.0, 52.0, 14.0),
+        (48.0, 48.0, 38.0, 12.0),
+        (58.0, 30.0, 24.0, 10.0),
+        (66.0, 14.0, 12.0, 6.0),
     ]
     .into_iter()
     .enumerate()
@@ -2605,7 +2606,7 @@ fn spawn_film_station_mountain(
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
-                // Almost all dark rock — alloy only on the tip lip.
+                // Darkrock through crown — alloy only on tip lip.
                 material: if i < 5 { dark.clone() } else { alloy.clone() },
                 transform: Transform::from_translation(base + Vec3::new(0.0, y, 0.0))
                     .with_scale(Vec3::new(sx, h, sz)),
@@ -2622,8 +2623,8 @@ fn spawn_film_station_mountain(
             PbrBundle {
                 mesh: cube.clone(),
                 material: neon.clone(),
-                transform: Transform::from_translation(base + Vec3::new(ox, 64.0, 2.0))
-                    .with_scale(Vec3::new(4.0, 8.0, 4.0)),
+                transform: Transform::from_translation(base + Vec3::new(ox, 68.0, 2.0))
+                    .with_scale(Vec3::new(3.5, 6.0, 3.5)),
                 ..default()
             },
             FilmSilhouette,
@@ -2636,8 +2637,8 @@ fn spawn_film_station_mountain(
         PbrBundle {
             mesh: cube.clone(),
             material: dark.clone(),
-            transform: Transform::from_translation(base + Vec3::new(-32.0, 18.0, 28.0))
-                .with_scale(Vec3::new(32.0, 38.0, 24.0)),
+            transform: Transform::from_translation(base + Vec3::new(-36.0, 18.0, 30.0))
+                .with_scale(Vec3::new(36.0, 40.0, 26.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2648,8 +2649,8 @@ fn spawn_film_station_mountain(
         PbrBundle {
             mesh: cube.clone(),
             material: dark.clone(),
-            transform: Transform::from_translation(base + Vec3::new(30.0, 14.0, 24.0))
-                .with_scale(Vec3::new(28.0, 32.0, 22.0)),
+            transform: Transform::from_translation(base + Vec3::new(32.0, 14.0, 26.0))
+                .with_scale(Vec3::new(30.0, 34.0, 24.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2661,8 +2662,8 @@ fn spawn_film_station_mountain(
         PbrBundle {
             mesh: cube.clone(),
             material: dark.clone(),
-            transform: Transform::from_translation(base + Vec3::new(-6.0, 26.0, 34.0))
-                .with_scale(Vec3::new(40.0, 34.0, 10.0)),
+            transform: Transform::from_translation(base + Vec3::new(-4.0, 28.0, 38.0))
+                .with_scale(Vec3::new(48.0, 40.0, 12.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2792,20 +2793,19 @@ fn spawn_film_grass_caps(
     soil: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Thick verdant crowns — lids + cliff faces toward painting cam (SW looking NE).
-    // Flat lids alone foreshorten under the upward planet look.
+    // Near-cam verdant crowns (cam z≈138) — fill lower third with grass islands.
+    // Rivers sit behind at z≈88..100 so green isn't buried by cyan/lava.
     for (i, (ox, oz, w, d, lift)) in [
-        // Near-cam mega crown (painting pos z≈138) — fill lower third green
-        (-12.0_f32, 108.0, 52.0, 40.0, 6.0),
-        (10.0, 104.0, 46.0, 36.0, 5.5),
-        (-32.0, 100.0, 40.0, 32.0, 5.0),
-        (8.0, 94.0, 42.0, 34.0, 6.0),
-        (28.0, 98.0, 36.0, 28.0, 5.0),
-        (-18.0, 90.0, 34.0, 28.0, 4.5),
-        (10.0, 82.0, 30.0, 24.0, 4.0),
-        (28.0, 86.0, 28.0, 22.0, 4.0),
-        (-6.0, 76.0, 26.0, 20.0, 3.0),
-        (40.0, 80.0, 24.0, 20.0, 3.5),
+        (-18.0_f32, 126.0, 58.0, 44.0, 5.0),
+        (8.0, 122.0, 52.0, 40.0, 4.5),
+        (-38.0, 118.0, 46.0, 36.0, 4.0),
+        (22.0, 116.0, 40.0, 32.0, 4.0),
+        (-8.0, 112.0, 48.0, 36.0, 5.0),
+        (30.0, 108.0, 34.0, 28.0, 3.5),
+        (-28.0, 108.0, 36.0, 30.0, 3.5),
+        (10.0, 100.0, 32.0, 26.0, 3.0),
+        (-16.0, 96.0, 28.0, 22.0, 2.5),
+        (36.0, 98.0, 26.0, 22.0, 3.0),
     ]
     .into_iter()
     .enumerate()
@@ -3795,8 +3795,8 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
     match index {
         0 => {
             // Mega verdant crown near painting frustum.
-            let lawn = deck + Vec3::new(-8.0, 10.0, 96.0);
-            let pos = lawn + Vec3::new(-32.0, 22.0, 34.0);
+            let lawn = deck + Vec3::new(-8.0, 8.0, 120.0);
+            let pos = lawn + Vec3::new(-28.0, 18.0, 28.0);
             let look = lawn + Vec3::new(4.0, -1.0, -6.0);
             (pos, look)
         }
@@ -3853,20 +3853,20 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         8 => {
-            // Coherent hero: planet upper; mountain mid-right; grass+rivers+skyway left/lower.
+            // Coherent hero: planet upper; mountain mid-right; grass lower; rivers mid.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-56.0, 40.0, 138.0);
-            let station_mid = deck + Vec3::new(22.0, 32.0, 82.0);
-            let green_crown = deck + Vec3::new(-14.0, 4.0, 110.0);
+            let pos = deck + Vec3::new(-52.0, 36.0, 142.0);
+            let station_mid = deck + Vec3::new(14.0, 34.0, 78.0);
+            let green_crown = deck + Vec3::new(-10.0, 5.0, 122.0);
             let skyway_mid = deck + Vec3::new(-22.0, 24.0, 100.0);
-            let rivers = deck + Vec3::new(0.0, 12.0, 104.0);
+            let rivers = deck + Vec3::new(0.0, 9.0, 96.0);
             let planet = pos + planet_dir * 155.0;
-            // Station owns mid-frame; rivers/grass share the lower third.
+            // Grass owns lower third; station mid-right; rivers share mid without mud.
             let ground = green_crown
-                .lerp(rivers, 0.4)
-                .lerp(skyway_mid, 0.15)
-                .lerp(station_mid, 0.5);
-            let look = ground.lerp(planet, 0.16);
+                .lerp(rivers, 0.28)
+                .lerp(skyway_mid, 0.12)
+                .lerp(station_mid, 0.40);
+            let look = ground.lerp(planet, 0.17);
             (pos, look)
         }
         9 => {
@@ -3898,7 +3898,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         13 => {
             // Station mountain — stand off so full stepped mass + neon crown read.
-            let station = deck + Vec3::new(22.0, 36.0, 82.0);
+            let station = deck + Vec3::new(14.0, 36.0, 78.0);
             let pos = deck + Vec3::new(-55.0, 78.0, 155.0);
             let look = station;
             (pos, look)
