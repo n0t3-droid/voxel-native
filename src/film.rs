@@ -2013,6 +2013,57 @@ fn spawn_film_tunnel_portal(
         FilmTunnelFx,
         Name::new("FilmTunnelGlow"),
     ));
+
+    // Painting-facing portal/holo arch — left of mountain so shot 8 reads the mouth.
+    let paint_mouth = deck + Vec3::new(-42.0, 18.0, 78.0);
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: rock.clone(),
+            transform: Transform::from_translation(paint_mouth)
+                .with_scale(Vec3::new(22.0, 18.0, 8.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmTunnelFx,
+        Name::new("FilmPaintPortalRock"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: dark.clone(),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 3.0))
+                .with_scale(Vec3::new(12.0, 12.0, 4.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmTunnelFx,
+        Name::new("FilmPaintPortalBore"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: cyan.clone(),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 5.5))
+                .with_scale(Vec3::new(10.0, 10.0, 1.2)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmTunnelFx,
+        Name::new("FilmPaintPortalArch"),
+    ));
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: glow.clone(),
+            transform: Transform::from_translation(paint_mouth + Vec3::new(0.0, 0.0, 6.5))
+                .with_scale(Vec3::new(7.0, 8.0, 1.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmTunnelFx,
+        Name::new("FilmPaintPortalGlow"),
+    ));
 }
 
 fn spawn_film_turrets_firing(
