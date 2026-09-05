@@ -119,6 +119,14 @@ struct FilmTurretFx;
 #[derive(Component)]
 struct FilmPlanetProxy;
 
+/// Crystal tower grove — hidden on fighter_swarm so plumes aren't buried.
+#[derive(Component)]
+struct FilmCrystalFx;
+
+/// Fighter swarm meshes — hidden on crystal_towers so spires read clean.
+#[derive(Component)]
+struct FilmFighterFx;
+
 #[derive(Component)]
 struct FilmShuttleMarker;
 
@@ -2144,6 +2152,7 @@ fn spawn_film_fighter_swarm(
                 ..default()
             },
             FilmSilhouette,
+            FilmFighterFx,
             Name::new(format!("FilmFighter{i}")),
         ));
         let plume_dir = Quat::from_rotation_y(yaw) * Vec3::new(-1.0, 0.0, 0.0);
@@ -2157,6 +2166,7 @@ fn spawn_film_fighter_swarm(
                 ..default()
             },
             FilmSilhouette,
+            FilmFighterFx,
             Name::new(format!("FilmFighterPlume{i}")),
         ));
         commands.spawn((
@@ -2169,6 +2179,7 @@ fn spawn_film_fighter_swarm(
                 ..default()
             },
             FilmSilhouette,
+            FilmFighterFx,
             Name::new(format!("FilmFighterWing{i}")),
         ));
         commands.spawn((
@@ -2182,6 +2193,7 @@ fn spawn_film_fighter_swarm(
                 ..default()
             },
             FilmSilhouette,
+            FilmFighterFx,
             Name::new(format!("FilmFighterNose{i}")),
         ));
     }
@@ -2401,61 +2413,93 @@ fn spawn_film_crystal_towers(
     verdant: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Cyan/luminite crystal spires — no brown trunks; must read as crystal.
-    let _ = verdant; // keep signature; painting uses crystal + ice tips only
+    // Tapered cyan spires (base→mid→shaft→tip) so dedicated + painting read as towers.
+    let ice = verdant;
     for (i, (ox, oz, h)) in [
-        (18.0_f32, 18.0, 38.0),
-        (28.0, 24.0, 48.0),
-        (22.0, 32.0, 34.0),
-        (36.0, 28.0, 54.0),
-        (14.0, 40.0, 42.0),
-        (42.0, 36.0, 46.0),
-        (10.0, 28.0, 36.0),
-        (48.0, 22.0, 40.0),
+        (18.0_f32, 18.0, 44.0),
+        (28.0, 24.0, 58.0),
+        (22.0, 32.0, 40.0),
+        (36.0, 28.0, 64.0),
+        (14.0, 40.0, 50.0),
+        (42.0, 36.0, 54.0),
+        (10.0, 28.0, 42.0),
+        (48.0, 22.0, 46.0),
     ]
     .into_iter()
     .enumerate()
     {
-        let lean = 0.12 * if i % 2 == 0 { 1.0 } else { -1.0 };
-        // Main crystal shaft.
+        let lean = 0.08 * if i % 2 == 0 { 1.0 } else { -1.0 };
+        let rot = Quat::from_rotation_z(lean);
+        // Broad base plinth.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: crystal.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.45, oz))
-                    .with_scale(Vec3::new(5.0, h, 5.0))
-                    .with_rotation(Quat::from_rotation_z(lean)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.12, oz))
+                    .with_scale(Vec3::new(7.5, h * 0.24, 7.5))
+                    .with_rotation(rot),
                 ..default()
             },
             FilmSilhouette,
-            Name::new(format!("FilmCrystalTower{i}")),
+            FilmCrystalFx,
+            Name::new(format!("FilmCrystalBase{i}")),
+        ));
+        // Mid facet block.
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: crystal.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.38, oz))
+                    .with_scale(Vec3::new(5.2, h * 0.32, 5.2))
+                    .with_rotation(rot * Quat::from_rotation_y(0.35)),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmCrystalFx,
+            Name::new(format!("FilmCrystalMid{i}")),
+        ));
+        // Narrow upper shaft.
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: ice.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.68, oz))
+                    .with_scale(Vec3::new(3.2, h * 0.36, 3.2))
+                    .with_rotation(rot),
+                ..default()
+            },
+            FilmSilhouette,
+            FilmCrystalFx,
+            Name::new(format!("FilmCrystalShaft{i}")),
         ));
         // Faceted diamond tip.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
-                material: crystal.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, h + 3.0, oz))
-                    .with_scale(Vec3::new(7.0, 6.0, 7.0))
-                    .with_rotation(Quat::from_rotation_y(0.4) * Quat::from_rotation_z(0.5)),
+                material: ice.clone(),
+                transform: Transform::from_translation(deck + Vec3::new(ox, h + 4.0, oz))
+                    .with_scale(Vec3::new(6.5, 7.0, 6.5))
+                    .with_rotation(Quat::from_rotation_y(0.55) * Quat::from_rotation_z(0.55)),
                 ..default()
             },
             FilmSilhouette,
+            FilmCrystalFx,
             Name::new(format!("FilmCrystalTip{i}")),
         ));
-        // Secondary shard for crystalline silhouette.
+        // Angled secondary shard.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: crystal.clone(),
                 transform: Transform::from_translation(
-                    deck + Vec3::new(ox + 3.5, h * 0.55, oz - 2.0),
+                    deck + Vec3::new(ox + 4.0, h * 0.50, oz - 2.5),
                 )
-                .with_scale(Vec3::new(2.4, h * 0.55, 2.4))
-                .with_rotation(Quat::from_rotation_z(-lean * 1.6)),
+                .with_scale(Vec3::new(2.2, h * 0.48, 2.2))
+                .with_rotation(Quat::from_rotation_z(-lean * 2.2) * Quat::from_rotation_x(0.25)),
                 ..default()
             },
             FilmSilhouette,
+            FilmCrystalFx,
             Name::new(format!("FilmCrystalShard{i}")),
         ));
     }
@@ -2520,6 +2564,8 @@ fn film_toggle_helpers(
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
         ),
     >,
     mut river_ribbons: Query<
@@ -2529,6 +2575,8 @@ fn film_toggle_helpers(
             Without<FilmKeelHelper>,
             Without<FilmTurretFx>,
             Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
         ),
     >,
     mut turret_fx: Query<
@@ -2538,6 +2586,8 @@ fn film_toggle_helpers(
             Without<FilmKeelHelper>,
             Without<FilmRiverRibbon>,
             Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
         ),
     >,
     mut planet_proxy: Query<
@@ -2547,13 +2597,39 @@ fn film_toggle_helpers(
             Without<FilmKeelHelper>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
+            Without<FilmCrystalFx>,
+            Without<FilmFighterFx>,
+        ),
+    >,
+    mut crystal_fx: Query<
+        &mut Visibility,
+        (
+            With<FilmCrystalFx>,
+            Without<FilmKeelHelper>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
+            Without<FilmFighterFx>,
+        ),
+    >,
+    mut fighter_fx: Query<
+        &mut Visibility,
+        (
+            With<FilmFighterFx>,
+            Without<FilmKeelHelper>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
+            Without<FilmCrystalFx>,
         ),
     >,
 ) {
     if !film.enabled || film.finished {
         return;
     }
-    let show_keel = true; // film-only helpers: always on so every beat's keels read
+    // Keel bounce cards only on the deck+keel beat — they were yellow/brown
+    // slabs flooding crystal / fighter / planet frames when always-on.
+    let show_keel = film.shot_index == 1;
     for mut vis in keel_helpers.iter_mut() {
         *vis = if show_keel {
             Visibility::Visible
@@ -2583,6 +2659,24 @@ fn film_toggle_helpers(
     let show_proxy = film.shot_index == 8;
     for mut vis in planet_proxy.iter_mut() {
         *vis = if show_proxy {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Crystal grove: painting + dedicated (hide on fighter so V plumes read).
+    let show_crystal = matches!(film.shot_index, 8 | 12);
+    for mut vis in crystal_fx.iter_mut() {
+        *vis = if show_crystal {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Fighters: combat / painting / dedicated (hide on crystal grove).
+    let show_fighters = matches!(film.shot_index, 2 | 8 | 11);
+    for mut vis in fighter_fx.iter_mut() {
+        *vis = if show_fighters {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -2681,8 +2775,8 @@ fn film_drive_camera(
             8 => 56.0,  // painting: station + dominant planet
             9 => 52.0,  // dual plasma + lava rivers
             10 => 48.0, // cyan waterfall cascade
-            11 => 40.0, // fighter swarm — tighter on formation
-            12 => 50.0, // crystal tower grove
+            11 => 38.0, // fighter swarm — overhead V
+            12 => 44.0, // crystal tower side elevation
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -3090,16 +3184,16 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         11 => {
-            // Fighter swarm: above formation looking down the V of plumes.
-            let form = deck + Vec3::new(28.0, 33.0, 44.0);
-            let pos = form + Vec3::new(22.0, 8.0, 18.0);
-            let look = form + Vec3::new(-8.0, -1.0, -4.0);
+            // Fighter swarm: high rear 3/4 so cyan plumes read as a V (no deck).
+            let form = deck + Vec3::new(26.0, 32.0, 46.0);
+            let pos = form + Vec3::new(18.0, 22.0, 28.0);
+            let look = form + Vec3::new(-6.0, -3.0, -8.0);
             (pos, look)
         }
         12 => {
-            // Crystal towers: high stand-off looking at spire tips (avoid keel).
-            let cluster = deck + Vec3::new(30.0, 32.0, 30.0);
-            let pos = deck + Vec3::new(78.0, 30.0, 78.0);
+            // Crystal towers: pure +X side elevation — full taper against sky.
+            let cluster = deck + Vec3::new(28.0, 30.0, 28.0);
+            let pos = deck + Vec3::new(118.0, 32.0, 30.0);
             let look = cluster;
             (pos, look)
         }
