@@ -2689,10 +2689,11 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         5 => {
-            // Centerline above rails — avoid pad turrets (±X) that were
-            // flooding this frame with red beam slabs.
-            let pos = station + Vec3::new(0.0, 7.2, 26.0);
-            let look = station + Vec3::new(0.0, 5.6, -10.0);
+            // Far stand-off on +Z above rail start — center turret sits at
+            // pad z≈24 and was painting this frame solid red when cam was
+            // at z=26 looking −Z along its beam.
+            let pos = station + Vec3::new(0.0, 11.0, 40.0);
+            let look = station + Vec3::new(0.0, 5.5, -6.0);
             (pos, look)
         }
         6 => {
