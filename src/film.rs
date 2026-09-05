@@ -151,6 +151,10 @@ struct FilmCombatFx;
 #[derive(Component)]
 struct FilmCombatVista;
 
+/// Bright combat stage floor — covers residual dark pad/keel lattice.
+#[derive(Component)]
+struct FilmCombatStage;
+
 /// Mountain station mass mesh — always on for painting/station beats.
 #[derive(Component)]
 struct FilmStationFx;
@@ -472,32 +476,45 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
     let oz = island.cz + 14;
     let mut cleared = 0usize;
     let mut stamped = 0usize;
-    // Wide/tall clear so tunnel pylons + skyway stubs cannot cage the two-shot.
-    for dx in -14..=14 {
-        for dz in -10..=12 {
+    // Wide/tall clear + SOLID keel fill (no AIR caves → no black lattice).
+    // Also scrub the camera corridor south of the pad (+Z).
+    for dx in -18..=18 {
+        for dz in -12..=28 {
             let x = ox + dx;
             let z = oz + dz;
-            for dy in 1..=22 {
+            // Air column above pad — kill rails, pylons, station stubs, grass.
+            for dy in 2..=28 {
                 if world.edit_set_voxel(x, oy + dy, z, AIR) {
                     cleared += 1;
                 }
             }
-            let _ = world.edit_set_voxel(x, oy + 2, z, AIR);
-            if world.edit_set_voxel(x, oy, z, BlockType::ShipHullDark.into()) {
-                stamped += 1;
-            }
-            if world.edit_set_voxel(x, oy + 1, z, BlockType::ShipHullAlloy.into()) {
-                stamped += 1;
+            // Solid bright pad stack — never ShipHullDark (inks as lattice).
+            for dy in -6..=1 {
+                let y = oy + dy;
+                let block = if dy >= 0 {
+                    BlockType::LuminiteCrystal
+                } else if dy >= -2 {
+                    BlockType::ShipHullAlloy
+                } else {
+                    BlockType::CrystalVerdant
+                };
+                if world.edit_set_voxel(x, y, z, block.into()) {
+                    stamped += 1;
+                }
             }
         }
     }
-    // Paint cyan/verdant luminite across the underside — never magenta, so
-    // thin crystal spikes cannot read as pink cockpit HUD streaks.
+    // Rest of island keel: keep prior rim treatment but skip combat frustum
+    // (already solid-filled above) so we don't re-carve AIR caves under the pad.
     let mut keel_lit = 0usize;
-    let rx = island.radius_x; // full island — don't leave outer keel bottoms inked
+    let rx = island.radius_x;
     let rz = island.radius_z;
     for dx in -rx..=rx {
         for dz in -rz..=rz {
+            // Skip combat pad columns — already solid bright fill.
+            if dx.abs() <= 18 && (dz - 14).abs() <= 28 && dz >= 2 {
+                continue;
+            }
             let nx = dx as f32 / rx.max(1) as f32;
             let nz = dz as f32 / rz.max(1) as f32;
             let d2 = nx * nx + nz * nz;
@@ -511,15 +528,13 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             .round() as i32;
             let bottom = island.deck_y - thickness.max(5);
             let edge = d2.sqrt();
-            // Full keel body: light alloy mid-faces + emissive cyan/verdant rim
-            // so lavapipe ambient crush cannot ink the silhouette black.
             for y in bottom..=(island.deck_y - 1).max(bottom) {
                 let near_bottom = y <= bottom + 2;
                 let near_rim = edge > 0.42;
-                // Keep only the top 4 solid layers under grass; carve the rest
-                // so unlit underside volumes fully own the keel silhouette.
                 if y < island.deck_y - 4 {
-                    if world.edit_set_voxel(x, y, z, AIR) {
+                    // Fill with alloy instead of AIR — prevents black cave faces
+                    // that read as lattice from elevated combat cams.
+                    if world.edit_set_voxel(x, y, z, BlockType::ShipHullAlloy.into()) {
                         keel_lit += 1;
                     }
                     continue;
@@ -535,8 +550,6 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
                         BlockType::Crystal
                     }
                 } else {
-                    // Never leave procedural dark stone — center keel faces
-                    // must stay readable alloy even under ambient crush.
                     BlockType::ShipHullAlloy
                 };
                 if world.edit_set_voxel(x, y, z, block.into()) {
@@ -548,8 +561,6 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
     info!(
         "FILM: combat slab at ({ox},{oy},{oz}) cleared={cleared} stamped={stamped} keel_lit={keel_lit}"
     );
-    // Scrub procedural magenta keel crystals near the hero island — thin
-    // pink columns bloom into fake cockpit-HUD streaks in shuttle frames.
     let mut scrubbed = 0usize;
     let scrub_r = island.radius_x.max(island.radius_z) + 8;
     for dx in -scrub_r..=scrub_r {
@@ -903,9 +914,9 @@ fn film_spawn_shuttle(
     film.shuttle_spawned = true;
     // Park real shuttle in painting frustum (proxy carries the plume read).
     let pos = Vec3::new(
-        island.cx as f32 + 12.0,
-        island.deck_y as f32 + 32.0,
-        island.cz as f32 + 86.0,
+        island.cx as f32 - 8.0,
+        island.deck_y as f32 + 30.0,
+        island.cz as f32 + 92.0,
     );
     // Nose toward −X so wakes stream +X toward a rear-quarter camera.
     let yaw = std::f32::consts::FRAC_PI_2;
@@ -1366,7 +1377,25 @@ fn film_spawn_silhouettes(
     }
 
     // Combat pad mesh figures — biped marine vs multi-leg alien (shot 2).
-    let pad = deck + Vec3::new(0.0, 0.0, 14.0);
+    let pad = deck + Vec3::new(0.0, 1.2, 18.0);
+    let stage_mat = materials.add(sil_mat(
+        Color::srgb(0.78, 0.82, 0.88),
+        LinearRgba::rgb(0.35, 0.4, 0.5),
+    ));
+    // Bright unlit stage covers residual voxel lattice under the two-shot.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: stage_mat,
+            transform: Transform::from_translation(pad + Vec3::new(0.5, -0.6, 1.0))
+                .with_scale(Vec3::new(32.0, 1.4, 22.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmCombatFx,
+        FilmCombatStage,
+        Name::new("FilmCombatStageFloor"),
+    ));
     spawn_film_marine(
         &mut commands,
         &cube,
@@ -1374,7 +1403,7 @@ fn film_spawn_silhouettes(
         &marine_dark,
         &marine_visor,
         pad + Vec3::new(-5.0, 0.0, 1.5),
-        3.2,
+        3.4,
     );
     spawn_film_alien(
         &mut commands,
@@ -1383,7 +1412,7 @@ fn film_spawn_silhouettes(
         &alien_leg,
         &alien_crest,
         pad + Vec3::new(6.0, 0.0, 2.5),
-        3.4,
+        3.6,
     );
     // Painting-scale giants on the verdant crown — must read in painting_hero.
     let vista_marine = spawn_film_marine(
@@ -2526,14 +2555,15 @@ fn spawn_film_station_mountain(
     neon: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Mountain in painting mid-right — stepped mass clear of the grass crown.
-    let base = deck + Vec3::new(36.0, 2.0, 68.0);
-    for (i, (y, sx, sz)) in [
-        (10.0_f32, 48.0, 40.0),
-        (26.0, 40.0, 32.0),
-        (42.0, 30.0, 24.0),
-        (58.0, 20.0, 18.0),
-        (72.0, 14.0, 14.0),
+    // Wide mountain installation mid-right — broad dark base, short crown (not a white tower).
+    let base = deck + Vec3::new(34.0, 0.0, 70.0);
+    for (i, (y, sx, sz, h)) in [
+        (6.0_f32, 72.0, 58.0, 14.0),
+        (18.0, 62.0, 50.0, 14.0),
+        (30.0, 50.0, 40.0, 12.0),
+        (42.0, 38.0, 30.0, 12.0),
+        (52.0, 26.0, 22.0, 10.0),
+        (60.0, 16.0, 14.0, 8.0),
     ]
     .into_iter()
     .enumerate()
@@ -2541,9 +2571,10 @@ fn spawn_film_station_mountain(
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
-                material: if i < 2 { dark.clone() } else { alloy.clone() },
+                // Dark rock for lower/mid mass; alloy only near crown.
+                material: if i < 4 { dark.clone() } else { alloy.clone() },
                 transform: Transform::from_translation(base + Vec3::new(0.0, y, 0.0))
-                    .with_scale(Vec3::new(sx, 18.0, sz)),
+                    .with_scale(Vec3::new(sx, h, sz)),
                 ..default()
             },
             FilmSilhouette,
@@ -2551,28 +2582,28 @@ fn spawn_film_station_mountain(
             Name::new(format!("FilmStationTier{i}")),
         ));
     }
-    // Neon crown spires — bright so painting mid-frame reads "station".
-    for (i, ox) in [-12.0_f32, -4.0, 4.0, 12.0].into_iter().enumerate() {
+    // Low neon rim lights — installation cue without tall white spires.
+    for (i, ox) in [-10.0_f32, 0.0, 10.0].into_iter().enumerate() {
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: neon.clone(),
-                transform: Transform::from_translation(base + Vec3::new(ox, 92.0, 0.0))
-                    .with_scale(Vec3::new(7.5, 30.0, 7.5)),
+                transform: Transform::from_translation(base + Vec3::new(ox, 68.0, 0.0))
+                    .with_scale(Vec3::new(5.0, 10.0, 5.0)),
                 ..default()
             },
             FilmSilhouette,
             FilmStationFx,
-            Name::new(format!("FilmStationSpire{i}")),
+            Name::new(format!("FilmStationRim{i}")),
         ));
     }
-    // Buttresses toward painting cam (−Z / −X).
+    // Broad buttress shoulders toward painting cam.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
-            material: alloy.clone(),
-            transform: Transform::from_translation(base + Vec3::new(-24.0, 28.0, 28.0))
-                .with_scale(Vec3::new(20.0, 56.0, 16.0)),
+            material: dark.clone(),
+            transform: Transform::from_translation(base + Vec3::new(-30.0, 20.0, 26.0))
+                .with_scale(Vec3::new(28.0, 40.0, 22.0)),
             ..default()
         },
         FilmSilhouette,
@@ -2583,13 +2614,26 @@ fn spawn_film_station_mountain(
         PbrBundle {
             mesh: cube.clone(),
             material: dark.clone(),
-            transform: Transform::from_translation(base + Vec3::new(22.0, 22.0, 22.0))
-                .with_scale(Vec3::new(18.0, 44.0, 16.0)),
+            transform: Transform::from_translation(base + Vec3::new(28.0, 16.0, 22.0))
+                .with_scale(Vec3::new(24.0, 34.0, 20.0)),
             ..default()
         },
         FilmSilhouette,
         FilmStationFx,
         Name::new("FilmStationButtressB"),
+    ));
+    // Cliff face plate — reads as carved mountain, not a free-standing tower.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: alloy.clone(),
+            transform: Transform::from_translation(base + Vec3::new(-8.0, 28.0, 32.0))
+                .with_scale(Vec3::new(36.0, 36.0, 8.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmStationFx,
+        Name::new("FilmStationCliffFace"),
     ));
 }
 
@@ -2601,13 +2645,14 @@ fn spawn_film_skyway_and_shuttle_proxy(
     hull: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Elevated cyan skyway spans across painting frustum toward station.
+    // Fat left-mid skyway spans — must read at painting_hero distance.
     for (i, (ax, az, bx, bz, y)) in [
-        (-24.0_f32, 102.0, 34.0, 80.0, 24.0),
-        (-12.0, 110.0, 44.0, 86.0, 28.0),
-        (2.0, 98.0, 38.0, 68.0, 32.0),
-        (-8.0, 90.0, 28.0, 98.0, 20.0),
-        (8.0, 84.0, 42.0, 74.0, 36.0),
+        (-36.0_f32, 108.0, 18.0, 88.0, 22.0),
+        (-28.0, 118.0, 26.0, 94.0, 28.0),
+        (-20.0, 100.0, 30.0, 78.0, 34.0),
+        (-40.0, 96.0, 8.0, 104.0, 18.0),
+        (-12.0, 112.0, 38.0, 82.0, 40.0),
+        (-32.0, 90.0, 14.0, 70.0, 30.0),
     ]
     .into_iter()
     .enumerate()
@@ -2615,7 +2660,7 @@ fn spawn_film_skyway_and_shuttle_proxy(
         let a = deck + Vec3::new(ax, y, az);
         let b = deck + Vec3::new(bx, y + 2.0, bz);
         let mid = a.lerp(b, 0.5);
-        let len = a.distance(b).max(8.0);
+        let len = a.distance(b).max(10.0);
         let dir = (b - a).normalize_or_zero();
         commands.spawn((
             PbrBundle {
@@ -2623,7 +2668,7 @@ fn spawn_film_skyway_and_shuttle_proxy(
                 material: deck_mat.clone(),
                 transform: Transform::from_translation(mid)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(6.0, 2.4, len)),
+                    .with_scale(Vec3::new(9.0, 3.5, len)),
                 ..default()
             },
             FilmSilhouette,
@@ -2634,9 +2679,9 @@ fn spawn_film_skyway_and_shuttle_proxy(
             PbrBundle {
                 mesh: cube.clone(),
                 material: cyan.clone(),
-                transform: Transform::from_translation(mid + Vec3::Y * 1.8)
+                transform: Transform::from_translation(mid + Vec3::Y * 2.4)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(1.8, 3.0, len * 0.98)),
+                    .with_scale(Vec3::new(3.2, 4.5, len * 0.98)),
                 ..default()
             },
             FilmSilhouette,
@@ -2644,15 +2689,15 @@ fn spawn_film_skyway_and_shuttle_proxy(
             Name::new(format!("FilmSkywayRail{i}")),
         ));
     }
-    // Oversized shuttle proxy with fat cyan plumes — reads in painting + skyway beat.
-    let shuttle = deck + Vec3::new(12.0, 32.0, 86.0);
-    let yaw = -0.65_f32;
+    // Oversized shuttle + fat cyan plumes in left-mid painting frustum.
+    let shuttle = deck + Vec3::new(-8.0, 30.0, 92.0);
+    let yaw = -0.55_f32;
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: hull.clone(),
             transform: Transform::from_translation(shuttle)
-                .with_scale(Vec3::new(28.0, 8.0, 12.0))
+                .with_scale(Vec3::new(34.0, 10.0, 14.0))
                 .with_rotation(Quat::from_rotation_y(yaw)),
             ..default()
         },
@@ -2666,8 +2711,8 @@ fn spawn_film_skyway_and_shuttle_proxy(
         PbrBundle {
             mesh: cube.clone(),
             material: cyan.clone(),
-            transform: Transform::from_translation(shuttle + plume_dir * 24.0)
-                .with_scale(Vec3::new(44.0, 6.5, 6.5))
+            transform: Transform::from_translation(shuttle + plume_dir * 28.0)
+                .with_scale(Vec3::new(52.0, 8.0, 8.0))
                 .with_rotation(Quat::from_rotation_y(yaw)),
             ..default()
         },
@@ -2680,8 +2725,8 @@ fn spawn_film_skyway_and_shuttle_proxy(
         PbrBundle {
             mesh: cube.clone(),
             material: cyan.clone(),
-            transform: Transform::from_translation(shuttle + plume_dir * 16.0 + Vec3::Y * 3.5)
-                .with_scale(Vec3::new(34.0, 4.5, 4.5))
+            transform: Transform::from_translation(shuttle + plume_dir * 18.0 + Vec3::Y * 4.0)
+                .with_scale(Vec3::new(40.0, 5.5, 5.5))
                 .with_rotation(Quat::from_rotation_y(yaw)),
             ..default()
         },
@@ -2695,7 +2740,7 @@ fn spawn_film_skyway_and_shuttle_proxy(
             mesh: cube.clone(),
             material: hull.clone(),
             transform: Transform::from_translation(shuttle)
-                .with_scale(Vec3::new(10.0, 2.5, 22.0))
+                .with_scale(Vec3::new(12.0, 3.0, 26.0))
                 .with_rotation(Quat::from_rotation_y(yaw)),
             ..default()
         },
@@ -3727,9 +3772,9 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         2 => {
-            // Elevated side-on two-shot — look over residual pad lattice at figures.
-            let look = deck + Vec3::new(0.8, 8.5, 16.5);
-            let pos = look + Vec3::new(-19.0, 7.5, 11.0);
+            // South elevated two-shot — camera corridor cleared; stage underfoot.
+            let look = deck + Vec3::new(0.5, 6.5, 19.5);
+            let pos = deck + Vec3::new(-6.0, 10.0, 42.0);
             (pos, look)
         }
         3 => {
@@ -3756,10 +3801,10 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         6 => {
-            // Hero shuttle REAR-QUARTER on elevated painting-frustum perch.
-            let shuttle = deck + Vec3::new(12.0, 32.0, 86.0);
-            let pos = shuttle + Vec3::new(16.0, 5.0, 14.0);
-            let look = shuttle + Vec3::new(-6.0, 0.5, -2.0);
+            // Hero shuttle REAR-QUARTER on elevated left-mid painting perch.
+            let shuttle = deck + Vec3::new(-8.0, 30.0, 92.0);
+            let pos = shuttle + Vec3::new(18.0, 6.0, 16.0);
+            let look = shuttle + Vec3::new(-8.0, 1.0, -2.0);
             (pos, look)
         }
         7 => {
@@ -3770,14 +3815,14 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             (pos, look)
         }
         8 => {
-            // Painting: planet upper; station mid-right; grass crown lower; skyway/shuttle.
+            // Painting: planet upper; mountain station mid-right; grass/skyway lower-left.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-55.0, 40.0, 132.0);
-            let station_mid = deck + Vec3::new(36.0, 36.0, 68.0);
-            let green_crown = deck + Vec3::new(-4.0, 6.0, 100.0);
+            let pos = deck + Vec3::new(-55.0, 42.0, 132.0);
+            let station_mid = deck + Vec3::new(34.0, 36.0, 70.0);
+            let green_crown = deck + Vec3::new(-8.0, 8.0, 100.0);
+            let skyway_mid = deck + Vec3::new(-12.0, 28.0, 94.0);
             let planet = pos + planet_dir * 155.0;
-            // Keep look weighted to grass so verdant crown survives mid-frame station.
-            let ground = green_crown.lerp(station_mid, 0.34);
+            let ground = green_crown.lerp(station_mid, 0.38).lerp(skyway_mid, 0.25);
             let look = ground.lerp(planet, 0.18);
             (pos, look)
         }
@@ -3810,16 +3855,16 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         13 => {
             // Station mountain — stand off so full stepped mass + neon crown read.
-            let station = deck + Vec3::new(36.0, 50.0, 68.0);
+            let station = deck + Vec3::new(34.0, 40.0, 70.0);
             let pos = deck + Vec3::new(-55.0, 78.0, 155.0);
             let look = station;
             (pos, look)
         }
         _ => {
             // Skyway + shuttle — rear-quarter of cyan-plume craft over spans.
-            let shuttle = deck + Vec3::new(12.0, 32.0, 86.0);
-            let pos = shuttle + Vec3::new(28.0, 12.0, 30.0);
-            let look = shuttle + Vec3::new(-4.0, 1.0, -6.0);
+            let shuttle = deck + Vec3::new(-8.0, 30.0, 92.0);
+            let pos = shuttle + Vec3::new(32.0, 14.0, 34.0);
+            let look = shuttle + Vec3::new(-6.0, 2.0, -8.0);
             (pos, look)
         }
     }
