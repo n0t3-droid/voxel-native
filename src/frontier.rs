@@ -244,32 +244,32 @@ impl SkyIsland {
     /// the illustration's hovering landmasses.
     pub fn hero() -> Self {
         Self {
-            cx: 108,
-            cz: -128,
-            cy: 110,
-            radius: 8,
+            cx: 96,
+            cz: -146,
+            cy: 118,
+            radius: 6,
             phase: 1.15,
         }
     }
 
     pub fn hero_b() -> Self {
         Self {
-            cx: 124,
-            cz: -146,
-            cy: 110,
-            radius: 7,
+            cx: 118,
+            cz: -158,
+            cy: 118,
+            radius: 5,
             phase: 2.4,
         }
     }
 
-    /// Small left-sky silhouette above the crystal mass — high and
-    /// modest so it reads as a hovering island, not a close deck.
+    /// Kept for postcard AABB tests; not stamped in the opening look
+    /// because a near slab reads as a deck over the crystal mass.
     pub fn hero_c() -> Self {
         Self {
-            cx: 98,
-            cz: -108,
-            cy: 112,
-            radius: 6,
+            cx: 70,
+            cz: -168,
+            cy: 116,
+            radius: 5,
             phase: 0.55,
         }
     }
@@ -626,7 +626,7 @@ impl CrystalCluster {
             if height < 4 {
                 continue;
             }
-            let thick = if self.scale >= 40 { 5 } else { 3 };
+            let thick = 3;
             let base_radius = 1 + (height / 8).min(thick);
             // Lean, expressed as horizontal drift per block of height.
             let lean_x = (cell_rand(seed, salt + 3, bx, bz) - 0.5) * if punch { 0.22 } else { 0.5 };
@@ -1908,7 +1908,6 @@ impl FrontierPlanner {
         for cluster in CrystalCluster::near(self.seed, wx, wz) {
             cluster.stamp(self.seed, chunk, canyon_floor);
         }
-        CrystalCluster::hero().stamp(self.seed, chunk, canyon_floor);
         CrystalCluster::hero_b().stamp(self.seed, chunk, ground);
         CrystalCluster::hero_c().stamp(self.seed, chunk, canyon_floor);
         CrystalCluster::hero_d().stamp(self.seed, chunk, canyon_floor);
@@ -1918,7 +1917,6 @@ impl FrontierPlanner {
         if top_y >= SKY_ISLAND_MIN_Y - 48 && base_y <= SKY_ISLAND_MAX_Y + 12 {
             SkyIsland::hero().stamp(self.seed, chunk);
             SkyIsland::hero_b().stamp(self.seed, chunk);
-            SkyIsland::hero_c().stamp(self.seed, chunk);
             for island in SkyIsland::near(self.seed, wx, wz, macro_ground) {
                 // Opening look keeps the three staged hero islands; extra
                 // lattice slabs there fight the mesa sheet. Fast streaming
@@ -2331,7 +2329,7 @@ mod tests {
         assert!(in_hero_postcard(SkyIsland::hero_c().cx, SkyIsland::hero_c().cz));
         assert!(SkyIsland::hero().cz < -90, "hero islands should sit in the left sky of the +X look");
         assert!(
-            SkyIsland::hero().cy >= SKY_ISLAND_MIN_Y && SkyIsland::hero().cy <= 110,
+            SkyIsland::hero().cy >= SKY_ISLAND_MIN_Y && SkyIsland::hero().cy <= 120,
             "look-cone islands should sit in the opening sky, not above the frustum"
         );
         let sky = SkywayNetwork::new(1);
