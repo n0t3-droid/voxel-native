@@ -617,6 +617,23 @@ impl CrystalCluster {
             10.0 + self.scale as f64 * 0.22
         };
         let punch = self.scale >= 40;
+        if punch {
+            // Hollow a sky chimney around the mass so spawn-left reads as
+            // shards against air/sky, not a banded stone pylon.
+            let pocket = 9 + self.scale / 10;
+            let base_y = ground(self.cx, self.cz);
+            for k in 3..(self.scale + 12) {
+                let wy = base_y + k;
+                for dz in -pocket..=pocket {
+                    for dx in -pocket..=pocket {
+                        if dx * dx + dz * dz > pocket * pocket {
+                            continue;
+                        }
+                        carve(chunk, origin, self.cx + dx, wy, self.cz + dz);
+                    }
+                }
+            }
+        }
         for s in 0..self.shards {
             let salt = 0x0C_20_00 + s * 7919;
             let bx = self.cx + ((cell_rand(seed, salt, self.cx, self.cz) - 0.5) * spread) as i32;
@@ -1659,7 +1676,7 @@ impl CliffFace {
         ((z * 11).rem_euclid(17) / 2).min(14)
     }
 
-    pub fn stamp(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
+    pub fn stamp(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32 + Copy) {
         let origin = chunk.pos.origin();
         let (ox, oy, oz) = origin;
         const JAG: i32 = 8;
@@ -1759,7 +1776,34 @@ impl CliffFace {
                 }
             }
         }
+        self.stamp_left_sky_notch(chunk, ground);
         self.stamp_lava_curtains(chunk, ground);
+    }
+
+    /// Push the spawn-left south-west mass back so the left third of the
+    /// opening look is sky behind the hero shards, not a banded ridge.
+    fn stamp_left_sky_notch(&self, chunk: &mut Chunk, ground: impl Fn(i32, i32) -> i32) {
+        if self.apron < 8 {
+            return;
+        }
+        let origin = chunk.pos.origin();
+        for wz in -122..=-90 {
+            if wz < self.z0 || wz > self.z1 {
+                continue;
+            }
+            let face = self.face_at(wz);
+            let rim = ground(self.face_x + self.depth, wz);
+            let pit = rim - self.drop;
+            let outcrop = pit + 5;
+            for wx in 70..=96 {
+                if wx >= face - 6 {
+                    continue;
+                }
+                for wy in (outcrop + 2)..=(rim + self.crest + 8) {
+                    carve(chunk, origin, wx, wy, wz);
+                }
+            }
+        }
     }
 
     /// Wide glowing curtains down the west face — a focal point, not dribbles.
@@ -1768,8 +1812,8 @@ impl CliffFace {
             return;
         }
         let origin = chunk.pos.origin();
-        const SITES: [i32; 5] = [-88, -80, -72, -64, -56];
-        let half = 11i32;
+        const SITES: [i32; 6] = [-96, -88, -80, -72, -64, -56];
+        let half = 13i32;
         for &cz in &SITES {
             if cz < self.z0 + 4 || cz > self.z1 - 4 {
                 continue;
@@ -1789,6 +1833,10 @@ impl CliffFace {
                     if edge > half - taper {
                         continue;
                     }
+                    place_over(chunk, origin, face - 12, wy, z, BlockType::Lava);
+                    place_over(chunk, origin, face - 11, wy, z, BlockType::Lava);
+                    place_over(chunk, origin, face - 10, wy, z, BlockType::Lava);
+                    place_over(chunk, origin, face - 9, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 8, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 7, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 6, wy, z, BlockType::Lava);
@@ -1797,8 +1845,9 @@ impl CliffFace {
                     place_over(chunk, origin, face - 3, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 2, wy, z, BlockType::Lava);
                     place_over(chunk, origin, face - 1, wy, z, BlockType::Lava);
-                    if edge <= 4 {
+                    if edge <= 5 {
                         place_over(chunk, origin, face, wy, z, BlockType::Lava);
+                        place_over(chunk, origin, face + 1, wy, z, BlockType::MagnetiteOre);
                     }
                 }
             }
@@ -1965,6 +2014,9 @@ impl FrontierPlanner {
             }
         };
         for cluster in CrystalCluster::near(self.seed, wx, wz) {
+            if in_opening_look(cluster.cx, cluster.cz) {
+                continue;
+            }
             cluster.stamp(self.seed, chunk, canyon_floor);
         }
         CrystalCluster::hero_b().stamp(self.seed, chunk, ground);
