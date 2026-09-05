@@ -384,8 +384,10 @@ impl NeuroCore {
             + self.telemetry.pending_terrain;
         let disc_filling = backlog > DISC_CATCHUP_BACKLOG;
         let startup_fill = self.telemetry.stream_elapsed > 0.05
-            && (self.telemetry.stream_elapsed < STARTUP_FILL_SECONDS
-                || (disc_filling && self.telemetry.stream_elapsed < DISC_CATCHUP_SECONDS));
+            && self.telemetry.stream_elapsed < STARTUP_FILL_SECONDS;
+        let disc_catchup = !startup_fill
+            && disc_filling
+            && self.telemetry.stream_elapsed < DISC_CATCHUP_SECONDS;
         let (
             rd,
             mut job_scale,
@@ -403,8 +405,20 @@ impl NeuroCore {
                 let rd_cap = if fast { 12 } else { 24 };
                 (
                 target.min(rd_cap).max(6),
-                if startup_fill { 1.0 } else { 0.52 },
-                if startup_fill { 1.0 } else { 0.55 },
+                if startup_fill {
+                    1.0
+                } else if disc_catchup {
+                    0.70
+                } else {
+                    0.52
+                },
+                if startup_fill {
+                    1.0
+                } else if disc_catchup {
+                    0.70
+                } else {
+                    0.55
+                },
                 0.25,
                 0.65,
                 if startup_fill {
@@ -414,6 +428,8 @@ impl NeuroCore {
                 },
                 String::from(if startup_fill {
                     "low-spec spawn fill"
+                } else if disc_catchup {
+                    "low-spec disc catch-up"
                 } else if fast {
                     "low-spec settled horizon"
                 } else {
@@ -935,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn lowspec_keeps_fill_budget_while_the_disc_is_still_dirty() {
+    fn lowspec_disc_catchup_is_gentler_than_full_fill() {
         let mut settings = WorldSettings::default();
         settings.apply_world_mode_card(crate::settings::WorldModeCard::FastLaptop);
         let mut core = NeuroCore::default();
@@ -943,20 +959,18 @@ mod tests {
         tel.stream_elapsed = 6.0;
         tel.dirty_chunks = 200;
         tel.pending_terrain = 16;
-        let fill = core.update_budget(&settings, tel.clone(), 0.16);
-        assert!(fill.startup_fill);
+        let catchup = core.update_budget(&settings, tel, 0.16);
+        assert!(!catchup.startup_fill);
         assert!(
-            fill.chunks_per_frame >= 12,
-            "disc still dirty should keep fill budget, got {}",
-            fill.chunks_per_frame
+            catchup.chunks_per_frame > 8,
+            "disc catch-up should beat the settled 0.52 scale, got {}",
+            catchup.chunks_per_frame
         );
-        assert_eq!(fill.render_distance, 12);
-
-        tel.stream_elapsed = 18.0;
-        tel.dirty_chunks = 200;
-        tel.pending_terrain = 16;
-        let still = core.update_budget(&settings, tel, 0.16);
-        assert!(still.startup_fill);
+        assert!(
+            catchup.chunks_per_frame < settings.chunks_per_frame,
+            "disc catch-up must not keep the full spawn-fill apply dump"
+        );
+        assert_eq!(catchup.render_distance, 12);
     }
 
     #[test]
