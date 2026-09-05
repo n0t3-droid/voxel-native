@@ -456,6 +456,15 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             if world.edit_set_voxel(x, bottom + 1, z, BlockType::Crystal.into()) {
                 keel_lit += 1;
             }
+            // Side-facing keel rim so a profile camera sees lit voxel faces.
+            if d2 > 0.55 {
+                if world.edit_set_voxel(x, bottom + 2, z, crystal.into()) {
+                    keel_lit += 1;
+                }
+                if world.edit_set_voxel(x, island.deck_y - 2, z, BlockType::Crystal.into()) {
+                    keel_lit += 1;
+                }
+            }
         }
     }
     info!(
@@ -1173,11 +1182,15 @@ fn film_drive_camera(
 
     // Extra ambient bounce on deck+keel so voxel undersides aren't crushed.
     ambient.brightness = if film.shot_index == 1 {
-        ambient.brightness.max(2_650.0)
+        ambient.brightness.max(3_800.0)
     } else {
         ambient.brightness.max(2_050.0)
     };
-    ambient.color = Color::srgb(0.82, 0.88, 0.78);
+    ambient.color = if film.shot_index == 1 {
+        Color::srgb(0.72, 0.92, 1.0)
+    } else {
+        Color::srgb(0.82, 0.88, 0.78)
+    };
     if let Ok(mut sun) = sun_q.get_single_mut() {
         sun.illuminance = sun.illuminance.max(28_000.0);
     }
