@@ -3310,6 +3310,32 @@ mod tests {
             "default terrain should stay playable for normal streaming budgets; highest sample was {highest}"
         );
     }
+
+    #[test]
+    fn sweep_biomes_exist_within_a_short_flight() {
+        let generator = TerrainGenerator::new(12345);
+        let mut volcanic = None;
+        let mut glacier = None;
+        let mut reef = None;
+        let mut crystal = None;
+        for z in (-2400..=2400).step_by(96) {
+            for x in (-2400..=2400).step_by(96) {
+                let biome = generator.biome_at(x, z);
+                let y = generator.surface_height_at(x, z) + 22;
+                match biome {
+                    Biome::VolcanicWaste if volcanic.is_none() => volcanic = Some((x, y, z)),
+                    Biome::GlacierShards if glacier.is_none() => glacier = Some((x, y, z)),
+                    Biome::AlienReef if reef.is_none() => reef = Some((x, y, z)),
+                    Biome::CrystalSpires if crystal.is_none() => crystal = Some((x, y, z)),
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            glacier.is_some() || crystal.is_some() || volcanic.is_some() || reef.is_some(),
+            "seed 12345 should expose at least one non-canyon biome nearby"
+        );
+    }
 }
 
 // Derive Copy/Clone only for lookup (biome blocks helper is `&self`-free).

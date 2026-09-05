@@ -841,9 +841,11 @@ fn make_repeating_image(w: u32, h: u32, data: Vec<u8>) -> Image {
         address_mode_w: ImageAddressMode::Repeat,
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
-        // Nearest mips keep thick strata / grass / sand hues from
-        // blending into a single flying-distance mud.
-        mipmap_filter: ImageFilterMode::Nearest,
+        // Linear mips + 8× aniso kill the flying-distance checkerboard
+        // on cliff faces. Nearest mips kept hue, but every greedy quad
+        // turned into a waffle once a mip boundary hit the pixel grid.
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 8,
         ..ImageSamplerDescriptor::linear()
     });
     image
