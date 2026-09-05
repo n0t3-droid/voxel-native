@@ -192,7 +192,7 @@ const SMOOTH_MAX_IN_FLIGHT_MESHES: u32 = 80;
 /// instead of the LowSpec / smoothness throttle. After that, LowSpec
 /// keeps the fill budget only while the disc is still dirty.
 const STARTUP_FILL_SECONDS: f32 = 2.2;
-const DISC_CATCHUP_SECONDS: f32 = 12.0;
+const DISC_CATCHUP_SECONDS: f32 = 24.0;
 const DISC_CATCHUP_BACKLOG: usize = 48;
 
 impl Default for RuntimeBudget {
@@ -943,7 +943,7 @@ mod tests {
         tel.stream_elapsed = 6.0;
         tel.dirty_chunks = 200;
         tel.pending_terrain = 16;
-        let fill = core.update_budget(&settings, tel, 0.16);
+        let fill = core.update_budget(&settings, tel.clone(), 0.16);
         assert!(fill.startup_fill);
         assert!(
             fill.chunks_per_frame >= 12,
@@ -951,6 +951,12 @@ mod tests {
             fill.chunks_per_frame
         );
         assert_eq!(fill.render_distance, 12);
+
+        tel.stream_elapsed = 18.0;
+        tel.dirty_chunks = 200;
+        tel.pending_terrain = 16;
+        let still = core.update_budget(&settings, tel, 0.16);
+        assert!(still.startup_fill);
     }
 
     #[test]
@@ -959,7 +965,7 @@ mod tests {
         settings.apply_world_mode_card(crate::settings::WorldModeCard::FastLaptop);
         let mut core = NeuroCore::default();
         let mut tel = telemetry(48.0, 0.2, RuntimeIntent::Explore);
-        tel.stream_elapsed = 13.0;
+        tel.stream_elapsed = 25.0;
         tel.dirty_chunks = 200;
         tel.pending_terrain = 16;
         let steady = core.update_budget(&settings, tel, 0.16);
