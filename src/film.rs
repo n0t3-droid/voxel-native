@@ -1477,6 +1477,17 @@ fn film_spawn_silhouettes(
         deck,
     );
 
+    // Film planet proxy — fills painting upper third when sky planet washes out.
+    let planet_body = materials.add(sil_mat(
+        Color::srgb(0.95, 0.55, 0.85),
+        LinearRgba::rgb(4.0, 1.5, 3.5),
+    ));
+    let planet_ring = materials.add(sil_mat(
+        Color::srgb(1.0, 0.92, 0.75),
+        LinearRgba::rgb(5.0, 4.0, 2.5),
+    ));
+    spawn_film_planet_proxy(&mut commands, &cube, &planet_body, &planet_ring, deck);
+
     info!(
         "FILM: spawned mesh silhouettes + keel underside plates on combat slab ({}, {})",
         island.cx, island.cz
@@ -2158,6 +2169,54 @@ fn spawn_film_fighter_swarm(
             Name::new(format!("FilmFighterNose{i}")),
         ));
     }
+}
+
+fn spawn_film_planet_proxy(
+    commands: &mut Commands,
+    cube: &Handle<Mesh>,
+    body: &Handle<StandardMaterial>,
+    ring: &Handle<StandardMaterial>,
+    deck: Vec3,
+) {
+    // Giant unlit planet + ring in the painting upper frustum.
+    let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
+    let center = deck + planet_dir * 160.0 + Vec3::new(30.0, 55.0, -20.0);
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: body.clone(),
+            transform: Transform::from_translation(center).with_scale(Vec3::splat(48.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmPlanetBody"),
+    ));
+    // Ring slab (flattened, tilted).
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: ring.clone(),
+            transform: Transform::from_translation(center)
+                .with_rotation(Quat::from_rotation_x(0.95) * Quat::from_rotation_z(-0.22))
+                .with_scale(Vec3::new(110.0, 2.5, 110.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmPlanetRing"),
+    ));
+    // Inner dark band so ring reads as a ring not a disc.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: body.clone(),
+            transform: Transform::from_translation(center + planet_dir * 2.0)
+                .with_rotation(Quat::from_rotation_x(0.95) * Quat::from_rotation_z(-0.22))
+                .with_scale(Vec3::new(70.0, 3.2, 70.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        Name::new("FilmPlanetRingInner"),
+    ));
 }
 
 fn spawn_film_waterfall(
@@ -2917,10 +2976,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         8 => {
-            // Painting-scale: station + open-air waterfall on far +X/+Z.
+            // Painting-scale: waterfall mid-right + planet proxy upper third.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-30.0, 20.0, 95.0);
-            let look = deck + Vec3::new(48.0, 0.0, 58.0) + planet_dir * 4.0;
+            let pos = deck + Vec3::new(-28.0, 18.0, 92.0);
+            let look = deck + Vec3::new(50.0, 8.0, 56.0) + planet_dir * 18.0;
             (pos, look)
         }
         9 => {
