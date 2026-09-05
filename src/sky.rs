@@ -759,6 +759,17 @@ fn follow_and_animate_sky(
         // Fixed direction, NEVER rotates — stationary landmark.
         let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
         planet_tf.translation = trans + planet_dir * SKY_DISTANCE * 0.9;
+        // Film planet/painting: enlarge so the giant dominates the upper third.
+        let film_giant = film
+            .as_ref()
+            .filter(|f| f.enabled && f.ready_to_roll)
+            .map(|f| matches!(f.shot_index, 7 | 8))
+            .unwrap_or(false);
+        planet_tf.scale = if film_giant {
+            Vec3::splat(3.2)
+        } else {
+            Vec3::ONE
+        };
     }
     if let Ok(mut planet_b_tf) = planet_b_q.get_single_mut() {
         // Fixed direction on the opposite horizon, NEVER rotates.
@@ -814,7 +825,16 @@ fn follow_and_animate_sky(
         // magenta disc and rainbow rings stay breathtaking at noon too,
         // just like in the reference art. Slight extra glow at
         // night/sunset for the cinematic payoff.
-        let planet_scale = 1.8 + 0.8 * night + sunset * 0.5;
+        let film_planet = film
+            .as_ref()
+            .filter(|f| f.enabled && f.ready_to_roll)
+            .map(|f| matches!(f.shot_index, 7 | 8))
+            .unwrap_or(false);
+        let planet_scale = if film_planet {
+            4.5 + 0.5 * night
+        } else {
+            1.8 + 0.8 * night + sunset * 0.5
+        };
         if let Some(mat) = materials.get_mut(&sky_mats.planet) {
             let base = Vec3::new(8.0, 3.0, 11.0);
             let s = base * planet_scale;

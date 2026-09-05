@@ -117,6 +117,9 @@ struct FilmRiverRibbon;
 struct FilmTurretFx;
 
 #[derive(Component)]
+struct FilmPlanetProxy;
+
+#[derive(Component)]
 struct FilmShuttleMarker;
 
 impl FilmRuntime {
@@ -1445,12 +1448,12 @@ fn film_spawn_silhouettes(
 
     // Crystal towers — next painting gap after fighter swarm readability.
     let tower_crystal = materials.add(sil_mat(
-        Color::srgb(0.45, 0.95, 1.0),
-        LinearRgba::rgb(1.2, 4.5, 5.0),
+        Color::srgb(0.55, 1.0, 1.0),
+        LinearRgba::rgb(2.5, 8.0, 9.0),
     ));
     let tower_verdant = materials.add(sil_mat(
-        Color::srgb(0.30, 0.92, 0.50),
-        LinearRgba::rgb(0.5, 3.5, 1.2),
+        Color::srgb(0.40, 0.98, 0.85),
+        LinearRgba::rgb(1.5, 6.0, 5.5),
     ));
     spawn_film_crystal_towers(&mut commands, &cube, &tower_crystal, &tower_verdant, deck);
 
@@ -1477,16 +1480,29 @@ fn film_spawn_silhouettes(
         deck,
     );
 
-    // Film planet proxy — fills painting upper third when sky planet washes out.
+    // Film planet sphere+ring — painting backup; hidden on dedicated sky shot.
+    let planet_sphere = meshes.add(Sphere::new(1.0).mesh().ico(3).expect("ico 3"));
     let planet_body = materials.add(sil_mat(
-        Color::srgb(0.95, 0.55, 0.85),
-        LinearRgba::rgb(4.0, 1.5, 3.5),
+        Color::srgb(0.95, 0.50, 0.95),
+        LinearRgba::rgb(7.0, 2.5, 9.0),
     ));
     let planet_ring = materials.add(sil_mat(
-        Color::srgb(1.0, 0.92, 0.75),
-        LinearRgba::rgb(5.0, 4.0, 2.5),
+        Color::srgb(1.0, 0.90, 0.75),
+        LinearRgba::rgb(8.0, 6.0, 4.0),
     ));
-    spawn_film_planet_proxy(&mut commands, &cube, &planet_body, &planet_ring, deck);
+    let planet_dark = materials.add(sil_mat(
+        Color::srgb(0.25, 0.08, 0.28),
+        LinearRgba::rgb(0.4, 0.1, 0.5),
+    ));
+    spawn_film_planet_proxy(
+        &mut commands,
+        &planet_sphere,
+        &cube,
+        &planet_body,
+        &planet_ring,
+        &planet_dark,
+        deck,
+    );
 
     info!(
         "FILM: spawned mesh silhouettes + keel underside plates on combat slab ({}, {})",
@@ -2173,49 +2189,81 @@ fn spawn_film_fighter_swarm(
 
 fn spawn_film_planet_proxy(
     commands: &mut Commands,
+    sphere: &Handle<Mesh>,
     cube: &Handle<Mesh>,
     body: &Handle<StandardMaterial>,
     ring: &Handle<StandardMaterial>,
+    dark: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Giant unlit planet + ring in the painting upper frustum.
+    // Large sphere + tilted ring in painting upper frustum (sky path backup).
     let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-    let center = deck + planet_dir * 160.0 + Vec3::new(30.0, 55.0, -20.0);
+    let center = deck + planet_dir * 95.0 + Vec3::new(20.0, 48.0, -15.0);
+    let tilt = Quat::from_rotation_x(0.95) * Quat::from_rotation_z(-0.22);
     commands.spawn((
         PbrBundle {
-            mesh: cube.clone(),
+            mesh: sphere.clone(),
             material: body.clone(),
-            transform: Transform::from_translation(center).with_scale(Vec3::splat(48.0)),
+            transform: Transform::from_translation(center).with_scale(Vec3::splat(38.0)),
             ..default()
         },
         FilmSilhouette,
+        FilmPlanetProxy,
         Name::new("FilmPlanetBody"),
     ));
-    // Ring slab (flattened, tilted).
+    // Limb-darkening rim (slightly larger dark shell cue).
+    commands.spawn((
+        PbrBundle {
+            mesh: sphere.clone(),
+            material: dark.clone(),
+            transform: Transform::from_translation(center - planet_dir * 2.0)
+                .with_scale(Vec3::splat(39.5)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmPlanetProxy,
+        Name::new("FilmPlanetLimb"),
+    ));
+    // Outer ring + Cassini gap (inner dark annulus).
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
             material: ring.clone(),
             transform: Transform::from_translation(center)
-                .with_rotation(Quat::from_rotation_x(0.95) * Quat::from_rotation_z(-0.22))
-                .with_scale(Vec3::new(110.0, 2.5, 110.0)),
+                .with_rotation(tilt)
+                .with_scale(Vec3::new(95.0, 1.8, 95.0)),
             ..default()
         },
         FilmSilhouette,
+        FilmPlanetProxy,
         Name::new("FilmPlanetRing"),
     ));
-    // Inner dark band so ring reads as a ring not a disc.
     commands.spawn((
         PbrBundle {
             mesh: cube.clone(),
-            material: body.clone(),
-            transform: Transform::from_translation(center + planet_dir * 2.0)
-                .with_rotation(Quat::from_rotation_x(0.95) * Quat::from_rotation_z(-0.22))
-                .with_scale(Vec3::new(70.0, 3.2, 70.0)),
+            material: dark.clone(),
+            transform: Transform::from_translation(center)
+                .with_rotation(tilt)
+                .with_scale(Vec3::new(58.0, 2.4, 58.0)),
             ..default()
         },
         FilmSilhouette,
-        Name::new("FilmPlanetRingInner"),
+        FilmPlanetProxy,
+        Name::new("FilmPlanetCassini"),
+    ));
+    // Outer bright band beyond Cassini.
+    commands.spawn((
+        PbrBundle {
+            mesh: cube.clone(),
+            material: ring.clone(),
+            transform: Transform::from_translation(center)
+                .with_rotation(tilt)
+                .with_scale(Vec3::new(120.0, 1.2, 120.0)),
+            ..default()
+        },
+        FilmSilhouette,
+        FilmPlanetProxy,
+        Name::new("FilmPlanetRingOuter"),
     ));
 }
 
@@ -2353,45 +2401,62 @@ fn spawn_film_crystal_towers(
     verdant: &Handle<StandardMaterial>,
     deck: Vec3,
 ) {
-    // Tall crystal towers — next most visible painting gap after fighters.
+    // Cyan/luminite crystal spires — no brown trunks; must read as crystal.
+    let _ = verdant; // keep signature; painting uses crystal + ice tips only
     for (i, (ox, oz, h)) in [
-        (18.0_f32, 18.0, 34.0),
-        (28.0, 24.0, 42.0),
-        (22.0, 32.0, 30.0),
-        (36.0, 28.0, 48.0),
-        (14.0, 40.0, 36.0),
-        (42.0, 36.0, 40.0),
-        (10.0, 28.0, 32.0),
+        (18.0_f32, 18.0, 38.0),
+        (28.0, 24.0, 48.0),
+        (22.0, 32.0, 34.0),
+        (36.0, 28.0, 54.0),
+        (14.0, 40.0, 42.0),
+        (42.0, 36.0, 46.0),
+        (10.0, 28.0, 36.0),
+        (48.0, 22.0, 40.0),
     ]
     .into_iter()
     .enumerate()
     {
-        let mat = if i % 2 == 0 { crystal } else { verdant };
+        let lean = 0.12 * if i % 2 == 0 { 1.0 } else { -1.0 };
+        // Main crystal shaft.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
-                material: mat.clone(),
+                material: crystal.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox, h * 0.45, oz))
-                    .with_scale(Vec3::new(4.4, h, 4.4))
-                    .with_rotation(Quat::from_rotation_z(
-                        0.08 * if i % 2 == 0 { 1.0 } else { -1.0 },
-                    )),
+                    .with_scale(Vec3::new(5.0, h, 5.0))
+                    .with_rotation(Quat::from_rotation_z(lean)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmCrystalTower{i}")),
         ));
-        // Bright tip so towers punch through skyway bloom.
+        // Faceted diamond tip.
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: crystal.clone(),
-                transform: Transform::from_translation(deck + Vec3::new(ox, h + 2.0, oz))
-                    .with_scale(Vec3::new(5.5, 4.0, 5.5)),
+                transform: Transform::from_translation(deck + Vec3::new(ox, h + 3.0, oz))
+                    .with_scale(Vec3::new(7.0, 6.0, 7.0))
+                    .with_rotation(Quat::from_rotation_y(0.4) * Quat::from_rotation_z(0.5)),
                 ..default()
             },
             FilmSilhouette,
             Name::new(format!("FilmCrystalTip{i}")),
+        ));
+        // Secondary shard for crystalline silhouette.
+        commands.spawn((
+            PbrBundle {
+                mesh: cube.clone(),
+                material: crystal.clone(),
+                transform: Transform::from_translation(
+                    deck + Vec3::new(ox + 3.5, h * 0.55, oz - 2.0),
+                )
+                .with_scale(Vec3::new(2.4, h * 0.55, 2.4))
+                .with_rotation(Quat::from_rotation_z(-lean * 1.6)),
+                ..default()
+            },
+            FilmSilhouette,
+            Name::new(format!("FilmCrystalShard{i}")),
         ));
     }
 }
@@ -2451,6 +2516,7 @@ fn film_toggle_helpers(
             With<FilmKeelHelper>,
             Without<FilmRiverRibbon>,
             Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
         ),
     >,
     mut river_ribbons: Query<
@@ -2459,6 +2525,7 @@ fn film_toggle_helpers(
             With<FilmRiverRibbon>,
             Without<FilmKeelHelper>,
             Without<FilmTurretFx>,
+            Without<FilmPlanetProxy>,
         ),
     >,
     mut turret_fx: Query<
@@ -2467,6 +2534,16 @@ fn film_toggle_helpers(
             With<FilmTurretFx>,
             Without<FilmKeelHelper>,
             Without<FilmRiverRibbon>,
+            Without<FilmPlanetProxy>,
+        ),
+    >,
+    mut planet_proxy: Query<
+        &mut Visibility,
+        (
+            With<FilmPlanetProxy>,
+            Without<FilmKeelHelper>,
+            Without<FilmRiverRibbon>,
+            Without<FilmTurretFx>,
         ),
     >,
 ) {
@@ -2494,6 +2571,15 @@ fn film_toggle_helpers(
     let show_turrets = matches!(film.shot_index, 2 | 3 | 8);
     for mut vis in turret_fx.iter_mut() {
         *vis = if show_turrets {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Dedicated planet shot uses the real sky giant; proxy only for painting.
+    let show_proxy = film.shot_index == 8;
+    for mut vis in planet_proxy.iter_mut() {
+        *vis = if show_proxy {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -2588,8 +2674,8 @@ fn film_drive_camera(
             4 => 48.0,  // crew pair
             5 => 55.0,  // tunnel portal + cyan rails
             6 => 46.0,  // shuttle rear-quarter
-            7 => 40.0,  // planet close
-            8 => 58.0,  // painting-scale wide hero
+            7 => 48.0,  // planet + rings fill
+            8 => 56.0,  // painting: station + dominant planet
             9 => 52.0,  // dual plasma + lava rivers
             10 => 48.0, // cyan waterfall cascade
             11 => 42.0, // fighter swarm — tighter on formation
@@ -2969,17 +3055,19 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         7 => {
-            // Ringed planet — match sky.rs planet_dir so the giant fills frame.
+            // Ringed planet hero — pure sky look (film proxy hidden this beat).
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-6.0, 14.0, 12.0);
-            let look = pos + planet_dir * 120.0;
+            let pos = deck + Vec3::new(-4.0, 18.0, 10.0);
+            let look = pos + planet_dir * 200.0;
             (pos, look)
         }
         8 => {
-            // Painting-scale: waterfall mid-right + planet proxy upper third.
+            // Painting: station lower half, sky/proxy planet dominates upper third.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-28.0, 18.0, 92.0);
-            let look = deck + Vec3::new(50.0, 8.0, 56.0) + planet_dir * 18.0;
+            let pos = deck + Vec3::new(-32.0, 16.0, 88.0);
+            let station = deck + Vec3::new(36.0, 2.0, 52.0);
+            let planet = pos + planet_dir * 140.0;
+            let look = station.lerp(planet, 0.62);
             (pos, look)
         }
         9 => {
@@ -2997,10 +3085,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         11 => {
-            // Fighter swarm: high open-sky three-quarter — avoid deck clutter.
-            let form = deck + Vec3::new(28.0, 31.0, 44.0);
-            let pos = deck + Vec3::new(50.0, 36.0, 68.0);
-            let look = form + Vec3::new(-4.0, 0.0, -2.0);
+            // Fighter swarm: sky-only V — no deck/magenta clutter in frame.
+            let form = deck + Vec3::new(30.0, 32.0, 44.0);
+            let pos = deck + Vec3::new(48.0, 40.0, 70.0);
+            let look = form + Vec3::new(-2.0, 1.0, -1.0);
             (pos, look)
         }
         _ => {
