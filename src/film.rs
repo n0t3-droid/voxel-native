@@ -2682,7 +2682,7 @@ fn film_drive_camera(
             9 => 52.0,  // dual plasma + lava rivers
             10 => 48.0, // cyan waterfall cascade
             11 => 40.0, // fighter swarm — tighter on formation
-            12 => 46.0, // crystal tower cluster
+            12 => 50.0, // crystal tower grove
             _ => 52.0,
         };
         persp.fov = target.to_radians();
@@ -3097,10 +3097,10 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         12 => {
-            // Crystal towers cluster on +X deck — cyan spires fill frame.
-            let cluster = deck + Vec3::new(28.0, 22.0, 30.0);
-            let pos = deck + Vec3::new(55.0, 18.0, 55.0);
-            let look = cluster + Vec3::new(-2.0, 8.0, -2.0);
+            // Crystal towers: stand off SW so cyan spires read as a grove.
+            let cluster = deck + Vec3::new(28.0, 18.0, 30.0);
+            let pos = deck + Vec3::new(72.0, 14.0, 72.0);
+            let look = cluster + Vec3::new(-4.0, 12.0, -4.0);
             (pos, look)
         }
         _ => {
