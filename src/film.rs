@@ -274,8 +274,8 @@ fn film_spawn_lights(
         PointLightBundle {
             point_light: PointLight {
                 color: Color::srgb(0.78, 0.98, 1.0),
-                intensity: 9_500_000.0,
-                range: 220.0,
+                intensity: 12_000_000.0,
+                range: 260.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -290,8 +290,8 @@ fn film_spawn_lights(
         PointLightBundle {
             point_light: PointLight {
                 color: Color::srgb(0.65, 1.0, 0.88),
-                intensity: 7_200_000.0,
-                range: 160.0,
+                intensity: 9_000_000.0,
+                range: 200.0,
                 shadows_enabled: false,
                 ..default()
             },
@@ -390,16 +390,18 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
     let oz = island.cz + 14;
     let mut cleared = 0usize;
     let mut stamped = 0usize;
-    for dx in -8..=8 {
-        for dz in -5..=5 {
+    for dx in -10..=10 {
+        for dz in -7..=7 {
             let x = ox + dx;
             let z = oz + dz;
             // Suppress tall grass / props in the combat frustum.
-            for dy in 1..=10 {
+            for dy in 1..=12 {
                 if world.edit_set_voxel(x, oy + dy, z, AIR) {
                     cleared += 1;
                 }
             }
+            // Also clear any leftover vegetation on the slab layer.
+            let _ = world.edit_set_voxel(x, oy + 2, z, AIR);
             // Clean dark pad slab (two layers) for silhouette feet.
             if world.edit_set_voxel(x, oy, z, BlockType::ShipHullDark.into()) {
                 stamped += 1;
@@ -409,7 +411,38 @@ fn film_stage_combat_slab(mut world: ResMut<VoxelWorld>, mut film: ResMut<FilmRu
             }
         }
     }
-    info!("FILM: combat slab at ({ox},{oy},{oz}) cleared={cleared} stamped={stamped}");
+    // Paint crystal / luminite on the main island underside rim so keel
+    // faces bounce even when ambient crush is high on lavapipe.
+    let mut keel_lit = 0usize;
+    let rx = island.radius_x.min(22);
+    let rz = island.radius_z.min(20);
+    for dx in -rx..=rx {
+        for dz in -rz..=rz {
+            let nx = dx as f32 / rx.max(1) as f32;
+            let nz = dz as f32 / rz.max(1) as f32;
+            let d2 = nx * nx + nz * nz;
+            if d2 > 1.02 || d2 < 0.12 {
+                continue;
+            }
+            let x = island.cx + dx;
+            let z = island.cz + dz;
+            let bottom = island.deck_y - (island.keel_depth * 3 / 4).max(4);
+            let crystal = if ((dx + dz) & 1) == 0 {
+                BlockType::LuminiteCrystal
+            } else {
+                island.crystal
+            };
+            if world.edit_set_voxel(x, bottom, z, crystal.into()) {
+                keel_lit += 1;
+            }
+            if world.edit_set_voxel(x, bottom + 1, z, BlockType::Crystal.into()) {
+                keel_lit += 1;
+            }
+        }
+    }
+    info!(
+        "FILM: combat slab at ({ox},{oy},{oz}) cleared={cleared} stamped={stamped} keel_lit={keel_lit}"
+    );
 }
 
 /// Stamp extra floating islands near the hero station so a wide painting
@@ -427,11 +460,14 @@ fn film_stamp_vista_archipelago(mut world: ResMut<VoxelWorld>, mut film: ResMut<
     film.vista_stamped = true;
     let mut written = 0usize;
     for (ox, oz, rx, rz, lift) in [
-        (island.cx + 55, island.cz + 28, 10, 8, -2),
-        (island.cx - 48, island.cz + 42, 9, 7, 1),
-        (island.cx + 72, island.cz - 18, 8, 9, -4),
-        (island.cx - 30, island.cz - 55, 11, 8, 2),
-        (island.cx + 38, island.cz + 70, 7, 7, -1),
+        (island.cx + 55, island.cz + 28, 12, 10, -2),
+        (island.cx - 48, island.cz + 42, 11, 9, 1),
+        (island.cx + 72, island.cz - 18, 10, 11, -4),
+        (island.cx - 30, island.cz - 55, 13, 10, 2),
+        (island.cx + 38, island.cz + 70, 9, 9, -1),
+        (island.cx + 95, island.cz + 40, 8, 8, -3),
+        (island.cx - 70, island.cz + 15, 10, 8, 0),
+        (island.cx + 20, island.cz + 95, 9, 7, -2),
     ] {
         let deck_y = island.deck_y + lift;
         written += stamp_film_vista_island(&mut world, ox, oz, deck_y, rx, rz, island.crystal);
@@ -620,15 +656,16 @@ fn film_spawn_silhouettes(
         LinearRgba::rgb(2.5, 4.5, 5.5),
     ));
 
-    // Staged on the cleared combat slab (z≈+14) — dark hull, no grass clutter.
+    // Staged on the cleared combat slab (z≈+14) — staggered in Z so a
+    // southwest camera sees BOTH figures (not marine occluding alien).
     spawn_film_marine(
         &mut commands,
         &cube,
         &marine_body,
         &marine_dark,
         &marine_visor,
-        deck + Vec3::new(-4.8, 0.2, 14.0),
-        2.45,
+        deck + Vec3::new(-5.5, 0.25, 12.5),
+        2.55,
     );
     spawn_film_alien(
         &mut commands,
@@ -636,8 +673,8 @@ fn film_spawn_silhouettes(
         &alien_body,
         &alien_leg,
         &alien_crest,
-        deck + Vec3::new(4.8, 0.2, 14.0),
-        2.7,
+        deck + Vec3::new(5.5, 0.25, 15.5),
+        2.85,
     );
     spawn_film_crew(
         &mut commands,
@@ -1396,9 +1433,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         2 => {
-            // Clean combat slab two-shot: biped west, multi-leg east.
-            let look = station + Vec3::new(0.0, 4.2, 14.0);
-            let pos = look + Vec3::new(-17.0, 2.4, -1.5);
+            // Southwest two-shot: marine (−X/−Z) and alien (+X/+Z) both visible.
+            let look = station + Vec3::new(0.0, 4.0, 14.0);
+            let pos = look + Vec3::new(-13.0, 3.2, 11.0);
             (pos, look)
         }
         3 => {
@@ -1433,11 +1470,11 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         7 => {
-            // Painting-scale hero: nebula + ringed planet + archipelago +
-            // skyway stubs + station island in one wide frame.
+            // Painting-scale hero: keep islands/skyways in the lower half while
+            // the ringed planet + nebula fill the upper sky.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-42.0, 32.0, 58.0);
-            let look = deck + planet_dir * 90.0 + Vec3::new(18.0, 10.0, -8.0);
+            let pos = deck + Vec3::new(-48.0, 18.0, 72.0);
+            let look = deck + Vec3::new(20.0, 14.0, 8.0) + planet_dir * 55.0;
             (pos, look)
         }
         _ => {
