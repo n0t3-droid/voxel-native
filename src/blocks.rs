@@ -807,8 +807,8 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             // grey the shard. G/B sit below the ACES clip so dusk
             // does not crush the pair toward white (which reintroduces R).
             c[0] *= 0.00;
-            c[1] *= 1.18;
-            c[2] *= 1.52;
+            c[1] *= 1.35;
+            c[2] *= 1.72;
         }
         23 => {
             // AlienMoss — bioluminescent magenta/violet. The multiplier
@@ -860,8 +860,8 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
             // Luminite — aquamarine shard core, same dusk-cyan budget
             // as Crystal so mixed shards stay one hue family.
             c[0] *= 0.00;
-            c[1] *= 1.22;
-            c[2] *= 1.58;
+            c[1] *= 1.38;
+            c[2] *= 1.76;
         }
         34 => {
             // Magnetite — hot ember orange, reads as ore against cyan crystal.
@@ -884,9 +884,9 @@ pub fn voxel_color(v: Voxel) -> [f32; 4] {
         }
         39 => {
             // Magenta crystal — hot pink hero shards.
-            c[0] *= 2.35;
-            c[1] *= 0.50;
-            c[2] *= 2.05;
+            c[0] *= 2.55;
+            c[1] *= 0.55;
+            c[2] *= 2.20;
         }
         40 => {
             // Emerald crystal.

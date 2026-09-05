@@ -1421,7 +1421,9 @@ fn hero_west_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
 fn hero_look_west_face_rail(wx: i32, wz: i32, macro_h: f64) -> Option<SkywayColumn> {
     const RAIL_X: i32 = 134;
     const HALF: f64 = 1.6;
-    if wz < -128 || wz > -56 {
+    // Keep this ribbon off the spawn-left third (z ≲ -80) so it cannot
+    // read as the horizontal bar of a T-ridge in front of the shards.
+    if wz < -72 || wz > -56 {
         return None;
     }
     let dist = (wx - RAIL_X).abs() as f64;
@@ -2478,7 +2480,7 @@ mod tests {
         assert!(west.half < SKYWAY_HALF_WIDTH);
         assert!(west.deck_y < rail.deck_y, "west rail should sit below the mesa rail");
         let look_west = sky
-            .column(134, -100, 70.0)
+            .column(134, -64, 70.0)
             .expect("look-cone crest ribbon missing on postcard");
         assert!(look_west.half < SKYWAY_HALF_WIDTH);
         assert!(
