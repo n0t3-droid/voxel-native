@@ -3231,9 +3231,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         12 => {
-            // Crystal towers: −Z elevation — full taper against sky (no waterfall).
-            let cluster = deck + Vec3::new(30.0, 48.0, 28.0);
-            let pos = deck + Vec3::new(34.0, 50.0, -90.0);
+            // Crystal towers: +X elevated side view (waterfall hidden this beat).
+            let cluster = deck + Vec3::new(30.0, 42.0, 28.0);
+            let pos = deck + Vec3::new(135.0, 48.0, 28.0);
             let look = cluster;
             (pos, look)
         }
