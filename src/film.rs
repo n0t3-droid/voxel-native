@@ -1931,10 +1931,10 @@ fn film_spawn_silhouettes(
         Color::srgb(0.55, 0.58, 0.65),
         LinearRgba::rgb(0.4, 0.45, 0.55),
     ));
-    // Dimmer skyway cyan — thinner glow so other planes compete (still PASS).
+    // Moderated skyway cyan — readable PASS, not a left-plane wash.
     let skyway_cyan = materials.add(sil_mat(
-        Color::srgb(0.32, 0.78, 0.86),
-        LinearRgba::rgb(0.45, 2.2, 2.6),
+        Color::srgb(0.30, 0.80, 0.88),
+        LinearRgba::rgb(0.55, 2.8, 3.2),
     ));
     let shuttle_hull = materials.add(sil_mat(
         Color::srgb(0.94, 0.96, 0.98),
@@ -2639,18 +2639,16 @@ fn spawn_film_fighter_swarm(
         (45.0, 57.0, 30.0, -0.35, 1.2, true),
         (35.0, 58.0, 16.0, -0.48, 1.3, true),
         (55.0, 55.0, 26.0, -0.42, 1.15, true),
-        // Painting wing — larger + nearer cam so silhouettes survive hero distance.
-        (8.0_f32, 38.0, 118.0, -0.55, 3.6, false),
-        (20.0, 42.0, 112.0, -0.45, 3.8, false),
-        (32.0, 40.0, 122.0, -0.50, 3.5, false),
-        (-4.0, 36.0, 108.0, -0.60, 3.4, false),
-        (40.0, 46.0, 104.0, -0.40, 3.3, false),
-        (14.0, 34.0, 126.0, -0.52, 3.7, false),
-        // Mid painting wing (still upper mid-right, clearer than skyway).
-        (18.0_f32, 52.0, 78.0, -0.55, 2.6, false),
-        (28.0, 56.0, 72.0, -0.45, 2.7, false),
-        (38.0, 54.0, 82.0, -0.50, 2.55, false),
-        (46.0, 58.0, 76.0, -0.40, 2.65, false),
+        // Painting wing — nearer/larger than finish17, clear of cam wash.
+        (10.0_f32, 44.0, 98.0, -0.55, 2.95, false),
+        (22.0, 48.0, 92.0, -0.45, 3.05, false),
+        (34.0, 46.0, 100.0, -0.50, 2.90, false),
+        (4.0, 42.0, 88.0, -0.60, 2.85, false),
+        (42.0, 50.0, 86.0, -0.40, 2.95, false),
+        (16.0, 40.0, 106.0, -0.52, 2.80, false),
+        // Upper mid-right backup wing.
+        (28.0, 56.0, 74.0, -0.45, 2.45, false),
+        (38.0, 54.0, 80.0, -0.50, 2.40, false),
     ]
     .into_iter()
     .enumerate()
@@ -3129,7 +3127,7 @@ fn spawn_film_skyway_and_shuttle_proxy(
                 material: cyan.clone(),
                 transform: Transform::from_translation(mid + Vec3::Y * 0.9)
                     .looking_to(dir, Vec3::Y)
-                    .with_scale(Vec3::new(0.85, 1.2, len * 0.98)),
+                    .with_scale(Vec3::new(1.05, 1.35, len * 0.98)),
                 ..default()
             },
             FilmSilhouette,
@@ -3137,13 +3135,13 @@ fn spawn_film_skyway_and_shuttle_proxy(
             Name::new(format!("FilmSkywayRail{i}")),
         ));
     }
-    // Near-cam articulated shuttle — larger so hero-distance silhouette survives.
-    let shuttle = deck + Vec3::new(-34.0, 30.0, 120.0);
+    // Near-left articulated shuttle — larger than finish17, short of washing painting.
+    let shuttle = deck + Vec3::new(-24.0, 29.0, 108.0);
     let yaw = -0.55_f32;
     let rot = Quat::from_rotation_y(yaw);
     let plume_dir = rot * Vec3::new(-1.0, 0.0, 0.0);
     let fwd = rot * Vec3::new(1.0, 0.0, 0.0);
-    let s = 1.55_f32;
+    let s = 1.28_f32;
     for (mat, tf, name) in [
         (
             hull.clone(),
@@ -4320,7 +4318,7 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         6 => {
             // Hero shuttle REAR-QUARTER — near-cam perch for silhouette read.
-            let shuttle = deck + Vec3::new(-34.0, 30.0, 120.0);
+            let shuttle = deck + Vec3::new(-24.0, 29.0, 108.0);
             let pos = shuttle + Vec3::new(22.0, 8.0, 18.0);
             let look = shuttle + Vec3::new(-10.0, 1.0, -2.0);
             (pos, look)
@@ -4339,11 +4337,11 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
             let pos = deck + Vec3::new(-58.0, 40.0, 142.0);
             let station_mid = deck + Vec3::new(28.0, 28.0, 74.0);
             let green_crown = deck + Vec3::new(-16.0, 5.0, 108.0);
-            let skyway_mid = deck + Vec3::new(-30.0, 30.0, 118.0);
+            let skyway_mid = deck + Vec3::new(-24.0, 28.0, 104.0);
             let rivers = deck + Vec3::new(-22.0, 8.0, 100.0);
             let portal = deck + Vec3::new(10.0, 22.0, 95.0);
             let fall = deck + Vec3::new(52.0, 10.0, 130.0);
-            let fighters = deck + Vec3::new(14.0, 40.0, 118.0);
+            let fighters = deck + Vec3::new(22.0, 46.0, 96.0);
             let planet = pos + planet_dir * 155.0;
             let ground = green_crown
                 .lerp(skyway_mid, 0.10)
@@ -4391,22 +4389,22 @@ fn shot_pose(index: usize, island: IslandSpec, _world: &VoxelWorld) -> (Vec3, Ve
         }
         14 => {
             // Skyway + shuttle — rear-quarter of near-cam cyan-plume craft.
-            let shuttle = deck + Vec3::new(-34.0, 30.0, 120.0);
+            let shuttle = deck + Vec3::new(-24.0, 29.0, 108.0);
             let pos = shuttle + Vec3::new(36.0, 16.0, 38.0);
             let look = shuttle + Vec3::new(-8.0, 2.0, -10.0);
             (pos, look)
         }
         15 => {
             // Craft closeup — shuttle + near fighters for silhouette proof.
-            let shuttle = deck + Vec3::new(-34.0, 30.0, 120.0);
-            let pos = shuttle + Vec3::new(28.0, 10.0, 24.0);
-            let look = shuttle + Vec3::new(-4.0, 2.0, -2.0);
+            let shuttle = deck + Vec3::new(-24.0, 29.0, 108.0);
+            let pos = shuttle + Vec3::new(20.0, 7.0, 16.0);
+            let look = shuttle + Vec3::new(-2.0, 1.5, -1.0);
             (pos, look)
         }
         _ => {
-            // Keel closeup — organic hanging clusters under mid-right island rim.
-            let keel = deck + Vec3::new(26.0, -2.0, 76.0);
-            let pos = deck + Vec3::new(8.0, 6.0, 98.0);
+            // Keel closeup — underside organic hangers under mid-right rim.
+            let keel = deck + Vec3::new(28.0, -6.0, 74.0);
+            let pos = deck + Vec3::new(18.0, -14.0, 92.0);
             let look = keel;
             (pos, look)
         }
