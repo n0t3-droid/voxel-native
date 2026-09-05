@@ -1199,20 +1199,22 @@ fn film_spawn_silhouettes(
         LinearRgba::rgb(0.8, 5.5, 8.0),
     ));
     let lava_mat = materials.add(sil_mat(
-        Color::srgb(1.0, 0.42, 0.08),
-        LinearRgba::rgb(7.5, 2.2, 0.2),
+        Color::srgb(1.0, 0.55, 0.10),
+        LinearRgba::rgb(14.0, 5.5, 0.35),
     ));
-    let river_y = -13.0_f32;
-    for i in 0..12 {
+    // Raised into painting_hero look (deck+(22,-10,36)) so orange survives
+    // keel-volume occlusion in the wide lower third.
+    let river_y = -8.0_f32;
+    for i in 0..16 {
         let t = i as f32;
-        let ox = 14.0 + t * 5.5;
-        let oz = 28.0 + (t * 0.7).sin() * 6.0;
+        let ox = 16.0 + t * 4.8;
+        let oz = 30.0 + (t * 0.7).sin() * 6.0;
         commands.spawn((
             PbrBundle {
                 mesh: cube.clone(),
                 material: plasma_mat.clone(),
                 transform: Transform::from_translation(deck + Vec3::new(ox, river_y, oz))
-                    .with_scale(Vec3::new(5.5, 2.2, 2.4))
+                    .with_scale(Vec3::new(6.5, 2.8, 2.8))
                     .with_rotation(Quat::from_rotation_y(0.35)),
                 ..default()
             },
@@ -1225,9 +1227,9 @@ fn film_spawn_silhouettes(
                 mesh: cube.clone(),
                 material: lava_mat.clone(),
                 transform: Transform::from_translation(
-                    deck + Vec3::new(ox + 7.0, river_y, oz - 5.0),
+                    deck + Vec3::new(ox + 7.0, river_y + 0.4, oz - 5.0),
                 )
-                .with_scale(Vec3::new(5.0, 2.0, 2.6))
+                .with_scale(Vec3::new(6.2, 3.0, 3.0))
                 .with_rotation(Quat::from_rotation_y(0.28)),
                 ..default()
             },
