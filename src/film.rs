@@ -95,6 +95,11 @@ struct FilmFigureKeyLight;
 #[derive(Component)]
 struct FilmSilhouette;
 
+/// Bounce cards / keel shells — only visible on the deck+keel beat so they
+/// don't white-out the wide painting_hero frame.
+#[derive(Component)]
+struct FilmKeelHelper;
+
 #[derive(Component)]
 struct FilmShuttleMarker;
 
@@ -618,7 +623,8 @@ fn stamp_film_station_mass(world: &mut VoxelWorld, cx: i32, oy: i32, cz: i32) ->
 fn stamp_film_dual_rivers(world: &mut VoxelWorld, island: IslandSpec) -> usize {
     let mut n = 0usize;
     // Shelf below the floating deck — visible from the wide painting cam.
-    let base_y = (island.deck_y - 28).max(crate::terrain::WATER_LEVEL + 4);
+    // Raise slightly so painting_hero looking under the near rim catches both.
+    let base_y = (island.deck_y - 22).max(crate::terrain::WATER_LEVEL + 4);
     let ax = island.cx - 20;
     let az = island.cz + 35;
     for i in 0..110 {
@@ -926,6 +932,7 @@ fn film_spawn_silhouettes(
             ..default()
         },
         FilmSilhouette,
+        FilmKeelHelper,
         Name::new("FilmKeelBounceCard"),
     ));
     // Second angled bounce for side-facing keel voxels.
@@ -941,6 +948,7 @@ fn film_spawn_silhouettes(
             ..default()
         },
         FilmSilhouette,
+        FilmKeelHelper,
         Name::new("FilmKeelBounceCardB"),
     ));
     // Unlit keel-face shell: wraps underside silhouette so faces never crush
@@ -986,6 +994,7 @@ fn film_spawn_silhouettes(
                 ..default()
             },
             FilmSilhouette,
+            FilmKeelHelper,
             Name::new("FilmKeelFaceShell"),
         ));
     }
@@ -1005,6 +1014,7 @@ fn film_spawn_silhouettes(
             ..default()
         },
         FilmSilhouette,
+        FilmKeelHelper,
         Name::new("FilmKeelCyanRim"),
     ));
 
@@ -1046,6 +1056,7 @@ fn film_spawn_silhouettes(
                 ..default()
             },
             FilmSilhouette,
+            FilmKeelHelper,
             Name::new(format!("FilmKeelCrystal{i}")),
         ));
     }
@@ -1374,6 +1385,7 @@ fn film_drive_camera(
     streamer: Res<ChunkStreamer>,
     mut film: ResMut<FilmRuntime>,
     mut ambient: ResMut<AmbientLight>,
+    mut clear_color: ResMut<ClearColor>,
     mut mode: ResMut<ModeContext>,
     mut toolbelt: ResMut<ToolbeltState>,
     mut sun_q: Query<&mut DirectionalLight, With<Sun>>,
@@ -1419,6 +1431,7 @@ fn film_drive_camera(
             Without<FilmUnderKeelLight>,
         ),
     >,
+    mut keel_helpers: Query<&mut Visibility, With<FilmKeelHelper>>,
 ) {
     if !film.enabled || film.finished {
         return;
@@ -1447,26 +1460,46 @@ fn film_drive_camera(
         // Keep bloom low so non-emissive limbs / grass survive lavapipe.
         bloom.intensity = match film.shot_index {
             5 => 0.10, // shuttle wakes — cyan, not washed
-            6 | 7 => 0.15,
+            6 => 0.12,
+            7 => 0.08, // painting: tame skyway white-out so grass/rivers read
             8 => 0.14, // dual rivers emissives
             _ => 0.05,
         };
         bloom.prefilter_settings.threshold = match film.shot_index {
             5 => 0.62, // tame pink/white bloom around nozzles
+            7 => 0.70,
             _ => 0.55,
         };
+    }
+
+    // Keel bounce shells only for the deck+keel beat — otherwise they flood
+    // painting_hero / dual_rivers with unlit white planes.
+    let show_keel_helpers = film.shot_index == 1;
+    for mut vis in keel_helpers.iter_mut() {
+        *vis = if show_keel_helpers {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+
+    // Darken ClearColor on planet/painting so additive nebula isn't crushed
+    // by noon sky wash (daytime pad shots keep the normal daynight clear).
+    if matches!(film.shot_index, 6 | 7) {
+        clear_color.0 = Color::srgb(0.22, 0.18, 0.32);
     }
 
     // Extra ambient bounce on deck+keel / dual-river so undersides aren't crushed.
     ambient.brightness = match film.shot_index {
         1 => ambient.brightness.max(6_800.0),
         8 => ambient.brightness.max(4_800.0),
-        7 => ambient.brightness.max(2_800.0),
+        7 => ambient.brightness.max(2_200.0),
         _ => ambient.brightness.max(2_050.0),
     };
     ambient.color = match film.shot_index {
         1 => Color::srgb(0.78, 0.94, 1.0),
         8 => Color::srgb(0.9, 0.82, 0.7),
+        7 => Color::srgb(0.7, 0.72, 0.85),
         _ => Color::srgb(0.82, 0.88, 0.78),
     };
     if let Ok(mut sun) = sun_q.get_single_mut() {
@@ -1789,14 +1822,15 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
         }
         7 => {
             // Painting-scale: denser archipelago fills lower 2/3, planet/nebula upper.
+            // Angle down enough to catch dual rivers under the near islands.
             let planet_dir = Vec3::new(0.55, 0.65, -0.52).normalize();
-            let pos = deck + Vec3::new(-48.0, 12.0, 88.0);
-            let look = deck + Vec3::new(28.0, 6.0, 30.0) + planet_dir * 28.0;
+            let pos = deck + Vec3::new(-42.0, 18.0, 78.0);
+            let look = deck + Vec3::new(24.0, -6.0, 28.0) + planet_dir * 18.0;
             (pos, look)
         }
         8 => {
             // Dual plasma (cyan) + lava (orange) filaments on the shelf below.
-            let base_y = (island.deck_y - 28).max(crate::terrain::WATER_LEVEL + 4) as f32;
+            let base_y = (island.deck_y - 22).max(crate::terrain::WATER_LEVEL + 4) as f32;
             let look = Vec3::new(
                 island.cx as f32 + 10.0,
                 base_y + 4.0,
