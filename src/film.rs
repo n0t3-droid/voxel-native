@@ -111,6 +111,11 @@ struct FilmKeelHelper;
 #[derive(Component)]
 struct FilmRiverRibbon;
 
+/// Turret bases / muzzles / beams — hidden on tunnel so rails aren't buried
+/// under fat red fire-lane slabs.
+#[derive(Component)]
+struct FilmTurretFx;
+
 #[derive(Component)]
 struct FilmShuttleMarker;
 
@@ -1822,6 +1827,7 @@ fn spawn_film_turrets_firing(
                 ..default()
             },
             FilmSilhouette,
+            FilmTurretFx,
             Name::new(format!("FilmTurretBase{i}")),
         ));
         let aim = alien + Vec3::new(0.0, 1.0, 0.0);
@@ -1837,6 +1843,7 @@ fn spawn_film_turrets_firing(
                 ..default()
             },
             FilmSilhouette,
+            FilmTurretFx,
             Name::new(format!("FilmTurretBarrel{i}")),
         ));
         let flash = origin + Vec3::new(0.0, 3.2, 0.0) + to_alien * 6.2;
@@ -1848,6 +1855,7 @@ fn spawn_film_turrets_firing(
                 ..default()
             },
             FilmSilhouette,
+            FilmTurretFx,
             Name::new(format!("FilmTurretMuzzle{i}")),
         ));
         // Fat red core + orange sheath so warm body survives ACES wash.
@@ -1863,6 +1871,7 @@ fn spawn_film_turrets_firing(
                 ..default()
             },
             FilmSilhouette,
+            FilmTurretFx,
             Name::new(format!("FilmTurretBeam{i}")),
         ));
         commands.spawn((
@@ -1875,6 +1884,7 @@ fn spawn_film_turrets_firing(
                 ..default()
             },
             FilmSilhouette,
+            FilmTurretFx,
             Name::new(format!("FilmTurretBeamOrange{i}")),
         ));
         // Hero beam slab parked in the fire lane for the turrets shot —
@@ -1891,6 +1901,7 @@ fn spawn_film_turrets_firing(
                     ..default()
                 },
                 FilmSilhouette,
+                FilmTurretFx,
                 Name::new("FilmTurretHeroBeam"),
             ));
             commands.spawn((
@@ -1903,6 +1914,7 @@ fn spawn_film_turrets_firing(
                     ..default()
                 },
                 FilmSilhouette,
+                FilmTurretFx,
                 Name::new("FilmTurretHeroBeamCore"),
             ));
         }
@@ -1919,6 +1931,7 @@ fn spawn_film_turrets_firing(
                     ..default()
                 },
                 FilmSilhouette,
+                FilmTurretFx,
                 Name::new(format!("FilmTurretSpark{i}_{s}")),
             ));
         }
@@ -2220,6 +2233,7 @@ fn film_toggle_helpers(
     film: Res<FilmRuntime>,
     mut keel_helpers: Query<&mut Visibility, (With<FilmKeelHelper>, Without<FilmRiverRibbon>)>,
     mut river_ribbons: Query<&mut Visibility, (With<FilmRiverRibbon>, Without<FilmKeelHelper>)>,
+    mut turret_fx: Query<&mut Visibility, (With<FilmTurretFx>, Without<FilmKeelHelper>)>,
 ) {
     if !film.enabled || film.finished {
         return;
@@ -2235,6 +2249,16 @@ fn film_toggle_helpers(
     let show_rivers = matches!(film.shot_index, 8 | 9);
     for mut vis in river_ribbons.iter_mut() {
         *vis = if show_rivers {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    // Keep beams on combat / turrets / painting; hide on tunnel + swarm
+    // so those hero frames aren't a solid red slab.
+    let show_turrets = matches!(film.shot_index, 2 | 3 | 8);
+    for mut vis in turret_fx.iter_mut() {
+        *vis = if show_turrets {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -2689,11 +2713,9 @@ fn shot_pose(index: usize, island: IslandSpec, world: &VoxelWorld) -> (Vec3, Vec
             (pos, look)
         }
         5 => {
-            // Far stand-off on +Z above rail start — center turret sits at
-            // pad z≈24 and was painting this frame solid red when cam was
-            // at z=26 looking −Z along its beam.
-            let pos = station + Vec3::new(0.0, 11.0, 40.0);
-            let look = station + Vec3::new(0.0, 5.5, -6.0);
+            // Along cyan rails into mouth (turret FX hidden on this beat).
+            let pos = station + Vec3::new(0.0, 8.5, 28.0);
+            let look = station + Vec3::new(0.0, 5.5, -10.0);
             (pos, look)
         }
         6 => {
